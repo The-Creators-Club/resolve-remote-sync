@@ -336,8 +336,11 @@ class Sequencer:
             # loop head, before any root check, and it can mkdir -- the same
             # ghost-tree-on-the-boot-disk hazard _clone_structure is guarded
             # against, so it takes the same predicate.
+            # bug-comp-syncthing-7 (2026-09-25): move_dir, so a re-pointed
+            # library carries its files and marker instead of coming up empty.
             else SharedFolderManager(admin, self.local_root, halted=halted,
-                                     root_present_fn=self._local_root_is_present)
+                                     root_present_fn=self._local_root_is_present,
+                                     move_dir=_default_move)
         )
         # Lender folders this machine borrows from without ticking them
         # (SHARED_FOLDERS_PLAN.md §3.3) -- same lifecycle as the asset
@@ -1113,7 +1116,16 @@ class Sequencer:
         seen = set(ids)
         cached: Optional[list[dict]] = None
         try:
-            cached = self.selection.load_cached()
+            # bug-comp-syncthing-6 (2026-09-25): whoever's plan it is. The
+            # cache now refuses a plan written for another editor, and this
+            # reader only PAUSES: the previous person's project folders are
+            # still configured in Syncthing here, and a halt that skipped
+            # them would let them sync on. A test double or an older
+            # client without the keyword keeps the plain read.
+            try:
+                cached = self.selection.load_cached(any_editor=True)
+            except TypeError:
+                cached = self.selection.load_cached()
         except Exception:
             log.debug("sequencer: no cached selection for the halt re-pause", exc_info=True)
         for item in cached or []:
@@ -1745,24 +1757,42 @@ class Sequencer:
         this policy (§4.2); re-applying it here is what stops a STALE CACHED
         selection.json -- or a tampered one -- from double-running a subtree
         or running one outside the declared scope. Fail closed: an invalid
-        entry is dropped with one warning, never widened."""
-        selected_rels = list(rel_to_slug)
+        entry is dropped with one warning, never widened.
+
+        Only FULL ticks cover or borrow anything (CLAUDE.md: every reader of
+        the selection that decides what comes DOWN asks for full ticks).
+        bug-comp-syncthing-2 (2026-09-25): an UPLOAD-ONLY borrower builds
+        nothing. Its turn is lane A alone and never runs a borrowed subtree,
+        and the dashboard shares a lender only for full borrower ticks, so
+        its lender sat in the borrowed-folder manager as `not-offered` for
+        ever and the tray told the editor to ask an admin to approve a share
+        that is correctly never made. bug-comp-syncthing-3 (2026-09-25): an
+        UPLOAD-ONLY lender covers nothing either. Its turn brings nothing
+        down, so a full borrower's borrowed subtree never arrived and nothing
+        said so; the lender stays in the manager's set, which is the one
+        route that holds its folder restricted to the borrowed subtrees."""
+        full_slugs = {s for s, it in slug_to_item.items() if not _item_upload_only(it)}
+        selected_rels = [r for r, s in rel_to_slug.items() if s in full_slugs]
         by_slug: dict[str, list[dict]] = {}
         borrowed_rel_to_slug: dict[str, str] = {}
         lenders: dict[str, dict] = {}
         claimed: list[str] = []
         for item in _sort_by_position(selection):
-            if not _item_is_valid(item):
+            if not _item_is_valid(item) or _item_upload_only(item):
                 continue
             slug = str(item.get("slug"))
             raw = item.get("includes")
             if not isinstance(raw, list):
                 continue
             for entry in raw:
-                if isinstance(entry, dict) and entry.get("covered"):
+                if (isinstance(entry, dict) and entry.get("covered")
+                        and not self._covered_by_upload_only(entry, slug_to_item)):
                     # The lender is selected on this machine: its own runs
                     # cover the subtree. The entry exists so the removal
                     # gate can see the relationship (app.removal_blockers).
+                    # A dashboard marks it covered for a lender ticked in ANY
+                    # mode (bug-comp-syncthing-3); an upload-only one here is
+                    # run like any other include.
                     continue
                 inc = _include_is_valid(entry)
                 if inc is None:
@@ -1782,13 +1812,25 @@ class Sequencer:
                 by_slug.setdefault(slug, []).append(inc)
                 borrowed_rel_to_slug[sub] = slug
                 lender = inc["lender_slug"]
-                if lender not in slug_to_item:
+                if lender not in full_slugs:
                     rec = lenders.setdefault(
                         lender, {"rel": inc["lender_rel"], "subs": [], "borrowers": []})
                     rec["subs"].append(inc["sub_rel"])
                     if slug not in rec["borrowers"]:
                         rec["borrowers"].append(slug)
         return by_slug, borrowed_rel_to_slug, lenders
+
+    @staticmethod
+    def _covered_by_upload_only(entry: dict, slug_to_item: dict[str, dict]) -> bool:
+        """A `covered` include whose lender is ticked UPLOAD-ONLY on this
+        machine (bug-comp-syncthing-3, 2026-09-25). A dashboard up to 0.7.58
+        decides `covered` from the selection without the mode; the lender's
+        own turn here is lane A alone and covers nothing that comes down."""
+        lender = entry.get("lender_slug")
+        if not isinstance(lender, str):
+            return False
+        item = slug_to_item.get(lender.strip())
+        return item is not None and _item_upload_only(item)
 
     def _borrowed_includes(self, slug: str) -> list[dict]:
         with self._lock:
@@ -2004,6 +2046,17 @@ class Sequencer:
         means the editor hasn't accepted that folder yet -- routine, and it
         used to write a full traceback per project per pass, burying real
         errors in companion.log (AUDIT_2 L-11)."""
+        if not paused and self._is_halted():
+            # bug-comp-syncthing-4 (2026-09-25): the one door every sequencer
+            # unpause goes through asks about the halt itself. stop() gives
+            # the worker 15 s and a lane C turn can outlive it inside one slow
+            # Syncthing call; it then came back to _verify_current_folder_
+            # unpaused (or the turn's own unpause) and released a folder the
+            # halt had just paused, which synced through the whole halt with
+            # nothing re-pausing it. app.release_halt clears the latch before
+            # it releases anything, so this refuses only under a halt.
+            log.info("sequencer: not unpausing %s -- syncing is halted", slug)
+            return False
         try:
             self.admin.set_folder_paused(slug, paused)
             with self._lock:
@@ -3171,8 +3224,13 @@ class Sequencer:
             offered_by = (pending.get(slug) or {}).get("offeredBy") or {}
             device_id = next(iter(offered_by.keys())) if offered_by else ""
             local_path = str(Path(self.local_root) / "Projects" / rel_path)
+            extra: dict[str, Any] = {}
+            if _accepts_kw(self.admin.accept_folder, "release_ok"):
+                # bug-comp-syncthing-4 (2026-09-25): see accept_folder.
+                extra["release_ok"] = lambda: not self._is_halted()
             self.admin.accept_folder(
-                slug, label=rel_path, local_path=local_path, offered_by_device_id=device_id
+                slug, label=rel_path, local_path=local_path, offered_by_device_id=device_id,
+                **extra,
             )
         except Exception:
             log.exception("sequencer: accept_folder(%s) failed", slug)

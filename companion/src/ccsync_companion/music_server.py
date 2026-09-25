@@ -461,7 +461,16 @@ def build_send_response(
     except broll_server.MountNotConfiguredError as exc:
         return 200, {"ok": False, "error": str(exc)}
 
-    if not os.path.isfile(local_path_str):
+    if os.path.isfile(local_path_str):
+        # bug-comp-broll-3 (2026-09-25), the music twin: the poll that finds
+        # the track in place is the one that would have read DONE, and it
+        # never asked, so every fetched track's job stayed in the registry
+        # and a later send of a deleted track read the stale DONE as "is the
+        # share mounted?". Popped here instead.
+        from . import broll_fetch
+
+        broll_fetch.reap_finished(local_path_str)
+    else:
         if not fetchable_from_nas(share, mounts, ccsync_cfg):
             return 200, {
                 "ok": False,

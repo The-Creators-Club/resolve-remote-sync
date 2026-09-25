@@ -14,9 +14,12 @@
       commands for THIS server, with its real names already in them.
     </p>
     <p class="muted" style="margin: 0 0 0.9rem; max-width: 72ch;">
+      {# bug-dash-diag-3 (2026-09-25): the copy goes to the top of the tree
+         now, not inside the project (which Syncthing sent to every editor). #}
       Nothing on this page overwrites anything. A restore copies files into a
-      new folder inside the project and leaves what is there alone, so picking
-      the wrong snapshot costs disk space and nothing else.
+      new folder at the top of the Projects folder on the server and leaves
+      what is there alone, so picking the wrong snapshot costs disk space and
+      nothing else.
     </p>
     {# NOT polled: a swap under the reader would throw away a preview somebody
        is halfway through reading, and this page asks the NAS on every render. #}

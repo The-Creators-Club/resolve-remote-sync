@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
+from . import machine as machine_mod
 from . import upgrade as upgrade_mod
 from .sync.base import STATE_SYNCING, LaneStatus
 
@@ -118,6 +119,78 @@ PAYLOAD_BUDGET_BYTES = 7 * 1024 * 1024
 # media_tree / queue. The server truncates past this; sending fewer keeps the
 # choice of WHICH projects survive on this side, where the selection is known.
 MAX_REPORT_PROJECTS = 64
+
+# bug-wire-3 (2026-09-25): mirrors of the dashboard's per-lane string caps
+# (api.LaneReportIn / TransferIn). Dashboard 0.7.58 and older declare these
+# as RAISING max_length, so one long rclone error (a stack of retried paths
+# easily passes 2000 chars) or a deep relative path 422'd the WHOLE report:
+# the machine went dark on the fleet grid for as long as the lane kept that
+# error. The dashboard truncates since the wave-2 fix, but a customer who
+# has not updated is still on the raising build, so the cut happens here too.
+LANE_LAST_ERROR_MAX = 2000
+LANE_DETAIL_MAX = 500
+LANE_CURRENT_PROJECT_MAX = 512
+TRANSFER_NAME_MAX = 512
+TRANSFER_PROJECT_SLUG_MAX = 128
+TRANSFER_DIRECTION_MAX = 16
+LANE_TRANSFERS_MAX = 256
+# api.CompletedIn: a finished file's HISTORY record carries the same per-file
+# name as its live transfer plus a project-subpath prefix (rclone_lane), so a
+# path long enough to be cut above is always too long here as well.
+COMPLETED_NAME_MAX = 512
+COMPLETED_DIRECTION_MAX = 16
+COMPLETED_LANE_MAX = 64
+COMPLETED_AT_MAX = 64
+COMPLETED_MAX = 200
+
+
+def _cap_str(value: Any, limit: int) -> Any:
+    """`value` cut to `limit` characters when it is a longer string; anything
+    else (None included) passes through untouched, so a caller's null keeps
+    meaning null."""
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit]
+    return value
+
+
+def _cap_dict_fields(items: Any, count: int, fields) -> list:
+    """`items` bounded to `count` entries, each dict's named string fields cut
+    to their limits. Non-dict entries pass through as before: the server
+    decides what they mean, and this is not the place to start dropping
+    data."""
+    out = []
+    for item in list(items or [])[:count]:
+        if isinstance(item, dict):
+            item = dict(item)
+            for key, limit in fields:
+                if key in item:
+                    item[key] = _cap_str(item[key], limit)
+        out.append(item)
+    return out
+
+
+def _capped_completions(completed: Any) -> list:
+    """The finished-file records, bounded to what every dashboard accepts
+    (bug-wire-3 review round: the same wire and the same cause as the
+    transfers, so one >512-char path 422'd the report after it finished)."""
+    return _cap_dict_fields(completed, COMPLETED_MAX, (
+        ("name", COMPLETED_NAME_MAX),
+        ("direction", COMPLETED_DIRECTION_MAX),
+        ("lane", COMPLETED_LANE_MAX),
+        ("at", COMPLETED_AT_MAX),
+    ))
+
+
+def _capped_transfers(transfers: Any) -> list:
+    """A lane's live transfers, bounded to what every dashboard accepts
+    (bug-wire-3). Non-dict entries pass through as before: the server decides
+    what they mean, and this is not the place to start dropping data."""
+    return _cap_dict_fields(transfers, LANE_TRANSFERS_MAX, (
+        ("name", TRANSFER_NAME_MAX),
+        ("project_slug", TRANSFER_PROJECT_SLUG_MAX),
+        ("direction", TRANSFER_DIRECTION_MAX),
+    ))
+
 
 # How stale an UNCHANGED local_manifest/media_tree may get before it is sent
 # again anyway (ops-efficiency-1, 2026-08-21). The two sections are rebuilt
@@ -445,6 +518,7 @@ class DashboardReporter:
         self._get_machine_id = get_machine_id
         self._get_syncthing_device_id = get_syncthing_device_id
         self._machine_id_cache: Optional[str] = None
+        self._machine_id_generation = machine_mod.remint_generation()
         self._syncthing_device_id_cache: Optional[str] = None
         # Monotonic stamp of the last successful myID read -- see
         # _syncthing_device_id (comp-lane-c-3).
@@ -706,6 +780,13 @@ class DashboardReporter:
         none. Cached: it is a file read that cannot change under us, and the
         empty answer is cached too so a read-only home directory is not
         re-tried every 30 seconds."""
+        # bug-comp-core-6 (2026-09-25): a remint (Settings, GIVE IT A NEW ID)
+        # is the one thing that changes the answer under a live process, so
+        # the cache - "" included - is dropped when the generation moves.
+        generation = machine_mod.remint_generation()
+        if generation != self._machine_id_generation:
+            self._machine_id_generation = generation
+            self._machine_id_cache = None
         if self._machine_id_cache is None:
             value = ""
             if self._get_machine_id is not None:
@@ -795,15 +876,16 @@ class DashboardReporter:
                     "state": status.state,
                     "queued": status.queued,
                     "transferring": status.transferring,
-                    "last_error": status.last_error,
+                    "last_error": _cap_str(status.last_error, LANE_LAST_ERROR_MAX),
                     "last_sync": status.last_sync.isoformat() if status.last_sync else None,
-                    "detail": status.detail or None,
-                    "current_project": status.current_project,
+                    "detail": _cap_str(status.detail or None, LANE_DETAIL_MAX),
+                    "current_project": _cap_str(status.current_project,
+                                                LANE_CURRENT_PROJECT_MAX),
                     "bytes_done": status.bytes_done,
                     "bytes_total": status.bytes_total,
                     "speed_bps": status.speed_bps,
                     "eta_seconds": status.eta_seconds,
-                    "transfers": list(status.transfers),
+                    "transfers": _capped_transfers(status.transfers),
                     **_lane_liveness(status),
                 }
                 for status in statuses
@@ -811,7 +893,7 @@ class DashboardReporter:
         }
         if self._get_completions is not None:
             try:
-                completed = list(self._get_completions() or [])[:200]
+                completed = _capped_completions(self._get_completions())
             except Exception:
                 log.exception("get_completions() failed")
                 completed = []
@@ -833,7 +915,7 @@ class DashboardReporter:
                     "queue field takes no more (B6)", MAX_REPORT_PROJECTS, len(queue))
                 queue = queue[:MAX_REPORT_PROJECTS]
             payload["queue"] = queue
-            payload["current_project"] = current_project
+            payload["current_project"] = _cap_str(current_project, LANE_CURRENT_PROJECT_MAX)
         if self._get_resolve_project is not None:
             try:
                 resolve_project = self._get_resolve_project()

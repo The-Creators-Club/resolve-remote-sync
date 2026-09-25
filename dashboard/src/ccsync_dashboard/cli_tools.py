@@ -1240,18 +1240,34 @@ def _finish_install(settings: Any, name: str, *, version: str, rel: str, sha: st
         "checksum_verified": checksum_source != "downloaded_bytes",
         "binary": rel,
     }
-    keep_previous = ""
+    now = time.time()
+    root = tool_root(settings, name)
+    # bug-dash-ops-8 (2026-09-25): a SECOND update inside the grace hour (an
+    # admin's UPDATE twice, or the unattended updater landing after one)
+    # rebuilt this record from scratch, so the version the FIRST update
+    # replaced was neither named nor spared and went with the prune at once -
+    # CR-309's failure exactly, for a call started on it just before the
+    # first flip. Every replaced version still inside its grace is carried
+    # forward, each with its own clock; `previous_version` stays the newest
+    # one so an older dashboard reading this record still sweeps that one.
+    carried = [
+        entry for entry in _superseded_entries(prior)
+        if entry["version"] != version
+        and 0 <= now - entry["at"] < PRUNE_GRACE_SECONDS
+        and (root / entry["version"]).is_dir()
+    ]
     if (previous and previous != version and _VERSION_RE.match(previous)
-            and (tool_root(settings, name) / previous).is_dir()):
-        keep_previous = previous
-        record["previous_version"] = previous
-        record["superseded_at_epoch"] = time.time()
+            and (root / previous).is_dir()):
+        carried = [e for e in carried if e["version"] != previous]
+        carried.append({"version": previous, "at": now})
+    _set_superseded(record, carried)
     _write_state(settings, name, record)
     pointer = pointer_path(settings, name)
     tmp = pointer.with_name("current.tmp")
     tmp.write_text(f"{version}/{rel}", encoding="utf-8")
     os.replace(tmp, pointer)
-    _prune_old_versions(settings, name, keep=version, previous=keep_previous)
+    _prune_old_versions(settings, name, keep=version,
+                        spare=[e["version"] for e in carried])
     home_dir(settings, name).mkdir(parents=True, exist_ok=True)
     try:
         home_dir(settings, name).chmod(0o700)
@@ -1269,8 +1285,51 @@ def _finish_install(settings: Any, name: str, *, version: str, rel: str, sha: st
 PRUNE_GRACE_SECONDS = 3600.0
 
 
+def _superseded_entries(state: dict) -> list[dict]:
+    """Every replaced version a state record still names, oldest first, as
+    {"version", "at"}. `previous_version`/`superseded_at_epoch` is the newest
+    (the pair CR-309 wrote and an older dashboard reads);
+    `superseded_earlier` holds the ones before it (bug-dash-ops-8). A
+    malformed entry is dropped rather than raised: this runs inside an
+    install and inside the collector's sweep."""
+    out: list[dict] = []
+    earlier = state.get("superseded_earlier")
+    for raw in earlier if isinstance(earlier, list) else []:
+        try:
+            v = str(raw.get("version") or "")
+            at = float(raw.get("at") or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if v and _VERSION_RE.match(v):
+            out.append({"version": v, "at": at})
+    previous = str(state.get("previous_version") or "")
+    if previous and _VERSION_RE.match(previous):
+        try:
+            at = float(state.get("superseded_at_epoch") or 0.0)
+        except (TypeError, ValueError):
+            at = 0.0
+        out.append({"version": previous, "at": at})
+    return out
+
+
+def _set_superseded(state: dict, entries: list[dict]) -> None:
+    """Write `entries` (oldest first) back into a state record, in the shape
+    `_superseded_entries` reads."""
+    state.pop("previous_version", None)
+    state.pop("superseded_at_epoch", None)
+    state.pop("superseded_earlier", None)
+    if not entries:
+        return
+    *earlier, newest = entries
+    state["previous_version"] = newest["version"]
+    state["superseded_at_epoch"] = newest["at"]
+    if earlier:
+        state["superseded_earlier"] = [
+            {"version": e["version"], "at": e["at"]} for e in earlier]
+
+
 def _prune_old_versions(settings: Any, name: str, *, keep: str,
-                        previous: str = "") -> None:
+                        spare: list[str] | tuple[str, ...] = ()) -> None:
     """One version on disk, plus - for PRUNE_GRACE_SECONDS - the one it
     replaced. These are 100-330 MB each and the appliance target is a NAS
     with tens of gigabytes free, so keeping every version an admin ever
@@ -1297,7 +1356,7 @@ def _prune_old_versions(settings: Any, name: str, *, keep: str,
     """
     root = tool_root(settings, name)
     children = list(root.iterdir()) if root.is_dir() else []
-    spared = {keep, "home", ".staging"} | ({previous} if previous else set())
+    spared = {keep, "home", ".staging"} | {v for v in spare if v}
     for child in children:
         if (child.is_dir() and child.name not in spared
                 and _VERSION_RE.match(child.name)):
@@ -1306,34 +1365,42 @@ def _prune_old_versions(settings: Any, name: str, *, keep: str,
 
 
 def sweep_superseded(settings: Any, name: str, now: float | None = None) -> str:
-    """Delete the version an install replaced, once PRUNE_GRACE_SECONDS have
-    passed (CR-309). -> the version removed, or "". Never raises.
+    """Delete each version an install replaced, once its PRUNE_GRACE_SECONDS
+    have passed (CR-309). -> the versions removed, comma-joined, or "".
+    Never raises.
 
     Called from the collector's cycle (`auto_update_tick`), so a replaced
     version goes at most one cycle after its grace, whether or not the
     unattended updater is on - the admin's UPDATE button defers the same way.
+    Each replaced version has its own clock (bug-dash-ops-8): two updates
+    inside one hour leave two versions, and each goes an hour after its own
+    flip, never the older one early for the newer one's sake.
     """
     try:
         state = read_state(settings, name)
-        previous = str(state.get("previous_version") or "")
-        if not previous:
+        entries = _superseded_entries(state)
+        if not entries:
             return ""
         now = time.time() if now is None else now
-        try:
-            since = float(state.get("superseded_at_epoch") or 0.0)
-        except (TypeError, ValueError):
-            since = 0.0
-        if since and 0 <= now - since < PRUNE_GRACE_SECONDS:
-            return ""
         current = str(state.get("installed_version") or "")
-        if (previous != current and _VERSION_RE.match(previous)):
-            shutil.rmtree(tool_root(settings, name) / previous, ignore_errors=True)
-        state.pop("previous_version", None)
-        state.pop("superseded_at_epoch", None)
+        removed: list[str] = []
+        kept: list[dict] = []
+        for entry in entries:
+            since = entry["at"]
+            if since and 0 <= now - since < PRUNE_GRACE_SECONDS:
+                kept.append(entry)
+                continue
+            previous = entry["version"]
+            if previous != current and _VERSION_RE.match(previous):
+                shutil.rmtree(tool_root(settings, name) / previous, ignore_errors=True)
+            removed.append(previous)
+            log.info("removed %s %s, replaced %s ago", name, previous,
+                     f"{int((now - since) / 60)} min" if since else "a while")
+        if not removed:
+            return ""
+        _set_superseded(state, kept)
         _write_state(settings, name, state)
-        log.info("removed %s %s, replaced %s ago", name, previous,
-                 f"{int((now - since) / 60)} min" if since else "a while")
-        return previous
+        return ",".join(removed)
     except Exception:                                                 # noqa: BLE001
         log.warning("could not sweep the replaced %s version", name, exc_info=True)
         return ""

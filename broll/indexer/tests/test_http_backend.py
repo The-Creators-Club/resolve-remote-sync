@@ -87,7 +87,10 @@ def test_write_index_result_posts_to_ingest_index(http_backend):
     )
     url, payload = session.posts[-1]
     assert url == "http://example.local/api/ingest/index"
-    assert payload["video_id"] == vid
+    # bug-broll-2 (2026-09-25): the CANONICAL id /ingest/video answered with
+    # (the fake answers 999), never the local shadow's, plus the identity.
+    assert payload["video_id"] == 999
+    assert (payload["share"], payload["rel_path"]) == ("broll", "clip.mov")
     assert payload["themes"] == ["a"]
 
 
@@ -97,7 +100,9 @@ def test_record_moved_posts_to_ingest_moved(http_backend):
     backend.record_moved(vid, "cat/a/clip.mov")
     url, payload = session.posts[-1]
     assert url == "http://example.local/api/ingest/moved"
-    assert payload == {"video_id": vid, "new_rel_path": "cat/a/clip.mov"}
+    # bug-broll-2 (2026-09-25): canonical id plus the path it moves FROM.
+    assert payload == {"video_id": 999, "share": "broll", "rel_path": "inbox/clip.mov",
+                       "new_rel_path": "cat/a/clip.mov"}
     assert backend.get_video(vid)["in_inbox"] == 0
 
 

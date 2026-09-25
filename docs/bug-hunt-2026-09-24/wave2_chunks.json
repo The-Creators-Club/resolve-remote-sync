@@ -1,0 +1,485 @@
+[
+ {
+  "group": "broll",
+  "part": 1,
+  "of": 3,
+  "ids": [
+   "bug-broll-1",
+   "bug-broll-2",
+   "bug-broll-3",
+   "bug-wire-2",
+   "logic-broll-music-1",
+   "ui-broll-web-3",
+   "bug-broll-4",
+   "logic-broll-music-4",
+   "ui-broll-web-1"
+  ]
+ },
+ {
+  "group": "broll",
+  "part": 2,
+  "of": 3,
+  "ids": [
+   "ui-broll-web-2",
+   "ui-broll-web-4",
+   "ui-broll-web-5",
+   "ui-broll-web-6",
+   "ui-broll-web-7",
+   "ui-broll-web-8",
+   "ui-broll-web-9",
+   "ui-broll-web-10",
+   "ui-broll-web-11"
+  ]
+ },
+ {
+  "group": "broll",
+  "part": 3,
+  "of": 3,
+  "ids": [
+   "ui-broll-web-12",
+   "ui-broll-web-13",
+   "ui-broll-web-14",
+   "ui-broll-web-15",
+   "ui-broll-web-16",
+   "ui-broll-web-17",
+   "ui-broll-web-18"
+  ]
+ },
+ {
+  "group": "c-app",
+  "part": 1,
+  "of": 1,
+  "ids": [
+   "bug-comp-app-2",
+   "bug-comp-app-3",
+   "bug-comp-core-3",
+   "bug-comp-app-4",
+   "bug-comp-app-5",
+   "bug-comp-app-6",
+   "bug-comp-app-7",
+   "bug-wire-6",
+   "ui-comp-windows-3"
+  ]
+ },
+ {
+  "group": "c-broll-music",
+  "part": 1,
+  "of": 1,
+  "ids": [
+   "bug-comp-broll-2",
+   "bug-comp-broll-4",
+   "bug-comp-broll-5",
+   "bug-comp-media-6",
+   "logic-broll-music-2",
+   "bug-comp-broll-3",
+   "bug-comp-broll-6",
+   "bug-comp-media-7",
+   "bug-wire-7"
+  ]
+ },
+ {
+  "group": "c-core",
+  "part": 1,
+  "of": 1,
+  "ids": [
+   "bug-comp-core-4",
+   "bug-comp-core-6",
+   "bug-comp-core-7"
+  ]
+ },
+ {
+  "group": "c-media",
+  "part": 1,
+  "of": 1,
+  "ids": [
+   "bug-comp-media-4",
+   "bug-comp-media-3",
+   "bug-comp-media-5",
+   "bug-comp-media-8"
+  ]
+ },
+ {
+  "group": "c-resolve",
+  "part": 1,
+  "of": 2,
+  "ids": [
+   "bug-comp-resolve-1",
+   "bug-comp-resolve-2",
+   "bug-comp-resolve-3",
+   "bug-comp-resolve-4",
+   "logic-resolve-1",
+   "logic-resolve-2",
+   "logic-resolve-3",
+   "logic-resolve-4"
+  ]
+ },
+ {
+  "group": "c-resolve",
+  "part": 2,
+  "of": 2,
+  "ids": [
+   "bug-comp-resolve-5",
+   "bug-comp-resolve-6",
+   "bug-comp-resolve-7",
+   "bug-comp-resolve-8",
+   "bug-comp-resolve-9",
+   "logic-resolve-5",
+   "logic-cards-9"
+  ]
+ },
+ {
+  "group": "c-sync",
+  "part": 1,
+  "of": 2,
+  "ids": [
+   "bug-comp-rclone-2",
+   "bug-comp-rclone-3",
+   "bug-comp-syncthing-1",
+   "bug-comp-syncthing-2",
+   "bug-comp-syncthing-3",
+   "bug-comp-syncthing-4",
+   "bug-comp-core-5",
+   "logic-sync-truth-2"
+  ]
+ },
+ {
+  "group": "c-sync",
+  "part": 2,
+  "of": 2,
+  "ids": [
+   "logic-sync-truth-4",
+   "bug-comp-rclone-4",
+   "bug-comp-rclone-5",
+   "bug-comp-syncthing-5",
+   "bug-comp-syncthing-6",
+   "bug-comp-syncthing-7",
+   "logic-sync-truth-3",
+   "logic-plans-5"
+  ]
+ },
+ {
+  "group": "c-ui",
+  "part": 1,
+  "of": 3,
+  "ids": [
+   "bug-comp-ui-1",
+   "ui-comp-windows-2",
+   "bug-comp-ui-2",
+   "bug-comp-ui-3",
+   "bug-comp-ui-4",
+   "bug-comp-ui-5",
+   "bug-comp-ui-6"
+  ]
+ },
+ {
+  "group": "c-ui",
+  "part": 2,
+  "of": 3,
+  "ids": [
+   "logic-sync-truth-6",
+   "ui-comp-windows-1",
+   "ui-comp-windows-4",
+   "ui-comp-windows-5",
+   "ui-comp-windows-6",
+   "ui-comp-windows-7",
+   "ui-comp-windows-8"
+  ]
+ },
+ {
+  "group": "c-ui",
+  "part": 3,
+  "of": 3,
+  "ids": [
+   "ui-comp-windows-9",
+   "ui-comp-windows-10",
+   "ui-comp-windows-11",
+   "ui-onboarding-9",
+   "ui-copy-5"
+  ]
+ },
+ {
+  "group": "c-ytdl",
+  "part": 1,
+  "of": 1,
+  "ids": [
+   "bug-comp-ytdl-2",
+   "bug-comp-ytdl-4",
+   "bug-comp-ytdl-3",
+   "bug-comp-ytdl-5",
+   "ui-copy-4"
+  ]
+ },
+ {
+  "group": "d-api",
+  "part": 1,
+  "of": 1,
+  "ids": [
+   "bug-dash-api-1",
+   "bug-dash-api-2",
+   "bug-wire-3",
+   "bug-dash-api-3",
+   "bug-dash-api-4",
+   "bug-wire-4",
+   "bug-wire-5"
+  ]
+ },
+ {
+  "group": "d-auth",
+  "part": 1,
+  "of": 1,
+  "ids": [
+   "bug-dash-auth-2",
+   "bug-dash-auth-3",
+   "bug-dash-auth-4",
+   "bug-dash-auth-1",
+   "bug-dash-auth-5",
+   "bug-dash-auth-6",
+   "bug-dash-auth-7"
+  ]
+ },
+ {
+  "group": "d-cards",
+  "part": 1,
+  "of": 2,
+  "ids": [
+   "bug-dash-cards-jobs-1",
+   "bug-dash-cards-jobs-2",
+   "bug-dash-cards-jobs-4",
+   "logic-ytdl-jobs-1",
+   "logic-cards-1",
+   "logic-cards-2",
+   "bug-dash-cards-jobs-3",
+   "bug-dash-cards-jobs-5"
+  ]
+ },
+ {
+  "group": "d-cards",
+  "part": 2,
+  "of": 2,
+  "ids": [
+   "bug-dash-cards-jobs-6",
+   "logic-ytdl-jobs-6",
+   "logic-cards-3",
+   "logic-cards-4",
+   "logic-cards-5",
+   "logic-cards-6",
+   "logic-cards-7",
+   "logic-cards-8"
+  ]
+ },
+ {
+  "group": "d-db",
+  "part": 1,
+  "of": 1,
+  "ids": [
+   "bug-dash-db-1",
+   "bug-dash-db-2",
+   "bug-wire-1",
+   "logic-plans-1",
+   "logic-plans-4",
+   "bug-dash-db-3",
+   "logic-ytdl-jobs-5"
+  ]
+ },
+ {
+  "group": "d-diag",
+  "part": 1,
+  "of": 3,
+  "ids": [
+   "bug-dash-diag-1",
+   "bug-dash-diag-3",
+   "bug-dash-ops-1",
+   "logic-sync-truth-1",
+   "logic-admin-1",
+   "logic-alerts-1",
+   "logic-alerts-2",
+   "logic-alerts-3",
+   "ui-copy-1"
+  ]
+ },
+ {
+  "group": "d-diag",
+  "part": 2,
+  "of": 3,
+  "ids": [
+   "ui-copy-2",
+   "bug-dash-diag-2",
+   "bug-dash-diag-4",
+   "bug-dash-ops-5",
+   "bug-dash-ops-6",
+   "bug-dash-ops-7",
+   "logic-sync-truth-5",
+   "logic-admin-4",
+   "logic-admin-5"
+  ]
+ },
+ {
+  "group": "d-diag",
+  "part": 3,
+  "of": 3,
+  "ids": [
+   "logic-alerts-4",
+   "logic-alerts-5",
+   "logic-alerts-6",
+   "logic-alerts-7",
+   "logic-alerts-8",
+   "logic-alerts-9",
+   "ui-dash-admin-10",
+   "ui-dash-admin-13",
+   "ui-copy-3"
+  ]
+ },
+ {
+  "group": "d-ops",
+  "part": 1,
+  "of": 1,
+  "ids": [
+   "bug-dash-ops-2",
+   "bug-dash-ops-4",
+   "logic-release-3",
+   "logic-release-4",
+   "bug-dash-ops-3",
+   "bug-dash-ops-8",
+   "bug-dash-ops-9",
+   "ui-dash-admin-8"
+  ]
+ },
+ {
+  "group": "d-ui",
+  "part": 1,
+  "of": 4,
+  "ids": [
+   "logic-admin-2",
+   "ui-dash-main-1",
+   "ui-dash-main-2",
+   "ui-dash-main-3",
+   "ui-dash-main-7",
+   "ui-dash-main-8",
+   "ui-dash-admin-2",
+   "ui-dash-admin-3",
+   "ui-dash-admin-5"
+  ]
+ },
+ {
+  "group": "d-ui",
+  "part": 2,
+  "of": 4,
+  "ids": [
+   "ui-dash-admin-6",
+   "ui-dash-admin-7",
+   "ui-dash-static-1",
+   "ui-dash-static-2",
+   "ui-dash-static-3",
+   "logic-plans-2",
+   "logic-admin-3",
+   "logic-admin-6",
+   "logic-admin-7"
+  ]
+ },
+ {
+  "group": "d-ui",
+  "part": 3,
+  "of": 4,
+  "ids": [
+   "ui-dash-main-4",
+   "ui-dash-main-5",
+   "ui-dash-main-6",
+   "ui-dash-main-9",
+   "ui-dash-main-10",
+   "ui-dash-admin-4",
+   "ui-dash-admin-9",
+   "ui-dash-admin-11",
+   "ui-dash-admin-12"
+  ]
+ },
+ {
+  "group": "d-ui",
+  "part": 4,
+  "of": 4,
+  "ids": [
+   "ui-dash-admin-14",
+   "ui-dash-static-4",
+   "ui-dash-static-5",
+   "ui-dash-static-6",
+   "ui-dash-static-7",
+   "ui-dash-static-8",
+   "ui-dash-static-9",
+   "ui-copy-6",
+   "ui-copy-7"
+  ]
+ },
+ {
+  "group": "music-ytdl",
+  "part": 1,
+  "of": 2,
+  "ids": [
+   "bug-music-ytdl-2",
+   "bug-music-ytdl-4",
+   "logic-broll-music-3",
+   "logic-ytdl-jobs-3",
+   "ui-music-ytdl-web-2",
+   "ui-music-ytdl-web-4",
+   "ui-music-ytdl-web-5",
+   "bug-music-ytdl-3"
+  ]
+ },
+ {
+  "group": "music-ytdl",
+  "part": 2,
+  "of": 2,
+  "ids": [
+   "logic-ytdl-jobs-4",
+   "ui-music-ytdl-web-1",
+   "ui-music-ytdl-web-3",
+   "ui-music-ytdl-web-6",
+   "ui-music-ytdl-web-7",
+   "ui-music-ytdl-web-8",
+   "ui-music-ytdl-web-9",
+   "ui-music-ytdl-web-10"
+  ]
+ },
+ {
+  "group": "onboarding",
+  "part": 1,
+  "of": 2,
+  "ids": [
+   "logic-onboarding-1",
+   "logic-onboarding-2",
+   "ui-onboarding-1",
+   "ui-onboarding-2",
+   "ui-onboarding-4",
+   "bug-ops-4",
+   "logic-onboarding-3",
+   "logic-onboarding-4",
+   "logic-onboarding-5"
+  ]
+ },
+ {
+  "group": "onboarding",
+  "part": 2,
+  "of": 2,
+  "ids": [
+   "ui-onboarding-3",
+   "ui-onboarding-5",
+   "ui-onboarding-6",
+   "ui-onboarding-7",
+   "ui-onboarding-8",
+   "ui-onboarding-10",
+   "ui-onboarding-11",
+   "ui-onboarding-12"
+  ]
+ },
+ {
+  "group": "release-tools",
+  "part": 1,
+  "of": 1,
+  "ids": [
+   "logic-release-2",
+   "logic-release-6",
+   "bug-ops-2",
+   "bug-ops-3",
+   "logic-release-5",
+   "logic-release-7"
+  ]
+ }
+]

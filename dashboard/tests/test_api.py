@@ -356,7 +356,7 @@ def test_the_fleet_page_banners_and_panel_show_the_refusals(app_env):
     seed(conn)
     _seed_refusals(conn)
     page = client.get("/").text
-    assert "SHARE REMOVAL(S) REFUSED" in page and "shares are FROZEN" in page
+    assert "2 SHARE REMOVALS REFUSED" in page and "shares are FROZEN" in page  # ui-dash-main-10 (2026-09-25): no "(S)"
     assert "0 of 37 folders" in page
     # the health panel + the read-only pending diff
     assert "[ COLLECTOR ]" in page and "[ PENDING SHARE CHANGES ]" in page
@@ -373,7 +373,7 @@ def test_an_editor_is_not_shown_the_collector_panel(app_env):
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
     page = client.get("/").text
     assert "[ COLLECTOR ]" not in page
-    assert "SHARE REMOVAL(S) REFUSED" not in page
+    assert "SHARE REMOVALS REFUSED" not in page and "SHARE REMOVAL(S)" not in page
     assert "collector" not in client.get("/api/v1/editors").json()
 
 

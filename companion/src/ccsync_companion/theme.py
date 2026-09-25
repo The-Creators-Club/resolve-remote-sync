@@ -20,7 +20,20 @@ RED_DIM = "#7c1322"     # rules, borders, quiet accents
 GREEN = "#2bff88"       # phosphor green — OK / go
 AMBER = "#ffb02e"       # warnings / in-progress
 TEXT = "#e8e8ea"        # primary text
-MUTED = "#6f6f7a"       # secondary text
+# ui-comp-windows-11 / ui-onboarding-9 (2026-09-25): MUTED carries 8-9 pt
+# text (the fixer's file paths, every secondary Settings line, the wizard's
+# radio subtitles, every non-primary button), so it has to clear WCAG AA's
+# 4.5:1 for small text. The old #6f6f7a was 3.98:1 on BG and 3.63:1 on FIELD;
+# this is 5.8:1 and 5.28:1. Still far enough below TEXT (#e8e8ea) to read as
+# secondary and as "disabled" where onboard greys a button with it.
+MUTED = "#8a8a96"       # secondary text
+# ui-onboarding-9 (2026-09-25): an input's outline. RED_DIM (1.86:1 on BG,
+# 1.69:1 on FIELD) left the fields barely visible; a UI component boundary
+# wants 3:1 against both sides of it. A neutral grey (3.98:1 / 3.63:1) rather
+# than a brighter red so the RED focus outline still reads as a change.
+# RED_DIM stays the colour of rules and decoration, where no contrast floor
+# applies.
+FIELD_BORDER = "#6f6f7a"
 
 # RGB tuples for PIL (tray icon)
 RGB_BG = (10, 10, 13)
@@ -387,7 +400,8 @@ def style_combobox(ttk_module, master=None) -> str:
         background=PANEL,
         foreground=TEXT,
         arrowcolor=RED,
-        bordercolor=RED_DIM,
+        # ui-onboarding-9 (2026-09-25): an input outline, see FIELD_BORDER.
+        bordercolor=FIELD_BORDER,
         lightcolor=PANEL,
         darkcolor=PANEL,
         insertcolor=RED,
@@ -431,6 +445,17 @@ def neon_button(tk_module, parent, text: str, command, primary: bool = True):
     """A flat terminal-style button: [ TEXT ] with a neon hover glow.
 
     primary=True -> brand red; False -> muted gray that reddens on hover.
+
+    ui-comp-windows-11 (2026-09-25, corrected in the review round the same
+    day): highlightthickness=0 HIDES keyboard focus on Windows. Measured with
+    a real Tk 8.6 root in the foreground and UISF_HIDEFOCUS cleared: this
+    button with highlightthickness=0 changed 0 pixels between unfocused and
+    focused; with highlightthickness=1 Windows draws its dotted focus
+    rectangle round the text (80 px, in the fg colour; highlightcolor itself
+    is ignored there). So the ring is 1 px, invisible until focused
+    (highlightbackground is the page colour), and highlightcolor=TEXT is what
+    X11/Aqua paint with. The first build of this fix claimed the dotted box
+    was drawn at 0; that probe had not given the window the foreground.
     """
     fg = RED if primary else MUTED
     btn = tk_module.Button(
@@ -445,8 +470,29 @@ def neon_button(tk_module, parent, text: str, command, primary: bool = True):
         bd=0,
         relief="flat",
         cursor="hand2",
-        highlightthickness=0,
+        takefocus=1,
+        highlightthickness=1,
+        highlightbackground=BG,
+        highlightcolor=TEXT,
     )
     btn.bind("<Enter>", lambda _e: btn.config(fg=RED_HOT))
     btn.bind("<Leave>", lambda _e: btn.config(fg=fg))
+
+    # ui-onboarding-8 (2026-09-25, the companion's half): a tk.Button answers
+    # Space, not Enter, so a keyboard user who tabbed to one pressed Enter and
+    # got nothing (or, where a window binds <Return> on its root, got THAT
+    # action instead of the button in focus). invoke() is a no-op on a
+    # disabled button. "break" stops the root's own <Return> binding firing
+    # as well: notice_dialog's destroys the root the button just destroyed,
+    # and confirm_dialog deliberately binds none so a focused CANCEL stays
+    # CANCEL.
+    def _press(_event=None):
+        try:
+            btn.invoke()
+        except Exception:
+            pass
+        return "break"
+
+    btn.bind("<Return>", _press)
+    btn.bind("<KP_Enter>", _press)
     return btn

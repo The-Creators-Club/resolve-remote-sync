@@ -77,6 +77,30 @@ ACTIVE_SECONDS = 15 * 60
 # per click, so the retry has a floor.
 RETRY_FLOOR_SECONDS = 20.0
 
+# bug-dash-cards-jobs-2 (2026-09-25): how long an editor's agent stays with
+# the episode they last ENTERED while another of their pages keeps polling a
+# different one. `_where` used to be overwritten by every served request, so
+# one account with a laptop in episode A and a phone in episode B (the
+# module docstring's everyday pair) flipped it several times a second, and
+# the agent's `/pending` and `/result` for ONE edit landed on two engines.
+# Now only a navigation moves it, or a request into another episode once the
+# entered one has had no page request from that person for this long (a
+# closed tab, a page served from a service worker's cache with no navigation
+# ever reaching us). Two minutes clears Chrome's once-a-minute throttling of
+# a background tab, so a hidden page still counts as being there.
+WHERE_STALE_SECONDS = 120.0
+
+# logic-cards-7 (2026-09-25): how long an episode may stay LOADING before
+# the pool calls it failed. Only the builder thread could ever leave LOADING,
+# so a build blocked in a scandir on a share that HANGS rather than refuses
+# (RETRY_FLOOR_SECONDS' own shape) held a seat for the life of the container
+# and every open landing page polled "opening" all afternoon. Generous on
+# purpose: a real build reads an episode off the share and a slow one must
+# not be thrown away, which is also why a build that finishes after the
+# deadline is still published if its entry is still there and a seat is free
+# (`_run_build`).
+BUILD_DEADLINE_SECONDS = 10 * 60
+
 _SLUG_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 
@@ -241,11 +265,31 @@ class Entry:
         # editor -> the last time a request of theirs was served here. The
         # sentence the cap refusal shows, and nothing else: it holds no seat.
         self.seen: dict[str, float] = {}
+        # editor -> the last PAGE request of theirs served here. `seen` also
+        # takes the agent's stamps (security-1); this one does not, so it can
+        # say whether a browser is still in the episode (bug-dash-cards-jobs-2).
+        self.page_seen: dict[str, float] = {}
 
     def occupants(self, within: float = ACTIVE_SECONDS) -> list[str]:
         now = time.time()
         return sorted(who for who, when in self.seen.items()
                       if now - when <= within)
+
+    def last_in_other_than(self, editor: str) -> tuple[str, float | None]:
+        """`last_in()` with `editor` left out. ("", None) if nobody else.
+
+        logic-cards-1 (2026-09-25): the close confirm was built from
+        `last_in()`, which is whoever sent the newest request - usually the
+        person about to press [ CLOSE ] - so "ruskin is in it now" was shown to
+        ruskin while alex was editing in it. The confirm has to name the
+        person the press takes the episode from.
+        """
+        me = str(editor or "").strip().lower()
+        others = [(who, when) for who, when in self.seen.items() if who != me]
+        if not others:
+            return "", None
+        who, when = max(others, key=lambda kv: kv[1])
+        return who, max(0.0, time.time() - when)
 
     def last_in(self) -> tuple[str, float | None]:
         """(who was in here last, how many seconds ago) - ("", None) if never.
@@ -269,7 +313,11 @@ class Entry:
                 "show": self.show, "state": self.state, "detail": self.detail,
                 "occupants": self.occupants(),
                 "last_in": who, "last_in_seconds": ago,
-                "opened_at": self.opened_at, "ready_at": self.ready_at}
+                "opened_at": self.opened_at, "ready_at": self.ready_at,
+                # logic-cards-7: how long a LOADING entry has been at it, so
+                # the page can say so instead of an unchanging "opening".
+                "opening_seconds": (max(0.0, time.time() - self.opened_at)
+                                    if self.state == LOADING else None)}
 
 
 class EnginePool:
@@ -300,6 +348,9 @@ class EnginePool:
         # phase 1a). Set from the page's own requests, which is the only
         # place we ever learn it.
         self._where: dict[str, str] = {}
+        # editor -> (slug, request id) of the last edit their agent was
+        # handed, so its result goes back there (bug-dash-cards-jobs-2).
+        self._handed: dict[str, tuple[str, str]] = {}
 
     def set_evict_hook(self, on_evict: Callable[[str], None] | None) -> None:
         """Wire the dispatcher in after both exist (dash-cards-5)."""
@@ -309,11 +360,36 @@ class EnginePool:
 
     def get(self, slug: str) -> Entry | None:
         with self._lock:
+            self._expire_stalled()
             return self._entries.get(slug)
 
     def entries(self) -> list[Entry]:
         with self._lock:
+            self._expire_stalled()
             return list(self._entries.values())
+
+    def _expire_stalled(self) -> None:
+        """LOADING past BUILD_DEADLINE_SECONDS -> FAILED. Call under the lock.
+
+        logic-cards-7 (2026-09-25). Lazy, on every read, because nothing else
+        in the pool ticks: the landing page's own poll is what notices, and
+        the entry then frees its seat and stops the page refreshing. The
+        thread is not killed (a thread stuck in a share read cannot be); its
+        result is judged when it arrives (`_run_build`).
+        """
+        now = time.time()
+        for entry in self._entries.values():
+            if (entry.state == LOADING
+                    and now - entry.opened_at > BUILD_DEADLINE_SECONDS):
+                entry.state = FAILED
+                entry.failed_at = now
+                entry.detail = (
+                    f"the vault did not answer for "
+                    f"{int(BUILD_DEADLINE_SECONDS // 60)} min, so this episode "
+                    f"did not open. Press [ OPEN ] to try again.")
+                log.warning("Timeline Cards: %s was still opening after %d s; "
+                            "marked failed", entry.root,
+                            int(BUILD_DEADLINE_SECONDS))
 
     def ready_asgi(self, slug: str) -> Any:
         """The mounted app for this slug, or None if it is not ready yet."""
@@ -359,10 +435,67 @@ class EnginePool:
         with self._lock:
             return self._where.get(str(editor or "").strip().lower(), "")
 
+    def slug_of(self, engine: Any) -> str:
+        """The slug whose READY entry holds this engine, or "".
+
+        By identity: a slug outlives its engine (close and reopen is a new
+        engine behind the same slug), and an edit handed out by the old one
+        must not be routed to the new one.
+        """
+        if engine is None:
+            return ""
+        with self._lock:
+            for slug, entry in self._entries.items():
+                if entry.engine is engine and entry.state == READY:
+                    return slug
+        return ""
+
+    def note_handed(self, editor: str, engine: Any, request_id: Any) -> None:
+        """This editor's agent was just handed edit `request_id` by `engine`.
+
+        bug-dash-cards-jobs-2 (2026-09-25): `/pending` and `/result` were
+        routed independently, each through `_where`, so an edit taken from
+        engine A could have its result posted to engine B. B answered "that
+        request is no longer open", and A's next poll published "the Resolve
+        agent went away with that edit" for an edit Resolve HAD applied, which
+        is an invitation to press it again. The result now goes back to the
+        engine that handed the edit out. Best effort, never raises.
+        """
+        editor = str(editor or "").strip().lower()
+        if not editor or request_id is None:
+            return
+        slug = self.slug_of(engine)
+        if not slug:
+            return
+        with self._lock:
+            self._handed[editor] = (slug, str(request_id))
+
+    def handed_engine(self, editor: str, request_id: Any) -> Any:
+        """The READY engine that handed this editor's agent `request_id`, or
+        None when it was not handed out here (or that episode has closed)."""
+        editor = str(editor or "").strip().lower()
+        if not editor or request_id is None:
+            return None
+        with self._lock:
+            slug, handed = self._handed.get(editor, ("", ""))
+            if not slug or handed != str(request_id):
+                return None
+            entry = self._entries.get(slug)
+        if entry is not None and entry.state == READY:
+            return entry.engine
+        return None
+
     # -- writing
 
-    def note_visit(self, slug: str, editor: str) -> None:
-        """That editor is in that episode. Best effort, never raises."""
+    def note_visit(self, slug: str, editor: str, enter: bool = True) -> None:
+        """That editor is in that episode. Best effort, never raises.
+
+        `enter` is "they opened it" (a navigation to the page, or the landing
+        page's OPEN), which is what moves their agent there. Every other
+        request (state polls, media ranges) stamps the seat and moves the
+        agent only if the episode it is attached to has had no page request
+        from them for WHERE_STALE_SECONDS (bug-dash-cards-jobs-2, 2026-09-25).
+        """
         editor = str(editor or "").strip().lower()
         if not editor:
             return
@@ -370,10 +503,25 @@ class EnginePool:
             entry = self._entries.get(slug)
             if entry is None:
                 return
-            entry.seen[editor] = time.time()
-            self._where[editor] = slug
+            now = time.time()
+            entry.seen[editor] = now
+            entry.page_seen[editor] = now
+            # logic-cards-3 (2026-09-25): only a READY episode takes the agent.
+            # `/cards/open` notes the presser on an entry that is still
+            # LOADING, and pointing `_where` at it detached their Resolve from
+            # the episode they were working in for the whole build ("alex is
+            # not in a Timeline Cards episode", while he was). Opening one is
+            # not moving your Resolve into it; entering its page is.
+            if entry.state != READY:
+                return
+            current = self._where.get(editor, "")
+            there = self._entries.get(current) if current else None
+            if (enter or there is None or current == slug
+                    or now - there.page_seen.get(editor, 0.0)
+                    > WHERE_STALE_SECONDS):
+                self._where[editor] = slug
 
-    def note_agent(self, editor: str) -> None:
+    def note_agent(self, editor: str, engine: Any = None) -> None:
         """That editor's Timeline Cards AGENT just drove their episode.
 
         security-1 (2026-09-18b mediums): `seen` was stamped only by a request
@@ -384,13 +532,24 @@ class EnginePool:
         against. The agent's poll is a second liveness signal for exactly that
         person, on the identity `api._require_fleet_caller` verified, and it
         reaches the container even when their browser cannot. Best effort,
-        never raises: `_where` is where the tunnel already routed it.
+        never raises: `_where` is where the tunnel already routed it, unless
+        the call names the `engine` it was actually served by (a result that
+        went back to the engine that handed the edit out).
+
+        logic-cards-2 (2026-09-25): the tunnel calls this for an agent doing
+        WORK only (a swept timeline, a playhead that moved, a result), never
+        for the 25-second `/pending` long poll or a heartbeat ping. The Cards
+        role polls from sign-in to shutdown, so stamping every call made
+        "occupant" mean "their companion is running", and the idle release,
+        the cap sentence and the Who column never lapsed for anyone with the
+        role on.
         """
         editor = str(editor or "").strip().lower()
         if not editor:
             return
+        slug = self.slug_of(engine) if engine is not None else ""
         with self._lock:
-            slug = self._where.get(editor) or ""
+            slug = slug or self._where.get(editor) or ""
             entry = self._entries.get(slug)
             if entry is not None:
                 entry.seen[editor] = time.time()
@@ -404,6 +563,7 @@ class EnginePool:
         """
         slug = slug_for(root)
         with self._lock:
+            self._expire_stalled()
             entry = self._entries.get(slug)
             if entry is not None and entry.state != FAILED:
                 return entry, ""
@@ -461,7 +621,7 @@ class EnginePool:
         mistaken opens by one editor parked the whole feature until an admin
         was found or the container restarted, and the refusal told them to do
         the one thing that frees nothing. An admin may still close anything.
-        Everyone else may close an episode they are themselves an occupant of,
+        Everyone else may close an episode they are the ONLY occupant of,
         or one nobody has been in for ACTIVE_SECONDS - which is exactly the
         "idle one" the cap refusal now names. Closing is not free (`drop`'s
         docstring: the upstream threads stay), which is why it stays a
@@ -474,9 +634,11 @@ class EnginePool:
         if entry is None:
             return ""
         occupants = entry.occupants()
+        # logic-cards-1 (2026-09-25): being ONE of the occupants used to be
+        # enough, so ruskin could close the engine alex was editing in, behind
+        # a confirm that named ruskin. Your own episode means nobody else is
+        # in it.
         if not occupants or occupants == [editor]:
-            return ""
-        if editor in occupants:
             return ""
         return ("somebody else is in that episode. Ask them to close it, or "
                 "an admin can.")
@@ -509,17 +671,36 @@ class EnginePool:
             # for the life of the container (the shape dash-release-jobs-1
             # cost us once already, one layer down).
             orphaned = self._entries.get(entry.slug) is not entry
+            late = ""
+            if not orphaned and entry.state == FAILED:
+                # logic-cards-7 (2026-09-25): the deadline called it failed
+                # while this thread was still reading the share. Still the
+                # registered entry and a seat free: publish it, because a slow
+                # build thrown away is a person waiting another ten minutes.
+                # No seat (somebody opened another episode meanwhile): an
+                # orphan, exactly as a close would have made it.
+                live = [e for e in self._entries.values()
+                        if e is not entry and e.state != FAILED]
+                if len(live) >= self.cap:
+                    late = ("this episode opened too late: every seat was "
+                            "taken by then. Press [ OPEN ] to try again.")
             entry.engine = engine
-        if orphaned:
+            if not (orphaned or late):
+                # Published under the SAME lock as the checks above: now that
+                # a deadline-failed entry can be replaced by a fresh `open()`
+                # (logic-cards-7), a gap between deciding and publishing
+                # would be a window to publish an engine nothing holds.
+                entry.asgi = asgi
+                entry.state = READY
+                entry.ready_at = time.time()
+                entry.detail = f"serving {entry.root}"
+        if orphaned or late:
             log.info("Timeline Cards: %s was closed while it was opening",
                      entry.root)
             _stop(entry)                       # outside the lock: it is theirs
+            if late:
+                entry.detail = late
             return
-        with self._lock:
-            entry.asgi = asgi
-            entry.state = READY
-            entry.ready_at = time.time()
-            entry.detail = f"serving {entry.root}"
         log.info("Timeline Cards: %s is open at /cards/p/%s/",
                  entry.root, entry.slug)
 
@@ -539,6 +720,9 @@ class EnginePool:
             for who, where in list(self._where.items()):
                 if where == slug:
                     self._where.pop(who, None)
+            for who, (where, _rid) in list(self._handed.items()):
+                if where == slug:
+                    self._handed.pop(who, None)
         if entry is None:
             return "that episode is not open"
         _stop(entry)
@@ -551,6 +735,7 @@ class EnginePool:
             entries = list(self._entries.values())
             self._entries.clear()
             self._where.clear()
+            self._handed.clear()
         for entry in entries:
             _stop(entry)
             self._evict(entry.slug)

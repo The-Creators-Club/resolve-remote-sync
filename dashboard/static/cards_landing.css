@@ -10,6 +10,14 @@
 .cl-lede { max-width: 70ch; margin: 0.4rem 0 0.8rem; }
 .cl-refusal { max-width: 70ch; color: var(--amber); margin: 0.6rem 0; }
 .cl-opening { color: var(--amber); max-width: 70ch; margin: 0.4rem 0 0.8rem; }
+/* logic-cards-4 (2026-09-25): the episode a `?want=` navigation asked for. */
+.cl-want {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem;
+  max-width: 70ch; margin: 0.6rem 0 0.8rem; padding: 0.55rem 0.8rem;
+  border: 1px solid var(--amber); color: var(--amber);
+}
+.cl-want p { margin: 0; flex: 1 1 22ch; min-width: 0; overflow-wrap: anywhere; }
+.cl-want .cl-act { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 .cl-carry {
   display: inline-block;
   color: var(--green);

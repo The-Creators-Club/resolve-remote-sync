@@ -235,8 +235,31 @@ def client_ip(request: Request | None) -> str:
                 "one client. Add the proxy's address to DASH_TRUSTED_PROXIES.",
                 peer, getattr(settings, "trusted_proxies", "?"))
         return peer
-    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    return forwarded or peer
+    # bug-dash-auth-7 (2026-09-25): walked from the RIGHT. A proxy that
+    # appends (nginx's $proxy_add_x_forwarded_for, Go's Director-mode
+    # ReverseProxy) keeps whatever the client sent at the LEFT, so the first
+    # element let a client pick its own login-throttle bucket: rotate it to
+    # dodge the IP budget, or name an innocent address to fill theirs. The
+    # rightmost address that is not itself one of our proxies is the one our
+    # proxy saw. A proxy that REPLACES the header (Tailscale Serve) sends one
+    # element, which is the same answer either way.
+    hops = [h.strip() for h in (request.headers.get("x-forwarded-for") or "").split(",")]
+    hops = [h for h in hops if h]
+    for hop in reversed(hops):
+        try:
+            ipaddress.ip_address(hop.strip("[]"))
+        except ValueError:
+            # Not an address our proxy would have written; anything to its
+            # left came from the client too.
+            break
+        if not trusted_proxy(settings, hop):
+            return hop
+    # Every hop is inside the trusted ranges (a client on the proxy's own
+    # network): the leftmost is the origin, as before. An empty or garbled
+    # right end: the peer is the best answer we can stand behind.
+    if hops and all(trusted_proxy(settings, h) for h in hops):
+        return hops[0]
+    return peer
 
 
 def login_throttled(request: Request | None, username: str,
@@ -547,11 +570,17 @@ def cookie_secure(settings: Settings, request: Request) -> bool:
     a configured trusted proxy (see trusted_proxy). Force it with
     DASH_COOKIE_SECURE=1 (or 0)."""
     mode = str(getattr(settings, "cookie_secure", "auto") or "auto").strip().lower()
-    if mode in ("1", "true", "yes", "on"):
+    if mode in _COOKIE_SECURE_ON:
         return True
-    if mode in ("0", "false", "no", "off"):
+    if mode in _COOKIE_SECURE_OFF:
         return False
     return request_is_https(settings, request)
+
+
+# One vocabulary for DASH_COOKIE_SECURE, read by cookie_secure() and by the
+# boot line in describe_auth() (bug-dash-auth-6, 2026-09-25).
+_COOKIE_SECURE_ON = frozenset({"1", "true", "yes", "on"})
+_COOKIE_SECURE_OFF = frozenset({"0", "false", "no", "off"})
 
 
 def refuse_plaintext_login(settings: Settings, request: Request) -> bool:
@@ -884,8 +913,16 @@ def describe_auth(settings: Settings) -> str:
     answerable from the container log alone."""
     method = str(settings.auth_method or "").strip().lower() or "smb"
     mode = str(settings.cookie_secure or "auto").strip().lower()
-    cookie = {"1": "Secure forced on", "0": "Secure forced off"}.get(
-        mode, "Secure follows the request scheme")
+    # bug-dash-auth-6 (2026-09-25): the same spellings cookie_secure() obeys.
+    # Only "1"/"0" were mapped, so DASH_COOKIE_SECURE=true logged "follows the
+    # request scheme" on a box that forces Secure, which is the one line an
+    # operator reads to rule the flag out of a login loop over plain http.
+    if mode in _COOKIE_SECURE_ON:
+        cookie = "Secure forced on"
+    elif mode in _COOKIE_SECURE_OFF:
+        cookie = "Secure forced off"
+    else:
+        cookie = "Secure follows the request scheme"
     extra = ""
     if method == "oidc":
         extra = f", issuer={settings.oidc_issuer}, admin claim={settings.oidc_admin_claim or '-'}"

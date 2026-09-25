@@ -110,7 +110,14 @@ ordinary ship; all of them change what happens when something goes wrong.
   the step, the version, the timestamp and what was made current;
   `tools\ship.cmd -Resume` continues from it and refuses a journal that
   describes a different companion version, because that is a new ship rather
-  than a resumption.
+  than a resumption. A journal that got as far as the publish (step 2b exited
+  0 or 3; a 2b that failed leaves it at `build`) skips step 0's "already
+  published" probes and re-uses the `onboard.exe` it published when that exe
+  is newer than all its inputs (bug-ops-2, 2026-09-25). Neither happens once
+  `$InstallerVersion` differs from the journal's: after an installer 409 and a
+  bump, `-Resume` probes and rebuilds like a new ship, so it stops on the
+  companion that run already published (as it always did): bump the
+  companion too and ship again.
 - **The dashboard deploy proves it came back.** `install_dashboard_app.py`
   probes `/api/v1/health` from inside the container after every restart, in
   both stack modes, and requires a 200 whose `version` is this checkout's
@@ -180,7 +187,8 @@ dashboard\.venv\Scripts\python.exe tools\publish_latest.py --kind onboard --plat
 run **on `main`**, downloads its artefact, re-verifies the sha256 against the
 manifest, refuses a dirty tree, refuses a commit that is not an ancestor of
 `origin/main`, refuses a version older than the channel already carries
-(`--allow-older` for a deliberate rollback), then hands it to `publish_feed`.
+(`--allow-older` publishes such a CI build anyway; it is **not** a rollback,
+see below), then hands it to `publish_feed`.
 It publishes four things: the companion and the **installer** (`kind=onboard`)
 for both platforms — the installer route was added 2026-08-21
 (release-pipeline-4), because a customer dashboard fed only from the vendor
@@ -188,7 +196,40 @@ channel had an **empty [ INSTALLER ] page** and no way to onboard a new
 editor.
 
 `--make-current` is not the default: without it a record is *staged* and
-customers keep being offered what they are offered now.
+customers keep being offered what they are offered now. Re-running with
+`--make-current` later makes a staged record current: when the version is
+already on the channel with the same bytes, `publish_latest` moves only the
+pointer (`publish_feed.py --set-current`), and when the newest green run has
+rebuilt that version with different bytes it says so and prints the
+`--set-current` line for the staged record instead of doing anything
+(logic-release-6, 2026-09-25).
+
+**Rolling the vendor feed back** is a pointer move, never a re-publish
+(logic-release-7, 2026-09-25). `publish_latest` only ever takes the newest
+green run, so it cannot roll anything back. The feed still carries every
+build it ever published, so:
+
+```powershell
+python tools\publish_feed.py --set-current companion/windows/0.9.77 `
+    --feed-dir feed --github-repo The-Creators-Club/ccsync-releases --github-upload
+```
+
+and if the bad build must also be withdrawn (the usual case), in one run:
+
+```powershell
+python tools\publish_feed.py --retract companion/windows/0.9.78 `
+    --set-current companion/windows/0.9.77 --reason "<why, one sentence>" `
+    --feed-dir feed --github-repo The-Creators-Club/ccsync-releases --github-upload
+```
+
+A `--retract` of the build `current` points at is **refused** unless the same
+run names the replacement with `--set-current` (or passes
+`--allow-no-current`): with no pointer, every `policy = current` site takes the
+HIGHEST version left on the channel, which is a newer STAGED build whenever
+one exists, i.e. the "rollback" would roll the fleet forward onto a build
+nobody promoted (logic-release-2). `publish_latest` prints the exact recall
+line for each record it publishes, with the previous current already filled
+in.
 
 **`ship.cmd` still publishes only to this deployment's dashboard**, so a
 studio-built companion is one feed customers can never receive. It says so at
@@ -1543,8 +1584,11 @@ python tools\publish_latest.py --dry-run        # ...say what it would do
 python tools\publish_latest.py --kind onboard --make-current   # the INSTALLER channel, both platforms
 .\tools\ship.cmd -Resume                        # continue a ship that stopped part-way
 python tools\publish_feed.py --retract companion/windows/0.6.1 `
+    --set-current companion/windows/0.6.0 `
     --reason "it deletes proxies on the second pass" `
-    --feed-dir .\feed --github-repo <owner/repo> --github-upload   # withdraw a bad build
+    --feed-dir .\feed --github-repo <owner/repo> --github-upload   # withdraw a bad build, naming what replaces it
+python tools\publish_feed.py --set-current companion/windows/0.6.0 `
+    --feed-dir .\feed --github-repo <owner/repo> --github-upload   # move `current` alone: make a staged build current, or roll back
 python tools\release_key.py new|pubkey|bake     # the offline release signing key (once, ever)
 .\tools\check_deploy_drift.ps1                  # what is actually running, anywhere
 .\tools\release.ps1                             # parity + tests + build + manifest

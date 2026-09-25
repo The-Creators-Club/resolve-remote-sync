@@ -201,6 +201,44 @@ remove_local_tree() {
     return 0
 }
 
+# bug-ops-4 (2026-09-25): the --full block's half of the same finding. Its
+# loop counted what it MEANT to delete (`rm -rf` then `removed+1` whatever
+# happened) and printed "removed your sign-in and settings ... including
+# config.toml, identity.json", and the closing verdict never heard about it.
+# config.toml holds the per-editor cce1. fleet credential and dashboard_token:
+# a root-owned one (a sudo'd bootstrap) survives, and the editor hands the Mac
+# on believing the sign-in is gone. install-onboard-3 fixed the Windows half
+# by re-listing the directory (windows_uninstall.ps1); this is that, here.
+# state/ is kept on purpose (section 5 says why), so it is never a survivor.
+# Returns 1 when anything else is still there.
+PROFILE_SURVIVED=0
+
+remove_profile_contents() {  # $1 = the ~/.ccsync directory
+    _profile="$1"
+    _intended=0
+    for _item in "$_profile"/* "$_profile"/.[!.]*; do
+        [ -e "$_item" ] || continue
+        [ "$(basename "$_item")" = state ] && continue
+        rm -rf "$_item" 2>/dev/null
+        _intended=$((_intended + 1))
+    done
+    _survivors=""
+    _left=0
+    for _item in "$_profile"/* "$_profile"/.[!.]*; do
+        [ -e "$_item" ] || continue
+        [ "$(basename "$_item")" = state ] && continue
+        _survivors="$_survivors
+    $_item"
+        _left=$((_left + 1))
+    done
+    if [ "$_left" = 0 ]; then
+        step "removed your sign-in and settings from $_profile ($_intended item(s), including config.toml, identity.json and volume.json)"
+        return 0
+    fi
+    warn "removed $((_intended - _left)) item(s) from $_profile, but could NOT remove $_left. These can hold your sign-in (config.toml, identity.json). Remove them by hand: sudo rm -rf followed by each path:$_survivors"
+    return 1
+}
+
 if [ -d "$CCSYNC_LOCAL" ]; then
     if [ "$DRY_RUN" = 1 ]; then
         dry "would delete $CCSYNC_LOCAL (rclone/syncthing/companion binaries in bin/, plus the Syncthing identity in syncthing-config/)"
@@ -270,21 +308,14 @@ if [ "$FULL" = 1 ]; then
         # which reads as "the fix didn't work" (exactly how the Blackmagic
         # Proxy Generator "New Doc" prompt kept coming back; seen live
         # 2026-07-25). It holds no identity, no credentials and no media.
-        removed=0
-        for item in "$CCSYNC_PROFILE"/* "$CCSYNC_PROFILE"/.[!.]*; do
-            [ -e "$item" ] || continue
-            case "$(basename "$item")" in
-                state) continue ;;
-            esac
-            if [ "$DRY_RUN" = 1 ]; then
+        if [ "$DRY_RUN" = 1 ]; then
+            for item in "$CCSYNC_PROFILE"/* "$CCSYNC_PROFILE"/.[!.]*; do
+                [ -e "$item" ] || continue
+                [ "$(basename "$item")" = state ] && continue
                 dry "would delete $item"
-            else
-                rm -rf "$item"
-            fi
-            removed=$((removed + 1))
-        done
-        if [ "$DRY_RUN" != 1 ]; then
-            step "removed your sign-in and settings from $CCSYNC_PROFILE ($removed item(s), including config.toml, identity.json and volume.json)"
+            done
+        else
+            remove_profile_contents "$CCSYNC_PROFILE" || { REMOVAL_INCOMPLETE=1; PROFILE_SURVIVED=1; }
         fi
         if [ -d "$CCSYNC_PROFILE/state" ]; then
             step "KEPT $CCSYNC_PROFILE/state -- the prompts you have already answered stay answered after a reinstall (no identity or credentials live there)."
@@ -292,7 +323,11 @@ if [ "$FULL" = 1 ]; then
     else
         skip "already absent: $CCSYNC_PROFILE"
     fi
-    warn "FULL uninstall: your saved sign-in is gone. A reinstall needs the admin to approve this Mac again before anything syncs. Your media was not touched."
+    if [ "$PROFILE_SURVIVED" = 1 ]; then
+        warn "FULL uninstall: your saved sign-in may still be on this Mac (see the WARNING above). Remove what is listed there before handing this Mac on."
+    else
+        warn "FULL uninstall: your saved sign-in is gone. A reinstall needs the admin to approve this Mac again before anything syncs. Your media was not touched."
+    fi
     if [ -f "$HOME/.ssh/ccsync_ed25519" ]; then
         step "NOTE: the rclone SSH key remains at $HOME/.ssh/ccsync_ed25519 (left in place -- delete it by hand if you want it gone; the admin would then re-run setup_editor_account.py)."
     fi
@@ -313,7 +348,9 @@ echo "=================================================================="
 # sentence that stops an editor looking.
 closing_verdict() {  # $1 = 1 when something could not be removed
     if [ "$1" = 1 ]; then
-        warn "CCSync uninstall NOT complete: some of $CCSYNC_LOCAL is still on this Mac (see the WARNING above). Remove it by hand, or run this script again, before reinstalling."
+        # bug-ops-4 (2026-09-25): not only $CCSYNC_LOCAL any more; a --full
+        # run's ~/.ccsync survivors set the same flag.
+        warn "CCSync uninstall NOT complete: some of what it removes is still on this Mac (see the WARNING above). Remove it by hand, or run this script again, before reinstalling."
     else
         step "CCSync uninstall complete$([ "$DRY_RUN" = 1 ] && echo ' (dry run -- nothing changed)')."
     fi

@@ -311,13 +311,27 @@ def _create_share_root_on_first_run(c):
     library root is a deployment act; the one case where an ingest may do it is
     the first ever upload on a fresh deployment -- the mountpoint's parent is
     there and the index names no tracks to be missing. That is the same case
-    config.share_root_ready() lets through, so the gate and this agree.
+    config.share_root_ready() lets through, so the gate and this agree
+    (bar one case, named below).
     """
     root = Path(config.share_root())
     if root.is_dir():
         return
     if root.parent.is_dir() and not config.library_has_tracks(c):
         root.mkdir(parents=True, exist_ok=True)
+        return
+    # bug-music-ytdl-3 review round (2026-09-25): share_root_ready now lets a
+    # missing root through when the index holds only rows whose audio has not
+    # landed (a first fleet drop still uploading), but this mkdir keeps the
+    # strict test. Say so in words rather than let the move below fail with a
+    # bare "No such file or directory". A library with LANDED rows never gets
+    # here past the gate (it 503s as not mounted), so that case stays quiet.
+    if root.parent.is_dir() and not config.library_has_tracks(
+            c, count_unlanded=False):
+        raise RuntimeError(
+            'the music library folder is not there yet on the server. A drop '
+            'that is still uploading will create it; try again once that has '
+            'finished.')
 
 
 def queue_one(upload_name, src, c):
@@ -374,9 +388,17 @@ def queue_one(upload_name, src, c):
             result['duplicate'] = True
             return result
 
-        dest = db.unique_dest(staged.name)
         _create_share_root_on_first_run(c)
-        shutil.move(str(staged), str(dest))
+        # bug-music-ytdl-2 (2026-09-25): claim_dest, not unique_dest. A name
+        # a fleet batch has promised is not on disk until its companion's
+        # upload lands, and landing here in that window meant the upload
+        # overwrote this recording.
+        dest = db.claim_dest(c, staged.name)
+        try:
+            shutil.move(str(staged), str(dest))
+        except BaseException:
+            db.release_dest(dest)
+            raise
         _make_readable_to_the_fleet(dest)
 
         rel = dest.relative_to(config.share_root()).as_posix()

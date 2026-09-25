@@ -1031,6 +1031,20 @@ def reclaim_if_reservation_lost(dest_dir: Path, dest_path: Path,
         # somebody else's file.
         log.warning("fix_clip: could not re-check the reserved name %s -- claiming a "
                     "fresh one rather than replacing into it", dest_path)
+        # bug-comp-resolve-6 (2026-09-25): the reservation we could not stat
+        # is, in the likely case, still OUR empty placeholder, and nothing
+        # else will ever remove it: the copy lands under the fresh name, so no
+        # `.ccsync-tmp` is left beside the old one and
+        # sweep_orphan_reservations (which finds reservations only through
+        # such a tmp) cannot see it. Left alone it is a 0-byte clip under the
+        # real name that lane A uploads and --ignore-existing makes permanent
+        # -- COMP-GUARD-1 by another road. remove_reserved_name deletes it
+        # only if it is still empty, so an arrival is never touched; if the
+        # blip is still on, it says so loudly and the file stays. Removed
+        # BEFORE the fresh claim, so a blip that has passed lands the copy
+        # under its own name rather than `name (2).ext`.
+        remove_reserved_name(dest_path)
+        return _claim_destination_path(dest_dir, filename)
     else:
         log.warning(
             "fix_clip: %s is no longer the empty name CCSync reserved (something "
@@ -1172,7 +1186,111 @@ def _relink_for_fix_all(media_pool_item, new_path: str) -> dict[str, Any]:
     return resolve_bridge.replace_clip(media_pool_item, new_path, source="fix-all")
 
 
-def fix_clip(
+# logic-resolve-4 (2026-09-25): the top-level folders under local_root whose
+# contents reach another machine. Lane A uploads only under Projects/<rel>,
+# and Assets/ is the shared-folder territory (Syncthing); anything else at
+# the tree root stays on this computer.
+SYNCED_TOP_LEVEL = ("projects", "assets")
+
+
+def destination_stays_local(dest_rel: str) -> bool:
+    """True when a FIX ALL destination is outside every folder that syncs.
+
+    logic-resolve-4 (2026-09-25): with no matched project, no dashboard
+    mapping and no active_project, pick_project_prefix answers "" and the
+    suggestion is `B-roll/Editor Added/<editor>` at the ROOT of the tree --
+    the very place CORE-H3 took out of the dropdown because it never reaches
+    another editor -- and the dialog still said "Fixed"."""
+    parts = [p for p in str(dest_rel or "").replace("\\", "/").split("/") if p]
+    if not parts:
+        return True
+    return parts[0].casefold() not in SYNCED_TOP_LEVEL
+
+
+# logic-resolve-1 (2026-09-25): how much of each end, and of the middle, of
+# a candidate copy is compared with the source before it is reused. Size
+# alone is not identity -- a constant-bitrate camera writes same-size clips
+# under recycled names -- and three windows from different parts of the file
+# differ between two recordings in their headers and timecode long before
+# they could agree by chance. A full hash of a 40 GB BRAW is the copy again.
+REUSE_SAMPLE_BYTES = 1024 * 1024
+
+
+def _same_bytes_sampled(a: Path, b: Path, size: int) -> bool:
+    offsets = sorted({0, max(0, size // 2 - REUSE_SAMPLE_BYTES // 2),
+                      max(0, size - REUSE_SAMPLE_BYTES)})
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            for offset in offsets:
+                fa.seek(offset)
+                fb.seek(offset)
+                if fa.read(REUSE_SAMPLE_BYTES) != fb.read(REUSE_SAMPLE_BYTES):
+                    return False
+    except OSError:
+        return False
+    return True
+
+
+def find_existing_copy(dest_dir: Path, src: Path) -> Optional[Path]:
+    """A finished copy of `src` already in `dest_dir`, or None.
+
+    logic-resolve-1 (2026-09-25): a relink that failed (ReplaceClip refused)
+    or was stopped part way keeps its copy, and RETRY FAILED -- or the next
+    popup for the same clip -- ran fix_clip from the top, so every press
+    claimed `name (2).ext`, `name (3).ext` ... and copied the whole file in
+    again, each one uploaded by lane A and fanned out by lane C. Only the
+    names fix_clip itself would have claimed (`name.ext`, `name (N).ext`)
+    are candidates, and one is reused only when its size and three sampled
+    windows match the source. Never raises."""
+    try:
+        size = src.stat().st_size
+    except OSError:
+        return None
+    if size <= 0:
+        return None
+    stem, ext = os.path.splitext(src.name)
+    pattern = re.compile(re.escape(stem) + r"(?: \((\d+)\))?" + re.escape(ext) + r"\Z",
+                         re.IGNORECASE if os.name == "nt" else 0)
+    candidates: list[tuple[int, Path]] = []
+    try:
+        with os.scandir(dest_dir) as entries:
+            for entry in entries:
+                m = pattern.match(entry.name)
+                if m is None:
+                    continue
+                try:
+                    if not entry.is_file() or entry.stat().st_size != size:
+                        continue
+                except OSError:
+                    continue
+                candidates.append((int(m.group(1) or 1), Path(entry.path)))
+    except OSError:
+        return None
+    for _n, candidate in sorted(candidates):
+        try:
+            if os.path.samefile(candidate, src):
+                continue
+        except OSError:
+            continue
+        if _same_bytes_sampled(src, candidate, size):
+            return candidate
+    return None
+
+
+def fix_clip(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """_fix_clip (below: the contract lives there) inside one journal hold.
+
+    logic-resolve-2 (2026-09-25): a copy longer than the journal's
+    two-minute quiet gap split one FIX ALL into several undo journals, and
+    UNDO LAST FIX reached only the newest. The hold keeps the burst open
+    across this clip's copy, so a FIX ALL is one journal and one undo."""
+    from . import resolve_journal
+
+    with resolve_journal.hold_sessions():
+        return _fix_clip(*args, **kwargs)
+
+
+def _fix_clip(
     file_path: str,
     dest_rel: str,
     local_root: str,
@@ -1322,27 +1440,6 @@ def fix_clip(
     except OSError as exc:
         return {"ok": False, "message": f"copy failed: {exc}", "copied_to": None}
 
-    try:
-        dest_path = _claim_destination_path(dest_dir, src.name)
-    except OSError as exc:
-        return {"ok": False, "message": f"copy failed: {exc}", "copied_to": None}
-
-    # Copy to a temp name in the same dir, then atomically replace into the
-    # final name -- a copy that dies mid-way (disk full, SMB drop) must
-    # never leave a truncated file under the final name, which lane A would
-    # otherwise upload once its --min-age guard expires and could then never
-    # replace (lane A uses --ignore-existing) (AUDIT D-5).
-    #
-    # The tmp name carries pid+uuid: two overlapping FIX ALLs for the same
-    # source name both wrote "<name>.ccsync-tmp", interleaved their writes,
-    # and both os.replace'd into the same final name -- a corrupted mixed
-    # file under a name Resolve was then relinked to (AUDIT_2 CORE-M1).
-    tmp_path = dest_path.with_name(
-        f"{dest_path.name}.{os.getpid()}-{uuid.uuid4().hex[:8]}{TMP_SUFFIX}"
-    )
-    placeholder = is_placeholder(str(src))
-    src_before = sample_source(src)
-
     def items_aborting() -> bool:
         """The cancel predicate for the relink loop. Swallows its own
         exceptions and reads them as "carry on", exactly as the copier does:
@@ -1355,85 +1452,115 @@ def fix_clip(
             log.debug("fix_clip: abort callback failed", exc_info=True)
             return False
 
-    try:
-        copy_fn(src, tmp_path)
-        dest_path = reclaim_if_reservation_lost(dest_dir, dest_path, src.name)
-        os.replace(tmp_path, dest_path)
-    except CopyAborted:
-        # THE CORE-H5 BARGAIN. Mid-file abort is only acceptable because
-        # every artifact of the attempt goes away here: the partial
-        # `<dest>.<pid>-<uuid>.ccsync-tmp` the copy was writing, and the
-        # 0-byte final name _claim_destination_path reserved up front (which
-        # os.replace never reached, so it is empty and unambiguously ours).
-        # Leave either behind and the editor is back to an orphan under
-        # local_root -- the tmp is filtered out of every lane, but the
-        # reservation is not: a 0-byte .braw under the final name would
-        # upload on lane A and could then never be replaced (--ignore-existing).
-        # The reservation goes through remove_reserved_name, which refuses to
-        # delete it if something else wrote there meanwhile (DEL-7).
-        leftovers = [p for p in (remove_partial(tmp_path),
-                                 remove_reserved_name(dest_path)) if p]
-        log.info("fix_clip: %s abandoned by the user mid-copy%s", file_path,
-                 f" (LEFTOVERS: {', '.join(leftovers)})" if leftovers else
-                 " -- the half-copied file was removed")
-        message = "Skipped by you. The half-copied file was removed. Nothing was relinked."
-        if leftovers:
-            message = (
-                "Skipped by you, but CCSync couldn't delete the half-copied file at "
-                + "; ".join(leftovers)
-                + ". Delete it by hand."
-            )
-        return {
-            "ok": False,
-            "aborted": True,
-            "message": message,
-            "copied_to": None,
-            "leftover_paths": leftovers,
-        }
-    except Exception as exc:
+    # logic-resolve-1 (2026-09-25): a copy an earlier attempt already landed
+    # (its relink failed, or was stopped part way) is relinked to, not copied
+    # in again under the next free name -- see find_existing_copy.
+    reused = find_existing_copy(dest_dir, src)
+    if reused is not None:
+        dest_path = reused
+        log.info("fix_clip: %s is already in the tree at %s -- relinking to that "
+                 "copy instead of copying it in again", file_path, dest_path)
+    else:
         try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        # dest_path is our O_EXCL-created reservation and nothing else's --
-        # remove it so a failed copy doesn't leave a 0-byte file behind.
-        try:
-            if dest_path.exists() and dest_path.stat().st_size == 0:
-                dest_path.unlink()
-        except OSError:
-            pass
-        # WARNING with the path: "12 failed" with no filenames left the user
-        # unable to see WHICH files failed, and the destination sits on an
-        # SMB share whose metadata isn't refreshed until the handle closes,
-        # so the filesystem cannot answer it either -- only this process can.
-        log.warning("fix_clip: copy failed for %s (cloud placeholder=%s): %s",
-                    file_path, placeholder, exc, exc_info=True)
-        return {
-            "ok": False,
-            "message": classify_copy_failure(exc, placeholder),
-            "copied_to": None,
-            "placeholder": placeholder,
-        }
-
-    # THE LAST GATE BEFORE RESOLVE IS TOLD ANYTHING (item 9, 2026-08-17).
-    # Everything above protects the destination; this protects the project
-    # database. A short copy or a source that moved under us must not become
-    # a relink -- see verify_copy.
-    bad = verify_copy(src, dest_path, src_before)
-    if bad is not None:
-        removed_note = ""
-        try:
-            os.remove(dest_path)
+            dest_path = _claim_destination_path(dest_dir, src.name)
         except OSError as exc:
-            removed_note = f" It is still at {dest_path} ({exc}); delete it by hand."
-        log.warning("fix_clip: refusing to relink %s -- %s", file_path, bad)
-        return {
-            "ok": False,
-            "message": (f"Copied {src.name}, but {bad}. Nothing was relinked and the "
-                        f"bad copy was removed.{removed_note}"),
-            "copied_to": None,
-            "verify_error": bad,
-        }
+            return {"ok": False, "message": f"copy failed: {exc}", "copied_to": None}
+
+        # Copy to a temp name in the same dir, then atomically replace into the
+        # final name -- a copy that dies mid-way (disk full, SMB drop) must
+        # never leave a truncated file under the final name, which lane A would
+        # otherwise upload once its --min-age guard expires and could then never
+        # replace (lane A uses --ignore-existing) (AUDIT D-5).
+        #
+        # The tmp name carries pid+uuid: two overlapping FIX ALLs for the same
+        # source name both wrote "<name>.ccsync-tmp", interleaved their writes,
+        # and both os.replace'd into the same final name -- a corrupted mixed
+        # file under a name Resolve was then relinked to (AUDIT_2 CORE-M1).
+        tmp_path = dest_path.with_name(
+            f"{dest_path.name}.{os.getpid()}-{uuid.uuid4().hex[:8]}{TMP_SUFFIX}"
+        )
+        placeholder = is_placeholder(str(src))
+        src_before = sample_source(src)
+
+        try:
+            copy_fn(src, tmp_path)
+            dest_path = reclaim_if_reservation_lost(dest_dir, dest_path, src.name)
+            os.replace(tmp_path, dest_path)
+        except CopyAborted:
+            # THE CORE-H5 BARGAIN. Mid-file abort is only acceptable because
+            # every artifact of the attempt goes away here: the partial
+            # `<dest>.<pid>-<uuid>.ccsync-tmp` the copy was writing, and the
+            # 0-byte final name _claim_destination_path reserved up front (which
+            # os.replace never reached, so it is empty and unambiguously ours).
+            # Leave either behind and the editor is back to an orphan under
+            # local_root -- the tmp is filtered out of every lane, but the
+            # reservation is not: a 0-byte .braw under the final name would
+            # upload on lane A and could then never be replaced (--ignore-existing).
+            # The reservation goes through remove_reserved_name, which refuses to
+            # delete it if something else wrote there meanwhile (DEL-7).
+            leftovers = [p for p in (remove_partial(tmp_path),
+                                     remove_reserved_name(dest_path)) if p]
+            log.info("fix_clip: %s abandoned by the user mid-copy%s", file_path,
+                     f" (LEFTOVERS: {', '.join(leftovers)})" if leftovers else
+                     " -- the half-copied file was removed")
+            message = "Skipped by you. The half-copied file was removed. Nothing was relinked."
+            if leftovers:
+                message = (
+                    "Skipped by you, but CCSync couldn't delete the half-copied file at "
+                    + "; ".join(leftovers)
+                    + ". Delete it by hand."
+                )
+            return {
+                "ok": False,
+                "aborted": True,
+                "message": message,
+                "copied_to": None,
+                "leftover_paths": leftovers,
+            }
+        except Exception as exc:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            # dest_path is our O_EXCL-created reservation and nothing else's --
+            # remove it so a failed copy doesn't leave a 0-byte file behind.
+            try:
+                if dest_path.exists() and dest_path.stat().st_size == 0:
+                    dest_path.unlink()
+            except OSError:
+                pass
+            # WARNING with the path: "12 failed" with no filenames left the user
+            # unable to see WHICH files failed, and the destination sits on an
+            # SMB share whose metadata isn't refreshed until the handle closes,
+            # so the filesystem cannot answer it either -- only this process can.
+            log.warning("fix_clip: copy failed for %s (cloud placeholder=%s): %s",
+                        file_path, placeholder, exc, exc_info=True)
+            return {
+                "ok": False,
+                "message": classify_copy_failure(exc, placeholder),
+                "copied_to": None,
+                "placeholder": placeholder,
+            }
+
+        # THE LAST GATE BEFORE RESOLVE IS TOLD ANYTHING (item 9, 2026-08-17).
+        # Everything above protects the destination; this protects the project
+        # database. A short copy or a source that moved under us must not become
+        # a relink -- see verify_copy.
+        bad = verify_copy(src, dest_path, src_before)
+        if bad is not None:
+            removed_note = ""
+            try:
+                os.remove(dest_path)
+            except OSError as exc:
+                removed_note = f" It is still at {dest_path} ({exc}); delete it by hand."
+            log.warning("fix_clip: refusing to relink %s -- %s", file_path, bad)
+            return {
+                "ok": False,
+                "message": (f"Copied {src.name}, but {bad}. Nothing was relinked and the "
+                            f"bad copy was removed.{removed_note}"),
+                "copied_to": None,
+                "verify_error": bad,
+            }
 
     failures: list[str] = []
     relinked = 0
@@ -1479,20 +1606,39 @@ def fix_clip(
         else:
             relinked += 1
 
+    verb = "already copied to" if reused is not None else "copied to"
+    # logic-resolve-4 (2026-09-25): said on the result, not only in a config
+    # warning in the log. The dialog's own promise is that FIX ALL fixes
+    # "will NOT sync", and a copy at the tree root is exactly that.
+    stays_local = destination_stays_local(dest_rel)
+    local_note = (" This folder is outside every project, so the copy stays on "
+                  "this computer and will not reach the server or other editors."
+                  if stays_local else "")
     if failures:
         return {
             "ok": False,
             "message": (
-                f"copied to {dest_path} but relink failed for "
+                f"{verb} {dest_path} but relink failed for "
                 f"{len(failures)} of {ui_copy.count(len(items), 'item')}: "
                 f"{'; '.join(failures)}"
-            ),
+            ) + local_note,
             "copied_to": str(dest_path),
+            # logic-resolve-5 owed round 3 (2026-09-25): the clips that DID
+            # repoint are journaled by replace_clip, and popup's
+            # _changed_something points at the undo only on this count. The
+            # stopped-by-you return above has always carried it; this one did
+            # not, so a relink that repointed 2 of 3 read as one that changed
+            # nothing.
+            "relinked": relinked,
+            "reused_copy": reused is not None,
+            "stays_local": stays_local,
         }
 
     return {
         "ok": True,
-        "message": (f"Fixed: copied to {dest_path} and relinked "
-                    f"{ui_copy.count(len(items), 'item')}"),
+        "message": (f"Fixed: {verb} {dest_path} and relinked "
+                    f"{ui_copy.count(len(items), 'item')}") + local_note,
         "copied_to": str(dest_path),
+        "reused_copy": reused is not None,
+        "stays_local": stays_local,
     }

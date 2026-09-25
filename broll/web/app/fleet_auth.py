@@ -172,6 +172,17 @@ def require_identity(x_ccsync_identity: str | None = Header(default=None)) -> st
             "reason": "identity_unconfigured"})
     editor = identity.read_identity_token(secret, x_ccsync_identity)
     if not editor:
+        # bug-wire-2 (2026-09-25): the dashboard's retired keys, accept-only,
+        # current key first -- the same order auth._read_token_any tries them.
+        # Nothing here mints, so the rotation still drains: an editor who
+        # signs in again moves to the current key.
+        for older in config.get_previous_session_secrets():
+            if older == secret:
+                continue
+            editor = identity.read_identity_token(older, x_ccsync_identity)
+            if editor:
+                break
+    if not editor:
         raise HTTPException(403, {
             "detail": (f"a valid {identity.HEADER} is required: sign in again "
                        "from the CC Sync tray"),

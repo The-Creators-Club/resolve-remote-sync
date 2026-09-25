@@ -135,6 +135,11 @@ const mi = {
   open: false,
   items: [],          // the drop, in order
   stagingId: null,
+  // ui-music-ytdl-web-9 review round (2026-09-25): which batch THIS page ran
+  // and which of the drop's items went into it, so the end of that batch
+  // clears exactly those and nothing an editor dropped since.
+  ranBatchUid: null,
+  ranIds: null,       // Set of local_id, or null
   staged: false,      // prepare has answered for the CURRENT item set
   caps: null,         // GET /music/ingest/capabilities, or null
   capsError: '',
@@ -345,6 +350,34 @@ function miAddItems(items) {
   // Final names are worth showing before a byte has moved; the duplicate
   // answers arrive later, when the hashes do.
   miSchedulePrecheck();
+}
+
+/* ui-music-ytdl-web-9: the tracks this page's own run put into `uid`, taken
+   off the staged list once that batch is over.
+   Review round (2026-09-25): round 1 emptied the whole list whenever
+   `mi.running` had been true, but the list poll's re-attach after a reload
+   and miTakeOver set `running` too, and a drop is accepted while a batch
+   runs (only prepare/precheck wait). So tracks dropped during ANY run were
+   thrown away unannounced when it ended. Now only the ids miRun recorded for
+   this very batch go; a re-attached or taken-over batch has no record here
+   and removes nothing. Whatever is left is re-staged: prepare held off while
+   the batch ran.
+   `stagingId` is KEPT: miTakeOver and miRetryFailed hand it to the companion
+   for the batch this page ran, and a new drop re-stages under a new id
+   anyway (miPrepare). */
+function miForgetRunDrop(uid) {
+  if (!uid || uid !== mi.ranBatchUid || !mi.ranIds) return;
+  const ran = mi.ranIds;
+  mi.ranBatchUid = null;
+  mi.ranIds = null;
+  const before = mi.items.length;
+  mi.items = mi.items.filter(i => !ran.has(i.local_id));
+  if (mi.items.length === before) return;
+  mi.staged = false;
+  mi.precheckKey = '';
+  miRenderPreview();
+  miRenderSummary();
+  if (mi.items.length) miSchedulePrepare();
 }
 
 function miClearDrop() {
@@ -657,6 +690,16 @@ async function miPollServer() {
     // The server is the truth after a reload - when it says the batch is over,
     // the live view stops claiming otherwise even if the companion is silent.
     if (MI_TERMINAL_STATES.includes(mi.batch.state)) {
+      // ui-music-ytdl-web-9 (2026-09-25): the drop this page ran is the
+      // batch's now. It stayed staged and ticked, so the moment `running`
+      // went false the Run button lit up again over tracks already in the
+      // library, and pressing it minted a second batch of the same files.
+      // Only the items this page's own miRun put into THIS batch (review
+      // round: `running` is also set by a re-attach and a take-over, and
+      // tracks dropped while a batch runs are not its). Cancelled and failed
+      // too: the batch card's retry is the way back for those, and it
+      // re-dispatches from the batch, never from this list.
+      miForgetRunDrop(mi.batch.uid || mi.batchUid);
       mi.running = false;
     }
     miNoteBatchState(mi.batch);
@@ -988,6 +1031,8 @@ async function miRun() {
 
   miSetNotice('');
   mi.running = true;
+  mi.ranBatchUid = created.uid;
+  mi.ranIds = new Set(chosen.map(it => it.local_id));
   $('#mi-live').classList.remove('hidden');
   toast(el('div', 'row good', mi.runMode === 'foreground'
     ? 'Analysing on this computer now.'
@@ -1065,6 +1110,11 @@ function miRenderLive() {
   const paused = !!(batch && batch.upload_paused) || !!(lb && lb.upload_paused);
   $('#mi-pause-upload').textContent = paused ? 'Resume uploads' : 'Pause uploads';
   const over = batch && MI_TERMINAL_STATES.includes(batch.state);
+  // ui-music-ytdl-web-9: the section's heading said "Running" over "all
+  // done" with every control greyed out. index.html's <h3> has no id, and a
+  // cached copy of it must still get the right word, so it is found by tag.
+  const title = live.querySelector('h3');
+  if (title) title.textContent = over ? 'Last batch' : 'Running';
   for (const id of ['#mi-pause', '#mi-resume', '#mi-start-now',
                     '#mi-pause-upload', '#mi-cancel']) {
     $(id).disabled = !!over;

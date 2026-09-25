@@ -11,8 +11,12 @@
         settings every editor's companion reads. Changes apply on save, no
         redeploy needed.</span></div>
 
-    <div id="settings-error" class="banner" style="display:none"></div>
-    <div id="settings-saved" class="muted"></div>
+    {# ui-dash-admin-6 (2026-09-25): the answer to [ SAVE ], [ IMPORT ] and
+       [ UNDO ] used to be written up here, above the first of twenty fields,
+       while each button sits a screen or more below: a save looked like it
+       did nothing, and a refused save after a good one showed "could not
+       save" over the old "saved". Each button now answers on the line beside
+       it (settings-save-result, settings-import-result, site-undo-result). #}
 
     {# DUI-11 (usability sweep 2026-09-03): sixteen jargon fields with ONE
        hint, in a mechanism built for hints. A first-time customer meets this
@@ -180,7 +184,8 @@
         </label>
       </fieldset>
 
-      <div style="margin-top:0.6rem"><button class="btn tap" type="submit">[ SAVE ]</button></div>
+      <div style="margin-top:0.6rem"><button class="btn tap" type="submit">[ SAVE ]</button>
+        <span id="settings-save-result" class="settings-result" role="status" aria-live="polite"></span></div>
     </form>
 
     {# AI providers (2026-08-18). Rendered by static/site_settings.js from
@@ -234,7 +239,8 @@
     </div>
     <form id="settings-import-form" class="admin-form" style="margin-top:0.6rem">
       <textarea name="text" rows="8" style="width:100%" placeholder="paste a site.toml here"></textarea>
-      <div style="margin-top:0.4rem"><button class="btn tap" type="submit">[ IMPORT ]</button></div>
+      <div style="margin-top:0.4rem"><button class="btn tap" type="submit">[ IMPORT ]</button>
+        <span id="settings-import-result" class="settings-result" role="status" aria-live="polite"></span></div>
     </form>
 
     {# UX-21 (resilience sweep 2026-08-28): what a save or an import changed
@@ -248,7 +254,12 @@
         recent one.</span></div>
     <div id="site-history-list" class="muted" style="margin-top:0.4rem">loading…</div>
     <div style="margin-top:0.4rem">
-      <button id="site-undo-btn" class="btn tap" type="button" style="display:none">[ UNDO LAST IMPORT ]</button>
+      {# ui-dash-admin-14 (2026-09-25): the button undoes the newest SAVE or
+         import (undo-last-change reverts site_history's entries[0]), so it
+         was named for only half of what it does: an owner who saved a field
+         after an import clicked UNDO LAST IMPORT and got the save undone. #}
+      <button id="site-undo-btn" class="btn tap" type="button" style="display:none">[ UNDO LAST CHANGE ]</button>
+      <span id="site-undo-result" class="settings-result" role="status" aria-live="polite"></span>
     </div>
     {% include "partials/android_settings.html" %}
   </main>

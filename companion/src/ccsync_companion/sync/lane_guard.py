@@ -731,6 +731,7 @@ class LaneBBreaker(_PersistedLatch):
     def note_pass(
         self, scope: str, deleted: int, moved_bytes: int, local_proxies: int = 0,
         relocation_probe: Optional[Callable[[], int]] = None,
+        known_relocated: int = 0,
     ) -> Optional[str]:
         """Account one lane B pass. Returns the trip reason, or None.
 
@@ -754,9 +755,23 @@ class LaneBBreaker(_PersistedLatch):
         over what it already knows. A move is the common benign shape -- an editor drags a
         folder in Explorer and every proxy under it "disappears" from the
         server at once -- and it was tripping the breaker on exactly the
-        event the breaker has nothing to say about."""
+        event the breaker has nothing to say about.
+
+        `known_relocated` is the part of that answer the lane already holds
+        for free: how many of this pass's trashed files the SERVER placed
+        somewhere else in the tree (bug-comp-rclone-2, 2026-09-25). It is
+        discounted on EVERY pass, not only past the eager threshold: the
+        discount is clamped to the current pass, so a relocation left on the
+        counter by a sub-eager pass could never be taken back, and a week of
+        small followed moves filled the cumulative rule on its own. The
+        probe, when it does run, is only credited for what it finds beyond
+        this figure, so the same file is never discounted twice."""
         deleted = max(0, int(deleted or 0))
         moved_bytes = max(0, int(moved_bytes or 0))
+        try:
+            known = max(0, int(known_relocated or 0))
+        except (TypeError, ValueError):
+            known = 0
         with self._lock:
             self._last_pass_deletes = deleted
             # res-companion-5 (2026-09-11): whatever this pass already
@@ -768,6 +783,17 @@ class LaneBBreaker(_PersistedLatch):
             self._persist_locked()
         if deleted <= 0:
             return None
+        # Clamped for the same reason the probe's answer is: a bug in the
+        # lane's figure must not talk the breaker out of a real trip.
+        known = min(known, deleted)
+        # The eager test below reads the pass's RAW count, taken before the
+        # known discount (review round, bug-comp-rclone-2): discounting first
+        # dropped a 30-file pass holding 10 located moves to 20, under the
+        # 25-file threshold, so the probe never ran and the 20 same-path
+        # re-renders only the probe can see stayed on the counter for good.
+        raw_deleted = deleted
+        if known:
+            deleted, cumulative = self._discount_relocations(known)
         limit = self.max_deletes_per_pass
         if local_proxies >= self.min_local_sample:
             limit = min(limit, max(1, int(local_proxies * self.max_delete_fraction)))
@@ -783,14 +809,17 @@ class LaneBBreaker(_PersistedLatch):
         # threshold is the ABSOLUTE per-pass cap's half, never the
         # fraction-narrowed `limit`: on a 12-proxy project that would spend a
         # recursive listing on a two-file cleanup.
-        eager = deleted >= max(2, self.max_deletes_per_pass // 2)
+        eager = raw_deleted >= max(2, self.max_deletes_per_pass // 2)
         if not (would_trip or eager):
             return None
         # About to trip on one rule or the other -- NOW it is worth asking
-        # whether what left the folder actually left the server.
-        relocated = self._count_relocations(relocation_probe, deleted)
-        if relocated:
-            deleted, cumulative = self._discount_relocations(relocated)
+        # whether what left the folder actually left the server. The probe
+        # counts the server's relocations too, and those are already off.
+        probed = self._count_relocations(relocation_probe, deleted + known)
+        extra = min(max(0, probed - known), deleted)
+        if extra:
+            deleted, cumulative = self._discount_relocations(extra)
+        relocated = known + extra
         if deleted > limit:
             return self._trip_and_return(
                 f"one proxy-download pass moved {deleted} file(s) out of "
@@ -999,6 +1028,12 @@ class DiskFloorLatch(_PersistedLatch):
         })
 
     def _sentence(self, free_bytes: int) -> str:
+        if free_bytes >= self.min_free_bytes:
+            # bug-comp-rclone-3 (2026-09-25): back above the floor but not yet
+            # at the clear threshold. "needs 20 GB" beside "has 22 GB" read as
+            # a contradiction, so say what it is actually waiting for.
+            return (f"this drive has {_gb(free_bytes)} GB free, and proxy download "
+                    f"starts again on its own at {_gb(self.clear_free_bytes)} GB")
         return (f"this drive has {_gb(free_bytes)} GB free, and proxy download needs "
                 f"{_gb(self.min_free_bytes)} GB")
 
@@ -1027,6 +1062,11 @@ class DiskFloorLatch(_PersistedLatch):
                         "lane B free-space park CLEARED: %s GB free is back above %s GB "
                         "(was: %s)", _gb(free), _gb(self.clear_free_bytes), reason)
                     return None
+                # bug-comp-rclone-3 (2026-09-25): the sentence is rebuilt from
+                # THIS measurement. It kept the figure from the moment it
+                # parked, so the tray, balloon and fleet chip went on saying
+                # "10 GB free" beside a free_bytes of 25 GB.
+                self._reason = self._sentence(free)
                 self._persist_locked()
                 return self._reason or None
             if free >= self.min_free_bytes:

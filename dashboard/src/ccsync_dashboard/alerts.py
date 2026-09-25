@@ -1120,6 +1120,20 @@ class Ctx:
             self.base_only: set[str] = db.base_only_editors(conn)
         except sqlite3.Error:
             self.base_only = set()
+        # logic-alerts-8 (2026-09-25): the (editor, machine) pairs holding at
+        # least one FULL tick, i.e. the computers proxy download writes to.
+        # None when it could not be read, which keeps the old behaviour
+        # (alert): for an editor's computer the dangerous direction is
+        # silence.
+        try:
+            self.full_tick_pairs: set[tuple[str, str]] | None = {
+                (str(pair[0]), str(pair[1]))
+                for pairs in db.fetch_machine_selections(
+                    conn, sync_modes=(db.SYNC_MODE_FULL,), for_enforce=True).values()
+                for pair in pairs}
+        except sqlite3.Error:
+            log.debug("alerts: could not read the full ticks", exc_info=True)
+            self.full_tick_pairs = None
         # What the four optional mounts decided at boot (DDIAG-7's registry).
         # A module global rather than app state, because this runs on the
         # collector thread with no app object in hand.
@@ -1399,22 +1413,45 @@ def _check_fleet_halt(ctx: Ctx) -> list[Finding]:
         f"Nothing is going up and nothing is coming down anywhere. It was set "
         f"{_age_words(halt.get('set_at'), ctx.now)} by "
         f"{halt.get('set_by') or 'an admin'}.",
-        "On the dashboard: SYNC STATUS, then [ RELEASE THE HALT ] when "
-        "whatever it was set for is over.",
+        # ui-copy-1 (2026-09-25): this used to send the owner to SYNC STATUS
+        # for a [ RELEASE THE HALT ] button no template has ever had. The
+        # control is partials/fleet_halt.html, on Settings, Users (the
+        # target the halt banner links to), under these two labels.
+        "On the dashboard: Settings, Users, then [ START SYNCING AGAIN ] when "
+        "whatever it was set for is over, or [ KEEP IT STOPPED ] if it is not.",
         str(halt.get("reason") or ""))]
+
+
+# logic-admin-1 (2026-09-25): how long an expired stop stays worth saying.
+# The stored blob keeps `expired` true until somebody sets a new stop, and the
+# expired panel offers no "that is fine" button, so without a window this warn
+# would stand for months after one forgotten weekend. A day is the stop's own
+# default length (db.FLEET_HALT_DEFAULT_HOURS).
+FLEET_HALT_EXPIRED_WINDOW_SECONDS = 24 * 3600
 
 
 def _check_fleet_halt_expired(ctx: Ctx) -> list[Finding]:
     halt = ctx.halt
-    if not (halt.get("active") and halt.get("expired")):
+    # logic-admin-1 (2026-09-25): `expired` alone. db._halt_state reports an
+    # expired stop as active=False (that is what makes the report reply
+    # release the fleet), so the old `active and expired` could never be true
+    # and this registered check never fired once.
+    if not halt.get("expired"):
+        return []
+    try:
+        since = (db.parse_iso(ctx.now)
+                 - db.parse_iso(str(halt.get("expires_at") or ""))).total_seconds()
+    except (TypeError, ValueError):
+        since = 0.0
+    if since > FLEET_HALT_EXPIRED_WINDOW_SECONDS:
         return []
     return [_f(
         "the whole fleet",
         f"The fleet-wide stop set {_age_words(halt.get('set_at'), ctx.now)} has run "
         f"past its own expiry time, so syncing has started again on its own. "
         f"If the reason it was set is still true, nobody has been told.",
-        "On the dashboard: SYNC STATUS, and either stop syncing again or "
-        "confirm it is no longer needed.",
+        "On the dashboard: Settings, Users, and either [ STOP ALL SYNCING ] "
+        "again or leave it running if the stop is no longer needed.",
         f"expires_at={halt.get('expires_at')}")]
 
 
@@ -1452,6 +1489,19 @@ def _check_disk_low(ctx: Ctx) -> list[Finding]:
                                              g.get("disk_root_total_bytes"),
                                              health.machine_disk_floor(g))
         if colour != health.RED or percent is None:
+            continue
+        # logic-alerts-8 (2026-09-25): this is a daily-repeating ERROR whose
+        # whole case is "proxy download will fill the drive" and whose fix is
+        # "untick a project". A computer wired to the server, or one with
+        # nothing ticked to download (a fine state, owner rule 2026-09-11),
+        # has neither, so alex/Razer with 15 GB free was mailed every day an
+        # impossible consequence and a fix with no target. Its drive is still
+        # on the grid's DISK chip and on `machine_disk_low`, which says it in
+        # plain words for such a computer.
+        if _is_base_machine(ctx, e) or (
+                ctx.full_tick_pairs is not None
+                and (str(e.get("editor_username") or ""), str(e.get("machine") or ""))
+                not in ctx.full_tick_pairs):
             continue
         who = ctx.name(_who(e))
         out.append(_f(
@@ -1745,7 +1795,9 @@ def _check_restarts(ctx: Ctx) -> list[Finding]:
             f"computer keeps knocking it over.",
             # CR-88 route sweep (usability sweep 2026-09-03): Copy
             # diagnostics left the tray menu on 2026-08-27.
-            f"Ask that editor to open {health.COMPANION_DIAGNOSTICS_PATH} on "
+            # ui-copy-5 (2026-09-25): "use", not "open": the route now ends
+            # at the button itself, as the companion's own copy names it.
+            f"Ask that editor to use {health.COMPANION_DIAGNOSTICS_PATH} on "
             f"that computer and send it to us.",
             f"last {g.get('restarts_last_at')}: {g.get('restarts_last_error') or ''}"))
     return out
@@ -1765,7 +1817,7 @@ def _check_crashes(ctx: Ctx) -> list[Finding]:
             f"which is why nobody notices.",
             # CR-88 route sweep (usability sweep 2026-09-03): the tray menu
             # has no Copy diagnostics since 2026-08-27.
-            f"Ask that editor to open {health.COMPANION_DIAGNOSTICS_PATH} on "
+            f"Ask that editor to use {health.COMPANION_DIAGNOSTICS_PATH} on "
             f"that computer and send it to us.",
             f"newest: {g.get('crash_newest') or '?'}"))
     return out
@@ -1791,7 +1843,7 @@ def _check_upgrade_failed(ctx: Ctx) -> list[Finding]:
                 f"itself back. It will not take that build again on its own, "
                 f"and this dashboard no longer offers it to that computer.",
                 f"Do not install {version} on that computer by hand. Ask that "
-                f"editor to open {health.COMPANION_DIAGNOSTICS_PATH} and send "
+                f"editor to use {health.COMPANION_DIAGNOSTICS_PATH} and send "
                 f"it to us, and publish a newer build.",
                 str(g.get("upgrade_last_error") or "")))
             continue
@@ -2422,6 +2474,20 @@ def _check_versions_behind(ctx: Ctx) -> list[Finding]:
     except sqlite3.Error:
         log.debug("alerts: could not read what the vendor feed offers", exc_info=True)
     out = []
+    # logic-alerts-2 (2026-09-25): counting staged and feed builds is right
+    # (SYS-2), but [ UPDATE NOW ] pushes the CURRENT build, so it is only an
+    # answer for a computer running something older than current. A computer
+    # already ON current, behind builds that are staged here (held for their
+    # trial, waiting for an admin) or offered by the feed and not published,
+    # used to read "running 0.9.70, current is 0.9.70" beside "3 releases
+    # behind" with a button that does nothing (triage_actions refuses it for
+    # the same reason). Those are said once per PLATFORM, because the act -
+    # make a newer build current, or update the dashboard - is one act for
+    # every computer in that state.
+    # Review round (2026-09-25): a platform with NO current build here is its
+    # own case. It used to share the "which is this dashboard's current build"
+    # sentence, which is false when nothing is current for that platform.
+    on_current: dict[tuple[str, bool], list[tuple[str, str, int, str]]] = {}
     for e in ctx.editors:
         version = db.version_tuple(e.get("companion_version"))
         if not version:
@@ -2430,6 +2496,13 @@ def _check_versions_behind(ctx: Ctx) -> list[Finding]:
         if len(newer) < VERSIONS_BEHIND_ALERT:
             continue
         who = ctx.name(_who(e))
+        current = db.version_tuple(e.get("current_companion_version"))
+        if not current or version >= current:
+            on_current.setdefault(
+                (str(e.get("platform") or "unknown"), bool(current)), []).append(
+                (who, str(e.get("companion_version") or ""), len(newer),
+                 str(e.get("current_companion_version") or "")))
+            continue
         out.append(_f(
             who,
             f"{who} is {len(newer)} releases behind on CC Sync (it is running "
@@ -2440,6 +2513,49 @@ def _check_versions_behind(ctx: Ctx) -> list[Finding]:
             "On the dashboard: SETTINGS, PACKAGES, then [ UPDATE NOW ] on that "
             "computer.",
             f"behind={len(newer)}"))
+    for platform, has_current in sorted(on_current):
+        rows = on_current[(platform, has_current)]
+        one_row = len(rows) == 1
+        behind = max(r[2] for r in rows)
+        names = ", ".join(r[0] for r in rows[:5])
+        if len(rows) > 5:
+            names += f" and {len(rows) - 5} more"
+        running = ", ".join(sorted({r[1] for r in rows}))
+        current_here = rows[0][3]
+        if not has_current:
+            out.append(_f(
+                f"the {platform} computers",
+                f"{names} {'is' if one_row else 'are'} {behind} releases behind "
+                f"on CC Sync ({'it runs' if one_row else 'they run'} {running}), "
+                f"and this dashboard has no current {platform} build at all. "
+                f"[ UPDATE NOW ] cannot help, because it sends the current "
+                f"build and there is none to send.",
+                f"On the dashboard: SETTINGS, PACKAGES. If a newer {platform} "
+                f"build is listed, make it current there. If none is listed, "
+                f"the vendor's build needs a newer dashboard: update the "
+                f"dashboard first, and the build is published here on the next "
+                f"check.",
+                f"behind={behind} running={running} current=none"))
+            continue
+        out.append(_f(
+            f"the {platform} computers",
+            f"{names} {'is' if one_row else 'are'} {behind} releases behind on "
+            f"CC Sync, although {'it runs' if one_row else 'they run'} "
+            + (f"{running}, which is this dashboard's current {platform} build. "
+               if {r[1] for r in rows} == {current_here} else
+               f"{running}, and this dashboard's current {platform} build is "
+               f"{current_here}. ")
+            + f"The newer builds exist but none of them is current here: they are "
+            f"staged on Settings, Packages (a build held for its trial is made "
+            f"current by hand), or offered by the vendor and not accepted by "
+            f"this dashboard. [ UPDATE NOW ] cannot help, because it sends the "
+            f"current build, which {'it already runs' if one_row else 'they already run'} "
+            f"or is ahead of.",
+            "On the dashboard: SETTINGS, PACKAGES. If a newer build is listed as "
+            "staged, make it current there. If it is not listed at all, the "
+            "vendor's build needs a newer dashboard: update the dashboard "
+            "first, and the build is published here on the next check.",
+            f"behind={behind} running={running}"))
     return out
 
 
@@ -2727,6 +2843,14 @@ def _check_jobs_starved(ctx: Ctx) -> list[Finding]:
         jobs_mod.REASON_HALTED:
             "syncing is stopped, and a computer with syncing stopped takes "
             "no jobs",
+        # logic-ytdl-jobs-1 (2026-09-25): jobs.explain now refuses a machine
+        # that has not reported for MACHINE_SILENT_SECONDS. Six hours on,
+        # every capable computer still silent is switched off or in a
+        # drawer, and a queue waiting on that will not empty by itself; the
+        # transient codes above stay out because the scheduler clears them.
+        jobs_mod.REASON_SILENT:
+            "every computer that could do it has stopped reporting to this "
+            "dashboard",
     }.get(code)
     if meaning is None:
         return []
@@ -3053,22 +3177,61 @@ def _check_platform_channel_stale(ctx: Ctx) -> list[Finding]:
             if behind <= PLATFORM_CHANNEL_STALE_BUILDS:
                 continue
             evidence = f"it is {behind} builds behind"
+        platform = str(channel.get("platform") or "")
+        detail = (f"{platform}={channel['current_version']} "
+                  f"{leader.get('platform')}={leader['current_version']} "
+                  f"behind={behind}")
+        head = (f"The current CC Sync build for {platform} "
+                f"computers is {channel['current_version']} and {evidence}. "
+                f"{leader.get('platform')} computers are on "
+                f"{leader['current_version']}. Every fix since then is missing on "
+                f"that half of the fleet")
+        # logic-alerts-3 (2026-09-25): a newer build for the LAGGING platform
+        # may already be here, staged (held for its trial, or waiting for an
+        # admin). Then nobody needs to build anything: re-running the publish
+        # is refused as "already published", and the act is one click on
+        # Settings, Packages. The studio sat exactly here with macOS current
+        # 0.9.70 and 0.9.71/0.9.72/0.9.74 staged while this told the owner to
+        # go and build it.
+        waiting = sorted(
+            (v for v in published.get(platform, []) if v > mine), reverse=True)
+        if waiting:
+            newest = ".".join(str(x) for x in waiting[0])
+            out.append(_f(
+                f"the {platform} channel",
+                f"{head}, although {newest} for {platform} is already "
+                f"published on this dashboard and is not current "
+                f"({len(waiting)} newer {platform} build(s) are waiting).",
+                f"On the dashboard: SETTINGS, PACKAGES, then make {newest} "
+                f"current for {platform} (a build held for its trial is made "
+                f"current by hand once you are happy with it). Nothing needs "
+                f"building.",
+                f"{detail} waiting={newest}"))
+            continue
+        # logic-alerts-3: the build commands are only an answer where the
+        # repo and a Mac are, on the vendor's own dashboard. A dashboard that
+        # takes its builds from the vendor's feed cannot build one at all, and
+        # the commands are macOS-only, so they are never the answer when the
+        # platform behind is not macOS.
+        if getattr(ctx.settings, "release_feed_url", ""):
+            fix = (f"This dashboard takes its builds from the vendor's feed, so a "
+                   f"newer {platform} build reaches it when the vendor publishes "
+                   f"one. Ask the vendor for it; there is nothing to build here.")
+        elif platform == "macos":
+            fix = ("On a Mac, in the repo: git pull && ./tools/release_macos.sh "
+                   "--publish --make-current, then ./tools/build_onboard_macos.sh "
+                   "--publish --make-current. PyInstaller cannot build a macOS "
+                   "bundle on Windows, so no ship from a Windows computer can do "
+                   "this.")
+        else:
+            fix = (f"Build and publish the {platform} companion from the repo "
+                   f"(docs/RELEASE.md), then make it current on SETTINGS, "
+                   f"PACKAGES.")
         out.append(_f(
-            f"the {channel.get('platform')} channel",
-            f"The current CC Sync build for {channel.get('platform')} "
-            f"computers is {channel['current_version']} and {evidence}. "
-            f"{leader.get('platform')} computers are on "
-            f"{leader['current_version']}. Every fix since then is missing on "
-            f"that half of the fleet, and nothing will offer it to them until "
-            f"somebody builds it.",
-            "On a Mac, in the repo: git pull && ./tools/release_macos.sh "
-            "--publish --make-current, then ./tools/build_onboard_macos.sh "
-            "--publish --make-current. PyInstaller cannot build a macOS "
-            "bundle on Windows, so no ship from a Windows computer can do "
-            "this.",
-            f"{channel.get('platform')}={channel['current_version']} "
-            f"{leader.get('platform')}={leader['current_version']} "
-            f"behind={behind}"))
+            f"the {platform} channel",
+            f"{head}, and nothing will offer it to them until somebody builds "
+            f"it.",
+            fix, detail))
     return out
 
 
@@ -3528,8 +3691,10 @@ def _check_red_unexplained(ctx: Ctx) -> list[Finding]:
                     f"which. It is not syncing normally.")
             + " Nothing more specific could be worked out from what that "
               "computer has reported.",
-            "Open that computer's row on the SYNC STATUS page and press [ ASK WHY ], "
-            "then send us the diagnostics it returns.",
+            # ui-copy-3 (2026-09-25): the button is [ ASK THIS COMPUTER WHY ]
+            # (partials/fleet_grid.html); "[ ASK WHY ]" named nothing.
+            "Open that computer's row on the SYNC STATUS page and press "
+            "[ ASK THIS COMPUTER WHY ], then send us the diagnostics it returns.",
             f"status={e.get('status')} reason={e.get('status_reason') or ''}"))
     return out
 
@@ -3704,6 +3869,22 @@ CHECK_FAILED = AlertKind(
     "every check ran", lambda ctx: [])
 
 
+def _known_kind(kind: str) -> AlertKind | None:
+    """The registry row for `kind`, or CHECK_FAILED for its own name.
+
+    bug-dash-diag-2 (2026-09-25): a recovered check_failed is now said (see
+    `deliver`), and a "cleared" line built from KIND_BY_NAME alone would title
+    it with the raw key `check_failed`. CHECK_FAILED stays OUT of the
+    registry itself: ALERT_KINDS is the list of checks the scan runs."""
+    if kind == CHECK_FAILED.kind:
+        return CHECK_FAILED
+    return KIND_BY_NAME.get(kind)
+
+
+# The check_failed subject when the scan context itself could not be built.
+SCAN_FAILED_SUBJECT = "the whole scan"
+
+
 def scan(conn: sqlite3.Connection, settings: Any, now: str,
          *, watchdog_restarts: int = 0) -> list[dict[str, Any]]:
     """Every condition that is true RIGHT NOW, as a flat list.
@@ -3719,7 +3900,7 @@ def scan(conn: sqlite3.Connection, settings: Any, now: str,
         log.exception("alerts: could not gather the scan context")
         return [{
             "kind": CHECK_FAILED.kind, "severity": SEV_ERROR,
-            "title": CHECK_FAILED.title, "subject": "the whole scan",
+            "title": CHECK_FAILED.title, "subject": SCAN_FAILED_SUBJECT,
             "diagnosis": ("This server could not read its own state to check "
                           "whether anything is wrong, so nothing below has "
                           "been checked."),
@@ -3837,7 +4018,8 @@ def _finding_body(finding: Mapping[str, Any]) -> str:
 
 
 def compose_recovered(kind: str, subject: str) -> tuple[str, str]:
-    title = KIND_BY_NAME[kind].title if kind in KIND_BY_NAME else kind
+    known = _known_kind(kind)
+    title = known.title if known is not None else kind
     line = f"CC Sync: cleared - {title} - {subject}" if subject else \
         f"CC Sync: cleared - {title}"
     return line, f"{line}\n\n{RECOVERED_BODY}\n"
@@ -3865,10 +4047,11 @@ def _digest_item(finding: Mapping[str, Any], mode: str, days: int = 0) -> dict[s
         "record_kind": kind + RECOVERED_SUFFIX if mode == "cleared" else kind,
         "subject": str(finding.get("subject") or ""),
         "severity": str(finding.get("severity")
-                        or (KIND_BY_NAME[kind].severity if kind in KIND_BY_NAME
+                        or (_known_kind(kind).severity if _known_kind(kind) is not None
                             else SEV_WARN)),
         "title": str(finding.get("title")
-                     or (KIND_BY_NAME[kind].title if kind in KIND_BY_NAME else kind)),
+                     or (_known_kind(kind).title if _known_kind(kind) is not None
+                         else kind)),
         "mode": mode,
         "body": _finding_body(finding) if mode != "cleared" else RECOVERED_BODY,
         "days": int(days or 0),
@@ -4578,9 +4761,28 @@ def deliver(
     # MAX_FINDINGS_PER_KIND is in the same position. It reported 40 of 45
     # subjects and said nothing whatever about the other 5, so its silence
     # about them is the cap, not a cure.
-    checked_kinds = {k.kind for k in ALERT_KINDS} - {
-        f["subject"] for f in findings if f["kind"] == CHECK_FAILED.kind
-    } - {str(f["kind"]) for f in findings if f.get("truncated")}
+    #
+    # bug-dash-diag-2 (2026-09-25): CHECK_FAILED is outside ALERT_KINDS, so a
+    # check_failed row was never offered here: no `check_failed.ok` was ever
+    # written, `_is_open` answered True for the life of the database, and the
+    # same check raising again weeks later went out as a "repeat ... 49 days"
+    # rather than a new failure. Its subjects are kind names (or "the whole
+    # scan"), so once the scan itself ran, a check_failed subject missing
+    # from `seen` really does mean that check ran this time.
+    #
+    # The same line had the opposite hole: when the scan context could not be
+    # built, the ONLY finding is check_failed/"the whole scan", whose subject
+    # is no kind name, so every registry kind counted as checked and every
+    # open alert was mailed as cleared by a scan that checked nothing.
+    whole_scan_failed = any(
+        f["kind"] == CHECK_FAILED.kind and f["subject"] == SCAN_FAILED_SUBJECT
+        for f in findings)
+    if whole_scan_failed:
+        checked_kinds: set[str] = set()
+    else:
+        checked_kinds = ({k.kind for k in ALERT_KINDS} | {CHECK_FAILED.kind}) - {
+            f["subject"] for f in findings if f["kind"] == CHECK_FAILED.kind
+        } - {str(f["kind"]) for f in findings if f.get("truncated")}
     for kind, subject in _open_subjects(conn, checked_kinds):
         if (kind, subject) in seen:
             continue

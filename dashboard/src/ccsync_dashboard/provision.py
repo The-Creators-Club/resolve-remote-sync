@@ -200,12 +200,33 @@ def shared_asset_folders_for(rels: Iterable[str]) -> list:
     validator sees. Leading separators were already stripped for the same
     reason."""
     out = []
+    seen: set[str] = set()
     for rel in rels:
         rel = str(rel).replace("\\", "/").strip("/")
         rel = "/".join(p for p in rel.split("/") if p and p != "..")
         if not rel:
             continue
-        out.append((slugify(rel), rel, _ASSET_LABELS.get(rel, rel)))
+        # bug-dash-auth-4 (2026-09-25): a rel slugify cannot make an id of,
+        # or a second rel whose id is already taken, is SKIPPED and named in
+        # the log rather than raised. This runs inside every
+        # resolved_manifest (so /api/v1/site, which every installer and
+        # companion reads) and at import time for DASH_SITE_SHARED_ASSETS,
+        # and one stored bad row used to take all of that down. site_store's
+        # validator refuses both shapes on the way in; this is for a row
+        # written before it did, or the environment value no validator sees.
+        try:
+            fid = slugify(rel)
+        except ValueError:
+            log.warning("shared asset folder %r has no letter or digit to make a folder id "
+                        "from; it is left out of the manifest until it is renamed", rel)
+            continue
+        if fid in seen:
+            log.warning("shared asset folder %r has the same folder id (%r) as one listed "
+                        "before it; it is left out of the manifest until it is renamed",
+                        rel, fid)
+            continue
+        seen.add(fid)
+        out.append((fid, rel, _ASSET_LABELS.get(rel, rel)))
     return out
 
 

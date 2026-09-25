@@ -1853,6 +1853,7 @@ so the two kinds of `false` can be told apart:
 | `halted` | fleet halt, or every machine's sync halted | no |
 | `kind_not_allowed` | every machine's config excludes this kind (or has jobs off) | no |
 | `kind_unknown` | this dashboard does not know the kind | no |
+| `machines_not_reporting` | every machine that could run it has not reported for 15 min (logic-ytdl-jobs-1, 2026-09-25: a switched-off laptop used to be ranked on its last report, so it could answer "schedulable") | no |
 | `held` | a machine is running it right now | yes |
 | `pinned` | the fleet gave up; this dashboard's own worker has it | yes |
 | `finished` | done, failed or abandoned | no |

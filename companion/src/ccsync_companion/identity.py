@@ -325,6 +325,12 @@ def verify_credentials(
         # ignore both fields.
         "companion_version": config_mod.VERSION,
         "platform": upgrade_mod.platform_key(),
+        # bug-comp-core-4 (2026-09-25): REL-16 made `arch` the channel's
+        # discriminator and the report has carried it since; sign-in did not,
+        # and the dashboard reads "no arch" as "offer everything", so an Intel
+        # Mac signing in was offered the arm64 build. A dashboard that has
+        # not declared the field on VerifyIn ignores it (pydantic's default).
+        "arch": upgrade_mod.arch_key(),
     }
     try:
         resp = http_post(url, payload, headers, timeout)
@@ -357,6 +363,11 @@ def verify_credentials(
         # Conditional upgrade advertisement (absent = up to date / older
         # dashboard) -- handed to UpgradeManager by app.sign_in().
         "upgrade": resp.get("upgrade"),
+        # bug-comp-core-4 (2026-09-25): "there IS a build, it is withheld from
+        # you" (comp-app-3). Without it the sign-in reply reads as "nothing to
+        # offer" and clears a standing refusal the next report cannot restore.
+        # Absent from a dashboard that does not send it: None, as before.
+        "upgrade_none_reason": resp.get("upgrade_none_reason"),
     }
 
 
@@ -383,6 +394,11 @@ class IdentityManager:
         # UpgradeManager. Deliberately NOT persisted: the reporter refreshes
         # this every report interval anyway.
         self.last_upgrade_info: Optional[dict[str, Any]] = None
+        # bug-comp-core-4 (2026-09-25): the same reply in the shape
+        # UpgradeManager.note_report_response reads, so the caller can hand
+        # it `upgrade_none_reason` too (a bare {"upgrade": X} built from
+        # last_upgrade_info cannot carry it). None until a sign-in succeeds.
+        self.last_upgrade_reply: Optional[dict[str, Any]] = None
         # A report token from a previous run's sign-in beats config.toml from
         # the moment this object exists -- IdentityManager is built before the
         # reporter and the selection client (app.py), and both read
@@ -497,7 +513,6 @@ class IdentityManager:
         result = verify_credentials(dashboard_url, username, password, http_post=self._http_post)
         if not result.get("ok"):
             return False, result.get("error") or "sign-in failed"
-        self.last_upgrade_info = result.get("upgrade")
 
         verified_username = str(result.get("username") or username).strip()
         token = str(result.get("token") or "")
@@ -511,6 +526,40 @@ class IdentityManager:
         # response alone would silently demote a machine an admin had already
         # migrated to a per-editor credential (2026-08-17).
         editor_report_token = self.editor_report_token
+        candidate = {
+            "username": verified_username,
+            "token": token,
+            "role": role,
+            "report_token": report_token,
+            "editor_report_token": editor_report_token,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if not is_valid(candidate):
+            # The dashboard's response didn't yield a usable (parseable,
+            # non-expired) token -- treat this as a failed sign-in rather
+            # than silently adopting a broken identity.
+            #
+            # bug-comp-core-7 (2026-09-25): and change NOTHING. This used to
+            # run after save_identity() and after the in-memory swap, so a
+            # signed-in editor re-entering credentials against a dashboard
+            # whose token this build cannot parse (a token-shape skew, or a
+            # skewed clock) was told the reply "couldn't be used" while
+            # identity.json already held the broken token and memory held
+            # nothing: signed out now, and again on the next start, with
+            # `require_login` then stopping every report. The upgrade offer
+            # rides the same unusable reply, so it is not adopted either.
+            # ui-copy-4 (2026-09-25): "computer", the word every other editor
+            # facing string uses; this sentence is shown in the sign-in window.
+            return False, (
+                "The server's sign-in reply couldn't be used. If this keeps "
+                "happening, check this computer's clock is correct, then "
+                f"{ui_copy.DIAGNOSTICS}."
+            )
+        self.last_upgrade_info = result.get("upgrade")
+        self.last_upgrade_reply = {
+            "upgrade": result.get("upgrade"),
+            "upgrade_none_reason": result.get("upgrade_none_reason"),
+        }
         try:
             save_identity(self.path, verified_username, token, role=role,
                           report_token=report_token,
@@ -519,26 +568,8 @@ class IdentityManager:
             log.warning("sign_in: failed to persist identity to %s: %s", self.path, exc)
 
         with self._lock:
-            self._identity = {
-                "username": verified_username,
-                "token": token,
-                "role": role,
-                "report_token": report_token,
-                "editor_report_token": editor_report_token,
-                "verified_at": datetime.now(timezone.utc).isoformat(),
-            }
+            self._identity = candidate
         self._adopt_report_token()
-        if not self.valid():
-            # The dashboard's response didn't yield a usable (parseable,
-            # non-expired) token -- treat this as a failed sign-in rather
-            # than silently adopting a broken identity.
-            with self._lock:
-                self._identity = None
-            return False, (
-                "The server's sign-in reply couldn't be used. If this keeps "
-                "happening, check this machine's clock is correct, then "
-                f"{ui_copy.DIAGNOSTICS}."
-            )
         return True, None
 
     def sign_out(self) -> None:

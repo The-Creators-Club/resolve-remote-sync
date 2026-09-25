@@ -64,8 +64,12 @@ def test_lane_chip_status():
     assert health.lane_chip_status({"state": "idle", "received_at": RECENT}, NOW) == health.GREEN
     assert health.lane_chip_status({"state": "syncing", "received_at": RECENT}, NOW) == health.AMBER
     assert health.lane_chip_status({"state": "error", "received_at": RECENT}, NOW) == health.RED
-    # companion silent for 15+ min -> red regardless of last state
-    assert health.lane_chip_status({"state": "idle", "received_at": OLD}, NOW) == health.RED
+    # companion silent for 15+ min -> amber regardless of last state, red from
+    # 6 h (logic-sync-truth-1, 2026-09-25: report_freshness's two steps; a
+    # laptop asleep for half an hour is not a broken lane)
+    assert health.lane_chip_status({"state": "idle", "received_at": OLD}, NOW) == health.AMBER
+    assert health.lane_chip_status(
+        {"state": "idle", "received_at": "2026-07-24T05:00:00+00:00"}, NOW) == health.RED
     fresh_enough = "2026-07-24T11:50:00+00:00"  # 10 min ago, under the 15-min cutoff
     assert health.lane_chip_status({"state": "idle", "received_at": fresh_enough}, NOW) == health.GREEN
 
@@ -128,7 +132,10 @@ def test_an_unreadable_token_stamp_is_no_verdict_and_never_raises():
 def test_silence_still_outranks_a_stall_and_says_which_it_is():
     colour, reason = health.lane_chip(
         lane(received_at=OLD, progress_token_since=OLD), NOW)
-    assert colour == health.RED
+    # logic-sync-truth-1 (2026-09-25): 30 minutes of silence is AMBER now
+    # (red from 6 h); it still outranks the stall, whose token cannot move
+    # while nothing is reporting.
+    assert colour == health.AMBER
     assert "silent" in reason
 
 

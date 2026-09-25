@@ -819,7 +819,12 @@ def decode(ffmpeg_path: str, path: Any, sample_rate: int = 48000,
     except (OSError, subprocess.SubprocessError) as exc:
         raise SidecarError(f"this file could not be decoded ({exc})") from exc
     samples = np.frombuffer(out, dtype=np.float32)
-    return np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0).copy()
+    # bug-comp-media-7 (2026-09-25): nan_to_num's default copy=True already
+    # returns a new, writable array; the `.copy()` that followed made a THIRD
+    # full-length buffer beside the pipe's bytes and that one - about 690 MB
+    # per hour of 48 kHz mono, ~2 GB peak for a one-hour mix, inside the tray
+    # process that also runs sync.
+    return np.nan_to_num(samples, copy=True, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def peaks(samples, n: int = PEAK_BUCKETS) -> bytes:
@@ -915,6 +920,28 @@ def embed_windows(chunks, key: str = ""):
     return np.asarray(out, dtype=np.float32)
 
 
+def _duration_of(samples, sample_rate: int, ffmpeg_path: str, path: Any) -> float:
+    """Seconds of audio in the file: the decoded count, unless the decode was
+    CUT at MAX_DECODE_SECONDS.
+
+    bug-comp-media-7 (2026-09-25): `decode` passes `-t MAX_DECODE_SECONDS`,
+    so a 2 h 30 min DJ set decoded to exactly two hours and was stored as a
+    2:00:00 track - a number known to be wrong, fed to the re-encode duplicate
+    defence that matches on duration. ffprobe's figure is distrusted for a
+    reason (embed_file's docstring: raw-ADTS .aac is estimated), but at the
+    cap it is the only figure that can be right, so it is taken when it is
+    LONGER than what was decoded; otherwise the cap stands.
+    """
+    decoded = float(samples.size) / float(sample_rate)
+    if not MAX_DECODE_SECONDS or decoded < float(MAX_DECODE_SECONDS) - 1.0:
+        return decoded
+    try:
+        probed = float((probe(ffmpeg_path, path) or {}).get("duration") or 0)
+    except Exception:  # noqa: BLE001 - probe never raises; belt and braces
+        probed = 0.0
+    return probed if probed > decoded else decoded
+
+
 def embed_file(path: Any, ffmpeg_path: str = "ffmpeg", key: str = "",
                stop_event: Optional[threading.Event] = None,
                child_sink: Optional[Any] = None) -> dict[str, Any]:
@@ -923,7 +950,8 @@ def embed_file(path: Any, ffmpeg_path: str = "ffmpeg", key: str = "",
     {embedding: [float]*dim, dim, duration, n_windows, peaks: bytes,
      windows: [{idx, t0, t1, vector}], samples}
 
-    `duration` comes from the DECODED SAMPLE COUNT, never from ffprobe, and
+    `duration` comes from the DECODED SAMPLE COUNT, never from ffprobe (one
+    exception: a decode cut at the cap, `_duration_of`), and
     that is not a detail: ffprobe derives a raw-ADTS .aac duration from
     bitrate x filesize and it is wrong in both directions (measured 0.89x and
     2.14x on real library files). The re-encode duplicate defence matches on
@@ -966,7 +994,7 @@ def embed_file(path: Any, ffmpeg_path: str = "ffmpeg", key: str = "",
     return {
         "embedding": np.asarray(track, dtype=np.float32),
         "dim": int(track.size),
-        "duration": float(samples.size) / float(sample_rate),
+        "duration": _duration_of(samples, sample_rate, ffmpeg_path, path),
         "n_windows": len(chunks),
         "peaks": peaks(samples),
         "windows": [{"idx": i, "t0": float(c[1]), "t1": float(c[2]),

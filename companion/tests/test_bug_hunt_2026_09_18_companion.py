@@ -109,7 +109,7 @@ def test_the_move_command_after_lane_b_followed_it_still_relinks_resolve(tmp_pat
     old_local, new_local = paths
     assert old_local.endswith(os.path.join("Season 1", "Proxy", "gold.mp4"))
     assert Path(new_local).is_file()
-    assert "lane B" in detail
+    assert "proxy download" in detail  # ui-copy-4 (2026-09-25): was "lane B"
 
 
 def test_a_machine_that_only_downloaded_the_file_still_says_nothing_moved(tmp_path):
@@ -127,7 +127,7 @@ def test_a_machine_that_only_downloaded_the_file_still_says_nothing_moved(tmp_pa
     ok, detail, paths = file_moves_mod.apply_move(
         _move(), str(local_root), ledger=ledger)
     assert (ok, paths) == (True, None)
-    assert detail == "nothing at the old path on this machine"
+    assert detail == "nothing at the old path on this computer"  # ui-copy-4 (2026-09-25)
 
 
 def test_the_relocation_note_ages_out(tmp_path):

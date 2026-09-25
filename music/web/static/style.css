@@ -22,13 +22,18 @@
   --green: #2bff88;
   --amber: #ffb02e;
   --text: #e8e8ea;
-  --muted: #6f6f7a;
+  /* ui-dash-static-5 parity (2026-09-25): #6f6f7a was 3.63:1 on --field,
+     below AA for the explanatory text it colours; the dashboard's token. */
+  --muted: #8a8a96;
   --border: #2a2a31;
 
   --mono: Consolas, Menlo, "DejaVu Sans Mono", monospace;
 
   /* Sticky header height - the filter rail parks directly underneath it.
-     Four rows: topbar, rule, controls, example prompts. */
+     Four rows: topbar, rule, controls, example prompts. A FALLBACK only
+     (ui-music-ytdl-web-8, 2026-09-25): app.js's trackHeaderHeight() writes
+     the header's measured height over it, because the rows wrap and the
+     injected dashboard topbar is taller than this guess. */
   --header-h: 134px;
 }
 
@@ -329,7 +334,10 @@ a.brand:hover { color: var(--red-hot); }
   letter-spacing: 0.08em;
 }
 .drawer-head .dim { color: var(--red-dim); }
-.drawer-close { color: var(--red-dim); font-size: 11px; }
+/* ui-dash-static owed round 2 (2026-09-25): --red-dim on the drawer's --panel
+   is 1.78:1, so the only way out of the drawer besides Esc was nearly
+   invisible; --red, as broll and the dashboard now use. */
+.drawer-close { color: var(--red); font-size: 11px; }
 .drawer-close:hover { color: var(--red-hot); }
 .drawer-nav { display: flex; flex-direction: column; padding: 0.6rem 0; }
 .drawer-item {
@@ -700,23 +708,40 @@ a.brand:hover { color: var(--red-hot); }
 .empty { color: var(--muted); padding: 30px; text-align: center; }
 
 /* ---------- inline waveform player ---------- */
-/* The pane lives directly after its track card and animates open. Height is
-   animated on a wrapper with overflow:hidden -- `height:auto` is not
-   animatable, and the content height here is fixed anyway (wave + transport
-   + one status line). */
+/* The pane lives directly after its track card and animates open.
+   ui-music-ytdl-web-4 (2026-09-25): it animates a grid ROW from 0fr to 1fr,
+   not a fixed height. It was `height: 150px` on the belief that the content
+   was fixed (wave + transport + one status line), and it is not: the
+   no-waveform caption of every fleet-ingested track, the Resolve status line
+   (up to ~200 characters) and the action buttons wrapping on a phone took it
+   to 161 px on a desktop and 237 px on a phone, and the overflow was clipped
+   with no scroll - the one line saying why Resolve did not answer, and on a
+   phone the reveal/similar buttons. A 1fr row is the content's own height,
+   and it still animates, which `height: auto` does not. */
 .pane {
+  display: grid;
+  grid-template-rows: 0fr;
   overflow: hidden;
-  height: 0;
   opacity: 0;
-  transition: height .26s cubic-bezier(.22,.7,.3,1), opacity .2s ease;
+  transition: grid-template-rows .26s cubic-bezier(.22,.7,.3,1), opacity .2s ease;
   margin-top: -1px;
 }
-.pane.open { height: 150px; opacity: 1; }
+.pane.open { grid-template-rows: 1fr; opacity: 1; }
 .paneinner {
+  min-height: 0;
+  overflow: hidden;
   background: var(--field);
   border: 1px solid var(--red);
   border-top: 0;
   padding: 10px 12px;
+  transition: padding .26s cubic-bezier(.22,.7,.3,1);
+}
+/* A 0fr row still leaves a grid item its own padding and border, so a closed
+   pane was a 21 px red-edged strip under every track it had been opened on. */
+.pane:not(.open) .paneinner {
+  padding-top: 0;
+  padding-bottom: 0;
+  border-bottom-width: 0;
 }
 .wavewrap { position: relative; height: 64px; cursor: pointer; }
 canvas.wave { display: block; width: 100%; height: 64px; }
@@ -815,6 +840,12 @@ canvas.wave { display: block; width: 100%; height: 64px; }
 .toast .good { color: var(--green); }
 
 @media (max-width: 900px) {
+  /* ui-music-ytdl-web-8 (2026-09-25): the header scrolls away on a narrow
+     screen. Its rows wrap to 263 px here (search, buttons, the Resolve chip,
+     the stats, eight example prompts), and pinned it held a third of a phone's
+     height while the track list scrolled in what was left. The rail below is
+     static at this width already, so nothing parks under it. */
+  #app-header { position: static; }
   #browse-layout { flex-direction: column; }
   .filter-rail {
     flex: 1 1 auto;

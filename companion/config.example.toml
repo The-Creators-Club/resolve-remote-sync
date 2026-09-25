@@ -592,6 +592,12 @@ lut_sync_enabled = true
 # where the tray finds LUTs that are on this machine only and offers to share
 # them. Blank = the standard location for this platform.
 resolve_lut_dir = ""
+# Extra names in that folder that are Resolve's OWN factory LUTs, comma-
+# separated, so the tray never offers to share them. The built-in list covers
+# the folders and files Resolve ships (ACES, Arri, Blackmagic Design, Sony,
+# ...); add a name here only if a newer Resolve ships one the tray keeps
+# offering. Blank = the built-in list only.
+resolve_factory_luts_extra = ""
 # The exact string written into the LUT Locations list. Blank = the canonical
 # P:\Assets\Luts on Windows -- identical on every editor's machine, which is
 # what keeps an applied LUT resolvable everywhere -- and the real local path

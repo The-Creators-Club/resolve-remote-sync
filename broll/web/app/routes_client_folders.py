@@ -78,14 +78,12 @@ def list_folders(
         # The clip's NAME as well as its id: an index rebuild renumbers
         # videos.id, and an id-only test then leaves the tick off a clip the
         # folder does hold, so the next "+" files it a second time (broll-4,
-        # 2026-08-21). add_items matches the same two ways.
-        ident = index.execute(
-            "SELECT share, rel_path FROM videos WHERE id = ?", (video_id,)).fetchone()
-        share, rel_path = (ident["share"], ident["rel_path"]) if ident else ("", "")
-        holding = {r["folder_id"] for r in conn.execute(
-            "SELECT folder_id FROM client_folder_items "
-            "WHERE video_id = ? OR (share = ? AND rel_path = ?)",
-            (video_id, share, rel_path))}
+        # 2026-08-21). And by what each item RESOLVES to, not "stored id OR
+        # name": `video_id` here is a CURRENT id, and after a rebuild it can be
+        # some other clip's stale stored id, which ticked a folder that does
+        # not hold this clip (bug-broll-1, 2026-09-25). add_items and the
+        # remove / note routes use the same rule.
+        holding = {r["folder_id"] for r in cf.items_holding(conn, index, video_id)}
         for f in folders:
             f["contains"] = f["id"] in holding
     return {
@@ -237,6 +235,7 @@ def add_items(
 @router.delete("/{folder_id}/items/{video_id}", status_code=204)
 def remove_item(
     folder_id: int, video_id: int,
+    item_id: int | None = Query(default=None),
     conn: sqlite3.Connection = Depends(cf.get_shares_db),
     index: sqlite3.Connection = Depends(get_db),
     _user: str = Depends(require_user),
@@ -245,8 +244,12 @@ def remove_item(
     # against the identity the item was stored under (MEDIA-23, 2026-08-28):
     # after a rebuild renumbers videos.id they are different numbers for the
     # same clip, and this used to 404 on a clip the folder does hold.
+    # `item_id` (bug-broll-1, 2026-09-25) is the panel's own ledger row and is
+    # exact; without it `video_id` is read as a CURRENT index id, which is
+    # what the card popover sends. An optional query key, so a page loaded
+    # before this change still reaches the route.
     _folder_or_404(conn, folder_id)
-    if not cf.remove_item(conn, folder_id, video_id, index):
+    if not cf.remove_item(conn, folder_id, video_id, index, item_id=item_id):
         raise HTTPException(404, "that clip is not in this folder")
 
 
@@ -254,13 +257,14 @@ def remove_item(
 def set_note(
     folder_id: int, video_id: int,
     body: ClientFolderNoteIn,
+    item_id: int | None = Query(default=None),
     conn: sqlite3.Connection = Depends(cf.get_shares_db),
     index: sqlite3.Connection = Depends(get_db),
     _user: str = Depends(require_user),
 ) -> dict:
     _folder_or_404(conn, folder_id)
     try:
-        ok = cf.set_note(conn, folder_id, video_id, body.note, index)
+        ok = cf.set_note(conn, folder_id, video_id, body.note, index, item_id=item_id)
     except cf.ClientFolderError as e:
         raise _bad_request(e) from e
     if not ok:

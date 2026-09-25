@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -76,13 +77,79 @@ def notify_title() -> str:
     its site manifest (UX-4, sweep 2026-09-04)."""
     return site_mod.notify_title("sync unfinished")
 
-# Lane name -> (singular, plural) noun for the sentence. Anything not listed
-# (a lane added later) falls back to "files".
+# Lane key -> (singular, plural) noun for the sentence. Anything not listed
+# (a lane added later) falls back to "files". Lane C is TWO-WAY, so its key
+# carries the direction LaneStatus.direction names (see _lane_key): a
+# download and an upload are different nouns, and a lane C episode whose
+# direction is unknown or both keeps the plain "other files" it always had.
+LANE_C = "lane_c_syncthing"
+LANE_C_UP = LANE_C + ":up"
+LANE_C_DOWN = LANE_C + ":down"
 _LANE_NOUNS = {
     "lane_a_video_up": ("upload", "uploads"),
     "lane_b_proxy_down": ("proxy download", "proxy downloads"),
-    "lane_c_syncthing": ("other file", "other files"),
+    LANE_C_UP: ("other file upload", "other file uploads"),
+    LANE_C_DOWN: ("other file download", "other file downloads"),
+    LANE_C: ("other file", "other files"),
 }
+
+# logic-sync-truth-6 (2026-09-25): which owed work earns the RECURRING
+# reminder. An owed UPLOAD is a file whose only copy may be on the drive in
+# the editor's bag: lane A's footage (rclone has no resume for it) and, the
+# review round found, lane C's upload direction too - lane C carries every
+# non-video file up (SPEC.md: its stignore drops only video and Proxy), so a
+# recorder WAV or a project file is as much at risk as the footage. An owed
+# DOWNLOAD already exists on the server and simply carries on when the drive
+# is back, which is the dashboard's own safe-to-close rule; a half-hourly
+# balloon about one is the cry-wolf this module's docstring warns about.
+# So an episode recurs UNLESS everything it owes is a known download. A lane
+# this module cannot place, and lane C with no direction (no peer, or both
+# ways at once), recur: the safe direction for a reminder about footage.
+UPLOAD_LANE = "lane_a_video_up"
+DOWNLOAD_LANES = frozenset({"lane_b_proxy_down", LANE_C_DOWN})
+
+# The download nouns, longest first so "other file downloads" is never read
+# as "other file" + a stray word. Used only to recover the decision for an
+# episode whose caller passed a bare summary (app.py passes
+# `work.summary()`) or whose record predates the `lanes` key (a 0.9.77
+# record read after an upgrade). Pinned to _LANE_NOUNS, this module's own
+# producer of the sentence.
+_DOWNLOAD_NOUNS = sorted(
+    (n for lane in DOWNLOAD_LANES for n in _LANE_NOUNS[lane]), key=len, reverse=True)
+_DOWNLOAD_ITEM = re.compile(
+    r"\d+ (?:%s)" % "|".join(map(re.escape, _DOWNLOAD_NOUNS)))
+_BYTES_CLAUSE = re.compile(r"\s*\([^()]*\bleft\)\s*$")
+
+
+def _lane_key(name: str, direction: str) -> str:
+    """The lane's key in _LANE_NOUNS: lane C with its direction attached."""
+    if name == LANE_C and direction in ("up", "down"):
+        return f"{name}:{direction}"
+    return name
+
+
+def owes_an_upload(lanes: Optional[Iterable], summary: str = "") -> bool:
+    """Whether an unfinished-work episode earns the recurring reminder.
+
+    `lanes` (Unfinished.lanes) when known decides: every lane a known
+    download means no cadence; anything else - an upload, lane C with no
+    known direction, a lane added later - recurs. When `lanes` is None the
+    summary is read back the same way: it recurs unless every item in it is
+    a known download noun. The "(2.3 GB left)" clause is not an item."""
+    if lanes is not None:
+        try:
+            names = [str(x) for x in lanes]
+        except TypeError:
+            names = None
+        if names:
+            return not all(name in DOWNLOAD_LANES for name in names)
+    text = _BYTES_CLAUSE.sub("", str(summary or "").strip())
+    if not text:
+        return True
+    head, _sep, last = text.rpartition(" and ")
+    items = [part.strip() for part in head.split(", ")] if head else []
+    items.append(last.strip())
+    return not all(_DOWNLOAD_ITEM.fullmatch(item) for item in items if item)
 
 
 @dataclass
@@ -150,9 +217,12 @@ def unfinished_work(busy: Iterable) -> Optional[Unfinished]:
                 if state != "syncing":
                     continue
                 count = 1
-            singular, plural = _LANE_NOUNS.get(name, ("file", "files"))
+            # Lane C is two-way: its direction picks the noun and whether
+            # the episode recurs (review round of logic-sync-truth-6).
+            key = _lane_key(name, str(getattr(status, "direction", "") or ""))
+            singular, plural = _LANE_NOUNS.get(key, ("file", "files"))
             result.items.append(f"{count} {singular if count == 1 else plural}")
-            result.lanes.append(name)
+            result.lanes.append(key)
             total = getattr(status, "bytes_total", None)
             done = getattr(status, "bytes_done", None)
             if total:
@@ -258,6 +328,11 @@ class DriveReminder:
         # ballooning. A counter cannot collide with itself.
         self._episode_id = 0
         self._muted_episode: Optional[int] = None
+        # logic-sync-truth-6 (2026-09-25): which lanes the open unfinished
+        # episode owes (None: not known, see owes_an_upload) and whether it
+        # earns the recurring reminder. A state episode always recurs.
+        self._lanes: Optional[list] = None
+        self._recurs = True
         self.reminders_sent = 0
 
     # -- what the tray asks --------------------------------------------------
@@ -275,20 +350,31 @@ class DriveReminder:
 
     # -- episode control -----------------------------------------------------
 
-    def begin(self, summary: str, announce: bool = True) -> None:
+    def begin(self, summary: str, announce: bool = True,
+              lanes: Optional[Iterable] = None) -> None:
         """The drive just went with `summary` still to go. Warns now (unless
         `announce` is False: a restart carrying on a remembered episode
         goes straight to the reminder cadence, since the first warning was
         already shown before the restart), records it, starts the timer.
         Idempotent within an episode: a second begin() with the drive still
-        out changes nothing."""
+        out changes nothing.
+
+        `lanes` is Unfinished.lanes. The first warning always goes; the
+        recurring reminder only while an upload is owed (logic-sync-truth-6,
+        owes_an_upload). Omitted, the summary is read back instead."""
         try:
             summary = str(summary or "").strip()
             if not summary:
                 return
+            try:
+                lane_list = None if lanes is None else [str(x) for x in lanes]
+            except TypeError:
+                lane_list = None
             with self._lock:
                 if self._sentence is not None:
                     return
+                self._lanes = lane_list
+                self._recurs = owes_an_upload(lane_list, summary)
                 self._summary = summary
                 self._sentence = reminder(self._drive_phrase(), summary)
                 self._kind = "unfinished"
@@ -347,8 +433,14 @@ class DriveReminder:
             # restart), but one reminder right now: the editor has just
             # started the machine, and "still disconnected, plug it back in"
             # is the sentence they need before anything else -- then the
-            # usual cadence.
-            self.begin(summary, announce=False)
+            # usual cadence. That one startup reminder goes for downloads
+            # too: it replaces the "Sync paused" balloon this start would
+            # otherwise have given, and only the CADENCE is upload-only
+            # (logic-sync-truth-6). A record from before `lanes` was kept
+            # (0.9.77) has none, and begin() reads its summary instead.
+            raw_lanes = record.get("lanes")
+            self.begin(summary, announce=False,
+                       lanes=raw_lanes if isinstance(raw_lanes, list) else None)
             if self.active:
                 self.remind_now()
             return self.active
@@ -375,6 +467,8 @@ class DriveReminder:
                     return
                 self._sentence = text
                 self._kind = str(state or "state")
+                self._lanes = None
+                self._recurs = True
                 self._since = self._clock()
                 self._episode_id += 1  # comp-sync-16
             log.info("drive reminder: %s and nothing was owed -- reminding every "
@@ -402,6 +496,8 @@ class DriveReminder:
                 self._sentence = None
                 self._kind = ""
                 self._since = None
+                self._lanes = None
+                self._recurs = True
                 # comp-sync-16: the mute belongs to the episode that is
                 # ending. Leaving it set was the other half of the collision.
                 self._muted_episode = None
@@ -441,6 +537,11 @@ class DriveReminder:
         log.warning("%s", message)
 
     def _start_thread(self) -> None:
+        if not self._recurs:
+            log.info("drive reminder: nothing owed is an upload, so the first "
+                     "warning stands alone; what is owed carries on when the "
+                     "drive is back")
+            return
         if self._interval <= 0:
             log.info("drive reminder: drive_reminder_minutes is 0 -- the first warning "
                      "stands alone, no reminders")
@@ -487,6 +588,9 @@ class DriveReminder:
                 # the process, which is the case the record exists for.
                 "sentence": self._sentence,
                 "kind": self._kind,
+                # logic-sync-truth-6: so a restart keeps the upload-only
+                # cadence decision instead of re-deriving it from the words.
+                "lanes": self._lanes,
                 "since": self._since,
                 "since_iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(self._since or 0)),
             }
@@ -552,7 +656,9 @@ class DriveReminder:
             # window keeps offering both buttons rather than saying they are
             # off.
             self._muted_episode = episode if wait_seconds <= 0 else None
-            if wait_seconds <= 0:
+            if wait_seconds <= 0 or not self._recurs:
+                # logic-sync-truth-6: an episode with no upload owed has no
+                # cadence to come back to, so a snooze would start one.
                 log.info("drive reminder: reminders muted for this episode by the "
                          "editor; the warning line stays and the drive coming back "
                          "still clears everything")
@@ -588,5 +694,9 @@ class DriveReminder:
         the episode's own start time rather than a bare flag: an episode that
         ended and a new one that began must not inherit the answer."""
         muted = getattr(self, "_muted_episode", None)
+        if self._sentence is not None and not getattr(self, "_recurs", True):
+            # logic-sync-truth-6: nothing owed is an upload, so no reminder is
+            # coming; Settings then says so instead of offering to mute one.
+            return True
         return (self._sentence is not None and muted is not None
                 and muted == self._episode_id)

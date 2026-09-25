@@ -184,6 +184,7 @@ class SelectionClient:
         self._last_response_editor: Optional[str] = None
         # Last payload actually written to disk, for write-only-on-change.
         self._last_written: Optional[dict[str, Any]] = None
+        self._last_written_editor: Optional[str] = None  # bug-comp-syncthing-6
         # SYNC-110 (usability sweep 2026-09-03): WHEN this plan was last
         # fetched live. `fetched_at` has been written into the cache since
         # the cache existed and was read back by nothing, so a machine
@@ -283,7 +284,7 @@ class SelectionClient:
         self._last_response_at = time.monotonic()
         self._last_response_editor = editor_name
         self._fetched_at = datetime.now(timezone.utc).isoformat()
-        self._write_cache(self._last_response)
+        self._write_cache(self._last_response, editor=editor_name)
         return selection
 
     def _headers(self) -> dict[str, str]:
@@ -346,7 +347,7 @@ class SelectionClient:
         stamp = data.get("fetched_at")
         return str(stamp) if stamp else None
 
-    def _write_cache(self, response: dict[str, Any]) -> None:
+    def _write_cache(self, response: dict[str, Any], editor: str = "") -> None:
         # comp-sync-14: BEFORE the write-on-change early return -- the point
         # is that a fetch that changed nothing still happened.
         self._note_fetch_stamp()
@@ -354,12 +355,26 @@ class SelectionClient:
         # fetch, and fetch() is reached from the sequencer's poll loop --
         # 120 disk writes per project per pass per editor while waiting out a
         # lane C turn, all of them byte-identical (AUDIT_2 P11).
-        if response == self._last_written:
+        #
+        # bug-comp-syncthing-6 (2026-09-25): the editor is part of "change".
+        # Two people whose plans happen to be identical (both empty, say)
+        # must still leave the file naming the one signed in now, or
+        # load_cached() would refuse the right person's plan.
+        editor = str(editor or "").strip().lower()
+        if response == self._last_written and editor == self._last_written_editor:
             return
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             payload = {
                 "fetched_at": datetime.now(timezone.utc).isoformat(),
+                # bug-comp-syncthing-6 (2026-09-25): whose plan this is. The
+                # in-memory TTL has been keyed on the editor since the
+                # sign-in rework, and the disk fallback was not, so the next
+                # person to sign in on a shared or re-assigned computer ran
+                # the previous person's projects (lane A up, lane B down)
+                # whenever their own first fetch failed. Additive: a cache
+                # without it is read as before.
+                "editor": editor,
                 "response": response,
             }
             # tmp + replace, like identity.save_identity. A bare write_text
@@ -372,20 +387,27 @@ class SelectionClient:
             tmp.write_text(json.dumps(payload), encoding="utf-8")
             tmp.replace(self._cache_path)
             self._last_written = response
+            self._last_written_editor = editor
         except Exception:
             log.debug("failed to write selection cache to %s", self._cache_path, exc_info=True)
 
     # -- cache -----------------------------------------------------
-    def _load_cached_response(self) -> Optional[dict[str, Any]]:
+    def _load_cached_response(self, any_editor: bool = False) -> Optional[dict[str, Any]]:
         """Tolerant read of the on-disk cache's full response. Never raises
         -- returns None on any failure (missing file, malformed JSON,
         unexpected shape). Tolerates the older cache format written before
-        the full response was cached (just {"fetched_at", "selection"})."""
+        the full response was cached (just {"fetched_at", "selection"}).
+
+        bug-comp-syncthing-6 (2026-09-25): a cache written for SOMEONE ELSE
+        is no cache at all, unless `any_editor`, which only a caller that
+        pauses (never runs or releases) may pass."""
         try:
             data = json.loads(self._cache_path.read_text(encoding="utf-8"))
         except Exception:
             return None
         if not isinstance(data, dict):
+            return None
+        if not any_editor and not self._cache_is_for_current_editor(data):
             return None
         response = data.get("response")
         if isinstance(response, dict):
@@ -439,10 +461,39 @@ class SelectionClient:
         current = now if now is not None else datetime.now(timezone.utc).timestamp()
         return max(0.0, float(current) - when.timestamp())
 
-    def load_cached(self) -> Optional[list[dict]]:
+    def _cache_is_for_current_editor(self, data: dict[str, Any]) -> bool:
+        """May this cache be acted on by whoever is signed in now?
+
+        bug-comp-syncthing-6 (2026-09-25). Refused only when BOTH names are
+        known and differ. A cache from before the key existed, and a moment
+        with no identity yet (the restart-with-the-dashboard-down case
+        SYNC-110 exists for, before the identity file is read), keep the old
+        behaviour: that plan is the last signed-in person's, which is the
+        machine's own. Never raises."""
+        cached_editor = str(data.get("editor") or "").strip().lower()
+        if not cached_editor:
+            return True
+        try:
+            current = str(self._editor_name_fn() or "").strip().lower()
+        except Exception:
+            log.debug("selection: editor_name_fn failed reading the cache", exc_info=True)
+            current = ""
+        if not current or current == cached_editor:
+            return True
+        # Once per pair: get() reaches here from the sequencer's poll loop
+        # for as long as the new person's fetch keeps failing.
+        if getattr(self, "_foreign_cache_logged", None) != (cached_editor, current):
+            self._foreign_cache_logged = (cached_editor, current)
+            log.info("selection: the cached plan is %s's, not %s's -- not using it",
+                     cached_editor, current)
+        return False
+
+    def load_cached(self, any_editor: bool = False) -> Optional[list[dict]]:
         """Tolerant read of the on-disk cache. Never raises -- returns None
-        on any failure (missing file, malformed JSON, unexpected shape)."""
-        response = self._load_cached_response()
+        on any failure (missing file, malformed JSON, unexpected shape), and
+        for a cache written for another editor unless `any_editor`
+        (bug-comp-syncthing-6)."""
+        response = self._load_cached_response(any_editor=any_editor)
         selection = response.get("selection") if isinstance(response, dict) else None
         if not isinstance(selection, list):
             return None
@@ -487,16 +538,41 @@ class SelectionClient:
         ok, message, view, status = self._delete_selection(
             f"{base}?machine={quote(machine, safe='')}" if machine else base
         )
+        widened = False
         if not ok and machine and status == 404:
-            # A dashboard that does not know this hostname (a rename it has
-            # not seen report yet) cannot honour a machine-scoped removal.
-            # The person-wide DELETE is what such a companion has always
-            # sent, so fall back to it rather than leaving the tray's action
-            # refused.
+            # A dashboard that does not know this hostname cannot honour a
+            # machine-scoped removal. The person-wide DELETE is what such a
+            # companion has always sent, so fall back to it rather than
+            # leaving the tray's action refused.
             log.info("untick %s: the dashboard does not know this machine -- "
                      "removing the tick for every machine", slug)
             ok, message, view, status = self._delete_selection(base)
+            widened = True
+        elif (ok and machine and self._still_selected(view, slug)
+              and isinstance(view, dict) and view.get("changed")):
+            # logic-plans-1 (2026-09-25): the DELETE removed a row of this
+            # computer's AND the project is still in its plan. That is a
+            # dashboard without its own logic-plans-1 fix (0.7.58 and older)
+            # on a computer whose last project came from the unassigned
+            # bucket: it materialised the bucket,
+            # removed this computer's copy, and the empty plan fell back to
+            # the bucket again. Widening here deleted every other computer's
+            # row for the project too (the comp-lane-c-2 outcome), so it is
+            # refused instead, and nothing local is deleted: the project
+            # would only come straight back.
+            self._last_response_at = 0.0
+            self._last_failure_at = 0.0
+            log.warning("untick %s: the dashboard removed this computer's tick "
+                        "but still lists the project in its plan -- refusing, "
+                        "nothing deleted and nothing widened", slug)
+            return False, (
+                "the dashboard still lists it in this computer's sync plan after "
+                "the untick. Untick it on the dashboard's sync plans page"
+            )
         elif ok and machine and self._still_selected(view, slug):
+            # logic-plans-1 (2026-09-25): only with `changed` falsy (a
+            # machine-scoped DELETE that removed nothing, or a dashboard too
+            # old to say), which is the pure bucket case this branch is for.
             # The tick this machine syncs by is not a row of its own: it is
             # the unassigned bucket, which a machine-scoped DELETE cannot
             # touch. Removing it everywhere is what "remove it from this
@@ -505,7 +581,51 @@ class SelectionClient:
             log.info(
                 "untick %s: this machine has no plan row of its own (unassigned "
                 "bucket) -- removing the tick for every machine, as before", slug)
-            ok, message, _view, _status = self._delete_selection(base)
+            ok, message, view, status = self._delete_selection(base)
+            widened = True
+        if ok and machine and not widened and self._removed_nothing(view, slug):
+            # logic-plans-5 (2026-09-25, review round). The tray only offers
+            # a project its plan lists for this computer, so a machine-scoped
+            # DELETE that removed NOTHING and whose view does not list the
+            # project means the tick it synced by lives under a key this
+            # hostname cannot reach. The case that matters: a renamed PC in
+            # SYS-18a's deferred-adoption window. Its new name IS registered
+            # (the report that was refused adoption still upserts it), so no
+            # "unknown machine" test can see it, and the old hostname's row
+            # brings the project back the moment the rename is adopted. This
+            # used to answer "unticked" and the tray deleted the local copy.
+            #
+            # Widening to the person is NOT the answer: it also unticks the
+            # project on every other computer this person owns (the
+            # comp-lane-c-2 shape), and for a computer an admin just forgot
+            # (CR-76) it is a person-wide removal for a no-op. So ask the
+            # person's union instead. Ticked nowhere: nothing can bring it
+            # back, and the local delete is safe (a plan that was already
+            # unticked while this tray's copy of it was stale). Ticked
+            # somewhere, or cannot tell: refuse, and nothing is deleted.
+            held = self._person_holds(editor, slug)
+            if held is not False:
+                # The tray's list is stale either way: refetch on next get().
+                self._last_response_at = 0.0
+                self._last_failure_at = 0.0
+                log.warning(
+                    "untick %s: the dashboard has no tick for it under %r; "
+                    "person-wide it is %s -- refusing, nothing deleted",
+                    slug, machine,
+                    "still ticked" if held else "unknown (could not ask)")
+                if held:
+                    return False, (
+                        f"the dashboard has no tick for it under this computer's "
+                        f"name ({machine}), but it is still ticked for another of "
+                        f"your computers. If this computer was renamed, wait until "
+                        f"the dashboard shows the new name, or untick it on the "
+                        f"dashboard"
+                    )
+                return False, (
+                    f"the dashboard has no tick for it under this computer's name "
+                    f"({machine}), and could not be asked whether another of your "
+                    f"computers holds it. Try again in a minute"
+                )
         if not ok:
             return False, message
         self._last_response_at = 0.0
@@ -553,6 +673,38 @@ class SelectionClient:
             # stand rather than widening it on a guess.
             log.debug("untick: could not parse the dashboard's answer", exc_info=True)
             return True, "unticked", None, 200
+
+    @classmethod
+    def _removed_nothing(cls, view: Any, slug: str) -> bool:
+        """Did a machine-scoped DELETE provably remove nothing, leaving the
+        project absent from this machine's view? (logic-plans-5.)
+
+        Only True on evidence: a view we could read, whose `changed` is
+        exactly False and whose `selection` list is present and does not name
+        `slug`. A dashboard too old to send `changed`, or an answer we cannot
+        parse, is not evidence and keeps the old "unticked" answer."""
+        if not isinstance(view, dict) or view.get("changed") is not False:
+            return False
+        if not isinstance(view.get("selection"), list):
+            return False
+        return not cls._still_selected(view, slug)
+
+    def _person_holds(self, editor: str, slug: str) -> Optional[bool]:
+        """Is `slug` ticked for ANY of this person's computers (the union a
+        GET with no `?machine=` answers)? True / False, or None when the
+        dashboard could not be asked or answered in a shape we cannot read.
+        Never raises. Does not touch the plan cache: this is the person's
+        union, not this computer's plan."""
+        url = (f"{self.dashboard_url.rstrip('/')}/api/v1/selection/"
+               f"{quote(editor, safe='')}")
+        try:
+            response = self._http_get(url, self._headers(), self.timeout)
+        except Exception as exc:
+            log.debug("untick: person-wide read failed: %s", exc)
+            return None
+        if not isinstance(response, dict) or not isinstance(response.get("selection"), list):
+            return None
+        return self._still_selected(response, slug)
 
     @staticmethod
     def _still_selected(view: Any, slug: str) -> bool:

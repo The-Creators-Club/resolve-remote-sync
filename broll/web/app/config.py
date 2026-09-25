@@ -85,6 +85,23 @@ def get_session_secret() -> str | None:
     return secret if secret else None
 
 
+def get_previous_session_secrets() -> tuple[str, ...]:
+    """DASH_SESSION_SECRET_PREVIOUS, comma-separated, blanks dropped: the
+    dashboard's ACCEPT-ONLY retired keys (DASH-2), parsed exactly as its
+    settings.py parses them.
+
+    bug-wire-2 (2026-09-25): the dashboard kept accepting a companion identity
+    signed with a retired key on the report, `/jobs*` and `/cards/agent/*`,
+    and counted the machine on the fleet page's drain counter, while this app
+    verified against the current key alone. So for the whole of a rotation
+    drain every un-re-signed machine's b-roll ingest claim, heartbeat, result
+    and upload 403'd "sign in again", and nothing on the fleet page said so.
+    Read live, by environment, for get_session_secret's reason.
+    """
+    raw = os.environ.get("DASH_SESSION_SECRET_PREVIOUS", "") or ""
+    return tuple(s.strip() for s in raw.split(",") if s.strip())
+
+
 def get_ingest_token() -> str | None:
     """BROLL_INGEST_TOKEN, or None when it is unset.
 

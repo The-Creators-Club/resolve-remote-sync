@@ -1097,7 +1097,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.warning("CSRF refusal: %s %s from %s", request.method, path,
                         auth.client_ip(request))
             return JSONResponse(
-                {"detail": "missing or bad CSRF token -- reload the page and try again"},
+                {"detail": "missing or bad CSRF token: reload the page and try again"},
                 status_code=403,
             )
         return await call_next(request)

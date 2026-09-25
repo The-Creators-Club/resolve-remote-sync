@@ -32,6 +32,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import math
 import sqlite3
 from typing import Any, Mapping
 
@@ -90,6 +91,36 @@ def default_requires(kind: str, inputs: Mapping[str, Any] | None) -> dict[str, A
     if mounts:
         requires["mount"] = mounts
     return requires
+
+
+def out_stem_problem(kind: str, inputs: Mapping[str, Any] | None) -> str | None:
+    """Why a media job's `out_stem` cannot name a file on ANY machine, or
+    None.
+
+    bug-comp-media-3 (2026-09-25, the owed half): the companion refuses such
+    a stem at claim time (`job_paths.safe_stem`, retryable=False), which is
+    right but late -- the job is queued, offered, claimed and failed before
+    anybody hears. Refusing it here tells the submitter at POST time. The
+    rules are EXACTLY safe_stem's fleet-wide four (blank or a dot name
+    after strip, a '/', a control character) and deliberately NOT its
+    Windows-only pair: ':' and '\\' are plain name characters on a Mac and
+    on the dashboard's own Linux engine, which is where a job a Windows
+    machine gave back gets made (`Q&A: Ruskin` is a real multicam name). A
+    missing or blank stem is fine: the claimant falls back to the source's
+    own stem, exactly as jobs_runner._media_paths does."""
+    if str(kind) not in (db.JOB_KIND_PROXY_480P, db.JOB_KIND_AUDIO_EXTRACT,
+                         db.JOB_KIND_PEAKS):
+        return None
+    raw = (inputs or {}).get("out_stem")
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    if (value in (".", "..") or "/" in value
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)):
+        return (f"out_stem {value!r} is not a plain file name: it cannot "
+                f"be a dot name or hold a '/' or a control character, on any "
+                f"computer")
+    return None
 
 
 # WHICH MACHINE IS PREFERRED FOR A KIND, as a table rather than a chain of
@@ -342,6 +373,22 @@ REFUSE_NOT_TARGET = "not_the_target"
 # saturated computer out of the ranking (it is refused before rank_key ever
 # sees it, so "longest idle" cannot promote it).
 REFUSE_LOCAL_WORK = "local_work"
+# logic-ytdl-jobs-1 (2026-09-25): a machine that has not reported for
+# MACHINE_SILENT_SECONDS. fleet_facts read every machine_state row with no
+# bound on its age, so a laptop put in a drawer a month ago was ranked on the
+# idle number it sent on its last report: `explain` answered "schedulable,
+# first choice" for a machine that will never claim, its old `not idle` kept a
+# job `idle_wait` (transient) when no live machine could run it at all, and
+# for the first 60 s it could win the rank grace over a live machine.
+REFUSE_SILENT = "not_reporting"
+# A companion reports every 60 s by default (5 s while a lane is busy), so
+# fifteen minutes is fifteen missed reports: a sleeping or switched-off
+# computer, never a slow one. Deliberately much shorter than the jobs picker's
+# `online` (alerts.SILENT_SECONDS, a day): the picker is where an admin aims
+# tonight's work at a laptop that was here this morning, and this is "will a
+# machine claim it on its next report". Only the bulk fleet read applies it;
+# the machine that is reporting or claiming right now is live by definition.
+MACHINE_SILENT_SECONDS = 15 * 60
 
 # THE JOB-LEVEL ANSWER, which is a different question from the per-machine
 # one. Timeline Cards' client asks exactly one thing of `why` -- "may I stop
@@ -371,6 +418,10 @@ REASON_FINISHED = "finished"
 # that machine is switched on).
 REASON_TARGET_AWAY = "target_away"
 REASON_TARGET_UNKNOWN = "target_unknown"
+# logic-ytdl-jobs-1: every machine that could run it has stopped reporting.
+# NOT transient: nothing will claim it until a computer comes back, which may
+# be never, and the safe direction for a waiting client is to do it itself.
+REASON_SILENT = "machines_not_reporting"
 
 # Which job-level code a per-machine refusal counts towards. Not the identity
 # map: `upgrading` and a tripped breaker are both "this machine is busy with
@@ -394,6 +445,7 @@ REFUSAL_TO_REASON = {
     REFUSE_COOLDOWN: REASON_COOLDOWN,
     REFUSE_FLEET_CAP: REASON_FLEET_CAP,
     REFUSE_NOT_PREFERRED: REASON_ALL_BUSY,
+    REFUSE_SILENT: REASON_SILENT,
     # Only ever seen on a targeted job, and _blocked_reason decides between
     # `target_away` and `target_unknown` with the whole fleet in hand: this
     # map answers one machine at a time and cannot tell "the target is busy"
@@ -653,11 +705,16 @@ def fleet_facts(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any
     for row in conn.execute(
         "SELECT editor_username, machine, mode, halt_active, breaker_tripped, "
         "       jobs_cooldown_until, jobs_cooldown_reason, "
-        "       ingest_active, music_ingest_active "
+        "       ingest_active, music_ingest_active, reported_at "
         "  FROM machine_state ORDER BY editor_username, machine"
     ):
         key = (row["editor_username"], row["machine"])
         out[key] = {
+            # logic-ytdl-jobs-1 (2026-09-25): the server's clock for this
+            # machine's last report (api.py has always written its own time
+            # into this column). policy_refusal reads it; machine_facts does
+            # not carry it, because the machine it describes is reporting now.
+            "reported_at": str(row["reported_at"] or ""),
             "editor": key[0], "machine": key[1],
             "capabilities": caps_map.get(key, {}),
             "mode": (row["mode"] or "editor"),
@@ -817,6 +874,15 @@ def policy_refusal(facts: Mapping[str, Any], kind: str,
         # UX-16: "stopped by your admin" is the fleet halt in the product
         # vocabulary; "halted" never reaches a reader.
         return REFUSE_FLEET_HALT, "syncing is stopped by your admin for the whole fleet"
+    # logic-ytdl-jobs-1: second, because everything below it describes a
+    # machine that is THERE; a stored halt, update or breaker on a computer
+    # that has been off for a week is not why nothing claims the job.
+    silent = _silent_for(facts, now)
+    if silent is not None:
+        return (REFUSE_SILENT,
+                f"this computer has not reported since {facts['reported_at']} "
+                f"({_duration_words(silent)} ago), so it cannot claim anything "
+                f"until it is switched on")
     if facts.get("halt_active"):
         return REFUSE_MACHINE_HALT, "syncing is stopped on this computer"
     if facts.get("upgrading"):
@@ -887,6 +953,35 @@ def policy_refusal(facts: Mapping[str, Any], kind: str,
         except (TypeError, ValueError):
             return (REFUSE_NOT_IDLE, "this computer's idle answer is unreadable")
     return "", ""
+
+
+def _silent_for(facts: Mapping[str, Any], now: str | None) -> float | None:
+    """Seconds since this machine last reported, when that is past
+    MACHINE_SILENT_SECONDS; else None (logic-ytdl-jobs-1, 2026-09-25).
+
+    None also for facts with no `reported_at` (machine_facts: the caller is
+    that machine, reporting now) and for a timestamp that cannot be read: an
+    unreadable clock is not evidence that a computer has gone, and refusing on
+    it would stop a queue over a parse error.
+    """
+    at = str(facts.get("reported_at") or "")
+    if not at:
+        return None
+    try:
+        age = (db.parse_iso(now or db.utcnow_iso())
+               - db.parse_iso(at)).total_seconds()
+    except Exception:  # noqa: BLE001 - see the docstring
+        return None
+    return age if age > MACHINE_SILENT_SECONDS else None
+
+
+def _duration_words(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 3600:
+        return f"{max(1, seconds // 60)} min"
+    if seconds < 2 * 86400:
+        return f"{seconds // 3600} h"
+    return f"{seconds // 86400} days"
 
 
 def offers_for_machine(
@@ -969,6 +1064,26 @@ def offers_for_machine(
         if len(offered) >= max(1, int(limit)):
             break
     return {"offered": offered, "forced": forced, "refused": refused}
+
+
+def _offer_clause(job: Mapping[str, Any], key: tuple[str, str],
+                  fleet: Mapping[tuple[str, str], Mapping[str, Any]],
+                  now: str) -> str:
+    """When a lower-ranked machine is offered the job, from `first_refusal`'s
+    own inputs.
+
+    logic-ytdl-jobs-6 (2026-09-25): every machine below first choice was told
+    "it is offered the job anyway once it has waited 60s", but a forced or
+    targeted job has no grace window, a tie is offered together, and a job
+    older than RANK_GRACE_SECONDS is already offered to everyone. An admin
+    who pressed RUN NOW read that the second machine would wait a minute for
+    something that had already happened.
+    """
+    if first_refusal(job, key, fleet, now):
+        return "it is being offered the job now too"
+    left = max(1, int(math.ceil(RANK_GRACE_SECONDS - job_age_seconds(job, now))))
+    return (f"it is offered the job too in {left}s if nobody ahead of it "
+            f"has taken it by then")
 
 
 def explain(conn: sqlite3.Connection, job_id: int,
@@ -1055,8 +1170,7 @@ def explain(conn: sqlite3.Connection, job_id: int,
             line["why"] = (f"this computer can take it (choice {rank} of "
                            f"{len(order)}"
                            + (f"; {beaten}" if beaten else "")
-                           + f"; it is offered the job anyway once it has "
-                             f"waited {int(RANK_GRACE_SECONDS)}s)")
+                           + f"; {_offer_clause(job, key, fleet, now)})")
         lines.append(line)
     can = [m for m in lines if m["ok"]]
     # The fleet cap is a property of the QUEUE, not of any machine, so it is
@@ -1149,9 +1263,13 @@ def _blocked_reason(lines: list[dict[str, Any]],
         return REASON_TARGET_AWAY if code in TRANSIENT_REASONS else code
     codes = {REFUSAL_TO_REASON.get(line["reason"], REASON_NO_CAPABLE)
              for line in lines}
+    # REASON_SILENT sits after every code a live machine can clear and before
+    # "no capability anywhere": a computer that is switched off may come back,
+    # which is more hope than a fleet with no GPU, and less than any of the
+    # rest (logic-ytdl-jobs-1).
     for code in (REASON_ALL_BUSY, REASON_FLEET_CAP, REASON_COOLDOWN,
                  REASON_IDLE_WAIT, REASON_HALTED, REASON_NOT_ALLOWED,
-                 REASON_KIND_UNKNOWN):
+                 REASON_KIND_UNKNOWN, REASON_SILENT):
         if code in codes:
             return code
     return REASON_NO_CAPABLE
@@ -1163,8 +1281,22 @@ def _terminal_summary(job: Mapping[str, Any]) -> str:
         return (f"{job['claimed_by']}/{job['claimed_machine']} is holding this "
                 f"job (lease until {job['lease_expires_at']})")
     if state == db.JOB_PINNED:
-        return ("the fleet could not finish this, so it is pinned to the "
-                "dashboard's own worker; it never goes back to the fleet")
+        words = ("the fleet could not finish this, so it is pinned to the "
+                 "dashboard's own worker; it never goes back to the fleet")
+        # bug-dash-cards-jobs-3 (2026-09-25): that worker needs an open
+        # Timeline Cards episode to run anything, and says so when it had
+        # none on its last pass. Nothing is lost: the next episode anybody
+        # opens runs it.
+        try:
+            from . import cards_exec
+
+            waiting = cards_exec.waiting_for_an_engine()
+        except Exception:  # noqa: BLE001 - an explanation never raises
+            waiting = False
+        if waiting:
+            words += (". It is waiting: no Timeline Cards episode is open on "
+                      "the dashboard, and it runs as soon as somebody opens one")
+        return words
     if state == db.JOB_DONE:
         return "this job is done"
     if state == db.JOB_ABANDONED:
@@ -1212,6 +1344,8 @@ def _blocked_summary(lines: list[dict[str, Any]],
         REFUSE_FLEET_CAP: "are at this fleet's limit for the kind",
         REFUSE_NOT_TARGET: "are not the computer this job was sent to",
         REFUSE_LOCAL_WORK: "are busy with their own media work",
+        REFUSE_SILENT: "have not reported in the last "
+                       f"{MACHINE_SILENT_SECONDS // 60} min",
     }.get(reason, reason)
     summary = (f"no computer can take this job right now: {count} of "
                f"{len(lines)} {words}")

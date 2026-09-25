@@ -134,12 +134,28 @@ def _context(
     notice: str | None = None,
     error: str | None = None,
     check: dict | None = None,
+    draft: dict | None = None,
 ) -> dict:
     """The partial's context. `manifest` is spelled exactly as
     `ui.page_admin_settings` spells it, because the panel is rendered BOTH by
     that page (through the `{% include %}`) and by the two routes below --
-    one template, one set of names, no second copy of the field values."""
+    one template, one set of names, no second copy of the field values.
+
+    `draft` is what the admin just submitted, shown in place of the saved
+    values when a save was refused (ui-dash-admin-8)."""
     manifest = site_store.resolved_manifest(conn, request.app.state.settings)
+    if draft is not None:
+        # ui-dash-admin-8 (2026-09-25): a refusal re-rendered the SAVED
+        # values, so one typo among three pasted fingerprints threw away all
+        # three. The template reads `manifest.android.*` and prints each
+        # fingerprint followed by a newline, so the raw textarea text goes in
+        # as a single entry and comes back exactly as typed - typo included,
+        # which is the line the error names.
+        android = dict(manifest.get("android") or {})
+        android["package_name"] = draft.get("package_name", "")
+        raw = str(draft.get("sha256_cert_fingerprints", "") or "").rstrip()
+        android["sha256_cert_fingerprints"] = [raw] if raw else []
+        manifest = dict(manifest, android=android)
     return {
         "manifest": manifest,
         "android_notice": notice,
@@ -180,11 +196,14 @@ def api_setup_android(
     try:
         site_store.set_many(conn, values, updated_by=admin)
     except site_store.SiteValidationError as exc:
-        # The panel re-renders with the message and the admin's own text is
-        # still in the boxes (the manifest is unchanged, so the fields show
-        # the last SAVED value -- a validation refusal writes nothing at all,
-        # per set_many's validate-everything-first rule).
-        return _render(request, _context(request, conn, error=str(exc)))
+        # The panel re-renders with the message and the admin's own text
+        # still in the boxes (ui-dash-admin-8: it used to show the last SAVED
+        # value). A validation refusal writes nothing at all, per set_many's
+        # validate-everything-first rule, so the draft is only on the page.
+        return _render(request, _context(
+            request, conn, error=str(exc),
+            draft={"package_name": package_name,
+                   "sha256_cert_fingerprints": sha256_cert_fingerprints}))
     # Keys only, never values, like every other site write (SYS-11).
     db.audit(conn, admin, "site.android_save", "site", {"keys": sorted(values)})
     conn.commit()

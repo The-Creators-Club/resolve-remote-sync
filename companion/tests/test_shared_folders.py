@@ -81,12 +81,21 @@ def _manager(admin, tmp_path):
     return shared_folders.SharedFolderManager(admin, tmp_path, folders=ONLY_LUTS)
 
 
+def _running_luts(tmp_path):
+    """The library's path with the marker a running Syncthing folder has.
+    bug-comp-syncthing-7 (2026-09-25): a running folder without it is now
+    reported as marker-missing, so a HEALTHY folder in these tests has one."""
+    path = shared_folders.local_path_for(tmp_path, "Assets/Luts")
+    (tmp_path / "Assets" / "Luts" / ".stfolder").mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def test_healthy_folder_costs_no_config_writes(tmp_path):
     """Steady state must be reads only: every config write restarts and
     rescans the folder in Syncthing."""
     admin = FakeAdmin(
         folder={"id": LUTS_FOLDER_ID, "paused": False,
-                "path": shared_folders.local_path_for(tmp_path, "Assets/Luts"),
+                "path": _running_luts(tmp_path),
                 "versioning": {"type": "staggered"}, "ignoreDelete": True},
         ignores=list(ASSET_STIGNORE_LINES),
     )
@@ -120,7 +129,7 @@ def test_an_unoffered_folder_is_not_an_error(tmp_path):
 def test_missing_ignores_are_re_asserted(tmp_path):
     admin = FakeAdmin(
         folder={"id": LUTS_FOLDER_ID, "paused": False,
-                "path": shared_folders.local_path_for(tmp_path, "Assets/Luts")},
+                "path": _running_luts(tmp_path)},
         ignores=["(?i)*.braw"],   # a fragment of the list
     )
     assert _manager(admin, tmp_path).reconcile()[LUTS_FOLDER_ID] == "repaired"
@@ -153,11 +162,16 @@ def test_a_paused_folder_with_unreadable_ignores_stays_paused(tmp_path):
 
 
 def test_a_folder_pointed_elsewhere_is_re_pointed(tmp_path):
+    # bug-comp-syncthing-7 (2026-09-25): the old directory does not exist
+    # and there is no mover, so the new one comes up with no marker. That is
+    # reported as marker-missing now, not "repaired" (which cleared the
+    # problem while the library synced nothing). The carried-over case is in
+    # test_bug_hunt_2026_09_24_w2_c-sync.
     admin = FakeAdmin(
         folder={"id": LUTS_FOLDER_ID, "paused": False, "path": "D:\\somewhere\\else"},
         ignores=list(ASSET_STIGNORE_LINES),
     )
-    assert _manager(admin, tmp_path).reconcile()[LUTS_FOLDER_ID] == "repaired"
+    assert _manager(admin, tmp_path).reconcile()[LUTS_FOLDER_ID] == "marker-missing"
     want = shared_folders.local_path_for(tmp_path, "Assets/Luts")
     assert ("set_path", LUTS_FOLDER_ID, want) in admin.calls
 
@@ -169,7 +183,7 @@ def test_a_folder_without_ignore_delete_gets_it(tmp_path):
     machine. Retrofit, reusing the config already fetched."""
     admin = FakeAdmin(
         folder={"id": LUTS_FOLDER_ID, "paused": False,
-                "path": shared_folders.local_path_for(tmp_path, "Assets/Luts"),
+                "path": _running_luts(tmp_path),
                 "versioning": {"type": "staggered"}},   # accepted before the flag existed
         ignores=list(ASSET_STIGNORE_LINES),
     )

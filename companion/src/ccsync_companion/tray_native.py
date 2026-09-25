@@ -72,7 +72,7 @@ def _flatten_toast(message: Any) -> str:
     return " ".join(str(message).split())
 
 
-def fit_toast(message: Any, limit: int = TOAST_LIMIT) -> str:
+def fit_toast(message: Any, limit: int = TOAST_LIMIT, log_full: bool = True) -> str:
     """Cut an overlong toast in the MIDDLE, never at the end (APP-4).
 
     This codebase's toast convention is "what happened, then what to do next",
@@ -82,6 +82,11 @@ def fit_toast(message: Any, limit: int = TOAST_LIMIT) -> str:
     line, up to half the budget -- and the variable middle is ellipsised. The
     full text goes to the log whenever this shortens anything, because the
     thing that was too long to show is usually the thing worth reading.
+
+     is for the tooltip (ui-comp-windows-7, 2026-09-25): it
+    is recomputed on every tray refresh, and logging the same sentence every
+    few seconds would bury the log; the sentence it shortens is the blocked
+    reason, which the reporter and Settings already carry in full.
     """
     text = str(message)
     if len(text) <= limit:
@@ -99,7 +104,8 @@ def fit_toast(message: Any, limit: int = TOAST_LIMIT) -> str:
     joiner = " ... "
     head = text[:max(0, limit - len(tail) - len(joiner))].rstrip()
     fitted = (head + joiner + tail) if tail else text[:limit]
-    log.info("toast shortened to fit (%d chars): %s", limit, text)
+    if log_full:
+        log.info("toast shortened to fit (%d chars): %s", limit, text)
     return fitted[:limit]
 
 
@@ -846,6 +852,13 @@ class _WindowsIcon:
         self._hwnd = None
         self._hicon = None
         self._hicon_cache: dict[int, tuple[Any, Any]] = {}
+        # bug-comp-ui-6 (2026-09-25): the cache is written from whichever
+        # thread assigns `icon` (the pulse and refresh loops) and emptied by
+        # the pump thread's _teardown. A tick already past its loop check at
+        # Quit inserted mid-iteration: "dictionary changed size during
+        # iteration" escaped run()'s finally before _stopped.set(), so stop()
+        # waited its full 5 s and an ordinary Quit wrote a crash report.
+        self._hicon_lock = threading.Lock()
         self._added = False
         self._running = threading.Event()
         self._stopped = threading.Event()
@@ -923,8 +936,12 @@ class _WindowsIcon:
         try:
             self._pump()
         finally:
-            self._teardown()
-            self._stopped.set()
+            # bug-comp-ui-6: _stopped is what stop() waits on, so a teardown
+            # that raises must not be able to skip it.
+            try:
+                self._teardown()
+            finally:
+                self._stopped.set()
 
     @property
     def registered(self) -> bool:
@@ -1098,13 +1115,14 @@ class _WindowsIcon:
         image = self._image
         if image is None:
             return None
-        cached = self._hicon_cache.get(id(image))
-        if cached is not None:
-            return cached[1]
-        hicon = _hicon_from_image(image)
-        if hicon:
-            self._hicon_cache[id(image)] = (image, hicon)
-        return hicon
+        with self._hicon_lock:
+            cached = self._hicon_cache.get(id(image))
+            if cached is not None:
+                return cached[1]
+            hicon = _hicon_from_image(image)
+            if hicon:
+                self._hicon_cache[id(image)] = (image, hicon)
+            return hicon
 
     def _add_icon(self, attempts: Optional[int] = None,
                   cap: float = _NIM_ADD_RETRY_DELAY) -> None:
@@ -1480,12 +1498,17 @@ class _WindowsIcon:
             self._remove_icon()
         except Exception:
             log.debug("removing the tray icon failed", exc_info=True)
-        for _image, hicon in self._hicon_cache.values():
+        # bug-comp-ui-6: taken out of the dict under the lock and destroyed
+        # outside it, so a late icon assignment either lands before (and is
+        # destroyed here) or after (a fresh entry, never a mutated iteration).
+        with self._hicon_lock:
+            handles = [hicon for _image, hicon in self._hicon_cache.values()]
+            self._hicon_cache.clear()
+        for hicon in handles:
             try:
                 api.user32.DestroyIcon(hicon)
             except Exception:
                 pass
-        self._hicon_cache.clear()
         self._hwnd = None
 
 
@@ -1548,7 +1571,7 @@ def _darwin_helper_classes():
             self._icon._menu_open.set()
 
         def menuDidClose_(self, _menu):
-            self._icon._menu_open.clear()
+            self._icon._menu_did_close()
 
     _DARWIN_HELPERS = (CCSyncTrayTarget, CCSyncTrayMenuWatcher)
     return _DARWIN_HELPERS
@@ -1594,6 +1617,22 @@ def _darwin_on_main_thread(fn: Callable[[], Any]) -> None:
             log.debug("tray: the un-marshalled update failed too", exc_info=True)
 
 
+def _darwin_after_current(fn: Callable[[], Any]) -> None:
+    """Queue `fn` on the macOS main queue even when already ON the main
+    thread, so it runs after the current AppKit callback returns
+    (bug-comp-ui-2). Inline if the queue is unavailable."""
+    try:
+        from Foundation import NSOperationQueue
+
+        NSOperationQueue.mainQueue().addOperationWithBlock_(fn)
+    except Exception:
+        log.debug("tray: could not queue on the main thread", exc_info=True)
+        try:
+            fn()
+        except Exception:
+            log.debug("tray: the un-queued update failed too", exc_info=True)
+
+
 class _DarwinIcon:
     """The menu-bar item on macOS, via NSStatusBar/NSStatusItem/NSMenu.
 
@@ -1618,6 +1657,9 @@ class _DarwinIcon:
         self._status_item = None
         self._delegate = None
         self._targets: list = []
+        # bug-comp-ui-2 (2026-09-25): a rebuild that reached the main queue
+        # while the menu was open, held until menuDidClose_.
+        self._menu_rebuild_pending = False
         self._stopped = threading.Event()
         # comp-ui-1 (2026-09-11): the same two names the Windows icon carries,
         # so "is it actually there?" is one question on both platforms. macOS
@@ -1771,9 +1813,32 @@ class _DarwinIcon:
         try:
             if self._status_item is None:
                 return
+            if self._menu_open.is_set():
+                # bug-comp-ui-2 (2026-09-25): tray.py checks the flag before
+                # assigning, but the rebuild is a main-queue block, and the
+                # main queue is drained in the event-tracking runloop mode --
+                # so a menu opened after the check still had the rebuild run
+                # under it. Rebuilding released the open menu's watcher
+                # (NSMenu.delegate is weak), menuDidClose_ never came, and
+                # ui_state.menu_open stayed set: a tray that stopped drawing
+                # and 8 s in front of every Resolve call until the next open
+                # and close. Held instead, and run once the menu has closed;
+                # the open menu keeps its own watcher and targets alive.
+                self._menu_rebuild_pending = True
+                return
+            self._menu_rebuild_pending = False
             self._status_item.setMenu_(self._build_nsmenu(self.menu))
         except Exception:
             log.exception("could not build the macOS tray menu")
+
+    def _menu_did_close(self) -> None:
+        """menuDidClose_, on the main thread: clear the flag, then run any
+        rebuild that arrived while the menu was open (bug-comp-ui-2). Queued
+        rather than inline, so the NSMenu is not replaced inside its own
+        delegate callback."""
+        self._menu_open.clear()
+        if self._menu_rebuild_pending:
+            _darwin_after_current(self._apply_menu_now)
 
     def _build_nsmenu(self, menu):
         import AppKit

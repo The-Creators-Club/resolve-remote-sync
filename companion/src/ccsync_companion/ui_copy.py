@@ -37,7 +37,15 @@ ACCEPT_LICENCE_SETTINGS = "Tray > Settings > READ AND ACCEPT THE LICENCE"
 
 # [ HELP ] in the Settings window. The label is quoted in CAPS because that
 # is exactly what is painted on the button (settings_window.build_settings_model).
-DIAGNOSTICS = "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN"
+#
+# ui-copy-5 (2026-09-25): DIAGNOSTICS names the HELP section on the way. It is
+# the one route an admin reads out to an editor from the dashboard, which
+# said "Settings > Help > Copy diagnostics" while this said no Help step and
+# a longer button: two directions to one button. This string is now the one
+# both sides say (the dashboard's health.COMPANION_DIAGNOSTICS_PATH is to
+# match it, "Tray >" included, because "Settings" alone on the dashboard
+# reads as the dashboard's own Settings page).
+DIAGNOSTICS = "Tray > Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN"
 OPEN_LOG = "Tray > Settings > OPEN LOG"
 
 # [ THIS COMPUTER ]. The tray keeps a Sign in row of its own while nobody is
@@ -51,6 +59,11 @@ CONSOLIDATE = ("Tray > Settings > BRING AN EXISTING PROJECT'S MEDIA INTO THE "
                "SYNCED FOLDER")
 UNDO_RELINK = "Tray > Settings > UNDO THE LAST CLIP-PATH CHANGE CCSYNC MADE"
 STOP_ALL_SYNCING = "Tray > Settings > STOP ALL SYNCING ON THIS COMPUTER"
+
+# [ SYNCING ], while a local stop is set. The tray has its own row with the
+# same words ("Clear the sync stop on this computer", UX-19); the Settings
+# button said "START SYNCING AGAIN" until ui-comp-windows-6 (2026-09-25).
+CLEAR_SYNC_STOP = "Tray > Settings > CLEAR THE SYNC STOP ON THIS COMPUTER"
 
 # [ YOUTUBE ]. Sentence case, again because that is what the buttons say.
 YOUTUBE_TERMS = "Tray > Settings > Accept YouTube Terms"
@@ -131,15 +144,15 @@ ROUTE_ROWS: dict[str, str] = {
     CONSOLIDATE: "BRING AN EXISTING PROJECT'S MEDIA INTO THE SYNCED FOLDER",
     UNDO_RELINK: "UNDO THE LAST CLIP-PATH CHANGE CCSYNC MADE",
     STOP_ALL_SYNCING: "STOP ALL SYNCING ON THIS COMPUTER",
+    CLEAR_SYNC_STOP: "CLEAR THE SYNC STOP ON THIS COMPUTER",
     YOUTUBE_TERMS: "Accept YouTube Terms",
     YOUTUBE_SIGN_IN: "Sign in to YouTube",
     YOUTUBE_COOKIES: "Use an exported cookies.txt",
     remove_project(): "REMOVE '",
     repair_drive("P:"): "REPAIR ",
     finish_grading("P:"): "FINISH GRADING: ",
-    # The Settings section itself (SYS-21): "Settings > Help > Copy
-    # diagnostics" is the one route the sweep asked every surface to use, so
-    # the section it names is checked like every other row.
+    # The Settings section itself (SYS-21): DIAGNOSTICS passes through it
+    # (ui-copy-5), so the section it names is checked like every other row.
     HELP_PAGE: "HELP",
 }
 

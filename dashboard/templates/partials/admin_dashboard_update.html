@@ -97,7 +97,11 @@
       <div class="muted" style="margin-top:0.6rem">
         older bundles on the feed (a rollback, not an update):
         {% for u in dash_update.rollback_candidates %}
-          <button class="btn tap" type="button" data-dashupd-apply="{{ u.version }}"
+          {# ui-dash-admin-14 (2026-09-25): these share the apply route, and
+             so shared its "Update this dashboard to X?" confirm: the wrong
+             word at the one moment the owner is going backwards.
+             data-dashupd-older is what makes the JS ask the rollback question. #}
+          <button class="btn tap" type="button" data-dashupd-apply="{{ u.version }}" data-dashupd-older="1"
                   title="go back to {{ u.version }}">[ ROLL BACK TO {{ u.version }} ]</button>
         {% endfor %}
       </div>

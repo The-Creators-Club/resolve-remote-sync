@@ -54,6 +54,10 @@ which docs/RELEASE_FEED.md documents in full.
     python tools/publish_feed.py --verify .\feed
 
     python tools/publish_feed.py --retract companion/windows/0.6.1 \
+        --set-current companion/windows/0.6.0 --reason "..." \
+        --feed-dir .\feed --github-repo ccsync/ccsync-releases --github-upload
+
+    python tools/publish_feed.py --set-current companion/windows/0.6.0 \
         --feed-dir .\feed --github-repo ccsync/ccsync-releases --github-upload
 
 THE PUBLISHED CHANNEL IS THE BASE (2026-08-21, release-pipeline-1). With
@@ -79,6 +83,12 @@ CCSYNC_MIN_VERSION rather than a decision to drop the floor.
 "<version>"} (release-pipeline-5): without it a customer dashboard on the
 "current" policy replayed the whole channel in APPEND order and the LAST
 record won, so republishing an older build offered the fleet a rollback.
+--set-current KIND/PLATFORM/VERSION moves that pointer ALONE, at a record the
+channel already carries, with no artifact (logic-release-6/-7, 2026-09-25):
+it is how a staged record is made current later, and how the feed is rolled
+back to a build it still holds. A --retract of the build `current` names must
+say what replaces it (--set-current), or pass --allow-no-current
+(logic-release-2).
 
 Exit codes: 2 usage, 3 the manifest condemned the build (dirty/untested,
 unless overridden), 4 the freshly-written feed failed its own offline
@@ -415,6 +425,13 @@ def baked_keys_of_current(channel: dict[str, Any], kind: str, platform: str) -> 
     if isinstance(ids, str):
         ids = [part.strip() for part in ids.split(",") if part.strip()]
     return version, [str(i) for i in (ids or [])]
+
+
+def _id_list(value: Any) -> list[str]:
+    """baked_pubkey_ids as a list, whichever shape the record carries."""
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return [str(v) for v in (value or [])]
 
 
 def upsert_record(channel: dict[str, Any], record: dict[str, Any]) -> None:
@@ -1054,6 +1071,22 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                          "The asset stays on the release; only the record and any `current` "
                          "pointer at it go. Combine with nothing else and it is a pure "
                          "withdrawal.")
+    # logic-release-6 / logic-release-7 (2026-09-25): the pointer could only
+    # move inside the --artifact branch, i.e. by re-uploading bytes. So a
+    # STAGED record could not be made current later (a newer green run of the
+    # same version has different bytes, and the replace check rightly refuses
+    # them), and the feed could not be rolled back to a build it still held
+    # without finding that build's exact original bytes again.
+    ap.add_argument("--set-current", default="",
+                    help="KIND/PLATFORM/VERSION: point the channel's `current` at a record "
+                         "it ALREADY carries, with no artifact. Makes a staged build "
+                         "current, or rolls the feed back to an older one; with --retract "
+                         "it names what replaces the withdrawn build.")
+    # logic-release-2 (2026-09-25): see the guard in main().
+    ap.add_argument("--allow-no-current", action="store_true",
+                    help="let --retract remove the `current` pointer with nothing in its "
+                         "place. Every `policy = current` site then takes the HIGHEST "
+                         "version left on the channel, staged or not.")
     ap.add_argument("--reason", default="",
                     help="why a --retract happened, in one sentence an admin will read on "
                          "the Packages page of every customer dashboard. Required with "
@@ -1184,6 +1217,31 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
 
         published_something = False
         retracted: set[tuple[str, str, str]] = set()
+        # logic-release-2 (2026-09-25): the pairs whose `current` pointer a
+        # --retract in this run removed, checked once everything else in the
+        # run has had its say (a --set-current or an --artifact --make-current
+        # may put a pointer back).
+        uncurrented: set[tuple[str, str]] = set()
+        # What `current` said before this run touched it, for the REL-7 key
+        # check on a pointer-only move (a retract may have popped it by then,
+        # and taken the record with it).
+        pointer_before = dict(channel.get("current") or {})
+        records_before = list(channel.get("packages", []))
+
+        set_current_key: tuple[str, str, str] | None = None
+        if args.set_current:
+            sc_parts = [p for p in args.set_current.split("/") if p]
+            if len(sc_parts) != 3:
+                raise PublishFeedError(
+                    f"--set-current wants KIND/PLATFORM/VERSION, got {args.set_current!r}",
+                    EXIT_USAGE)
+            set_current_key = (sc_parts[0], sc_parts[1], sc_parts[2])
+            if (args.artifact and args.make_current
+                    and (args.kind, args.platform) == set_current_key[:2]):
+                raise PublishFeedError(
+                    f"--set-current {args.set_current} and --make-current both name the "
+                    f"`current` pointer for {args.kind}/{args.platform}; pass one.",
+                    EXIT_USAGE)
 
         if args.retract:
             parts = [p for p in args.retract.split("/") if p]
@@ -1200,6 +1258,8 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
                     "shows it beside the withdrawn build, and an admin whose fleet is "
                     "being rolled back has nothing else to go on.", EXIT_USAGE)
             r_kind, r_platform, r_version = parts
+            if current_version(channel, r_kind, r_platform) == r_version:
+                uncurrented.add((r_kind, r_platform))
             note_retracted(channel, r_kind, r_platform, r_version,
                            args.reason.strip(), sign_release.utcnow_iso())
             if retract_record(channel, r_kind, r_platform, r_version):
@@ -1212,6 +1272,48 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
                       "locally is exactly who needs to hear about it.", file=out)
             print(f"[publish-feed]   reason: {args.reason.strip()}", file=out)
             retracted.add((r_kind, r_platform, r_version))
+            published_something = True
+
+        if set_current_key is not None:
+            sc_kind, sc_platform, sc_version = set_current_key
+            target = existing_package(channel, sc_kind, sc_platform, sc_version)
+            if target is None:
+                carried = sorted(
+                    (str(p.get("version") or "") for p in channel.get("packages", [])
+                     if (p.get("kind"), p.get("platform")) == (sc_kind, sc_platform)),
+                    key=sign_release.version_tuple)
+                raise PublishFeedError(
+                    f"--set-current {args.set_current}: this channel carries no such record "
+                    f"(it has {sc_kind}/{sc_platform} " + (", ".join(carried) or "nothing")
+                    + "). A pointer at a version the feed does not carry makes every "
+                      "`policy = current` dashboard offer NOTHING for that pair. Nothing was "
+                      "uploaded.", EXIT_USAGE)
+            if set_current_key in retracted_keys(channel):
+                raise PublishFeedError(
+                    f"--set-current {args.set_current}: that build is on this channel's "
+                    "RECALL list, and every dashboard refuses to make it current. Name a "
+                    "build that was not withdrawn. Nothing was uploaded.", EXIT_USAGE)
+            # REL-7, applied to a pointer-only move: pointing `current` at a
+            # record signed with a key the build customers are on today does
+            # not trust strands that fleet exactly as publishing it would.
+            before = str(pointer_before.get(f"{sc_kind}/{sc_platform}") or "")
+            before_record = next(
+                (p for p in records_before
+                 if (p.get("kind"), p.get("platform"), p.get("version"))
+                 == (sc_kind, sc_platform, before)), None) if before else None
+            before_keys = _id_list((before_record or {}).get("baked_pubkey_ids"))
+            signing_id = str(target.get("pubkey_id") or "")
+            if (before_keys and signing_id and signing_id not in before_keys
+                    and not args.allow_key_rotation):
+                raise PublishFeedError(
+                    key_rotation_refusal(signing_id, before, before_keys, sc_kind,
+                                         sc_platform,
+                                         ",".join(_id_list(target.get("baked_pubkey_ids")))),
+                    EXIT_USAGE)
+            set_current(channel, sc_kind, sc_platform, sc_version)
+            print(f"[publish-feed] current[{sc_kind}/{sc_platform}] = {sc_version}"
+                  + (f" (was {before})" if before and before != sc_version else "")
+                  + " -- pointer only, no artifact uploaded", file=out)
             published_something = True
 
         if args.artifact:
@@ -1410,7 +1512,42 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             published_something = True
 
         if not published_something:
-            raise PublishFeedError("nothing to do -- pass --artifact/--manifest, --asset and/or --set-image", EXIT_USAGE)
+            raise PublishFeedError("nothing to do -- pass --artifact/--manifest, --asset, "
+                                   "--set-current and/or --set-image", EXIT_USAGE)
+
+        # logic-release-2 (2026-09-25): a --retract of the CURRENT build used
+        # to leave that pair with no pointer, and a dashboard with no pointer
+        # takes the highest version on the channel. A newer build the vendor
+        # had only STAGED ("nobody is offered this yet, on any policy") then
+        # became what every `policy = current` site published and made
+        # current, on the very command the operator ran to roll the fleet
+        # BACK. So a retract that un-currents a pair must say what replaces
+        # it, or say out loud that highest-wins is what it means.
+        for u_kind, u_platform in sorted(uncurrented):
+            if current_version(channel, u_kind, u_platform) or args.allow_no_current:
+                continue
+            left = sorted(
+                (str(p.get("version") or "") for p in channel.get("packages", [])
+                 if (p.get("kind"), p.get("platform")) == (u_kind, u_platform)),
+                key=sign_release.version_tuple)
+            if not left:
+                continue
+            gone = next(v for (k, plat, v) in retracted if (k, plat) == (u_kind, u_platform))
+            below = [v for v in left
+                     if sign_release.version_tuple(v) < sign_release.version_tuple(gone)]
+            suggest = below[-1] if below else left[-1]
+            newer = (sign_release.version_tuple(left[-1])
+                     > sign_release.version_tuple(gone))
+            raise PublishFeedError(
+                f"--retract {u_kind}/{u_platform}/{gone} removes the build `current` points "
+                "at, and nothing replaces it. With no pointer every `policy = current` "
+                "dashboard takes the HIGHEST version left on the channel, which is "
+                f"{left[-1]}" + (", a NEWER build, staged or not: not a rollback" if newer
+                                 else "") + ".\n"
+                f"Name the build the fleet should be on: add --set-current "
+                f"{u_kind}/{u_platform}/{suggest} (the channel carries {', '.join(left)}), or "
+                "--allow-no-current if highest-wins is really what you mean. Nothing was "
+                "uploaded.", EXIT_USAGE)
 
         if args.dry_run:
             print("[dry-run] channel would be:", file=out)

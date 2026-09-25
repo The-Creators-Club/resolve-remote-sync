@@ -10,7 +10,12 @@
   --green: #2bff88;
   --amber: #ffb02e;
   --text: #e8e8ea;
-  --muted: #6f6f7a;
+  /* ui-dash-static-5 (2026-09-25): was #6f6f7a, 3.8:1 on --panel and 3.6:1
+     on --field, under WCAG AA's 4.5:1 for the 11-12 px sentences that carry
+     the next action (why-lines, stamps, row labels). #8a8a96 is 5.8 / 5.6 /
+     5.3:1 on --bg / --panel / --field and still reads as secondary beside
+     --text. */
+  --muted: #8a8a96;
 
   /* The mobile tokens (2026-08-30, MOBILE_PLAN.md 3.1). A media query cannot
      read a custom property, so the two breakpoints are written out as
@@ -181,7 +186,10 @@ a { color: inherit; text-decoration: none; }
   letter-spacing: 0.08em;
 }
 .drawer-head .dim { color: var(--red-dim); }
-.drawer-close { color: var(--red-dim); font-size: 11px; }
+/* ui-dash-static-5 (2026-09-25): --red-dim is 1.8:1 on the page, a border
+   colour; as the text of the drawer's close control (both copies, the phone
+   foot's included) it was unreadable outdoors. --red is 5:1 on --panel. */
+.drawer-close { color: var(--red); font-size: 11px; }
 .drawer-close:hover { color: var(--red-hot); }
 .drawer-nav { display: flex; flex-direction: column; padding: 0.6rem 0; }
 .drawer-item {
@@ -768,6 +776,10 @@ tr.current-row { background: var(--field); }
   margin-bottom: 1.4rem;
 }
 .root-line { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+/* ui-dash-main-5 (2026-09-25): the WHICH COMPUTER chips. .mono-sm is
+   nowrap, so as a plain line a long Mac hostname ran off a 390 px screen
+   and could not be tapped; as flex items each chip moves to the next row. */
+.fix-root-machines { display: flex; align-items: baseline; gap: 0.3rem 0.4rem; flex-wrap: wrap; }
 .root-select {
   font-size: 12px;
   padding: 0.15rem 0.3rem;
@@ -1030,6 +1042,10 @@ details.queue-group[open] > summary .marker {
   color: var(--red-hot);
 }
 details.queue-group > .clip-list li { justify-content: space-between; }
+/* bug-dash-db-2 owed round 2 (2026-09-25): a queue row's explanatory
+   sentence sits in a .mono-sm (nowrap) summary; unwrapped, the capped
+   computer's "cannot tell" line ran the desktop page sideways. */
+details.queue-group > summary .queue-note { white-space: normal; flex: 1 1 20rem; min-width: 0; }
 
 /* ---------------- media presence / bins ---------------- */
 .presence-box {
@@ -1875,15 +1891,31 @@ input[type="range"]:disabled {
    is fixed to the bottom, not the top: the buttons that provoked the failure
    are at the bottom of these panels, and a refusal two thousand pixels above
    the viewport is a refusal nobody reads. */
-.stale-banner {
+.banner.alarm.stale-banner {
+  /* ui-dash-static-7: three classes, because .banner.alarm (two) sets its own
+     margin and padding and used to win over this rule's, which is how the
+     banner floated 0.4rem off the bottom edge with no room for --safe-b. */
   position: fixed;
   left: 0;
   right: 0;
   bottom: 0;
   z-index: 60;
   margin: 0;
-  padding: 0.5rem 0.9rem;
+  /* ui-dash-static-7 (2026-09-25): the installed PWA paints edge to edge
+     (viewport-fit=cover), so without --safe-b the end of the sentence ran
+     under the iPhone home indicator. .chip-sheet already did this. */
+  padding: 0.5rem 0.9rem calc(0.5rem + var(--safe-b, 0px));
   text-align: center;
+}
+/* ui-dash-static-7: while the banner is up it covered the last lines of the
+   page and the assignments page's error toasts, which stay until clicked and
+   so could neither be read nor dismissed. --stale-h is the banner's measured
+   height (htmx_errors.js), because the reason wraps to a different number of
+   lines on every screen; 4rem is the guess for a browser that set nothing. */
+body[data-stale] { padding-bottom: var(--stale-h, 4rem); }
+body[data-stale] .toast-host {
+  bottom: calc(1rem + var(--stale-h, 4rem));
+  z-index: 65;
 }
 
 /* DUI-1: the one-time credential box. Loud on purpose and NOT the amber
@@ -1899,6 +1931,11 @@ input[type="range"]:disabled {
 }
 .minted-value {
   word-break: break-all;
+  /* ui-dash-admin-11 (2026-09-25): the value also carries .mono-sm, whose
+     nowrap beat break-all, so a 70-character cce1 token ran ~500 px out of
+     the box on a phone and took the page sideways. This rule comes later in
+     the file at the same specificity, so it wins. */
+  white-space: normal;
   user-select: all;
   margin: 0.4rem 0;
   color: var(--text);
@@ -1941,8 +1978,11 @@ input[type="range"]:disabled {
 
 /* DUI-6: the refusal, moved next to the control that caused it. The panels
    still render their banner at the top -- that is right for an error with no
-   button behind it -- and htmx_errors.js relocates the ones that have one. */
-.banner.form-error {
+   button behind it -- and htmx_errors.js relocates the ones that have one.
+   .form-result (ui-dash-admin-5, 2026-09-25) is the same move for an outcome
+   that is not a refusal: a failed test send, a failed rehearsal. */
+.banner.form-error,
+.form-result {
   margin: 0.3rem 0;
   display: block;
 }
@@ -2002,7 +2042,8 @@ form.htmx-request input { pointer-events: none; }
 .help-file { padding: 0.12rem 0; line-height: 1.35; }
 .help-file-current > a { color: var(--red); font-weight: bold; }
 .help-file-name { font-size: 11px; margin-left: 0.4rem; }
-.help-file-note { font-size: 11px; color: var(--red-dim); margin-left: 0.4rem; }
+/* ui-dash-static-5: was --red-dim (1.8:1), the same unreadable note text. */
+.help-file-note { font-size: 11px; color: var(--muted); margin-left: 0.4rem; }
 .help-file-path { font-size: 11px; margin: 0.2rem 0 0.9rem; }
 @media (max-width: 900px) {
   .help-browser { display: block; }
@@ -2044,3 +2085,9 @@ form.htmx-request input { pointer-events: none; }
   margin-bottom: 0.6rem;
 }
 /* ===== END wave 4 of the usability sweep ============================== */
+
+/* ui-dash-admin-6 (2026-09-25): Site Settings answers each button on the
+   line beside it, not above the first field a screen away. */
+.settings-result { margin-left: 0.6rem; }
+.settings-result.ok { color: var(--green); }
+.settings-result.bad { color: var(--red-hot); }

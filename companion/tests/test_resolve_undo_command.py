@@ -291,7 +291,7 @@ def test_no_project_open_parks_the_undo_instead_of_failing_it():
 
     assert not ok
     assert state == resolve_undo.STATE_RETRYING, "it must still be offered again"
-    assert "Parked" in detail and "no project open in Resolve" in detail
+    assert "Waiting" in detail and "no project open in Resolve" in detail
     assert "as soon as that project is open" in detail or "next time that project is open" in detail
     assert "—" not in detail
 

@@ -247,8 +247,10 @@ def test_begin_after_clear_is_a_fresh_episode(tmp_path):
     reminder, notes = _reminder(tmp_path, interval=0.05)
     reminder.begin("1 upload")
     reminder.clear()
-    reminder.begin("3 other files")
-    assert reminder.active and reminder.summary == "3 other files"
+    # logic-sync-truth-6 (2026-09-25): an upload, because only an owed
+    # upload starts the recurring thread now.
+    reminder.begin("3 uploads")
+    assert reminder.active and reminder.summary == "3 uploads"
     assert reminder._thread is not None and reminder._thread.is_alive()
     assert threading.active_count() >= 2
     reminder.clear()

@@ -480,6 +480,33 @@ def job_state(dest: str) -> Optional[str]:
         return job.state
 
 
+def reap_finished(dest: str) -> Optional[str]:
+    """Pop a FINISHED job for `dest` and say how it ended; None when there is
+    no such job or it is still running.
+
+    bug-comp-broll-3 (2026-09-25): terminal jobs were popped only by a
+    `poll_fetch` read, and every caller checks the file on disk FIRST. rclone
+    renames `.partial` into place before `_run_job` flips the job to DONE, so
+    the poll that would have read DONE found the file and never asked: one
+    DONE job per fetched clip stayed for the life of the process, and after
+    that clip was deleted the next Send to Resolve read the stale DONE, found
+    no file, and answered "is the share mounted?". A caller that finds the
+    file in place calls this, which also tells it the download it is looking
+    at is the one this process ran.
+    """
+    key = _job_key(dest)
+    with _JOBS_LOCK:
+        job = _JOBS.get(key)
+        if job is None:
+            return None
+        with job.lock:
+            state = job.state
+        if state not in (STATE_DONE, STATE_FAILED):
+            return None
+        _JOBS.pop(key, None)
+    return state
+
+
 def stop_all() -> None:
     """Kill every in-flight download. For companion shutdown; never raises.
 

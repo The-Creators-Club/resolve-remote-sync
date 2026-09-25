@@ -53,6 +53,16 @@ DEFAULT_ABSOLUTE_SECONDS = 7 * 24 * 3600
 # design, and a session touch is not allowed to compete with it.
 TOUCH_INTERVAL_SECONDS = 60.0
 
+# bug-dash-auth-2 (2026-09-25): how long the sliding touch (and the delete of
+# an expired row) may wait for the write lock. `validate` runs INLINE on the
+# event loop -- login_gate and csrf_gate are async middlewares on a
+# single-worker container -- so the 20 s background timeout `_connect` uses
+# stopped every request on the dashboard for up to 20 s behind a collector
+# write, and then raised anyway (the CR-282F shape through another door). The
+# touch is best effort: last_seen is written again by the next request a
+# minute on, and missing one costs at most a minute of idle lifetime.
+TOUCH_BUSY_MS = 250
+
 # Login throttle. Budgets are counted per username AND per client IP; whichever
 # is exhausted first blocks. Backoff doubles per failure past the limit so a
 # patient attacker gets minutes, not seconds, between guesses.
@@ -137,14 +147,14 @@ class SessionStore:
 
     # ------------------------------------------------------------- plumbing
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, busy_ms: int | None = None) -> sqlite3.Connection:
         # A LONGER busy timeout than a request's own connection gets
-        # (2026-09-03 database is locked, api_report held the lock). The touch
-        # below is one UPDATE of one row, and it runs on every authenticated
-        # request: when it lost the race for the write lock it raised, and a
-        # signed-in admin got a 500 on the fleet grid because somebody's
-        # companion was mid-report. Waiting is the right answer here.
-        return db.connect(self.db_path, busy_ms=db.BUSY_TIMEOUT_BACKGROUND_MS)
+        # (2026-09-03 database is locked, api_report held the lock) for the
+        # writes that MUST land (create, revoke, the login throttle). The
+        # sliding touch no longer comes through here with it: it passes
+        # TOUCH_BUSY_MS and gives up instead (bug-dash-auth-2, see there).
+        return db.connect(self.db_path,
+                          busy_ms=db.BUSY_TIMEOUT_BACKGROUND_MS if busy_ms is None else busy_ms)
 
     def ensure_schema(self, conn: sqlite3.Connection | None = None) -> None:
         own = conn is None
@@ -157,12 +167,12 @@ class SessionStore:
             if own:
                 conn.close()
 
-    def _run(self, fn, write: bool = False):
+    def _run(self, fn, write: bool = False, busy_ms: int | None = None):
         """Open a connection, run `fn(conn)`, and self-heal the one failure
         that is expected in practice: a database whose auth tables have not
         been created yet (a fresh /data, or a test that built its own DB)."""
         for attempt in (0, 1):
-            conn = self._connect()
+            conn = self._connect(busy_ms)
             try:
                 result = fn(conn)
                 if write:
@@ -225,16 +235,39 @@ class SessionStore:
             return None
         if idle > self.idle_seconds or age > self.absolute_seconds:
             # Expired sessions are deleted rather than left to accumulate: the
-            # row exists to be revocable, and an expired one is not.
-            self.delete(sid)
+            # row exists to be revocable, and an expired one is not. Best
+            # effort for the same reason as the touch below: the answer is
+            # "no session" either way, and a row left behind is deleted by
+            # the next request that carries it.
+            def drop(conn: sqlite3.Connection) -> None:
+                conn.execute("DELETE FROM auth_sessions WHERE sid = ?", (sid,))
+
+            self._best_effort_write(drop, "delete an expired session")
             return None
         if idle >= TOUCH_INTERVAL_SECONDS:
             def touch(conn: sqlite3.Connection) -> None:
                 conn.execute("UPDATE auth_sessions SET last_seen = ? WHERE sid = ?", (now, sid))
 
-            with _write_lock:
-                self._run(touch, write=True)
+            self._best_effort_write(touch, "slide last_seen")
         return row["username"]
+
+    def _best_effort_write(self, fn, what: str) -> bool:
+        """bug-dash-auth-2 (2026-09-25): a write `validate` makes on the way
+        through, which must never stall the event loop or turn a valid
+        session into an error. The module lock is taken without waiting (a
+        revoke or a throttle write holding it is itself waiting on SQLite),
+        the connection waits TOUCH_BUSY_MS, and "database is locked" is a
+        skip, not a raise. False when skipped."""
+        if not _write_lock.acquire(blocking=False):
+            return False
+        try:
+            self._run(fn, write=True, busy_ms=TOUCH_BUSY_MS)
+            return True
+        except sqlite3.OperationalError as exc:
+            log.debug("session store: could not %s now (%s); the next request will", what, exc)
+            return False
+        finally:
+            _write_lock.release()
 
     def delete(self, sid: str) -> None:
         def go(conn: sqlite3.Connection) -> None:

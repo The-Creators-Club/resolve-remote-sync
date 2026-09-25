@@ -946,96 +946,102 @@ def write_item_result(conn, batch, item, body):
     the source-bias directions are all relative to the library, so a new track
     changes everybody's numbers, and there is no cheaper honest version.
     """
-    if item['track_id']:
-        # A retried result for a track this batch already wrote: update it in
-        # place rather than allocating a second name for the same audio.
-        dest_name = item['dest_name']
-    else:
-        dest_name = allocate_name(
-            conn, body.name or item['orig_name'],
-            transcoded=bool(body.transcoded),
-            reserved=reserved_names(conn))
-    _check_transition(item['state'], 'indexed')
+    # bug-music-ytdl-2 (2026-09-25): the pick and the commit that makes it
+    # visible happen under db.NAME_LOCK, the lock a browser upload's
+    # db.claim_dest takes. Between allocate_name and the commit below the
+    # name is in neither `tracks` nor the ledger, and a browser drop that
+    # checked in that gap took the same name.
+    with db.NAME_LOCK:
+        if item['track_id']:
+            # A retried result for a track this batch already wrote: update it in
+            # place rather than allocating a second name for the same audio.
+            dest_name = item['dest_name']
+        else:
+            dest_name = allocate_name(
+                conn, body.name or item['orig_name'],
+                transcoded=bool(body.transcoded),
+                reserved=reserved_names(conn))
+        _check_transition(item['state'], 'indexed')
 
-    blob, dim = _embedding_blob(body)
-    library_dim = _library_dim(conn)
-    if library_dim and dim != library_dim:
-        # Not a 500 and not silence: an embedding of another width is another
-        # model's, and mixing two models in one index makes every cosine in it
-        # meaningless. The companion is told which two numbers disagree so the
-        # operator can see it is a model-version problem.
-        raise HTTPException(409, {
-            'detail': f'this library is indexed at {library_dim} dimensions and '
-                      f'the embedding has {dim}; the CC Sync tray is running a '
-                      f'different CLAP model version',
-            'reason': 'model_mismatch', 'expected_dim': library_dim, 'dim': dim})
+        blob, dim = _embedding_blob(body)
+        library_dim = _library_dim(conn)
+        if library_dim and dim != library_dim:
+            # Not a 500 and not silence: an embedding of another width is another
+            # model's, and mixing two models in one index makes every cosine in it
+            # meaningless. The companion is told which two numbers disagree so the
+            # operator can see it is a model-version problem.
+            raise HTTPException(409, {
+                'detail': f'this library is indexed at {library_dim} dimensions and '
+                          f'the embedding has {dim}; the CC Sync tray is running a '
+                          f'different CLAP model version',
+                'reason': 'model_mismatch', 'expected_dim': library_dim, 'dim': dim})
 
-    now = now_iso()
-    probe = body.probe or {}
-    # Whether this is a NEW row decides one thing outside the database
-    # (music-4, 2026-08-21): a created row takes max(rowid)+1, which is the id
-    # of the highest row ever deleted, and the preview proxy is keyed by id
-    # alone. Read before the INSERT, acted on after it commits.
-    created = conn.execute('SELECT id FROM tracks WHERE rel_path = ?',
-                           (dest_name,)).fetchone() is None
-    try:
-        with conn:
-            cur = conn.execute(
-                'INSERT INTO tracks(share, rel_path, filename, ext, bytes, '
-                'duration, samplerate, channels, codec, bpm, music_key, '
-                'key_conf, lufs, peak_db, embedding, dim, file_hash, model, '
-                'analyzed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
-                'ON CONFLICT(rel_path) DO UPDATE SET '
-                'bytes=excluded.bytes, duration=excluded.duration, '
-                'samplerate=excluded.samplerate, channels=excluded.channels, '
-                'codec=excluded.codec, bpm=excluded.bpm, '
-                'music_key=excluded.music_key, key_conf=excluded.key_conf, '
-                'lufs=excluded.lufs, peak_db=excluded.peak_db, '
-                'embedding=excluded.embedding, dim=excluded.dim, '
-                'model=excluded.model, analyzed_at=excluded.analyzed_at',
-                (batch['share'] or config.SHARE, dest_name, dest_name,
-                 Path(dest_name).suffix.lower(), body.size_bytes,
-                 body.duration, probe.get('samplerate'), probe.get('channels'),
-                 probe.get('codec'), body.bpm, body.music_key, body.key_conf,
-                 body.lufs, body.peak_db, blob, dim,
-                 # file_hash is the indexer's size+mtime fingerprint and this
-                 # host has no file to stat yet. The CONTENT hash is what
-                 # dashboard ingest knows, and recording it here is what stops
-                 # a later sweep re-analysing a track it already has.
-                 body.content_hash or None, body.model, now))
-            track_id = conn.execute('SELECT id FROM tracks WHERE rel_path = ?',
-                                    (dest_name,)).fetchone()['id']
-            _write_windows(conn, track_id, body)
-            _write_peaks(conn, track_id, body)
-            conn.execute(
-                "UPDATE ingest_items SET state = 'indexed', stage_percent = 100, "
-                'error = NULL, track_id = ?, dest_name = ?, transcoded = ?, '
-                'content_hash = COALESCE(?, content_hash), updated_at = ? '
-                'WHERE uid = ?',
-                (track_id, dest_name, int(bool(body.transcoded)),
-                 body.content_hash or None, now, item['uid']))
-            _apply_probe(conn, item['uid'], {
-                'duration_s': body.duration, **{k: probe.get(k) for k in
-                                                ('samplerate', 'channels', 'codec')}})
-            if batch['state'] == 'claimed':
+        now = now_iso()
+        probe = body.probe or {}
+        # Whether this is a NEW row decides one thing outside the database
+        # (music-4, 2026-08-21): a created row takes max(rowid)+1, which is the id
+        # of the highest row ever deleted, and the preview proxy is keyed by id
+        # alone. Read before the INSERT, acted on after it commits.
+        created = conn.execute('SELECT id FROM tracks WHERE rel_path = ?',
+                               (dest_name,)).fetchone() is None
+        try:
+            with conn:
+                cur = conn.execute(
+                    'INSERT INTO tracks(share, rel_path, filename, ext, bytes, '
+                    'duration, samplerate, channels, codec, bpm, music_key, '
+                    'key_conf, lufs, peak_db, embedding, dim, file_hash, model, '
+                    'analyzed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                    'ON CONFLICT(rel_path) DO UPDATE SET '
+                    'bytes=excluded.bytes, duration=excluded.duration, '
+                    'samplerate=excluded.samplerate, channels=excluded.channels, '
+                    'codec=excluded.codec, bpm=excluded.bpm, '
+                    'music_key=excluded.music_key, key_conf=excluded.key_conf, '
+                    'lufs=excluded.lufs, peak_db=excluded.peak_db, '
+                    'embedding=excluded.embedding, dim=excluded.dim, '
+                    'model=excluded.model, analyzed_at=excluded.analyzed_at',
+                    (batch['share'] or config.SHARE, dest_name, dest_name,
+                     Path(dest_name).suffix.lower(), body.size_bytes,
+                     body.duration, probe.get('samplerate'), probe.get('channels'),
+                     probe.get('codec'), body.bpm, body.music_key, body.key_conf,
+                     body.lufs, body.peak_db, blob, dim,
+                     # file_hash is the indexer's size+mtime fingerprint and this
+                     # host has no file to stat yet. The CONTENT hash is what
+                     # dashboard ingest knows, and recording it here is what stops
+                     # a later sweep re-analysing a track it already has.
+                     body.content_hash or None, body.model, now))
+                track_id = conn.execute('SELECT id FROM tracks WHERE rel_path = ?',
+                                        (dest_name,)).fetchone()['id']
+                _write_windows(conn, track_id, body)
+                _write_peaks(conn, track_id, body)
                 conn.execute(
-                    "UPDATE ingest_batches SET state = 'running', "
-                    'started_at = COALESCE(started_at, ?), updated_at = ? '
-                    'WHERE uid = ?', (now, now, batch['uid']))
-            counts = _recount(conn, batch['uid'])
-    except sqlite3.IntegrityError as exc:
-        # Overwhelmingly UNIQUE(rel_path): another batch landed this name
-        # between the allocation and the INSERT. The companion retries the
-        # result, which re-allocates around it.
-        log.warning('music ingest: result for %s hit a constraint: %s',
-                    item['uid'], exc)
-        # music-2 (2026-09-11): `retry` in the payload, because the companion
-        # classified every non-200 as a permanent failure for the track. The
-        # wording is unchanged; what is new is that the flag says so in a field
-        # rather than only in prose.
-        raise HTTPException(409, retry_detail(
-            'another batch claimed that filename first; retry',
-            'name_race')) from exc
+                    "UPDATE ingest_items SET state = 'indexed', stage_percent = 100, "
+                    'error = NULL, track_id = ?, dest_name = ?, transcoded = ?, '
+                    'content_hash = COALESCE(?, content_hash), updated_at = ? '
+                    'WHERE uid = ?',
+                    (track_id, dest_name, int(bool(body.transcoded)),
+                     body.content_hash or None, now, item['uid']))
+                _apply_probe(conn, item['uid'], {
+                    'duration_s': body.duration, **{k: probe.get(k) for k in
+                                                    ('samplerate', 'channels', 'codec')}})
+                if batch['state'] == 'claimed':
+                    conn.execute(
+                        "UPDATE ingest_batches SET state = 'running', "
+                        'started_at = COALESCE(started_at, ?), updated_at = ? '
+                        'WHERE uid = ?', (now, now, batch['uid']))
+                counts = _recount(conn, batch['uid'])
+        except sqlite3.IntegrityError as exc:
+            # Overwhelmingly UNIQUE(rel_path): another batch landed this name
+            # between the allocation and the INSERT. The companion retries the
+            # result, which re-allocates around it.
+            log.warning('music ingest: result for %s hit a constraint: %s',
+                        item['uid'], exc)
+            # music-2 (2026-09-11): `retry` in the payload, because the companion
+            # classified every non-200 as a permanent failure for the track. The
+            # wording is unchanged; what is new is that the flag says so in a field
+            # rather than only in prose.
+            raise HTTPException(409, retry_detail(
+                'another batch claimed that filename first; retry',
+                'name_race')) from exc
 
     if created:
         # Any mp3 already sitting at this id belonged to a track that was
@@ -1235,11 +1241,18 @@ def release(conn, batch, *, state, summary=None):
     reports what it did, the server decides what to call it, so a track that
     failed cannot be summarised away.
 
-    On `cancelled`, items still in flight are cancelled with it. What is NOT
-    deleted is any `tracks` row already written: unlike b-roll's `ingesting`
-    videos, a music row only exists because a real embedding arrived, and if
-    its audio never landed it is `indexed` rather than `live` -- visible in the
-    ledger, fixable by re-uploading, and not a name-holding ghost.
+    On `cancelled`, items still in flight are cancelled with it, and so is
+    the `tracks` row of every `indexed`/`uploading` item whose audio is not on
+    the share (bug-hunt-2026-09-24 bug-music-ytdl-4 / logic-broll-music-3,
+    2026-09-25). This docstring used to promise such an item stayed `indexed`
+    and "fixable by re-uploading"; the UPDATE below made it `cancelled`, which
+    is terminal and which `retry_failed` does not reach, so the row stayed in
+    search, similar, browse and every percentile with an audio route that
+    404s, and held its filename, for ever. Nothing will upload it: the
+    companion stops its upload queue before it releases. A row whose file IS
+    on disk (the upload landed, `uploaded` did not) is real and stays, and so
+    does every row when this host cannot see the share, because "not on disk"
+    means nothing then.
     """
     if state not in ('done', 'failed', 'cancelled'):
         raise HTTPException(422, 'release state must be done, failed or cancelled')
@@ -1249,21 +1262,66 @@ def release(conn, batch, *, state, summary=None):
         final = state
         if state == 'done' and counts['n_failed']:
             final = 'done_with_errors'
+        dropped = []
         if state == 'cancelled':
+            dropped = _drop_unlanded_tracks(conn, batch['uid'])
             conn.execute(
                 "UPDATE ingest_items SET state = 'cancelled', updated_at = ? "
                 'WHERE batch_uid = ? AND state NOT IN '
                 "('live', 'duplicate', 'skipped', 'cancelled', 'queued_for_base_rig')",
                 (now, batch['uid']))
+            if dropped:
+                # Library-relative scores counted these rows; the release
+                # route's _settle_scores (or the next result) re-scores.
+                db.set_meta(conn, rescore.SCORES_STALE, now)
         conn.execute(
             'UPDATE ingest_batches SET state = ?, error = ?, finished_at = ?, '
             'lease_expires_at = NULL, current_item_uid = NULL, updated_at = ? '
             'WHERE uid = ?',
             (final, _summary_text(summary), now, now, batch['uid']))
         counts = _recount(conn, batch['uid'])
+    # After the commit, as prune_missing does: deleting the row is what frees
+    # its id for the next insert, so a proxy left behind would preview this
+    # cue under a new track's name (music-4, 2026-08-21).
+    for track_id in dropped:
+        config.drop_proxy(track_id)
+    if dropped:
+        log.info('music ingest: cancelled batch %s dropped %d track row(s) whose '
+                 'audio never reached the library', batch['uid'], len(dropped))
     log.info('music ingest: batch %s released as %s (%d live, %d failed)',
              batch['uid'], final, counts['n_live'], counts['n_failed'])
     return {'ok': True, 'state': final, **counts}
+
+
+def _drop_unlanded_tracks(conn, batch_uid):
+    """Delete this batch's track rows whose audio never landed. -> track ids.
+
+    Runs inside release()'s transaction. Conservative in every direction that
+    cannot be decided: a share this host cannot see, a stat that raises, or
+    any spelling of the name present on disk keeps the row.
+    """
+    rows = conn.execute(
+        'SELECT uid, track_id, dest_name FROM ingest_items WHERE batch_uid = ? '
+        "AND state IN ('indexed', 'uploading') AND track_id IS NOT NULL "
+        'AND dest_name IS NOT NULL', (batch_uid,)).fetchall()
+    if not rows:
+        return []
+    ok, _why = config.share_root_ready(conn)
+    if not ok:
+        return []
+    gone = []
+    for r in rows:
+        taken, unsure = _disk_state(r['dest_name'])
+        if taken or unsure:
+            continue
+        gone.append(r)
+    for r in gone:
+        # windows/tags/axes/peaks cascade (schema.sql); prune_missing refuses
+        # without foreign keys for the same reason, and db.con() turns them on.
+        conn.execute('DELETE FROM tracks WHERE id = ?', (r['track_id'],))
+        conn.execute('UPDATE ingest_items SET track_id = NULL WHERE uid = ?',
+                     (r['uid'],))
+    return [r['track_id'] for r in gone]
 
 
 def _summary_text(summary):

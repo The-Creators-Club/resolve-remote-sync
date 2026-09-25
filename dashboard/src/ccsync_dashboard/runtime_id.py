@@ -98,7 +98,7 @@ def base_image_from_dockerfile(text: str) -> str:
     match = _ARG_BASE_IMAGE.search(text)
     if match is None:
         raise ValueError(
-            "the Dockerfile declares no `ARG BASE_IMAGE=` line -- the runtime id "
+            "the Dockerfile declares no `ARG BASE_IMAGE=` line: the runtime id "
             "cannot be computed without the base image it pins")
     return match.group("value").strip()
 

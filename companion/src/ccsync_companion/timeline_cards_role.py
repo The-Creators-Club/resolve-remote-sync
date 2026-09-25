@@ -237,19 +237,25 @@ def check_contract(engine_mod: Any) -> Any:
     """
     version = getattr(engine_mod, "BRIDGE_CONTRACT_VERSION", None)
     wanted = timeline_cards_bridge.CONTRACT_VERSION
+    # ui-copy owed round 3 (2026-09-25): the three sentences below reach the
+    # dashboard's machine row, which an admin reads; a bug id and a doc
+    # section are for us, so they live here. Why a second connection is
+    # refused: CR-68 (one scriptapp() caller per machine). The contract
+    # itself: docs/TIMELINE-CARDS-INTO-CCSYNC.md §7c, whose engine is
+    # SyncEngine(root, bridge=...).
     if version is None:
         raise CardsRoleError(
             "this Timeline Cards checkout has no bridge contract: its "
             "ResolveEngine still owns a Resolve connection of its own, which "
-            "cannot run beside the companion's (CR-68). Update the checkout "
+            "cannot run beside the companion's. Update the checkout "
             "to one that defines BRIDGE_CONTRACT_VERSION = "
-            f"{wanted} (docs/TIMELINE-CARDS-INTO-CCSYNC.md §7c)",
+            f"{wanted}.",
             STATE_NO_ENGINE)
     if int(version) != wanted:
         raise CardsRoleError(
             f"this Timeline Cards checkout implements bridge contract "
-            f"{version} and this companion speaks {wanted} "
-            f"(docs/TIMELINE-CARDS-INTO-CCSYNC.md §7c)", STATE_OLD_ENGINE)
+            f"{version} and this companion speaks {wanted}, so one of the "
+            "two needs updating.", STATE_OLD_ENGINE)
     engine_cls = engine_class(engine_mod)
     if engine_cls is None:
         raise CardsRoleError(
@@ -261,7 +267,7 @@ def check_contract(engine_mod: Any) -> Any:
     if "bridge" not in parameters:
         raise CardsRoleError(
             f"{engine_cls.__name__} says it speaks bridge contract {version} "
-            f"but takes no `bridge` argument (§7c: SyncEngine(root, bridge=...))",
+            "but takes no `bridge` argument. Update the checkout.",
             STATE_OLD_ENGINE)
     return engine_cls
 
@@ -275,7 +281,10 @@ _AGENT_MARKERS = ("reorder_web.py", "multicam_pipeline")
 # The one answer that is neither a sighting nor a clearance. A CONSTANT since
 # RES-7, because `refusal()` gives it its own sentence: rendering "Found: this
 # machine's processes could not be listed" read as if something had been seen.
-PROBE_UNREADABLE = "this machine's processes could not be listed"
+# ui-copy-4 (2026-09-25): "computer", the editor-facing word (sweep
+# 2026-09-03 section 4). Only ever compared with this constant, never parsed
+# on either side of the wire, so the rewording is safe on any dashboard.
+PROBE_UNREADABLE = "this computer's processes could not be listed"
 
 
 def describe_process(line: str) -> str:
@@ -387,7 +396,10 @@ def make_tunnel_client(agent_mod: Any, role: "TimelineCardsRole", engine: Any) -
 
     class _TunnelClient(agent_mod.AgentClient):                 # type: ignore[misc]
         def _req(self, path, doc=None, timeout=30):
-            return role.call(path, doc, timeout)
+            # bug-comp-resolve-4 (2026-09-25): the client names itself, so a
+            # loop left over from a role the watchdog replaced is refused
+            # rather than served (see TimelineCardsRole.call).
+            return role.call(path, doc, timeout, caller=self)
 
     # The token is empty ON PURPOSE and stays empty: the cards server's own
     # secret lives in the dashboard container and is attached there. Anything
@@ -396,6 +408,31 @@ def make_tunnel_client(agent_mod: Any, role: "TimelineCardsRole", engine: Any) -
 
 
 # ------------------------------------------------------------------ the role
+
+# logic-cards-9 (2026-09-25): how the tunnel says "this editor is in no
+# episode". `attached: false` is the machine-readable key (owed to the
+# dashboard's cards_tunnel._no_engine); a dashboard that predates it is known
+# by its shapes: the long poll's `{"note": ...}` is only ever that answer, and
+# the state/result routes' `{"error": ...}` carries this sentence. Anything
+# else with an `error` came from an engine, which is attached by definition.
+_NO_ENGINE_SENTENCE = "is not in a timeline cards episode"
+
+
+def _is_no_engine_answer(parsed: Any) -> bool:
+    """Is this 200 the tunnel's "no episode for this editor" refusal?"""
+    if not isinstance(parsed, dict):
+        return False
+    attached = parsed.get("attached")
+    if attached is False:
+        return True
+    if attached is True:
+        return False
+    note = parsed.get("note")
+    if isinstance(note, str) and note.strip():
+        return True
+    error = parsed.get("error")
+    return isinstance(error, str) and _NO_ENGINE_SENTENCE in error.lower()
+
 
 class TimelineCardsRole:
     """The thread, the gate and the credential. Never raises out of
@@ -447,6 +484,9 @@ class TimelineCardsRole:
         # wire-3 / dash-cards-8 (2026-09-18): the sentence a 200 carried,
         # when that 200 meant "I threw your push away". See _note_answer.
         self._not_attached = ""
+        # logic-cards-9 (2026-09-25): the last engine-side refusal sentence,
+        # so it is logged once per change like the not-attached one.
+        self._last_refusal = ""
         # THE EVIDENCE report_block() JUDGES ON (RES-6). `_last_poll_at` is
         # any successful tunnel call, not only a `state` push: the pull loop
         # long-polls `pending` and a role whose push loop alone had died would
@@ -509,7 +549,11 @@ class TimelineCardsRole:
             answer = standalone_agent(self._processes_fn())
         except Exception:
             log.debug("cards: the standalone-agent probe failed", exc_info=True)
-            answer = "this machine's processes could not be listed"
+            # ui-copy-4 (2026-09-25): THE CONSTANT, not a copy of its words:
+            # `refusal()` tells "cannot tell" from a sighting by comparing
+            # with it, so a copy reworded on one side only would draw a
+            # probe that raised as "already driving Resolve here".
+            answer = PROBE_UNREADABLE
         self._probe = (now, answer)
         self._probed = True
         return answer
@@ -554,8 +598,10 @@ class TimelineCardsRole:
                     "on its own within a minute")
         if self._halted():
             return (STATE_HALTED,
-                    "the fleet is halted, so this machine is not taking work "
-                    "of any kind")
+                    # ui-copy-4 (2026-09-25): the owner-approved words for a
+                    # fleet halt (sweep 2026-09-03 section 4), not "halted".
+                    "syncing is stopped by your admin, so this computer is "
+                    "not taking work of any kind")
         if not self.checkout:
             return (STATE_NO_CHECKOUT,
                     "jobs_mulcam_pipeline is not set, so there is no Timeline "
@@ -570,9 +616,11 @@ class TimelineCardsRole:
             # machine's processes could not be listed", which reads like
             # something was seen and sent people looking for it (RES-7).
             return (STATE_STANDALONE_AGENT,
+                    # ui-copy-4 (2026-09-25): no bug id in a sentence an
+                    # editor reads; the rule it cites lives in the comments.
                     "another Timeline Cards process may be running here and "
-                    "this machine's processes could not be listed, so the "
-                    "companion is not starting the role (CR-68)")
+                    "this computer's processes could not be listed, so the "
+                    "companion is not starting the role")
         if found:
             # comp-resolve-3 (2026-09-11): THE PROCESS LEADS. The old sentence
             # put RES-7's `describe_process` last, at character 247 of a field
@@ -581,7 +629,7 @@ class TimelineCardsRole:
             # act on. What gets cut now is constant advice, not the pid.
             head = "a Timeline Cards process is already driving Resolve here: "
             tail = (". Close the standalone Timeline Cards agent and this "
-                    "computer picks the page up within a minute (CR-68)")
+                    "computer picks the page up within a minute")
             budget = DETAIL_MAX_CHARS - len(head) - len(tail)
             return (STATE_STANDALONE_AGENT,
                     head + _elide(describe_process(found), budget) + tail)
@@ -863,14 +911,40 @@ class TimelineCardsRole:
                 "X-CCSync-Token": self._token,
                 "X-CCSync-Identity": identity}
 
-    def call(self, path: str, doc: Optional[dict] = None, timeout: float = 30.0) -> Any:
+    def _is_current(self, caller: Any) -> bool:
+        """Is `caller` the client this role is serving with right now? True
+        for no caller at all (a direct call, not a loop's)."""
+        if caller is None:
+            return True
+        with self._lock:
+            return caller is self._client
+
+    def call(self, path: str, doc: Optional[dict] = None, timeout: float = 30.0,
+             caller: Any = None) -> Any:
         """One `/agent/*` call, re-pointed at the dashboard's tunnel.
 
         `AgentClient` builds paths like `/agent/pending?wait=25&token=...`.
         The token in that query is dropped: this companion holds no cards
         token, the dashboard attaches the real one, and a secret in a query
         string is a secret in somebody's access log.
+
+        `caller` is the tunnel client making the call. A client that is no
+        longer `self._client` is REFUSED, before the request and again after
+        it (bug-comp-resolve-4, 2026-09-25). regression-8 restarts the role
+        when ONE loop dies, and the other loop of the old client is a daemon
+        thread in a long poll that nothing can stop: served, it went on
+        taking /cards/agent/pending commands and applying them through the
+        released engine, beside the new engine's own pull loop -- two
+        Timeline Cards engines driving one Resolve. Refused, it gets a
+        CardsTunnelError, which its own retry/back-off treats like any
+        dashboard error, and it never receives work again. The check after
+        the request covers a long poll that was already in flight at the
+        restart: that command is dropped (the page reports it unanswered)
+        rather than applied by an engine this role has let go of.
         """
+        if not self._is_current(caller):
+            raise CardsTunnelError(
+                "this Timeline Cards client has been replaced; it takes no more work")
         raw, _, query = str(path).partition("?")
         suffix = raw.rsplit("/", 1)[-1]
         if suffix not in ("state", "pending", "result"):
@@ -919,6 +993,11 @@ class TimelineCardsRole:
                        + (f": {detail}" if detail else ""))
             self._note_call(int(status), message)
             raise CardsTunnelError(message)
+        if not self._is_current(caller):
+            log.warning("cards: dropped a %s answer that arrived for a Timeline "
+                        "Cards client the role has replaced", suffix)
+            raise CardsTunnelError(
+                "this Timeline Cards client has been replaced; it takes no more work")
         self._note_call(200, "")
         if self._note_answer(parsed):
             # wire-3 / dash-cards-8 (2026-09-18): a 200 that DISCARDED this
@@ -944,6 +1023,18 @@ class TimelineCardsRole:
         route's `{}` and a real answer carry neither. Logged once per change,
         not once per call: the loops run every few seconds and a person who
         has not opened an episode yet is not an incident.
+
+        logic-cards-9 (2026-09-25): only ONE of those refusals means "the
+        dashboard is discarding this computer's pushes" -- the tunnel's own
+        no-engine answer (see _is_no_engine_answer). An `error` from an
+        ENGINE is an engine that exists and answered: `/agent/result`'s
+        routine "that request is no longer open" for an edit it already let
+        go, or an engine exception `_local` wrapped. Those were logged at
+        WARNING as the discarding sentence and replaced the fleet grid's
+        detail, sending the reader to look at routing for one late edit.
+        They still return True (the push was not served), are logged at INFO
+        once per change, and CLEAR the not-attached state: an engine
+        answering is the proof that this computer is attached.
         """
         sentence = ""
         if isinstance(parsed, dict):
@@ -952,16 +1043,23 @@ class TimelineCardsRole:
                 if isinstance(value, str) and value.strip():
                     sentence = value.strip()[:300]
                     break
+        not_attached = sentence if (sentence and _is_no_engine_answer(parsed)) else ""
         with self._lock:
-            changed = sentence != self._not_attached
-            self._not_attached = sentence
+            changed = not_attached != self._not_attached
+            self._not_attached = not_attached
+            refusal_changed = (sentence and not not_attached
+                               and sentence != getattr(self, "_last_refusal", ""))
+            self._last_refusal = "" if not_attached else sentence
         if changed:
-            if sentence:
+            if not_attached:
                 log.warning("cards: the dashboard is discarding this "
-                            "computer's pushes: %s", sentence)
+                            "computer's pushes: %s", not_attached)
             else:
                 log.info("cards: the dashboard is taking this computer's "
                          "pushes again")
+        if refusal_changed:
+            log.info("cards: Timeline Cards refused one request (the episode "
+                     "is attached): %s", sentence)
         return bool(sentence)
 
     def _note_call(self, status: Optional[int], error: str) -> None:

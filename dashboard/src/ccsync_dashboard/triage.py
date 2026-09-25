@@ -611,8 +611,23 @@ def prune(conn: sqlite3.Connection, settings: Any, now: str) -> int:
     return len(old)
 
 
+def mask_reference(text: str) -> str:
+    """`CCT-<token>` cut to its last four characters.
+
+    bug-dash-ops-6 (2026-09-25): the run row keeps only sha256(token) so that
+    a database reader cannot mint a reply, but the stored copy of the mailed
+    body carried `Reference: CCT-<token>` in full, served on the check's page
+    and copied into every backup and snapshot for the token's 48 h. The
+    plaintext belongs in the outgoing email and nowhere else; the tail is
+    enough to match a stored copy against a mail in the owner's inbox."""
+    return triage_mail.TOKEN_RE.sub(
+        lambda m: f"CCT-...{m.group(1)[-4:]}", str(text or ""))
+
+
 def _finish(conn: sqlite3.Connection, run_id: int, now: str, status: str,
             report: Mapping[str, Any], email_ok: bool, detail: str) -> None:
+    if report.get("body"):
+        report = {**report, "body": mask_reference(str(report["body"]))}
     conn.execute(
         "UPDATE triage_runs SET finished_at=?, status=?, report_json=?, email_ok=?, "
         "detail=? WHERE id=?",
@@ -689,7 +704,16 @@ def run(settings: Any, now: str | None = None, *, forced: bool = False) -> dict[
                 "VALUES (?, ?, ?, ?, ?, 'offered')",
                 (run_id, a["n"], a["action"], triage_actions.params_json(a["params"]),
                  a.get("why") or ""))
-        outcome = _send(conn, settings, subject, text, reply_to, now)
+        # logic-alerts-4 (2026-09-25): Reply-To only on a report that offers
+        # something to reply to. An all-clear, a "nothing can be done by
+        # reply" report and the fallback carry no CCT reference, so the
+        # owner's natural "thanks" to one reached the +address, was refused
+        # under `reference` and opened a triage_reply_refused card telling
+        # him to reply to an email that had nothing to reply with. Without
+        # the header his reply goes to his own From address, which the poll
+        # never reads: nothing refused, no card.
+        mail_reply_to = reply_to if (offered and reply_enabled) else ""
+        outcome = _send(conn, settings, subject, text, mail_reply_to, now)
         email_ok = bool(outcome["ok"])
         _finish(conn, run_id, db.utcnow_iso(), status,
                 {"subject": subject, "body": text, "report": report, "forced": forced},
@@ -886,4 +910,6 @@ def report_text(conn: sqlite3.Connection, run_id: int) -> str | None:
     if not report.get("body"):
         return (f"Server check #{row['id']}, started {row['started_at']}: "
                 f"{row['status']}. {row['detail'] or ''}\n")
-    return f"Subject: {report.get('subject', '')}\n\n{report['body']}"
+    # bug-dash-ops-6: masked on the way out too, for a row written before
+    # `_finish` masked it (a run's row outlives its token's 48 h).
+    return f"Subject: {report.get('subject', '')}\n\n{mask_reference(report['body'])}"

@@ -55,7 +55,7 @@ def test_notice_href_derives_the_project_page_from_the_subject():
     """`inventory_refused` and `plan_without_share` are about ONE project when
     the subject names one, and about the fleet when it does not."""
     assert dbmod.notice_href("inventory_refused", "ff5-lab")[0] == "/project/ff5-lab"
-    assert dbmod.notice_href("enforce_refusal", "share removals")[0] == "/fleet"
+    assert dbmod.notice_href("enforce_refusal", "share removals")[0] == "/"
     assert dbmod.notice_href(
         "plan_without_share", "jsmith/EDIT-PC -> ff5-lab")[0] == "/project/ff5-lab"
 
@@ -136,7 +136,7 @@ def test_machine_forgotten_fires_past_the_give_up_line_and_names_forget(conn):
     assert "OLD-LAPTOP" in rows[0]["body"] and "jsmith" in rows[0]["body"]
     assert "last reported" in rows[0]["body"]
     assert "[ FORGET ]" in rows[0]["fix"]
-    assert dbmod.notice_href("machine_forgotten")[0] == "/fleet"
+    assert dbmod.notice_href("machine_forgotten")[0] == "/"
     assert notices.SILENT_GIVE_UP_DAYS == 14
 
 

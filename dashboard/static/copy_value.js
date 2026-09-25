@@ -25,10 +25,58 @@
     } catch (err) { /* selection is a nicety; never break the click */ }
   }
 
-  function flash(btn) {
-    var was = btn.textContent;
-    btn.textContent = btn.getAttribute("data-copied-label") || "[ COPIED ]";
-    setTimeout(function () { btn.textContent = was; }, 2000);
+  // ui-dash-static-8 (2026-09-25): the idle label is read ONCE and kept on
+  // the button. flash() used to save whatever the button said, so a second
+  // click inside the 2 s window saved "[ COPIED ]" as the label to go back
+  // to, and the button said COPIED for good over a password nobody copied.
+  function flash(btn, label) {
+    if (!btn.hasAttribute("data-idle-label")) {
+      btn.setAttribute("data-idle-label", btn.textContent);
+    }
+    if (btn._copyTimer) clearTimeout(btn._copyTimer);
+    btn.textContent = label || btn.getAttribute("data-copied-label") || "[ COPIED ]";
+    btn._copyTimer = setTimeout(function () {
+      btn._copyTimer = null;
+      btn.textContent = btn.getAttribute("data-idle-label");
+    }, 2000);
+  }
+
+  // ui-dash-static-8: on a plain-http origin navigator.clipboard is absent,
+  // and the click used to select the value and change nothing on the button,
+  // so the admin could not tell whether a one-time password was copied.
+  // execCommand("copy") still works there from a click; when it does not,
+  // the button says what is left to do.
+  function legacyCopy(src, text) {
+    var ok = false;
+    var scratch = null;
+    try {
+      if (src) {
+        select(src);
+      } else {
+        scratch = document.createElement("textarea");
+        scratch.value = text;
+        scratch.setAttribute("readonly", "");
+        scratch.style.position = "fixed";
+        scratch.style.top = "-1000px";
+        document.body.appendChild(scratch);
+        scratch.select();
+      }
+      ok = !!(document.execCommand && document.execCommand("copy"));
+    } catch (err) {
+      ok = false;
+    }
+    if (scratch && scratch.parentNode) scratch.parentNode.removeChild(scratch);
+    return ok;
+  }
+
+  function fallback(btn, src, text) {
+    if (legacyCopy(src, text)) { flash(btn); return; }
+    if (src) {
+      select(src);
+      flash(btn, "[ SELECTED - PRESS CTRL+C ]");
+    } else {
+      flash(btn, "[ COULD NOT COPY ]");
+    }
   }
 
   document.addEventListener("click", function (evt) {
@@ -43,10 +91,10 @@
       navigator.clipboard.writeText(text).then(function () {
         flash(btn);
       }).catch(function () {
-        if (src) select(src);
+        fallback(btn, src, text);
       });
       return;
     }
-    if (src) select(src);
+    fallback(btn, src, text);
   });
 })();

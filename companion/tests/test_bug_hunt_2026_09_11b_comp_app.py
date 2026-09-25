@@ -529,7 +529,7 @@ def test_the_rate_limiters_hold_off_is_logged_once_per_cooldown(tmp_path,
     app = _app(tmp_path)
     monkeypatch.setattr(resolve_bridge, "media_pool_item_is_reachable",
                         lambda item: True)
-    monkeypatch.setattr(resolve_bridge, "current_project_name", lambda: "P")
+    monkeypatch.setattr(resolve_bridge, "current_project_name", lambda *a, **k: "P")
     monkeypatch.setattr(resolve_journal, "allow_automatic",
                         lambda project, kind: False)
     caplog.set_level(logging.INFO, logger="ccsync.app")

@@ -286,7 +286,7 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.44"
+$InstallerVersion = "1.0.45"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see
@@ -389,6 +389,45 @@ function Get-BareAccountName {
     return $text.Trim()
 }
 
+function Get-FirstSetupSteps {
+    <#  The end banner's first three "remaining manual steps", as lines.
+        ui-onboarding-11 (2026-09-25): every wizard install ended its saved
+        log with "1. tailscale up ... 2. ssh-keygen ... send the .pub file ...
+        3. SIGN IN", written for a hand run and pointing at a docs/ folder an
+        editor does not have. onboard.exe has already done all three by the
+        time this script runs (the Tailscale page gates NEXT on a live
+        connection; the wizard makes the key, offers it to the dashboard and
+        writes identity.json), and an editor or admin reading the log made
+        and sent a second key. onboard.exe says so through
+        $env:CCSYNC_FROM_WIZARD (onboarding/steps.py FROM_WIZARD_ENV). Pure,
+        so installer/tests/Test-FirstSetupSteps.ps1 can table it. #>
+    param([bool]$FromWizard, [string]$KeyFilePath)
+    if ($FromWizard) {
+        return @(
+            " Remaining steps:",
+            "   1-3. DONE BY THE SETUP WIZARD: Tailscale is joined, this computer's",
+            "        SSH key is made, and the companion is signed in. The wizard's",
+            "        last page says whether the key still has to be sent to your admin."
+        )
+    }
+    return @(
+        " Remaining manual steps (see docs/EDITOR_SETUP.md):",
+        "   1. tailscale up   (join the tailnet, one-time interactive login)",
+        "   2. generate an SSH keypair for rclone if you haven't already:",
+        "        ssh-keygen -t ed25519 -f `"$KeyFilePath`"",
+        "      and send the .pub file to the admin",
+        "   3. SIGN IN: right-click the CCSync tray icon (bottom-right of",
+        "      your taskbar) and choose `"Sign in...`", then enter the SAME",
+        # logic-onboarding-4 (2026-09-25): not "TrueNAS": false on a Synology
+        # site and on DASH_AUTH_METHOD=local, where the account is a dashboard one.
+        "      username and password the admin gave you.",
+        "      NOTHING SYNCS UNTIL YOU DO THIS -- the companion deliberately",
+        "      refuses to touch your files until it knows who you are, and",
+        "      signing in on the dashboard WEBSITE is not the same thing.",
+        "      (If you installed via onboard.exe this is already done.)"
+    )
+}
+
 function Test-ConsoleUserMismatch {
     <#  The refusal message, or "" when there is nothing to say. Pure string
         in / string out so installer\tests\Test-ConsoleUser.ps1 can check the
@@ -398,7 +437,12 @@ function Test-ConsoleUserMismatch {
     $running = Get-BareAccountName $RunningUser
     if (-not $signedIn -or -not $running) { return "" }
     if ([string]::Equals($signedIn, $running, [System.StringComparison]::OrdinalIgnoreCase)) { return "" }
-    return "You are running as $running but $signedIn is signed in. Everything this installs is per-user, so $signedIn would get nothing. Sign in as $signedIn and run it again (it does not need administrator rights)."
+    # ui-onboarding-10 (2026-09-25): "Sign in as $signedIn" told the person to
+    # do what was already done; what has to change is HOW this was started (a
+    # PowerShell window opened through Run as administrator or with another
+    # account's password). The first two sentences match
+    # onboarding/steps.py console_user_mismatch.
+    return "You are running as $running but $signedIn is signed in. Everything this installs is per-user, so $signedIn would get nothing. $signedIn does not need to sign in again: close this window and run the script again from a PowerShell window opened normally in $signedIn's session, not through Run as administrator or with another account's password (it does not need administrator rights)."
 }
 
 function Get-ConsoleUser {
@@ -2453,18 +2497,11 @@ else {
         Write-Host " is what shares it."
     }
     Write-Host ""
-    Write-Host " Remaining manual steps (see docs/EDITOR_SETUP.md):"
-    Write-Host "   1. tailscale up   (join the tailnet, one-time interactive login)"
-    Write-Host "   2. generate an SSH keypair for rclone if you haven't already:"
-    Write-Host "        ssh-keygen -t ed25519 -f `"$KeyFilePath`""
-    Write-Host "      and send the .pub file to the admin"
-    Write-Host "   3. SIGN IN: right-click the CCSync tray icon (bottom-right of"
-    Write-Host "      your taskbar) and choose `"Sign in...`", then enter the SAME"
-    Write-Host "      TrueNAS username and password the admin gave you."
-    Write-Host "      NOTHING SYNCS UNTIL YOU DO THIS -- the companion deliberately"
-    Write-Host "      refuses to touch your files until it knows who you are, and"
-    Write-Host "      signing in on the dashboard WEBSITE is not the same thing."
-    Write-Host "      (If you installed via onboard.exe this is already done.)"
+    # ui-onboarding-11 (2026-09-25): steps 1-3 through Get-FirstSetupSteps,
+    # which knows whether onboard.exe ran this script (it has done all three).
+    foreach ($setupLine in (Get-FirstSetupSteps -FromWizard ($env:CCSYNC_FROM_WIZARD -eq "1") -KeyFilePath $KeyFilePath)) {
+        Write-Host $setupLine
+    }
     Write-Host "   4. connect DaVinci Resolve to the Project Server"
     Write-Host "   5. Playback > Proxy Handling > Prefer Proxies"
     Write-Host "   6. do NOT map any NAS share to another drive letter -- see the"

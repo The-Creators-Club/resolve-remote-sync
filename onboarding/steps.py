@@ -132,7 +132,7 @@ from ccsync_companion import site as site_mod
 # CCSYNC_CANONICAL_PREFIX/CCSYNC_TREE_NAME) so one failed fetch cannot map
 # one letter while config.toml names another. Both bootstraps changed, so
 # the shared number moves.
-INSTALLER_VERSION = "1.0.44"
+INSTALLER_VERSION = "1.0.45"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every
@@ -457,6 +457,9 @@ DEFAULT_REMOTE_ROOT = ""
 # Invoke-WebRequest, or a hung `subst` would otherwise block the worker
 # thread forever -- see run_bootstrap).
 BOOTSTRAP_TIMEOUT_SECONDS = 1800
+# Set in the bootstrap's environment by run_bootstrap (ui-onboarding-11); both
+# scripts' end banners read it.
+FROM_WIZARD_ENV = "CCSYNC_FROM_WIZARD"
 BOOTSTRAP_SCRIPT_NAME = "windows_bootstrap.ps1"
 BOOTSTRAP_SCRIPT_NAME_MACOS = "macos_bootstrap.sh"
 COMPANION_EXE_NAME = "ccsync-companion.exe"
@@ -695,8 +698,50 @@ def parse_eula_version(text: str) -> str:
     return match.group(1) if match else ""
 
 
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+_MD_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$", re.M)
+_MD_BOLD_RE = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1", re.S)
+_MD_ITALIC_RE = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])")
+_MD_CODE_RE = re.compile(r"`([^`\n]+)`")
+_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
+
+
+def eula_display_text(text: Optional[str]) -> str:
+    """The licence as an editor should read it in a plain Tk Text widget.
+
+    ui-onboarding-2 (2026-09-25): the page inserted EULA.md VERBATIM, so the
+    first thing every new editor read was the internal `DRAFT FOR COUNSEL
+    ... TODO(legal) ... almost certainly NOT the correct contracting entity`
+    comment, then `#` and `**` markup, and 14 em dashes (owner rule: none in
+    anything an editor reads). Display only: the acceptance hash and
+    parse_eula_version still read the raw EULA_TEXT, so what is recorded is
+    exactly the document the companion checks against. The WORDS of the
+    agreement are counsel's and are not touched here (the entity name and the
+    bracketed TODO(legal) placeholders in the body are docs/legal/'s to fix).
+    """
+    out = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    out = _HTML_COMMENT_RE.sub("", out)
+
+    def _heading(match: "re.Match[str]") -> str:
+        words = match.group(2)
+        # Top two levels read as headings in a monospace box only if they
+        # stand out, and upper case is the one emphasis plain text has.
+        return words.upper() if len(match.group(1)) <= 2 else words
+
+    out = _MD_HEADING_RE.sub(_heading, out)
+    out = _MD_BOLD_RE.sub(r"\2", out)
+    out = _MD_ITALIC_RE.sub(r"\1", out)
+    out = _MD_CODE_RE.sub(r"\1", out)
+    out = _MD_LINK_RE.sub(r"\1 (\2)", out)
+    # " — " -> " - " first so a spaced dash does not become a double space.
+    out = out.replace(" \u2014 ", " - ").replace("\u2014", " - ")
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip() + ("\n" if out.strip() else "")
+
+
 EULA_TEXT = eula_text()
 EULA_VERSION = parse_eula_version(EULA_TEXT)
+EULA_DISPLAY_TEXT = eula_display_text(EULA_TEXT)
 
 
 def eula_acceptance_path(home: Optional[Path] = None) -> Path:
@@ -866,7 +911,92 @@ def verify_account(
         # config.toml's static mode (see ccsync_companion.app's
         # _apply_identity_role, which write_identity()'s role param feeds).
         "role": resp.get("role"),
+        # logic-onboarding-2 (2026-09-25): "shared" or "editor" (api.py,
+        # dash-core-2). None from a dashboard older than that key, which the
+        # wizard reads as "no opinion" -- never as "a per-editor token is
+        # needed" -- so a new wizard against an old dashboard behaves exactly
+        # as it did.
+        "report_token_kind": resp.get("report_token_kind"),
     }
+
+
+# -- the fleet credential (logic-onboarding-2, 2026-09-25) --------------------
+# Once an operator follows the documented migration and sets
+# DASH_SHARED_REPORT_TOKEN_ENABLED=0, /verify answers report_token "" and
+# report_token_kind "editor": this computer will only be let in with a
+# per-editor `cce1.` token minted on Settings > Users > REPORT TOKENS, which
+# /verify deliberately never hands out (CR-18). Nothing read that key, the
+# wizard had no field for the token, and its finish page said DONE for a
+# machine whose every report 401s. The shape is the dashboard's own
+# (db._REPORT_TOKEN_RE), copied because the wizard cannot import the dashboard.
+EDITOR_REPORT_TOKEN_RE = re.compile(r"^cce1\.[0-9a-f]{16}\.[0-9a-f]{48}$")
+
+FLEET_TOKEN_PANEL = "Settings > Users > REPORT TOKENS"
+
+
+def looks_like_editor_report_token(token: Optional[str]) -> bool:
+    """Shape only, exactly like db.looks_like_editor_report_token."""
+    return bool(EDITOR_REPORT_TOKEN_RE.match(str(token or "").strip()))
+
+
+def existing_editor_report_token(config_path: Optional[Path] = None,
+                                 identity_path: Optional[Path] = None) -> str:
+    """A per-editor fleet token this computer already holds, else "". The two
+    places identity.preferred_report_token looks for one: identity.json
+    `editor_report_token`, then config.toml `report_token`. Never raises."""
+    try:
+        ipath = Path(identity_path) if identity_path is not None else identity_mod.identity_path()
+        data = identity_mod.load_identity(ipath) or {}
+        held = str(data.get("editor_report_token") or "").strip()
+        if held:
+            return held
+    except Exception:
+        pass
+    cpath = Path(config_path) if config_path is not None else config_mod.CONFIG_PATH
+    try:
+        text = cpath.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ""
+    literal = _existing_literal(text, "report_token")
+    if literal is None:
+        return ""
+    return literal.strip().strip('"').strip("'").strip()
+
+
+def fleet_token_needed(report_token: Optional[str], report_token_kind: Optional[str],
+                       existing: Optional[str] = "") -> bool:
+    """True when this install must ask for a per-editor token: the dashboard
+    said so in words ("editor"), handed out no shared token, and this
+    computer does not already hold a per-editor one (a re-run of a migrated
+    machine must not be asked again)."""
+    if str(report_token_kind or "").strip().lower() != "editor":
+        return False
+    if str(report_token or "").strip():
+        return False
+    return not str(existing or "").strip()
+
+
+def fleet_token_problem(value: Optional[str]) -> Optional[str]:
+    """None when the typed fleet key is usable (blank is usable: the install
+    goes ahead and the finish page says NOT READY), else a one-line reason."""
+    text = str(value or "")
+    if not text.strip():
+        return None
+    if text != text.strip():
+        return "remove the space before or after the key"
+    if not looks_like_editor_report_token(text):
+        return ("that is not a report token: it starts with cce1. and is one long "
+                "line of letters and numbers, copied from " + FLEET_TOKEN_PANEL)
+    return None
+
+
+def missing_fleet_token_warning() -> str:
+    """The finish-page line for a machine installed with no fleet credential."""
+    return ("no fleet key: this dashboard no longer hands out the shared report "
+            "token, and no report token was entered, so the dashboard will refuse "
+            "every report from this computer and it will never appear on the fleet "
+            "page. Ask your admin for a report token (" + FLEET_TOKEN_PANEL + "), "
+            "then run this installer again and paste it on the install page.")
 
 
 def submit_ssh_key(
@@ -936,16 +1066,46 @@ def tailscale_installed(
         return True
     if _is_mac(platform):
         return exists(TAILSCALE_APP_MACOS) or exists(TAILSCALE_CLI_MACOS)
+    return exists(tailscale_exe_windows())
+
+
+def tailscale_exe_windows() -> str:
+    """Where Tailscale's Windows installer puts its CLI."""
     program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
-    return exists(str(Path(program_files) / "Tailscale" / "tailscale.exe"))
+    return str(Path(program_files) / "Tailscale" / "tailscale.exe")
 
 
 def _tailscale_cli_candidates(platform: Optional[str] = None) -> list[str]:
     """Executables to try for `... status`, in order. On macOS the CLI lives
-    inside the .app and is normally not on PATH at all."""
+    inside the .app and is normally not on PATH at all.
+
+    ui-onboarding-4 (2026-09-25): on Windows the bare name alone is resolved
+    against THIS process's PATH, captured when the wizard started, i.e. before
+    INSTALL TAILSCALE (winget) added Tailscale's folder to it. So a join check
+    after installing from this very page raised FileNotFoundError and said
+    "tailscale isn't joined yet" for ever, until the wizard was restarted.
+    The install location is tried next, the path tailscale_installed checks.
+    """
     if _is_mac(platform):
         return ["tailscale", TAILSCALE_CLI_MACOS]
-    return ["tailscale"]
+    return ["tailscale", tailscale_exe_windows()]
+
+
+def winget_tailscale_outcome(returncode: Optional[int], installed: bool) -> tuple[str, bool]:
+    """(message, succeeded) for the INSTALL TAILSCALE (winget) button.
+
+    ui-onboarding-4 (2026-09-25): the button printed a GREEN "winget install
+    finished" for every exit that was not an exception, including a failed
+    download and a cancelled UAC prompt. The fact that matters is whether
+    Tailscale is on disk afterwards, so that decides; the exit code is only
+    named when it failed (winget also exits non-zero for "already installed,
+    nothing newer", which is a success here)."""
+    if installed:
+        return ("Tailscale is installed. Sign in to it (its icon in the tray), "
+                "then press CHECK CONNECTION."), True
+    code = "" if returncode is None else f" (winget exit code {returncode})"
+    return (f"winget did not install Tailscale{code}. Try OPEN DOWNLOAD PAGE "
+            "and run the installer from there."), False
 
 
 def tailscale_up(run: RunFn = subprocess.run, platform: Optional[str] = None) -> bool:
@@ -1620,6 +1780,12 @@ def run_bootstrap(
     # can never be mismatched here.
     child_env = dict(os.environ)
     child_env["CCSYNC_DASHBOARD_TOKEN"] = str(dashboard_token or "")
+    # ui-onboarding-11 (2026-09-25): tells both bootstraps' end banners that
+    # this wizard has already joined Tailscale, made (and offered) the SSH key
+    # and signed the companion in, so the saved install log stops listing
+    # them as "remaining manual steps" an editor or admin then repeats. An
+    # environment variable, not a flag: a script that predates it ignores it.
+    child_env[FROM_WIZARD_ENV] = "1"
     if nas_device_id:
         # macos_bootstrap.sh has no flag for it (it reads
         # CCSYNC_NAS_SYNCTHING_ID); the .ps1 takes -NasSyncthingId above and
@@ -1749,44 +1915,95 @@ def bootstrap_hard_failure(exit_code: Any, capability_problems: Optional[list[st
 INSTALL_ROLES = ("editor", "base")
 
 
-def effective_install_role(picked_role: Optional[str], verified_role: Optional[str]) -> str:
-    """The role the install must actually RUN as, given the radio button the
-    editor picked and the role the dashboard verified the account as.
+def effective_install_role(picked_role: Optional[str], verified_role: Optional[str] = None) -> str:
+    """The role the install must actually RUN as: the radio button the editor
+    picked, which since logic-onboarding-1 (2026-09-25) is the only input.
 
-    The verified role wins whenever the dashboard sent a recognised one. The
-    radio is a guess made before anyone signed in; `verified_role` is what
-    /api/v1/verify says the account is, and it is already what the companion
-    itself obeys once it starts (see write_identity's role param).
+    `verified_role` is what /api/v1/verify says the ACCOUNT is, and the
+    dashboard derives it from the admin list (api.py `role`), i.e. from the
+    PERSON. Until 2026-09-25 it beat the radio, on the grounds that "the
+    companion obeys it anyway". CR-88 (companion 0.9.54) ended that: wired or
+    remote is the COMPUTER's own setting, read from config.toml `mode` only,
+    and this wizard was the last place still turning the person's role into
+    the machine's mode. The failures that caused (the bug-hunt-2026-09-24
+    finding, and data-model-2 / CR-66 before it): an admin re-running the
+    wizard on his REMOTE laptop got a base install (mode=base, local_root on
+    the NAS letter, the Syncthing and tree-drive autostarts deleted), and a
+    non-admin on a wired office desktop could never get the wired install
+    the refusal told them to pick. MULTI_BASE_RIG_PLAN.md WP5: the radio wins.
+    The parameter stays for the callers' sake and is deliberately unread.
 
-    This matters because the roles are not symmetric in cost (B20): an
-    "editor" install tears P: down (`subst P: /D` + `net use P: /delete /y`)
-    and recreates it as a loopback share of a LOCAL folder. Run that on the
-    base rig -- whose P: is the real NAS share every P:\\Projects\\... clip
-    path in the Resolve database resolves through -- and the whole tree goes
-    offline. Dispatching on the radio meant a base-rig re-run with the default
-    "editor" selection did exactly that, while the wizard printed an amber
-    note saying it knew better.
+    What made the old precedence feel necessary (B20: an "editor" install
+    tears the tree drive down and re-shares a LOCAL folder under its letter,
+    which on a wired machine takes the live NAS mapping away) is guarded
+    MECHANICALLY now, on the machine's facts rather than the account's:
+    execute_cleanup's p_mapping_is_ours refusal and the bootstrap's
+    $PIsForeign refusal both leave a real NAS mapping alone, and
+    validate_local_root refuses an editor local_root on the tree drive or a
+    network path. A re-run also starts from this machine's own config.toml
+    `mode` (initial_install_role), so the default radio is no longer a trap.
     """
-    verified = str(verified_role or "").strip().lower()
-    if verified in INSTALL_ROLES:
-        return verified
+    del verified_role  # the person's role; see the docstring
     picked = str(picked_role or "").strip().lower()
     if picked in INSTALL_ROLES:
         return picked
-    # Neither is usable. "base" is the non-destructive one -- it never touches
-    # a drive mapping -- so an unknown role must land there, not on the branch
-    # that unmounts P:.
+    # Unusable. "base" is the non-destructive one -- it never touches a drive
+    # mapping -- so an unknown role must land there, not on the branch that
+    # unmounts P:.
     return "base"
+
+
+def read_config_mode(config_path: Optional[Path] = None) -> Optional[str]:
+    """`mode` from an existing ~/.ccsync/config.toml when it is one of
+    INSTALL_ROLES, else None. Never raises. Read as TEXT, not through
+    config.load_config: that applies MODE_PROFILES and defaults, and a file
+    that never said `mode` must read as "no answer", not as "editor"."""
+    path = Path(config_path) if config_path is not None else config_mod.CONFIG_PATH
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    literal = _existing_literal(text, "mode")
+    if literal is None:
+        return None
+    value = literal.strip().strip('"').strip("'").strip().lower()
+    return value if value in INSTALL_ROLES else None
+
+
+def initial_install_role(config_path: Optional[Path] = None) -> str:
+    """What the role radio starts on (logic-onboarding-1, 2026-09-25): this
+    computer's own config.toml `mode` on a re-run, "editor" on a first run.
+
+    Seeding it from the machine is what keeps a routine re-run on a wired
+    machine from defaulting to the install that remaps the tree drive, now
+    that the account's role no longer silently corrects the radio."""
+    return read_config_mode(config_path) or "editor"
 
 
 # -- identity + config finalization --------------------------------------------
 
-def write_identity(username: str, token: str, role: Optional[str] = None) -> None:
+def write_identity(username: str, token: str, role: Optional[str] = None,
+                   report_token: Optional[str] = None) -> None:
     """Write ~/.ccsync/identity.json so the companion is already signed in
     (with its role already resolved, if the dashboard sent one) when the
     editor first launches it -- see identity.save_identity."""
     path = identity_mod.identity_path()
-    identity_mod.save_identity(path, username, token, role=role)
+    # logic-onboarding-2 (2026-09-25): carry the fleet credentials through the
+    # rewrite, the way the companion's own sign-in does (GOTCHAS "A sign-in
+    # never demotes a migrated machine"). Passing only the identity here
+    # silently dropped a per-editor `cce1.` token from identity.json on every
+    # re-run, which on a site that has retired the shared token is a machine
+    # whose every report 401s after an install that said DONE.
+    try:
+        previous = identity_mod.load_identity(path) or {}
+    except Exception:
+        previous = {}
+    identity_mod.save_identity(
+        path, username, token, role=role,
+        report_token=(str(report_token or "").strip()
+                      or (previous.get("report_token") or None)),
+        editor_report_token=previous.get("editor_report_token") or None,
+    )
 
 
 def finalize_config_identity(username: str, config_path: Optional[Path] = None) -> None:
@@ -2092,9 +2309,11 @@ def finish_warning_lines(warnings: list[str],
     hidden = len(items) - len(shown)
     if hidden > 0:
         shown.append(
+            # ui-onboarding-5 (2026-09-25): "COPY LOG on the previous page"
+            # sent the editor to a page the finish page has no BACK to. The
+            # finish pages carry their own COPY LOG button now.
             f"... and {hidden} more. All of them are in the install log (use "
-            "COPY LOG on the previous page, or the file named at the bottom of "
-            "this one).")
+            "COPY LOG at the bottom of this page, or the file named there).")
     return shown
 
 
@@ -2110,6 +2329,72 @@ def finish_copy_field(value: Optional[str], placeholder: str) -> tuple[str, bool
     if text:
         return text, True
     return placeholder, False
+
+
+def finish_page_copy(ssh_key_sent: bool, username: Optional[str]) -> dict[str, str]:
+    """The editor finish page's words when the install had no warnings.
+
+    logic-onboarding-5 (2026-09-25). Two defects in the old copy: the hint
+    read 'One more step: right-click the tray icon -> "Sign in..." is already
+    done for you', i.e. it announced a step and then said the step was done,
+    and a non-technical editor went looking for a sign-in they did not need;
+    and when _offer_ssh_key had already sent the SSH key to the dashboard
+    (it waits on the Users page for the admin's click), the page still said
+    "send these two values", so the admin got a key already in their queue,
+    which is noise that hides a value that really is missing. The key's field
+    stays on the page either way: it is the fallback if the admin cannot see
+    it."""
+    who = str(username or "").strip() or "you"
+    if ssh_key_sent:
+        return {
+            "heading": "DONE: SEND YOUR DEVICE ID TO YOUR ADMIN",
+            "intro": ("Nothing syncs and no project will be shared with you until your\n"
+                      "admin approves this computer. The companion is installed, signed\n"
+                      f"in as {who}, and will start automatically next login."),
+            "hint": ("You are already signed in. Your SSH key has been sent to the\n"
+                     "dashboard and is waiting for your admin on its Users page, so\n"
+                     "you do not need to send it (it is shown above in case they ask)."),
+            "send": "Send the Syncthing device ID above to your admin to finish signup.",
+        }
+    return {
+        "heading": "DONE: SEND THESE TWO VALUES TO YOUR ADMIN",
+        "intro": ("Nothing syncs and no project will be shared with you until your\n"
+                  "admin approves both of these. The companion is installed, signed\n"
+                  f"in as {who}, and will start automatically next login."),
+        "hint": ("You are already signed in. Nothing downloads until your admin\n"
+                 "approves the two values above."),
+        "send": "Send these two values to your admin to finish signup.",
+    }
+
+
+def welcome_text(drive_letter: str, is_macos: Optional[bool] = None) -> str:
+    """The welcome page body.
+
+    ui-onboarding-6 (2026-09-25): it ended "You'll need the username and
+    password your admin set up for you -- nothing else", and the very next
+    page refuses NEXT without a dashboard url (there has been no compiled-in
+    one since WP0, 2026-08-17). An editor who started with only their login,
+    as told, was stopped on page two waiting for the admin."""
+    mac = IS_MACOS if is_macos is None else bool(is_macos)
+    need = ("You'll need two things from your admin: the dashboard address,\n"
+            "and the username and password they set up for you.\n"
+            "Safe to re-run any time.")
+    if mac:
+        return (
+            "This installer sets up (or refreshes) this Mac for shared\n"
+            "editing: it removes every trace of older CCSync versions,\n"
+            "installs the sync tools and the current companion app (which\n"
+            "updates itself from the dashboard from now on), signs it in,\n"
+            f"and points DaVinci Resolve's {_drive_word(drive_letter)}:\\ mapping at your local copy\n"
+            "of the project tree.\n\n" + need
+        )
+    return (
+        "This installer sets up (or refreshes) this machine for shared\n"
+        "editing: it removes every trace of older CCSync versions,\n"
+        "remounts the project drive, installs the current companion app\n"
+        "(which updates itself from the dashboard from now on), and\n"
+        "signs it in.\n\n" + need
+    )
 
 
 def install_state_dir(home: Optional[Path] = None) -> Path:
@@ -2161,16 +2446,73 @@ def read_install_breadcrumb(home: Optional[Path] = None) -> Optional[dict]:
     return data if isinstance(data, dict) else {}
 
 
-def install_close_warning(drive_letter: str) -> str:
+def install_close_warning(drive_letter: str, role: Optional[str] = None,
+                          is_macos: Optional[bool] = None) -> str:
     """What the WM_DELETE_WINDOW dialog asks mid-install. Here rather than in
     onboard.py so it is testable at all (the wizard has no automated tests)
     and so the drive letter comes from the site manifest -- a literal P: in
     this sentence is exactly the "no customer's name in code" rule one level
-    down (2026-08-17, COMMERCIAL_READINESS.md item 11)."""
-    letter = str(drive_letter or "").strip().rstrip(":\\/") or site_drive_letter(None)
+    down (2026-08-17, COMMERCIAL_READINESS.md item 11).
+
+    ui-onboarding-3 (2026-09-25): only a Windows EDITOR install takes the
+    tree drive down (build_cleanup_plan sets unmount_p for role "editor"
+    alone; the macOS plan never does). Telling a wired machine, or a Mac,
+    that it is about to lose its drive is a false alarm on the one dialog
+    whose whole job is to be believed. role None keeps the editor wording."""
+    what = _half_installed_loss(drive_letter, role, is_macos)
     return (
         "The install is part-way through. Closing now leaves this computer "
-        f"with no CCSync and no {letter} drive. Close anyway?"
+        f"with {what}. Close anyway?"
+    )
+
+
+def _drive_word(drive_letter: str) -> str:
+    return str(drive_letter or "").strip().rstrip(":\\/") or site_drive_letter(None)
+
+
+def _half_installed_loss(drive_letter: str, role: Optional[str],
+                         is_macos: Optional[bool]) -> str:
+    """What a machine interrupted between the clean slate and the end of the
+    install is left without, in words (ui-onboarding-3)."""
+    mac = IS_MACOS if is_macos is None else bool(is_macos)
+    if mac or str(role or "").strip().lower() == "base":
+        return "no CCSync"
+    return f"no CCSync and no {_drive_word(drive_letter)} drive"
+
+
+def breadcrumb_role(crumb: Optional[dict]) -> Optional[str]:
+    """The role the interrupted run was installing as, from the breadcrumb's
+    `clean_slate:<role>` phase, or None (ui-onboarding-3, 2026-09-25). It was
+    written and never read back, so FINISH THE INSTALL landed on a radio that
+    knew nothing about the run it was finishing (on a first run that never
+    reached ensure_config, config.toml has no `mode` to seed it from)."""
+    if not isinstance(crumb, dict):
+        return None
+    _, _, role = str(crumb.get("phase") or "").partition(":")
+    role = role.strip().lower()
+    return role if role in ("base", "editor") else None
+
+
+def interrupted_install_message(drive_letter: str, role: Optional[str] = None,
+                                is_macos: Optional[bool] = None) -> str:
+    """The body of the THE LAST INSTALL DID NOT FINISH page (ui-onboarding-3).
+    Same rule as install_close_warning: the drive is only named where the
+    interrupted install could have taken it down. role None (an unreadable
+    breadcrumb) keeps the editor wording, the worse of the two."""
+    mac = IS_MACOS if is_macos is None else bool(is_macos)
+    base = str(role or "").strip().lower() == "base"
+    if base and mac:
+        tail = "Your NAS mounts were not touched, but the companion is not running."
+    elif base:
+        tail = (f"Your {_drive_word(drive_letter)}: drive mappings were not touched, "
+                "but the companion is not running.")
+    else:
+        tail = "Nothing is syncing."
+    return (
+        "This computer was part-way through an install when the wizard "
+        f"closed. Until it is finished, there is "
+        f"{_half_installed_loss(drive_letter, role, is_macos)} on this "
+        f"machine. {tail}"
     )
 
 
@@ -2207,11 +2549,19 @@ def console_user_mismatch(console_user: Optional[str],
         return None
     if signed_in.casefold() == running.casefold():
         return None
+    # ui-onboarding-10 (2026-09-25): "Sign in as <signed_in>" told the person
+    # to do what was already done; they signed out and back in, started the
+    # installer the same way (a UAC credential prompt answered with another
+    # account's password, or Run as administrator) and got the same refusal.
+    # What has to change is HOW it is started. The opening two sentences are
+    # shared with windows_bootstrap.ps1's Test-ConsoleUserMismatch.
     return (
         f"You are running as {running} but {signed_in} is signed in. "
         f"Everything this installs is per-user, so {signed_in} would get "
-        f"nothing. Sign in as {signed_in} and run it again (it does not need "
-        f"administrator rights)."
+        f"nothing. {signed_in} does not need to sign in again: close this and "
+        f"start the installer again by double-clicking it, and do not choose "
+        f"Run as administrator or type another account's password if Windows "
+        f"asks (it does not need administrator rights)."
     )
 
 
@@ -3118,6 +3468,7 @@ def ensure_config(
     config_path: Optional[Path] = None,
     platform: Optional[str] = None,
     site: Optional[dict[str, Any]] = None,
+    report_token: Optional[str] = None,
 ) -> Path:
     """Write or refresh ~/.ccsync/config.toml BEFORE anything launches the
     companion. An existing file is merged (user tweaks survive; the keys the
@@ -3174,6 +3525,12 @@ def ensure_config(
         # grid would show this editor offline, with the wizard saying DONE
         # (INST-11).
         defaults["dashboard_token"] = _toml_string("")
+    # logic-onboarding-2 (2026-09-25): the per-editor fleet key the editor
+    # pasted on the install page. Forced when given (it is the newest thing
+    # the admin handed over); a blank never touches the key, so a re-run
+    # cannot erase one an admin put here by hand.
+    if str(report_token or "").strip():
+        forced["report_token"] = _toml_string(str(report_token).strip())
     if role == "base":
         root = local_root or default_base_local_root(platform)
         forced["local_root"] = _toml_string(root)

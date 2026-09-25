@@ -969,7 +969,7 @@ def test_one_toast_per_episode_naming_the_biggest_gap(tmp_path):
     # total presented as the project's -- the reading that sent someone hunting
     # for 1046 clips in a project holding 438 (2026-08-10).
     assert "12 clips in Nuclear" in sent[0][0]
-    assert "14 on this machine" in sent[0][0]
+    assert "14 on this computer" in sent[0][0]
     # Same unchanged gap, next scan cycle: silence.
     gen.scan_once()
     assert gen._maybe_notify() is None
@@ -1055,11 +1055,11 @@ def test_the_toast_never_reports_the_machine_total_under_one_project_name(tmp_pa
 
     text = gen._notify_text("2026/FF5/Energy Transition", totals, 438)
     assert "438 clips in Energy Transition" in text
-    assert "1046 on this machine" in text
+    assert "1046 on this computer" in text
 
     # One project holding the whole gap says the number once, not twice.
     single = gen._notify_text("2026/A/One", {**totals, "missing": 5}, 5)
-    assert "5 clips in One" in single and "on this machine" not in single
+    assert "5 clips in One" in single and "on this computer" not in single
 
     # And an unknown project still names the total rather than nothing.
     assert "1046" in gen._notify_text("", totals, 0)

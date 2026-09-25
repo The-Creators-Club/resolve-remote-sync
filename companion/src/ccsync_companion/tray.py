@@ -24,6 +24,7 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -46,6 +47,7 @@ from . import ytdl_cookies
 from . import ytdl_executor
 from . import ytdlp_manager
 from .sync.base import STATE_ERROR, STATE_PAUSED, STATE_SYNCING, LaneStatus
+from .sync.syncthing_lane import NO_PEER_DETAIL as _LANE_C_NO_PEER
 
 if TYPE_CHECKING:
     from .app import CompanionApp
@@ -89,6 +91,7 @@ from .tray_native import (  # noqa: E402
     _clamp_menu_anchor,
     _taskbar_geometry,
 )
+from .tray_native import fit_toast as _fit_tail  # noqa: E402
 
 from . import theme
 
@@ -269,7 +272,21 @@ def should_pulse(color_name: str, statuses: list[LaneStatus]) -> bool:
     """
     if color_name == "red":
         return True
-    return color_name == "orange" and any(s.state == STATE_SYNCING for s in statuses)
+    # logic-sync-truth-3 (2026-09-25): a lane that is `syncing` with files
+    # owed and NO server connected (lane C's no-peer branch) is waiting, not
+    # working. It kept the mark breathing for as long as the link was down,
+    # which is the "work is happening" signal about work that cannot happen.
+    # Still amber (compute_overall_color), just steady.
+    return color_name == "orange" and any(_lane_is_moving(s) for s in statuses)
+
+
+def _lane_is_moving(status: Any) -> bool:
+    """`syncing` AND able to move bytes. Lane C's no-peer branch stays
+    `syncing` on purpose (the sequencer's turn logic reads it) while nothing
+    can move until the server is connected again."""
+    if getattr(status, "state", None) != STATE_SYNCING:
+        return False
+    return bool(_lane_direction(status))
 
 
 def _color_rgb(color_name: str) -> tuple[int, int, int]:
@@ -1131,6 +1148,22 @@ def _show_sign_in_dialog_locked(app: "CompanionApp") -> None:
     ui_dispatch.dispatch(lambda: _build_sign_in_dialog(app))
 
 
+def _discard_half_built(root: Any, what: str) -> None:
+    """Destroy a dialog root whose build (or event loop) raised, on the thread
+    that built it (bug-comp-ui-5, 2026-09-25).
+
+    comp-ui-6 (2026-09-11) established the shape and fixed it for Settings
+    only: a TclError or OSError after tk.Tk() -- an RDP reconnect, a display
+    change -- leaves a mapped window with no event loop, frozen and
+    uncloseable, which ui_dispatch then keeps pinned for the life of the
+    process because winfo_exists() is still true; the caller releases the
+    popup lock, and every retry adds another one. release_root never raises,
+    so the original exception is the one the caller sees."""
+    if root is None:
+        return
+    ui_dispatch.release_root(root, f"{what} (failed build)")
+
+
 def _build_sign_in_dialog(app: "CompanionApp") -> None:
     try:
         import tkinter as tk
@@ -1147,88 +1180,95 @@ def _build_sign_in_dialog(app: "CompanionApp") -> None:
         log.warning("sign-in dialog failed to open (%s)", exc)
         _notify(app, "Couldn't open the sign-in window. Restart CCSync and try again.")
         return
-    root.title(site_mod.notify_title("sign in"))
-    theme.apply_window_icon(tk, root)
-    root.attributes("-topmost", True)
-    root.configure(bg=theme.BG, padx=18, pady=14)
+    # bug-comp-ui-5 (2026-09-25): see _discard_half_built.
+    try:
+        root.title(site_mod.notify_title("sign in"))
+        theme.apply_window_icon(tk, root)
+        root.attributes("-topmost", True)
+        root.configure(bg=theme.BG, padx=18, pady=14)
 
-    tk.Label(root, text="► SIGN IN", bg=theme.BG, fg=theme.RED,
-             font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
-    tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
-    # APP-10 / SYNC-114 (sweep 2026-09-04): no storage vendor's name in an
-    # editor's sentence, and a first-run editor has no other source for
-    # where this login comes from - hence the second line.
-    tk.Label(root,
-             text=(f"Enter the username and password you use to sign in to "
-                   f"{site_mod.product_name()}. This verifies that this "
-                   f"computer is yours."),
-             bg=theme.BG, fg=theme.MUTED, font=theme.mono(9), justify="left", anchor="w",
-             wraplength=360).pack(anchor="w", pady=(6, 2))
-    tk.Label(root, text="Ask your admin if you do not have one yet.",
-             bg=theme.BG, fg=theme.MUTED, font=theme.mono(9), justify="left", anchor="w",
-             wraplength=360).pack(anchor="w", pady=(0, 10))
+        tk.Label(root, text="► SIGN IN", bg=theme.BG, fg=theme.RED,
+                 font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
+        tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+        # APP-10 / SYNC-114 (sweep 2026-09-04): no storage vendor's name in an
+        # editor's sentence, and a first-run editor has no other source for
+        # where this login comes from - hence the second line.
+        tk.Label(root,
+                 text=(f"Enter the username and password you use to sign in to "
+                       f"{site_mod.product_name()}. This verifies that this "
+                       f"computer is yours."),
+                 bg=theme.BG, fg=theme.MUTED, font=theme.mono(9), justify="left", anchor="w",
+                 wraplength=360).pack(anchor="w", pady=(6, 2))
+        tk.Label(root, text="Ask your admin if you do not have one yet.",
+                 bg=theme.BG, fg=theme.MUTED, font=theme.mono(9), justify="left", anchor="w",
+                 wraplength=360).pack(anchor="w", pady=(0, 10))
 
-    form = tk.Frame(root, bg=theme.BG)
-    form.pack(anchor="w", fill="x")
+        form = tk.Frame(root, bg=theme.BG)
+        form.pack(anchor="w", fill="x")
 
-    tk.Label(form, text="username:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
-        row=0, column=0, sticky="w", pady=(0, 6))
-    # master=root, NOT the default root. A Tk variable binds to the
-    # interpreter of its master, and on macOS the default root is
-    # ui_dispatch's hidden one -- a DIFFERENT interpreter from this dialog.
-    # Masterless, the Entry wrote the typed username into this root's PY_VAR0 while
-    # .get() read the hidden root's empty PY_VAR0, so a filled-in form
-    # failed with "username and password are both required" (MAC-6).
-    username_var = tk.StringVar(master=root)
-    username_entry = tk.Entry(form, textvariable=username_var, font=theme.mono(10), width=28,
-                               bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
-                               relief="flat", highlightthickness=1,
-                               highlightbackground=theme.RED_DIM, highlightcolor=theme.RED)
-    username_entry.grid(row=0, column=1, sticky="w", pady=(0, 6), padx=(8, 0))
+        tk.Label(form, text="username:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
+            row=0, column=0, sticky="w", pady=(0, 6))
+        # master=root, NOT the default root. A Tk variable binds to the
+        # interpreter of its master, and on macOS the default root is
+        # ui_dispatch's hidden one -- a DIFFERENT interpreter from this dialog.
+        # Masterless, the Entry wrote the typed username into this root's PY_VAR0 while
+        # .get() read the hidden root's empty PY_VAR0, so a filled-in form
+        # failed with "username and password are both required" (MAC-6).
+        username_var = tk.StringVar(master=root)
+        # ui-onboarding-9 (2026-09-25): every Entry outline in this module is
+        # theme.FIELD_BORDER, not RED_DIM (1.86:1, the field was barely there).
+        username_entry = tk.Entry(form, textvariable=username_var, font=theme.mono(10), width=28,
+                                   bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
+                                   relief="flat", highlightthickness=1,
+                                   highlightbackground=theme.FIELD_BORDER, highlightcolor=theme.RED)
+        username_entry.grid(row=0, column=1, sticky="w", pady=(0, 6), padx=(8, 0))
 
-    tk.Label(form, text="password:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
-        row=1, column=0, sticky="w")
-    password_var = tk.StringVar(master=root)
-    password_entry = tk.Entry(form, textvariable=password_var, font=theme.mono(10), width=28,
-                               show="*", bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
-                               relief="flat", highlightthickness=1,
-                               highlightbackground=theme.RED_DIM, highlightcolor=theme.RED)
-    password_entry.grid(row=1, column=1, sticky="w", padx=(8, 0))
+        tk.Label(form, text="password:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
+            row=1, column=0, sticky="w")
+        password_var = tk.StringVar(master=root)
+        password_entry = tk.Entry(form, textvariable=password_var, font=theme.mono(10), width=28,
+                                   show="*", bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
+                                   relief="flat", highlightthickness=1,
+                                   highlightbackground=theme.FIELD_BORDER, highlightcolor=theme.RED)
+        password_entry.grid(row=1, column=1, sticky="w", padx=(8, 0))
 
-    error_label = tk.Label(root, text="", bg=theme.BG, fg=theme.RED, font=theme.mono(9),
-                            justify="left", anchor="w", wraplength=360)
-    error_label.pack(anchor="w", pady=(8, 0))
+        error_label = tk.Label(root, text="", bg=theme.BG, fg=theme.RED, font=theme.mono(9),
+                                justify="left", anchor="w", wraplength=360)
+        error_label.pack(anchor="w", pady=(8, 0))
 
-    btn_bar = tk.Frame(root, bg=theme.BG)
-    btn_bar.pack(anchor="e", pady=(12, 0))
+        btn_bar = tk.Frame(root, bg=theme.BG)
+        btn_bar.pack(anchor="e", pady=(12, 0))
 
-    def _cancel():
-        root.destroy()
-
-    def _submit():
-        username = username_var.get().strip()
-        password = password_var.get()
-        if not username or not password:
-            error_label.config(text="username and password are both required")
-            return
-        try:
-            ok, error = app.sign_in(username, password)
-        except Exception as exc:
-            log.exception("sign_in() raised")
-            error_label.config(text=f"sign-in failed: {exc}")
-            return
-        if ok:
+        def _cancel():
             root.destroy()
-        else:
-            error_label.config(text=error or "sign-in failed")
-            password_var.set("")
 
-    theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
-    theme.neon_button(tk, btn_bar, "SIGN IN", _submit, primary=True).pack(side="left")
-    root.bind("<Return>", lambda _e: _submit())
-    root.protocol("WM_DELETE_WINDOW", _cancel)
-    username_entry.focus_set()
-    ui_dispatch.run_dialog(root)
+        def _submit():
+            username = username_var.get().strip()
+            password = password_var.get()
+            if not username or not password:
+                error_label.config(text="username and password are both required")
+                return
+            try:
+                ok, error = app.sign_in(username, password)
+            except Exception as exc:
+                log.exception("sign_in() raised")
+                error_label.config(text=f"sign-in failed: {exc}")
+                return
+            if ok:
+                root.destroy()
+            else:
+                error_label.config(text=error or "sign-in failed")
+                password_var.set("")
+
+        theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
+        theme.neon_button(tk, btn_bar, "SIGN IN", _submit, primary=True).pack(side="left")
+        root.bind("<Return>", lambda _e: _submit())
+        root.protocol("WM_DELETE_WINDOW", _cancel)
+        username_entry.focus_set()
+        ui_dispatch.run_dialog(root)
+    except BaseException:
+        _discard_half_built(root, "the sign-in dialog")
+        raise
 
 
 def _on_sign_out(app: "CompanionApp") -> None:
@@ -1685,6 +1725,7 @@ def _build_update_dialog(app: "CompanionApp", info: dict) -> bool:
     # build must say so here too (see upgrade.offer_dialog_text).
     title, body, ok_label = upgrade_mod.offer_dialog_text(info["version"])
     heading = "► ROLL BACK COMPANION" if ok_label == "ROLL BACK" else "► UPDATE COMPANION"
+    root = None
     try:
         root = tk.Tk()
         root.title(title)
@@ -1716,6 +1757,9 @@ def _build_update_dialog(app: "CompanionApp", info: dict) -> bool:
         root.protocol("WM_DELETE_WINDOW", _cancel)
         ui_dispatch.run_dialog(root)
     except Exception as exc:
+        # bug-comp-ui-5 (2026-09-25): logging was not enough -- see
+        # _discard_half_built.
+        _discard_half_built(root, "the update dialog")
         log.warning("update dialog failed (%s) -- NOT applying the update", exc)
         _notify(app, "Couldn't open the update window, so nothing was changed. "
                      "Restart CCSync and try again.")
@@ -1778,6 +1822,7 @@ def _build_scripting_warning_dialog(app: "CompanionApp") -> bool:
         "affected." + "\n\n"
         "Save your work first -- nothing here is urgent enough to lose a take over."
     )
+    root = None
     try:
         root = tk.Tk()
         root.title(site_mod.notify_title("Resolve scripting is down"))
@@ -1811,6 +1856,7 @@ def _build_scripting_warning_dialog(app: "CompanionApp") -> bool:
         root.protocol("WM_DELETE_WINDOW", _dismiss)
         ui_dispatch.run_dialog(root)
     except Exception as exc:
+        _discard_half_built(root, "the scripting warning")  # bug-comp-ui-5
         log.warning("scripting warning dialog failed (%s) -- notifying instead", exc)
         _notify(app, resolve_bridge.NO_SCRIPTING_MESSAGE)
         return False
@@ -1933,46 +1979,51 @@ def _build_typed_confirmation(
     except Exception as exc:
         log.warning("typed-confirmation dialog failed to open (%s)", exc)
         return False
-    result = {"ok": False}
-    root.title(title)
-    theme.apply_window_icon(tk, root)
-    root.attributes("-topmost", True)
-    root.configure(bg=theme.BG, padx=18, pady=14)
+    # bug-comp-ui-5 (2026-09-25): see _discard_half_built.
+    try:
+        result = {"ok": False}
+        root.title(title)
+        theme.apply_window_icon(tk, root)
+        root.attributes("-topmost", True)
+        root.configure(bg=theme.BG, padx=18, pady=14)
 
-    tk.Label(root, text=f"► {title}", bg=theme.BG, fg=theme.RED,
-             font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
-    tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
-    tk.Label(root, text=body, bg=theme.BG, fg=theme.TEXT, font=theme.mono(10),
-             justify="left", anchor="w", wraplength=520).pack(anchor="w", pady=(6, 10))
+        tk.Label(root, text=f"► {title}", bg=theme.BG, fg=theme.RED,
+                 font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
+        tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+        tk.Label(root, text=body, bg=theme.BG, fg=theme.TEXT, font=theme.mono(10),
+                 justify="left", anchor="w", wraplength=520).pack(anchor="w", pady=(6, 10))
 
-    typed_var = tk.StringVar(master=root)
-    entry = tk.Entry(root, textvariable=typed_var, font=theme.mono(10), width=40,
-                     bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
-                     relief="flat", highlightthickness=1,
-                     highlightbackground=theme.RED_DIM, highlightcolor=theme.RED)
-    entry.pack(anchor="w")
-    error_label = tk.Label(root, text="", bg=theme.BG, fg=theme.RED, font=theme.mono(9),
-                           justify="left", anchor="w", wraplength=520)
-    error_label.pack(anchor="w", pady=(8, 0))
+        typed_var = tk.StringVar(master=root)
+        entry = tk.Entry(root, textvariable=typed_var, font=theme.mono(10), width=40,
+                         bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
+                         relief="flat", highlightthickness=1,
+                         highlightbackground=theme.FIELD_BORDER, highlightcolor=theme.RED)
+        entry.pack(anchor="w")
+        error_label = tk.Label(root, text="", bg=theme.BG, fg=theme.RED, font=theme.mono(9),
+                               justify="left", anchor="w", wraplength=520)
+        error_label.pack(anchor="w", pady=(8, 0))
 
-    btn_bar = tk.Frame(root, bg=theme.BG)
-    btn_bar.pack(anchor="e", pady=(12, 0))
+        btn_bar = tk.Frame(root, bg=theme.BG)
+        btn_bar.pack(anchor="e", pady=(12, 0))
 
-    def _cancel():
-        root.destroy()
+        def _cancel():
+            root.destroy()
 
-    def _submit():
-        if typed_var.get().strip() != expected:
-            error_label.config(text=f"type exactly: {expected}")
-            return
-        result["ok"] = True
-        root.destroy()
+        def _submit():
+            if typed_var.get().strip() != expected:
+                error_label.config(text=f"type exactly: {expected}")
+                return
+            result["ok"] = True
+            root.destroy()
 
-    theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
-    theme.neon_button(tk, btn_bar, "DELETE ANYWAY", _submit, primary=True).pack(side="left")
-    root.protocol("WM_DELETE_WINDOW", _cancel)
-    entry.focus_set()
-    ui_dispatch.run_dialog(root)
+        theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
+        theme.neon_button(tk, btn_bar, "DELETE ANYWAY", _submit, primary=True).pack(side="left")
+        root.protocol("WM_DELETE_WINDOW", _cancel)
+        entry.focus_set()
+        ui_dispatch.run_dialog(root)
+    except BaseException:
+        _discard_half_built(root, "the typed confirmation")
+        raise
     return result["ok"]
 
 
@@ -2202,74 +2253,79 @@ def _build_credentials_dialog(app: "CompanionApp") -> Optional[tuple[str, str]]:
         log.warning("credentials dialog failed to open (%s)", exc)
         _notify(app, "Couldn't open the login window. Restart CCSync and try again.")
         return None
-    result: list[Optional[tuple[str, str]]] = [None]
-    root.title(site_mod.notify_title("server login"))
-    theme.apply_window_icon(tk, root)
-    root.attributes("-topmost", True)
-    root.configure(bg=theme.BG, padx=18, pady=14)
-
-    tk.Label(root, text="► SERVER LOGIN", bg=theme.BG, fg=theme.RED,
-             font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
-    tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
-    # APP-10 / SYNC-114: the server has whatever name the site manifest gives
-    # it, and "the server" when it gives it none.
-    tk.Label(root,
-             text=(f"Windows needs your login for {site_mod.server_phrase()} to "
-                   f"stream originals. Use the same username and password you "
-                   f"sign in to {site_mod.product_name()} with. It is saved on "
-                   f"this computer, so you will only be asked once."),
-             bg=theme.BG, fg=theme.MUTED, font=theme.mono(9), justify="left", anchor="w",
-             wraplength=360).pack(anchor="w", pady=(6, 10))
-
-    form = tk.Frame(root, bg=theme.BG)
-    form.pack(anchor="w", fill="x")
-
-    tk.Label(form, text="username:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
-        row=0, column=0, sticky="w", pady=(0, 6))
-    username_var = tk.StringVar(master=root)   # see _build_sign_in_dialog
+    # bug-comp-ui-5 (2026-09-25): see _discard_half_built.
     try:
-        username_var.set(app.editor_identity() or "")
-    except Exception:
-        pass
-    username_entry = tk.Entry(form, textvariable=username_var, font=theme.mono(10), width=28,
-                               bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
-                               relief="flat", highlightthickness=1,
-                               highlightbackground=theme.RED_DIM, highlightcolor=theme.RED)
-    username_entry.grid(row=0, column=1, sticky="w", pady=(0, 6), padx=(8, 0))
+        result: list[Optional[tuple[str, str]]] = [None]
+        root.title(site_mod.notify_title("server login"))
+        theme.apply_window_icon(tk, root)
+        root.attributes("-topmost", True)
+        root.configure(bg=theme.BG, padx=18, pady=14)
 
-    tk.Label(form, text="password:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
-        row=1, column=0, sticky="w")
-    password_var = tk.StringVar(master=root)   # see _build_sign_in_dialog
-    password_entry = tk.Entry(form, textvariable=password_var, font=theme.mono(10), width=28,
-                               show="*", bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
-                               relief="flat", highlightthickness=1,
-                               highlightbackground=theme.RED_DIM, highlightcolor=theme.RED)
-    password_entry.grid(row=1, column=1, sticky="w", padx=(8, 0))
+        tk.Label(root, text="► SERVER LOGIN", bg=theme.BG, fg=theme.RED,
+                 font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
+        tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+        # APP-10 / SYNC-114: the server has whatever name the site manifest gives
+        # it, and "the server" when it gives it none.
+        tk.Label(root,
+                 text=(f"Windows needs your login for {site_mod.server_phrase()} to "
+                       f"stream originals. Use the same username and password you "
+                       f"sign in to {site_mod.product_name()} with. It is saved on "
+                       f"this computer, so you will only be asked once."),
+                 bg=theme.BG, fg=theme.MUTED, font=theme.mono(9), justify="left", anchor="w",
+                 wraplength=360).pack(anchor="w", pady=(6, 10))
 
-    error_label = tk.Label(root, text="", bg=theme.BG, fg=theme.RED, font=theme.mono(9),
-                            justify="left", anchor="w", wraplength=360)
-    error_label.pack(anchor="w", pady=(8, 0))
+        form = tk.Frame(root, bg=theme.BG)
+        form.pack(anchor="w", fill="x")
 
-    btn_bar = tk.Frame(root, bg=theme.BG)
-    btn_bar.pack(anchor="e", pady=(12, 0))
+        tk.Label(form, text="username:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
+            row=0, column=0, sticky="w", pady=(0, 6))
+        username_var = tk.StringVar(master=root)   # see _build_sign_in_dialog
+        try:
+            username_var.set(app.editor_identity() or "")
+        except Exception:
+            pass
+        username_entry = tk.Entry(form, textvariable=username_var, font=theme.mono(10), width=28,
+                                   bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
+                                   relief="flat", highlightthickness=1,
+                                   highlightbackground=theme.FIELD_BORDER, highlightcolor=theme.RED)
+        username_entry.grid(row=0, column=1, sticky="w", pady=(0, 6), padx=(8, 0))
 
-    def _cancel():
-        root.destroy()
+        tk.Label(form, text="password:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
+            row=1, column=0, sticky="w")
+        password_var = tk.StringVar(master=root)   # see _build_sign_in_dialog
+        password_entry = tk.Entry(form, textvariable=password_var, font=theme.mono(10), width=28,
+                                   show="*", bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
+                                   relief="flat", highlightthickness=1,
+                                   highlightbackground=theme.FIELD_BORDER, highlightcolor=theme.RED)
+        password_entry.grid(row=1, column=1, sticky="w", padx=(8, 0))
 
-    def _submit():
-        username = username_var.get().strip()
-        if not username or not password_var.get():
-            error_label.config(text="username and password are both required")
-            return
-        result[0] = (username, password_var.get())
-        root.destroy()
+        error_label = tk.Label(root, text="", bg=theme.BG, fg=theme.RED, font=theme.mono(9),
+                                justify="left", anchor="w", wraplength=360)
+        error_label.pack(anchor="w", pady=(8, 0))
 
-    theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
-    theme.neon_button(tk, btn_bar, "CONNECT", _submit, primary=True).pack(side="left")
-    root.bind("<Return>", lambda _e: _submit())
-    root.protocol("WM_DELETE_WINDOW", _cancel)
-    (password_entry if username_var.get() else username_entry).focus_set()
-    ui_dispatch.run_dialog(root)
+        btn_bar = tk.Frame(root, bg=theme.BG)
+        btn_bar.pack(anchor="e", pady=(12, 0))
+
+        def _cancel():
+            root.destroy()
+
+        def _submit():
+            username = username_var.get().strip()
+            if not username or not password_var.get():
+                error_label.config(text="username and password are both required")
+                return
+            result[0] = (username, password_var.get())
+            root.destroy()
+
+        theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
+        theme.neon_button(tk, btn_bar, "CONNECT", _submit, primary=True).pack(side="left")
+        root.bind("<Return>", lambda _e: _submit())
+        root.protocol("WM_DELETE_WINDOW", _cancel)
+        (password_entry if username_var.get() else username_entry).focus_set()
+        ui_dispatch.run_dialog(root)
+    except BaseException:
+        _discard_half_built(root, "the server login dialog")
+        raise
     return result[0]
 
 
@@ -2441,6 +2497,40 @@ def _current_project_line(app: "CompanionApp") -> Optional[str]:
     return None
 
 
+# syncthing_lane.check_once's outgoing-need branch is the only lane C status
+# whose count is an UPLOAD ("sending N file(s) (...) to the server"); its
+# need-count branch is our download. The problem/path suffixes are joined on
+# with "; " and may come before it, so this is a search, not a prefix match.
+_LANE_C_SENDING = re.compile(r"\bsending \d+ file\(s\)")
+
+
+def _lane_direction(status: Any) -> str:
+    """"up", "down" or "" for one syncing lane's count (logic-sync-truth-6).
+
+    Lanes A and B are named for their direction. Lane C carries no field for
+    it, so its own sentence is read; anything that is not the outgoing branch
+    is Syncthing's needTotalItems, which is what WE still have to receive.
+
+    "" means NOT MOVING: lane C's no-peer branch (logic-sync-truth-3) stays
+    `syncing` with files owed while no server is connected, and its detail
+    names no direction - the owed count may be either our need or the
+    server's need of us. Counting it as a download told a disconnected editor
+    "downloading N files" about files this computer owes the server (review
+    round 2026-09-25). Checked first, because the no-peer sentence replaces
+    the "sending" one rather than joining it."""
+    name = str(getattr(status, "name", "") or "")
+    if name.endswith("_up"):
+        return "up"
+    if name.endswith("_down"):
+        return "down"
+    detail = str(getattr(status, "detail", "") or "")
+    if _LANE_C_NO_PEER in detail:
+        return ""
+    if _LANE_C_SENDING.search(detail):
+        return "up"
+    return "down"
+
+
 def _sync_line(snap: dict) -> str:
     """The one line "what is syncing" summary the reduced menu shows in place
     of the three lane lines + six advisory lines it used to carry
@@ -2501,12 +2591,18 @@ def _sync_line(snap: dict) -> str:
         if status.state != STATE_SYNCING:
             continue
         count = int(status.transferring or status.queued or 0)
-        # Lane C is "everything else, both ways" (LANE_LABELS) -- it carries
-        # no up/down split of its own, so its activity counts toward BOTH
-        # totals rather than inventing a third phrasing nobody asked for.
-        if not status.name.endswith("_down"):
+        # logic-sync-truth-6 (2026-09-25): lane C's count is ONE direction,
+        # never both. It used to be added to up AND down ("everything else,
+        # both ways"), so a 40-file audio pull read "up 40 · down 40", eighty
+        # claimed transfers for forty files.
+        direction = _lane_direction(status)
+        if not direction:
+            # Owed but not moving (no peer): it falls through to the
+            # "N files waiting" line below, which names no direction.
+            continue
+        if direction == "up":
             up += count
-        if not status.name.endswith("_up"):
+        else:
             down += count
         if status.speed_bps:
             speed += float(status.speed_bps)
@@ -2520,9 +2616,20 @@ def _sync_line(snap: dict) -> str:
             return f"Sync: uploading {up} file{'s' if up != 1 else ''}{suffix}"
         return f"Sync: downloading {down} file{'s' if down != 1 else ''}{suffix}"
 
-    waiting = sum(int(status.queued or 0) for status in snap.get("statuses") or [])
+    statuses = list(snap.get("statuses") or [])
+    waiting = sum(int(status.queued or 0) for status in statuses)
     if waiting:
-        return f"Sync: {waiting} file{'s' if waiting != 1 else ''} waiting"
+        no_peer = [status for status in statuses
+                   if status.state == STATE_SYNCING and not _lane_direction(status)]
+        if no_peer and all(status in no_peer or not int(status.queued or 0)
+                           for status in statuses):
+            # logic-sync-truth-3 (2026-09-25): the only work claimed is owed
+            # to or from a server nobody is connected to. Said as waiting
+            # FIRST, because nothing is going to move until the link is back.
+            return (f"Sync: waiting, not connected to the server "
+                    f"({ui_copy.count(waiting, 'file')} owed)")
+        reason = " (not connected to the server)" if no_peer else ""
+        return f"Sync: {waiting} file{'s' if waiting != 1 else ''} waiting{reason}"
     return "Sync: up to date"
 
 
@@ -3455,7 +3562,9 @@ def _conflicts_line(guard: dict) -> Optional[str]:
     paths = [str(p) for p in (conflicts.get("paths") or []) if p]
     example = f" (e.g. {paths[0].rsplit('/', 1)[-1]})" if paths else ""
     return (f"⚠ {count} file{'s' if count != 1 else ''} "
-            f"{'were' if count != 1 else 'was'} edited on two machines at once, so "
+            # owed-2 (2026-09-25): "machines" slipped the vocabulary scan,
+            # whose word pattern had no plural; a computer is a "computer".
+            f"{'were' if count != 1 else 'was'} edited on two computers at once, so "
             f"Syncthing kept both copies{example}. Nothing was lost: ask your admin "
             "which one to keep")
 
@@ -4212,7 +4321,8 @@ def _tooltip_text(snap: dict) -> str:
         if status.state == STATE_ERROR:
             return f"CCSync: PROBLEM with {lane_label(status.name).split(' (')[0]}"
     for status in snap["statuses"]:
-        if status.state == STATE_SYNCING:
+        # logic-sync-truth-3 (2026-09-25): a no-peer lane C is not "syncing".
+        if _lane_is_moving(status):
             parts = ["CCSync: syncing"]
             if status.current_project:
                 parts.append(str(status.current_project)[-40:])
@@ -4231,7 +4341,20 @@ def _tooltip_text(snap: dict) -> str:
     # grid show, so there is one wording, not a third.
     blocked = (snap.get("sync_guard") or {}).get("blocked") or {}
     if isinstance(blocked, dict) and blocked.get("detail"):
-        return f"CCSync: {blocked['detail']}"[:127]
+        # ui-comp-windows-7 (2026-09-25): cut in the middle, not at the end.
+        # The blocked sentences end with what to do, and the licence one
+        # ("...has been updated (version 1.1; ...). Open Tray > Settings >
+        # READ AND ACCEPT THE LICENCE.") is 149 characters: the head slice
+        # threw away the whole route (APP-4's rule for balloons).
+        return _fit_tail(f"CCSync: {blocked['detail']}", 127,
+                         log_full=False)
+    # logic-sync-truth-3 (2026-09-25): owed files with no server connected are
+    # neither "syncing" (skipped above) nor "up to date".
+    owed = sum(int(s.queued or 0) for s in snap["statuses"]
+               if s.state == STATE_SYNCING and not _lane_is_moving(s))
+    if owed:
+        return (f"CCSync: waiting, not connected to the server "
+                f"({ui_copy.count(owed, 'file')} owed)")
     # SYNC-109: a file that will never upload is not "up to date". Up to
     # three names, because the editor's next move is to look for them.
     names = skipped_exists_names(snap.get("sync_guard"),
@@ -4716,8 +4839,10 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     # disappear.
     problem_items = []
     if snap["problems"]:
+        # ui-copy-5 (2026-09-25): the same route ui_copy.DIAGNOSTICS spells,
+        # HELP step included, less the "Tray >" the reader is already in.
         problem_items = [tray_backend.MenuItem(
-            "⚠ NOT SET UP: nothing will sync (Settings > COPY DIAGNOSTICS FOR YOUR ADMIN)",
+            "⚠ NOT SET UP: nothing will sync (Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN)",
             None, enabled=False,
         )]
 

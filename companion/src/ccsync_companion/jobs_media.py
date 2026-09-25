@@ -102,6 +102,10 @@ PEAKS_EXT = ".peaks"
 # changing it there is a cache that is rebuilt on every single view.
 PEAK_RATE = 200
 PEAK_SAMPLE_RATE = 8000
+# What ffmpeg says when `-vn` leaves nothing to write (ffmpeg 4 prints
+# "Output file #0 does not contain any stream", 7 drops the "#0"); lowered,
+# and matched as a substring so both spellings count. bug-comp-media-4.
+_NO_OUTPUT_STREAM = "does not contain any stream"
 
 # `_src_make`'s tolerance: an mp4 with an edit list or priming samples can
 # come out of a stream copy shifted, and the lane's whole premise is that
@@ -937,6 +941,17 @@ class MediaJob:
             peaks_cmd(self.ffmpeg_path, source), should_stop=self.should_stop,
             ceiling=COPY_TIMEOUT_SECONDS, clock=self.clock, popen=self.popen)
         if code != 0:
+            # bug-comp-media-4 (2026-09-25): a video-only angle (a drone, a
+            # second camera with no sound) makes this decode exit non-zero
+            # with "Output file does not contain any stream", and the default
+            # retryable failure toured it round the fleet, cooling every
+            # machine it visited down for 120 s before pinning it onto the
+            # dashboard's engine, which failed it too. The probe's empty codec
+            # ALONE is not proof (it is also what a probe that could not run
+            # answers), so the verdict needs ffmpeg's own sentence as well:
+            # both together are a file with no audio on every machine.
+            if not _codec and _NO_OUTPUT_STREAM in (err or "").lower():
+                raise MediaJobError("no audio track", retryable=False)
             raise MediaJobError(err or f"ffmpeg exited {code}")
         if not raw:
             raise MediaJobError("there is no audio to draw", retryable=False)

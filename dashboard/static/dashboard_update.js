@@ -128,10 +128,72 @@
     });
   }
 
-  function runUpdate(version, wasRunning) {
+  // ui-dash-static-4 (2026-09-25): a REFUSED apply (a signature or runtime
+  // refusal, "an update is in progress") used to be written into
+  // #dashupd-progress and then erased one round trip later by reloadPanel(),
+  // whose render only knows a RUN's last_error, never a refusal of the
+  // request. The reason now gets its own line, attached above the progress
+  // line AFTER the repaint, so the panel's own "working: ..." line can sit
+  // beside it rather than overwrite it.
+  function showRefusal(text) {
+    var prog = document.getElementById("dashupd-progress");
+    if (!prog || !prog.parentNode) return;
+    clearRefusal();
+    var line = document.createElement("div");
+    line.id = "dashupd-refusal";
+    line.className = "banner";
+    line.setAttribute("role", "alert");
+    line.textContent = "\u25B2 not applied: " + text;
+    prog.parentNode.insertBefore(line, prog);
+  }
+
+  function clearRefusal() {
+    var old = document.getElementById("dashupd-refusal");
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+  }
+
+  // ui-dash-static-4: one apply at a time from this page. A double click
+  // posted twice, and the second refusal wiped the first run's progress.
+  var applying = false;
+
+  function runUpdate(version, wasRunning, button) {
+    if (applying) return;
+    applying = true;
+    if (button) button.disabled = true;
+    var settle = function () {
+      applying = false;
+      if (button && button.isConnected) button.disabled = false;
+    };
+    clearRefusal();
     progress("starting the update", false);
     postJson(APPLY_URL, {version: version, force: false})
-      .then(function () { return watchProgress(version); })
+      .then(function () { return true; }, function (err) {
+        // Refused before anything ran: say why, and keep saying it after
+        // the repaint. `false` stands the rest of the chain down.
+        var reason = err.message || String(err);
+        progress(reason, true);
+        return reloadPanel().then(function () {
+          showRefusal(reason);
+          // The commonest refusal is another admin's update still running.
+          // A fetch() repaint fires no htmx:afterSwap, so the watcher at
+          // the bottom of this file never saw that panel: pick the watch up
+          // here, or its "working" line freezes until a page reload.
+          var prog = document.getElementById("dashupd-progress");
+          if (prog && prog.getAttribute("data-in-progress") === "1") {
+            watchProgress("").then(function () { reloadPanel(); });
+          }
+          return false;
+        });
+      })
+      .then(function (accepted) {
+        if (!accepted) return null;
+        return runAccepted(version, wasRunning);
+      })
+      .then(settle, settle);
+  }
+
+  function runAccepted(version, wasRunning) {
+    return watchProgress(version)
       .then(function (outcome) {
         if (typeof outcome === "string" && outcome.indexOf("failed:") === 0) {
           progress(outcome.slice(7), true);
@@ -146,7 +208,7 @@
       })
       .catch(function (err) {
         progress(err.message || String(err), true);
-        reloadPanel();
+        return reloadPanel();
       });
   }
 
@@ -158,12 +220,22 @@
     if (applyVersion) {
       var running = document.getElementById(PANEL);
       var wasRunning = running ? (running.getAttribute("data-running") || "") : "";
-      if (!window.confirm("Update this dashboard to " + applyVersion + "?\n\n"
-                          + "It will be offline for about ten seconds while it restarts. "
-                          + "The databases are backed up first.")) {
+      // ui-dash-admin-14 (2026-09-25): the [ ROLL BACK TO X ] buttons for an
+      // older bundle on the feed share this handler, and asked "Update this
+      // dashboard to X?" at the one moment the owner is going backwards.
+      var older = target.getAttribute("data-dashupd-older") === "1";
+      var question = older
+        ? "Roll this dashboard back to " + applyVersion + "?\n\n"
+          + "It will be offline for about ten seconds while it restarts. "
+          + "The databases are backed up first and stay as they are: they are "
+          + "not taken back to an older copy."
+        : "Update this dashboard to " + applyVersion + "?\n\n"
+          + "It will be offline for about ten seconds while it restarts. "
+          + "The databases are backed up first.";
+      if (!window.confirm(question)) {
         return;
       }
-      runUpdate(applyVersion, wasRunning);
+      runUpdate(applyVersion, wasRunning, target);
       return;
     }
 

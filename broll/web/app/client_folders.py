@@ -597,24 +597,24 @@ def add_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection, folder_i
     """
     if get_folder(conn, folder_id) is None:
         raise ClientFolderError("no such folder")
-    # By id AND by (share, rel_path): after an index rebuild renumbers
-    # videos.id the folder's row for this clip carries the OLD id, so an
-    # id-only test says "not in the folder", UNIQUE (folder_id, video_id) does
-    # not catch the second insert, and resolve_items then draws the clip twice
-    # on the client's page (broll-4, 2026-08-21).
-    present, present_names = set(), set()
-    for r in conn.execute(
-            "SELECT video_id, share, rel_path FROM client_folder_items "
-            "WHERE folder_id = ?", (folder_id,)):
-        present.add(r["video_id"])
-        present_names.add((r["share"], r["rel_path"]))
+    # "Already in the folder" is decided by what each item IS in the current
+    # index -- the same re-resolution resolve_items draws the page with --
+    # never by the bare stored id. bug-broll-1 / logic-broll-music-1
+    # (2026-09-25): broll-4's OR (stored id, or name) compared a CURRENT id
+    # against STORED ones, and after a rebuild a stored id can be the current
+    # id of a different clip, so a new clip C whose number an old item still
+    # carried answered `already` and never reached the client.
+    items = list_items(conn, folder_id)
+    present = {v["id"] for v in (_resolve_item(index_conn, it)[0] for it in items)
+               if v is not None}
+    stored_ids = {it["video_id"] for it in items}
     ord_row = conn.execute(
         "SELECT COALESCE(MAX(ord), -1) FROM client_folder_items WHERE folder_id = ?",
         (folder_id,)).fetchone()
     next_ord = int(ord_row[0]) + 1
     added, already = [], []
     now = now_iso()
-    n_existing = len(present)
+    n_existing = len(items)
     pending = []
     for vid in video_ids:
         vid = int(vid)
@@ -622,12 +622,8 @@ def add_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection, folder_i
             already.append(vid)
             continue
         share, rel_path, video_hash = _video_identity(index_conn, vid)
-        if (share, rel_path) in present_names:
-            already.append(vid)
-            continue
         pending.append((vid, share, rel_path, video_hash))
         present.add(vid)
-        present_names.add((share, rel_path))
     # bug-hunt-2026-09-03 broll-5: the cap used to be tested inside the insert
     # loop, so a batch that overran it raised after earlier INSERTs and
     # get_shares_db closed the connection unstamped -- sqlite rolled the whole
@@ -640,6 +636,8 @@ def add_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection, folder_i
             f"{n_existing}, so there is room for {room} more and {len(pending)} new "
             f"clips were sent. Nothing was added.")
     for vid, share, rel_path, video_hash in pending:
+        if vid in stored_ids:
+            _rekey_stale_item(conn, index_conn, folder_id, vid, stored_ids)
         conn.execute(
             "INSERT INTO client_folder_items (folder_id, video_id, share, rel_path, hash, ord, "
             "added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -652,50 +650,121 @@ def add_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection, folder_i
     return {"added": added, "already": already}
 
 
-def _identity_of(index_conn: sqlite3.Connection | None, video_id: int) -> tuple[str, str]:
-    """The (share, rel_path) the CURRENT index files `video_id` under, or a
-    pair nothing matches.
+def _rekey_stale_item(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
+                      folder_id: int, vid: int, stored_ids: set[int]) -> None:
+    """Move an item whose STORED id is `vid` off that number, so the clip that
+    holds `vid` in the current index can be inserted.
 
-    MEDIA-23 (resilience sweep 2026-08-28): the panel sends the id the index
-    has NOW, which after a rebuild is not the id the item was stored under.
-    An id-only match then answered "that clip is not in this folder" to an
-    editor pulling a clip out of a live client link, while the client kept
-    seeing it -- and the same for a note. The empty pair is deliberate: no
-    row carries it, so a caller with no index connection (or a clip that has
-    left the index) falls back to the id-only behaviour rather than matching
-    everything (broll-1's family, sites four and five).
+    bug-broll-1 (2026-09-25): UNIQUE (folder_id, video_id) is over stored ids,
+    and after a renumbering rebuild a stale item can sit on the number a new
+    clip now has. The caller has already established the stale item is NOT
+    that clip (its re-resolution landed elsewhere, or nowhere). It moves to
+    the id it resolves to now when that number is free in this folder, which
+    is the id the panel shows for it anyway; otherwise to its own negative
+    row id, which no index row ever carries: the item is then found by name or
+    hash only, exactly as resolve_items already finds a renumbered one.
     """
+    row = conn.execute(
+        "SELECT * FROM client_folder_items WHERE folder_id = ? AND video_id = ?",
+        (folder_id, vid)).fetchone()
+    if row is None:
+        return
+    video, _via_hash = _resolve_item(index_conn, row)
+    target = video["id"] if video is not None else None
+    if target is None or target == vid or target in stored_ids:
+        target = -int(row["id"])
+    conn.execute("UPDATE client_folder_items SET video_id = ? WHERE id = ?",
+                 (target, row["id"]))
+    stored_ids.discard(vid)
+    stored_ids.add(target)
+
+
+def items_holding(conn: sqlite3.Connection, index_conn: sqlite3.Connection | None,
+                  video_id: int, folder_id: int | None = None) -> list[sqlite3.Row]:
+    """The items (in one folder, or in every folder) whose clip IS the clip the
+    CURRENT index files under `video_id`, in display order.
+
+    bug-broll-1 / logic-broll-music-1 (2026-09-25). MEDIA-23 and broll-4
+    matched `video_id = X OR (share, rel_path) = identity-of-X`, and X was a
+    stored id from the panel but a current id from the card popover. After a
+    rebuild renumbers videos.id those are different id spaces, so the OR
+    matched a SECOND, unrelated item: removing clip A from a live client link
+    also removed clip B, one note landed on two clips, and the public detail
+    panel could show another clip's caption. Now an item matches only when its
+    own re-resolution (stored id whose name still agrees, then name, then a
+    unique hash: resolve_items' rule) lands on this very index row. The panel
+    no longer sends a video id for its own rows at all; it sends the item's
+    row id (see remove_item / set_note).
+
+    With no index connection there is nothing to resolve against and the bare
+    stored id is all there is (the pre-MEDIA-23 behaviour). An id the index
+    no longer has matches only items that ALSO resolve to nothing and were
+    stored under it: the curator pulling a `missing` clip out.
+    """
+    where = "folder_id = ?" if folder_id is not None else "1 = 1"
+    base_args: tuple = (folder_id,) if folder_id is not None else ()
     if index_conn is None:
-        return "", ""
-    row = index_conn.execute(
-        "SELECT share, rel_path FROM videos WHERE id = ?", (video_id,)).fetchone()
-    return (row["share"], row["rel_path"]) if row is not None else ("", "")
+        return conn.execute(
+            f"SELECT * FROM client_folder_items WHERE {where} AND video_id = ? "
+            "ORDER BY folder_id, ord, id", (*base_args, video_id)).fetchall()
+    current = index_conn.execute(
+        "SELECT id, share, rel_path, hash FROM videos WHERE id = ?",
+        (video_id,)).fetchone()
+    if current is None:
+        return [it for it in conn.execute(
+            f"SELECT * FROM client_folder_items WHERE {where} AND video_id = ? "
+            "ORDER BY folder_id, ord, id", (*base_args, video_id)).fetchall()
+            if _resolve_item(index_conn, it)[0] is None]
+    candidates = conn.execute(
+        f"SELECT * FROM client_folder_items WHERE {where} AND (video_id = ? "
+        "OR (share = ? AND rel_path = ?) OR (hash != '' AND hash = ?)) "
+        "ORDER BY folder_id, ord, id",
+        (*base_args, video_id, current["share"], current["rel_path"],
+         current["hash"] or "")).fetchall()
+    out = []
+    for it in candidates:
+        video, _via_hash = _resolve_item(index_conn, it)
+        if video is not None and video["id"] == video_id:
+            out.append(it)
+    return out
+
+
+def _item_rows(conn: sqlite3.Connection, folder_id: int, video_id: int,
+               index_conn: sqlite3.Connection | None,
+               item_id: int | None) -> list[int]:
+    """The ledger row ids a remove/note request names. `item_id` (the panel's
+    own row, client_folder_items.id) is exact and wins; a bare `video_id` is a
+    CURRENT index id (the card popover) and goes through items_holding."""
+    if item_id is not None:
+        row = conn.execute(
+            "SELECT id FROM client_folder_items WHERE folder_id = ? AND id = ?",
+            (folder_id, item_id)).fetchone()
+        return [row["id"]] if row is not None else []
+    return [it["id"] for it in items_holding(conn, index_conn, video_id, folder_id)]
 
 
 def remove_item(conn: sqlite3.Connection, folder_id: int, video_id: int,
-                index_conn: sqlite3.Connection | None = None) -> bool:
-    share, rel_path = _identity_of(index_conn, video_id)
-    cur = conn.execute(
-        "DELETE FROM client_folder_items WHERE folder_id = ? "
-        "AND (video_id = ? OR (share = ? AND rel_path = ?))",
-        (folder_id, video_id, share, rel_path),
-    )
+                index_conn: sqlite3.Connection | None = None,
+                item_id: int | None = None) -> bool:
+    rows = _item_rows(conn, folder_id, video_id, index_conn, item_id)
+    for row_id in rows:
+        conn.execute("DELETE FROM client_folder_items WHERE id = ?", (row_id,))
     conn.execute("UPDATE client_folders SET updated_at = ? WHERE id = ?",
                  (now_iso(), folder_id))
     conn.commit()
-    return cur.rowcount > 0
+    return bool(rows)
 
 
 def set_note(conn: sqlite3.Connection, folder_id: int, video_id: int, note: str,
-             index_conn: sqlite3.Connection | None = None) -> bool:
-    share, rel_path = _identity_of(index_conn, video_id)
-    cur = conn.execute(
-        "UPDATE client_folder_items SET note = ? WHERE folder_id = ? "
-        "AND (video_id = ? OR (share = ? AND rel_path = ?))",
-        (_clean_text(note, MAX_NOTE, "note"), folder_id, video_id, share, rel_path),
-    )
+             index_conn: sqlite3.Connection | None = None,
+             item_id: int | None = None) -> bool:
+    clean = _clean_text(note, MAX_NOTE, "note")
+    rows = _item_rows(conn, folder_id, video_id, index_conn, item_id)
+    for row_id in rows:
+        conn.execute("UPDATE client_folder_items SET note = ? WHERE id = ?",
+                     (clean, row_id))
     conn.commit()
-    return cur.rowcount > 0
+    return bool(rows)
 
 
 def reorder(conn: sqlite3.Connection, folder_id: int, video_ids: list[int]) -> None:
@@ -799,6 +868,42 @@ def _refresh_item_path(conn: sqlite3.Connection, item_id: int, rel_path: str) ->
         pass
 
 
+def _resolve_item(index_conn: sqlite3.Connection,
+                  item: sqlite3.Row) -> tuple[sqlite3.Row | None, bool]:
+    """(the index row this item IS now, whether it was found by hash).
+
+    The one re-resolution rule, shared by resolve_items (what the page draws)
+    and items_holding / add_items (what remove, note, the popover tick and
+    "already in the folder" act on), so they can never disagree about which
+    clip an item is (bug-broll-1, 2026-09-25). Read only: the caller decides
+    whether to refresh a hash-found item's stored path.
+    """
+    video = index_conn.execute(
+        "SELECT * FROM videos WHERE id = ?", (item["video_id"],)).fetchone()
+    if video is None or (video["share"], video["rel_path"]) != (item["share"], item["rel_path"]):
+        # MEDIA-1 (resilience sweep 2026-08-28): the by-id row is NOT a
+        # fallback. When the identity disagrees the id names some other
+        # clip -- a rebuild reuses low ids -- and keeping it here put that
+        # clip in public_video_ids, which is what _member_id authorises
+        # on, so the client's page drew and streamed footage nobody
+        # curated (the fourth site of broll-1, which fixed the other
+        # three). By name or not at all.
+        video = index_conn.execute(
+            "SELECT * FROM videos WHERE share = ? AND rel_path = ?",
+            (item["share"], item["rel_path"])).fetchone()
+    if video is not None:
+        return video, False
+    # LAST, after id and name (broll-1, 2026-09-03): the clip was MOVED or
+    # renamed since it was curated -- the sorter's /api/ingest/moved rewrites
+    # videos.rel_path for every inbox clip it files -- so both of the
+    # identities above are stale while the footage is untouched. Hash is last
+    # because it is NOT unique (the pipeline records duplicate_of), so a
+    # rebuild that renumbers ids must get its answer from the two exact
+    # identities first.
+    video = _resolve_by_hash(index_conn, item)
+    return video, video is not None
+
+
 def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
                   folder_id: int, public: bool) -> list[dict]:
     """The folder's clips joined with what broll.db knows about them, in order.
@@ -824,37 +929,14 @@ def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
     # ones they set; removing it from the panel reveals the other.
     seen: set[int] = set()
     for item in list_items(conn, folder_id):
-        video = index_conn.execute(
-            "SELECT * FROM videos WHERE id = ?", (item["video_id"],)).fetchone()
-        if video is None or (video["share"], video["rel_path"]) != (item["share"], item["rel_path"]):
-            # MEDIA-1 (resilience sweep 2026-08-28): the by-id row is NOT a
-            # fallback. When the identity disagrees the id names some other
-            # clip -- a rebuild reuses low ids -- and keeping it here put that
-            # clip in public_video_ids, which is what _member_id authorises
-            # on, so the client's page drew and streamed footage nobody
-            # curated (the fourth site of broll-1, which fixed the other
-            # three). By name or not at all: None below drops the item, and
-            # the curator's panel reports it `missing`.
-            video = index_conn.execute(
-                "SELECT * FROM videos WHERE share = ? AND rel_path = ?",
-                (item["share"], item["rel_path"])).fetchone()
-        if video is None:
-            # LAST, after id and name (broll-1, 2026-09-03): the clip was
-            # MOVED or renamed since it was curated -- the sorter's
-            # /api/ingest/moved rewrites videos.rel_path for every inbox clip
-            # it files -- so both of the identities above are stale while the
-            # footage is untouched. The client's card used to vanish and its
-            # media 404. Hash is last because it is NOT unique (the pipeline
-            # records duplicate_of), so a rebuild that renumbers ids must get
-            # its answer from the two exact identities first.
-            video = _resolve_by_hash(index_conn, item)
-            if video is not None:
-                _refresh_item_path(conn, item["id"], video["rel_path"])
+        video, via_hash = _resolve_item(index_conn, item)
+        if via_hash:
+            _refresh_item_path(conn, item["id"], video["rel_path"])
         if video is None:
             if not public:
-                out.append({"video_id": item["video_id"], "share": item["share"],
-                            "rel_path": item["rel_path"], "note": item["note"],
-                            "missing": True})
+                out.append({"video_id": item["video_id"], "item_id": item["id"],
+                            "share": item["share"], "rel_path": item["rel_path"],
+                            "note": item["note"], "missing": True})
             continue
         if video["id"] in seen:
             continue
@@ -869,6 +951,10 @@ def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
         entry["note"] = item["note"]
         if not public:
             entry["video_id"] = item["video_id"]
+            # bug-broll-1 (2026-09-25): the ledger row, which is what the
+            # panel's remove and note buttons name. Neither the stored nor the
+            # current video id is unambiguous after a renumbering rebuild.
+            entry["item_id"] = item["id"]
             entry["share"] = v["share"]
             entry["rel_path"] = v["rel_path"]
             entry["category"] = v.get("category") or v.get("category_hint")

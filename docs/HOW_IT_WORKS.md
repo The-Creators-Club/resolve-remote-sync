@@ -854,7 +854,7 @@ links straight to a row here wherever one of them appears.
 | **Stopped by your admin** | Your admin stopped syncing for the whole fleet. Only they can start it again, and it releases itself after a day unless they keep it stopped |
 | **Stopped itself** | The companion stopped one thing on its own for safety: proxy download stops when the server does not look like the tree any more, or when your disk is nearly full. Nothing is deleted, and it stays stopped until a person clears it |
 | **Sync status** | The dashboard's front page: every project, every computer, and what is moving |
-| **Copy diagnostics** | The button that puts a summary of this computer's state on the clipboard to send to your admin. It is in the companion's own window: **Settings > Help > Copy diagnostics** |
+| **Copy diagnostics** | The button that puts a summary of this computer's state on the clipboard to send to your admin. It is in the companion's own window: **Tray > Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN** |
 | **NAS** | Network-attached storage: the server holding the one true copy of your footage |
 | **Tree** | The folder structure on the server that every computer mirrors, seen as `P:` on Windows |
 | **Canonical path** | The path spelling stored in the shared project database (`P:\Projects\...`), identical on every computer, which is what stops clips going offline when a project moves between them |
@@ -890,7 +890,7 @@ links straight to a row here wherever one of them appears.
 | "Media Offline" for clips other people can see | Their proxy has not arrived yet, the project is not ticked on this computer, or `P:` is not mapped | Check the project is ticked for this computer and the tray shows it syncing; on Windows check `P:` exists; on Mac check the mapped mount |
 | "mapping looks wrong" warning | Resolve resolves `P:\` paths to somewhere other than your sync folder | Mac: re-run the wizard's mapping step with Resolve quit. Windows: log off and on, then tell the admin if it persists |
 | Playback is strangely slow and the tray shows little activity | Resolve is streaming originals over the network, usually because a NAS share is mapped to a colliding drive letter | Check your mapped drives and remove any NAS mapping you made yourself |
-| "Sync engine will not start: <why>" | The folder sync engine could not be restarted after three tries | Send the admin diagnostics (companion window: *Settings > Help > Copy diagnostics*) |
+| "Sync engine will not start: <why>" | The folder sync engine could not be restarted after three tries | Send the admin diagnostics (companion window: *Tray > Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN*) |
 | "PAUSED, drive disconnected" (Mac) | The SSD holding your tree is unplugged | Plug it back in; syncing resumes by itself. If macOS mounts it as "Name 1", see the Mac notes the admin has |
 | "...was disconnected before syncing finished: N uploads still to go", repeating every half hour | The SSD was unplugged with a transfer still running; what it names is still owed | Plug it back in and leave the companion running until the `Sync:` line reads up to date. The reminders stop by themselves when the drive is back |
 | The scripting warning dialog keeps appearing | Resolve's scripting server is not answering | Restart the companion, then Resolve; check *External scripting using* is set to Local |

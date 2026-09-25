@@ -214,12 +214,15 @@ def test_admin_todo_when_nobody_can_administer_a_nas_auth_site(conn):
     assert "DASH_ADMIN_USERS" in state.detail
 
 
-def test_admin_ok_when_oidc_maps_admins_from_a_claim(conn):
+def test_admin_todo_when_oidc_has_only_a_claim(conn):
+    """bug-dash-auth-5 (2026-09-25): the claim is logged, never obeyed
+    (auth.is_admin reads DASH_ADMIN_USERS only), so it cannot satisfy the
+    step. This test said ok until then."""
     settings = Settings(auth_method="oidc", oidc_admin_claim="groups",
                         oidc_admin_values=frozenset({"ccsync-admins"}))
     state = setup_engine.run_check(ctx(conn, settings), "admin")
-    assert state.status == "ok"
-    assert "groups" in state.detail
+    assert state.status == "todo"
+    assert "DASH_ADMIN_USERS" in state.detail and "groups" in state.detail
 
 
 def test_admin_under_local_login_reads_the_accounts_table(conn):

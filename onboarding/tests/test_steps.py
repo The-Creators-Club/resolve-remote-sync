@@ -507,32 +507,32 @@ class TestBootstrapHardFailure:
 
 
 class TestEffectiveInstallRole:
-    """Which install actually runs. Only one of the two roles is destructive:
-    the editor flow does `subst P: /D` + `net use P: /delete /y` and remaps P:
-    at a loopback share of a LOCAL folder. On the base rig P: IS the NAS share
-    every P:\\Projects\\... path in the Resolve database resolves through."""
+    """Which install actually runs. Since logic-onboarding-1 (2026-09-25) the
+    radio decides (the account's role is the PERSON's, and wired or remote is
+    the computer's own setting since CR-88). Changed from the B20 version,
+    which pinned the account's role beating the radio; the destructive half of
+    B20 is guarded by p_mapping_is_ours / the bootstrap's $PIsForeign instead.
+    test_bug_hunt_2026_09_24_w2_onboarding.py has the scenarios."""
 
-    def test_verified_role_beats_the_radio(self):
-        # The default radio is "editor"; re-running on the base rig used to
-        # dispatch on it and destroy the NAS mapping.
-        assert steps.effective_install_role("editor", "base") == "base"
-        assert steps.effective_install_role("base", "editor") == "editor"
+    def test_the_radio_beats_the_accounts_role(self):
+        assert steps.effective_install_role("editor", "base") == "editor"
+        assert steps.effective_install_role("base", "editor") == "base"
 
     def test_matching_roles_pass_through(self):
         assert steps.effective_install_role("editor", "editor") == "editor"
         assert steps.effective_install_role("base", "base") == "base"
 
-    def test_falls_back_to_the_radio_when_the_dashboard_sends_no_role(self):
+    def test_the_radio_alone_when_the_dashboard_sends_no_role(self):
         # Older dashboards omit "role" entirely (see verify_account).
         assert steps.effective_install_role("editor", None) == "editor"
         assert steps.effective_install_role("base", "") == "base"
         assert steps.effective_install_role("editor", "   ") == "editor"
 
-    def test_unrecognised_verified_role_falls_back_to_the_radio(self):
+    def test_unrecognised_verified_role_changes_nothing(self):
         assert steps.effective_install_role("editor", "admin") == "editor"
 
     def test_case_and_whitespace_are_tolerated(self):
-        assert steps.effective_install_role("editor", " BASE ") == "base"
+        assert steps.effective_install_role(" BASE ", "editor") == "base"
         assert steps.effective_install_role(" Editor ", None) == "editor"
 
     def test_two_unknowns_land_on_the_non_destructive_role(self):
@@ -1046,22 +1046,29 @@ def test_a_corrupt_breadcrumb_still_counts_as_present(tmp_path):
 
 
 def test_install_close_warning_uses_the_sites_drive_letter():
-    text = steps.install_close_warning("Q")
+    # is_macos pinned since ui-onboarding-3 (2026-09-25): a Mac install never
+    # takes a drive down, so on the macOS CI job the default wording names none.
+    text = steps.install_close_warning("Q", is_macos=False)
     assert text == ("The install is part-way through. Closing now leaves this "
                     "computer with no CCSync and no Q drive. Close anyway?")
     assert "P drive" not in text
     assert "\u2014" not in text
-    assert steps.install_close_warning("W:\\").startswith(
+    assert steps.install_close_warning("W:\\", is_macos=False).startswith(
         "The install is part-way through.")
-    assert " W drive" in steps.install_close_warning("W:\\")
+    assert " W drive" in steps.install_close_warning("W:\\", is_macos=False)
 
 
 def test_console_user_mismatch_refuses_and_names_both_accounts():
     message = steps.console_user_mismatch("STUDIO\\leso", "administrator")
     assert message == (
         "You are running as administrator but leso is signed in. Everything "
-        "this installs is per-user, so leso would get nothing. Sign in as "
-        "leso and run it again (it does not need administrator rights)."
+        "this installs is per-user, so leso would get nothing. leso does not "
+        "need to sign in again: close this and start the installer again by "
+        "double-clicking it, and do not choose Run as administrator or type "
+        "another account's password if Windows asks (it does not need "
+        "administrator rights)."
+        # ui-onboarding-10 (2026-09-25): was "Sign in as leso and run it
+        # again", asking for a sign-in that had already happened.
     )
 
 

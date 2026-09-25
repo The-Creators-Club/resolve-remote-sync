@@ -65,8 +65,29 @@
     // default. Both states are recorded, so a section the server renders
     // open (e.g. the current project's group) stays closed if the user
     // closed it.
+    //
+    // ui-dash-main-1 (2026-09-25): after an OUTERHTML swap htmx 1.9.12 hands
+    // afterSwap the ORIGINAL target in detail.target, and that element has
+    // already been removed from the document; the event itself fires on each
+    // NEW element. Restoring into detail.target therefore wrote the saved
+    // state into a detached tree, and the sidebar tick (an outerHTML swap)
+    // folded the whole project tree shut. liveRoot() is the element that is
+    // actually on the page now. The same swap replaced an OPEN popover (the
+    // phone's projects sheet) with a new, closed one, so the open popover
+    // and its scroll position are carried across too (ui-dash-main-8).
+    function liveRoot(evt) {
+      var t = evt.detail && evt.detail.target;
+      if (t && t.isConnected === false && evt.target && evt.target.nodeType === 1) {
+        return evt.target;
+      }
+      return t;
+    }
     (function () {
       var state = {};
+      var sheets = {};
+      function isOpen(el) {
+        try { return el.matches(":popover-open"); } catch (e) { return false; }
+      }
       document.addEventListener("htmx:beforeSwap", function (evt) {
         var t = evt.detail.target;
         if (!t || !t.querySelectorAll) return;
@@ -75,16 +96,36 @@
           seen[d.getAttribute("data-key")] = d.hasAttribute("open");
         });
         state[t.id || "_"] = seen;
+        var open = [];
+        var pops = t.querySelectorAll("[popover][id]");
+        if (t.matches && t.matches("[popover][id]")) open.push({id: t.id, top: t.scrollTop});
+        pops.forEach(function (p) {
+          if (isOpen(p)) open.push({id: p.id, top: p.scrollTop});
+        });
+        sheets[t.id || "_"] = open;
       });
       document.addEventListener("htmx:afterSwap", function (evt) {
-        var t = evt.detail.target;
+        var key = (evt.detail.target && evt.detail.target.id) || "_";
+        var t = liveRoot(evt);
         if (!t || !t.querySelector) return;
-        var seen = state[t.id || "_"] || {};
-        Object.keys(seen).forEach(function (key) {
-          var d = t.querySelector('details[data-key="' + CSS.escape(key) + '"]');
+        var seen = state[key] || {};
+        Object.keys(seen).forEach(function (k) {
+          var sel = 'details[data-key="' + CSS.escape(k) + '"]';
+          var d = (t.matches && t.matches(sel)) ? t : t.querySelector(sel);
           if (!d) return;
-          if (seen[key]) d.setAttribute("open", "");
+          if (seen[k]) d.setAttribute("open", "");
           else d.removeAttribute("open");
+        });
+        // Consumed by the first afterSwap of this swap: htmx fires one per
+        // settled element, and a sheet the reader closes afterwards must not
+        // be reopened by a later event carrying a stale record.
+        var reopen = sheets[key] || [];
+        delete sheets[key];
+        reopen.forEach(function (s) {
+          var p = document.getElementById(s.id);
+          if (!p || !p.showPopover || isOpen(p)) return;
+          try { p.showPopover(); } catch (e) { return; }
+          p.scrollTop = s.top;
         });
       });
     })();
@@ -104,7 +145,9 @@
       var done = false;
       document.addEventListener("htmx:afterSwap", function (evt) {
         if (done || !location.hash || location.hash.length < 2) return;
-        var t = evt.detail && evt.detail.target;
+        // ui-dash-main-1 (2026-09-25): the live element, not the detached
+        // original an outerHTML swap leaves in detail.target.
+        var t = liveRoot(evt);
         if (!t || !t.querySelector) return;
         var id = location.hash.slice(1);
         var el = null;

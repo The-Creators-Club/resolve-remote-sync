@@ -186,8 +186,15 @@ def test_a_sent_copy_does_not_vouch_for_a_different_sender(site):
 
 
 class _SentIMAP:
-    def __init__(self, sent_ids):
+    # bug-dash-ops-1 (2026-09-25): a Sent hit is now fetched and compared, so
+    # the fake serves the copy it holds (`copy`) for message 7.
+    def __init__(self, sent_ids, copy=None):
         self.sent_ids, self.selected, self.calls = sent_ids, None, []
+        self.copy = copy
+
+    def fetch(self, num, what):
+        self.calls.append(("fetch", num, what))
+        return "OK", [(b"7 (BODY[] {n}", self.copy), b")"]
 
     def list(self):
         return "OK", [rb'(\HasNoChildren) "/" "INBOX"',
@@ -206,7 +213,7 @@ class _SentIMAP:
 
 def test_in_sent_finds_the_folder_by_its_flag_and_goes_back_to_the_inbox():
     raw = reply(message_id="<mine@mail.gmail.com>")
-    client = _SentIMAP({"<mine@mail.gmail.com>"})
+    client = _SentIMAP({"<mine@mail.gmail.com>"}, copy=raw)
     assert triage_mail._in_sent(client, raw) is True
     assert client.calls[0] == ("select", '"[Gmail]/Sent Mail"', True)
     assert client.calls[-1][1] == "INBOX" and client.calls[-1][2] is False

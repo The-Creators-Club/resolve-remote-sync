@@ -1685,7 +1685,7 @@ def test_the_page_groups_the_rows_that_shared_a_message(env, monkeypatch):
     client = as_admin(_client)
     page = client.get("/admin/alerts")
     assert page.status_code == 200
-    assert "one message, 2 finding(s)" in page.text
+    assert "one message, 2 findings" in page.text  # ui-dash-admin-12 (2026-09-25): no "(s)"
 
 
 # ------------------------------- out_of_tree names its project (CR-232)

@@ -165,13 +165,39 @@ def ingest_video(body: VideoIn, conn: sqlite3.Connection = Depends(get_db)) -> d
     return {"id": row["id"]}
 
 
+def _target_video_id(conn: sqlite3.Connection, video_id: int,
+                     share: str | None, rel_path: str | None) -> int:
+    """The canonical row an /index or /moved body is about. 404 if none.
+
+    bug-broll-2 (2026-09-25): the id alone is not an identity here. The
+    indexer's HttpBackend keeps a LOCAL shadow database whose ids are its own
+    (its module docstring says so), and it posted that local id: canonical
+    clip 1 got the new clip's segments and themes, the new clip stayed
+    `discovered`, and a sort renamed the wrong clip, all silently. A body
+    that also names the clip's (share, rel_path) -- for /moved, the path it
+    is moving FROM -- is resolved by that, and a disagreeing id is logged and
+    ignored. Both keys are optional, so an older indexer that sends the id
+    alone is answered exactly as before.
+    """
+    if share and rel_path:
+        row = conn.execute(
+            "SELECT id FROM videos WHERE share = ? AND rel_path = ?",
+            (share, rel_path)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="video not found")
+        if row["id"] != video_id:
+            log.warning("ingest: body names %s/%s (id %s) but carries video_id %s; "
+                        "using the path", share, rel_path, row["id"], video_id)
+        return row["id"]
+    row = conn.execute("SELECT id FROM videos WHERE id = ?", (video_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="video not found")
+    return row["id"]
+
+
 @router.post("/index", dependencies=[Depends(verify_ingest_token)])
 def ingest_index(body: IndexIn, conn: sqlite3.Connection = Depends(get_db)) -> dict:
-    video = conn.execute(
-        "SELECT id FROM videos WHERE id = ?", (body.video_id,)
-    ).fetchone()
-    if video is None:
-        raise HTTPException(status_code=404, detail="video not found")
+    video_id = _target_video_id(conn, body.video_id, body.share, body.rel_path)
 
     now = datetime.now(timezone.utc).isoformat()
     try:
@@ -188,12 +214,12 @@ def ingest_index(body: IndexIn, conn: sqlite3.Connection = Depends(get_db)) -> d
             # transcript_segments.
             conn.execute(
                 "DELETE FROM embeddings WHERE source = 'segment' AND video_id = ?",
-                (body.video_id,),
+                (video_id,),
             )
-            conn.execute("DELETE FROM segments WHERE video_id = ?", (body.video_id,))
-            conn.execute("DELETE FROM themes WHERE video_id = ?", (body.video_id,))
+            conn.execute("DELETE FROM segments WHERE video_id = ?", (video_id,))
+            conn.execute("DELETE FROM themes WHERE video_id = ?", (video_id,))
             conn.execute(
-                "DELETE FROM quality_flags WHERE video_id = ?", (body.video_id,)
+                "DELETE FROM quality_flags WHERE video_id = ?", (video_id,)
             )
 
             for seg in body.segments:
@@ -206,7 +232,7 @@ def ingest_index(body: IndexIn, conn: sqlite3.Connection = Depends(get_db)) -> d
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        body.video_id,
+                        video_id,
                         seg.t_start,
                         seg.t_end,
                         seg.description,
@@ -236,13 +262,13 @@ def ingest_index(body: IndexIn, conn: sqlite3.Connection = Depends(get_db)) -> d
             for theme in body.themes:
                 conn.execute(
                     "INSERT INTO themes (video_id, text) VALUES (?, ?)",
-                    (body.video_id, theme),
+                    (video_id, theme),
                 )
 
             for flag in body.quality_flags:
                 conn.execute(
                     "INSERT INTO quality_flags (video_id, flag) VALUES (?, ?)",
-                    (body.video_id, flag),
+                    (video_id, flag),
                 )
 
             conn.execute(
@@ -251,7 +277,7 @@ def ingest_index(body: IndexIn, conn: sqlite3.Connection = Depends(get_db)) -> d
                 SET category_hint = ?, status = 'indexed', indexed_at = ?, model = ?
                 WHERE id = ?
                 """,
-                (body.category_hint, now, body.model, body.video_id),
+                (body.category_hint, now, body.model, video_id),
             )
 
             # Inside the same transaction as the replace, deliberately: this is
@@ -269,11 +295,7 @@ def ingest_index(body: IndexIn, conn: sqlite3.Connection = Depends(get_db)) -> d
 
 @router.post("/moved", dependencies=[Depends(verify_ingest_token)])
 def ingest_moved(body: MovedIn, conn: sqlite3.Connection = Depends(get_db)) -> dict:
-    video = conn.execute(
-        "SELECT id FROM videos WHERE id = ?", (body.video_id,)
-    ).fetchone()
-    if video is None:
-        raise HTTPException(status_code=404, detail="video not found")
+    video_id = _target_video_id(conn, body.video_id, body.share, body.rel_path)
 
     try:
         with conn:
@@ -283,7 +305,7 @@ def ingest_moved(body: MovedIn, conn: sqlite3.Connection = Depends(get_db)) -> d
                 SET rel_path = ?, in_inbox = 0, status = 'sorted'
                 WHERE id = ?
                 """,
-                (body.new_rel_path, body.video_id),
+                (body.new_rel_path, video_id),
             )
     except sqlite3.IntegrityError as exc:
         raise HTTPException(

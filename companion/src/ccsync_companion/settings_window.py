@@ -42,6 +42,7 @@ from typing import Callable, TYPE_CHECKING
 
 from . import config as config_mod
 from . import machine as machine_mod
+from . import root_guard as root_guard_mod
 from . import site as site_mod
 from . import tray as tray_mod
 from . import ui_copy
@@ -211,8 +212,25 @@ def _lane_advisories(guard: dict, skip_blocked: bool = False) -> list[tuple[str,
                 producer, "__name__", producer))
             continue
         if text:
+            if producer is tray_mod._blocked_line and _blocked_is_informational(guard):
+                # ui-comp-windows-2 (2026-09-25): the producer's BLOCKING tier
+                # is about the reasons that stop work. "No projects are
+                # ticked" is a fact, not a fault (owner rule, 2026-09-11,
+                # restated 2026-09-18: never an error or warning on any
+                # surface) -- and tagged BLOCKING it was drawn red and pulled
+                # HELP to the top of a brand-new computer's Settings. The
+                # tray already treats it this way (live-5).
+                severity = INFO
             out.append((severity, text))
     return out
+
+
+def _blocked_is_informational(guard: dict) -> bool:
+    blocked = (guard or {}).get("blocked") or {}
+    if not isinstance(blocked, dict):
+        return False
+    reason = str(blocked.get("reason") or "").strip()
+    return reason in getattr(tray_mod, "_BLOCKED_INFORMATIONAL", frozenset())
 
 
 def _licence_advisory(guard: dict) -> str:
@@ -229,9 +247,81 @@ def _licence_advisory(guard: dict) -> str:
     detail = str(blocked.get("detail") or "").strip()
     if not detail:
         return ""
-    kept = [s for s in detail.split(". ") if "setup wizard" not in s.lower()]
+    # ui-comp-windows-7 (2026-09-25): the sentence is now "... Open Tray >
+    # Settings > READ AND ACCEPT THE LICENCE." (comp-app-3), and this line is
+    # drawn directly above that button, inside that window - so the route is
+    # the part to drop. The "setup wizard" filter stays for a record written
+    # by an older build's wording.
+    kept = [s for s in detail.split(". ")
+            if "setup wizard" not in s.lower()
+            and not s.strip().startswith("Open ")]
     sentence = ". ".join(p.strip().rstrip(".") for p in kept if p.strip())
     return f"⚠ {sentence}. Nothing syncs until it is accepted." if sentence else ""
+
+
+# The Settings row that clears a local stop (ui-comp-windows-6). The same
+# words as tray.halt_release_label, in the window's capitals; ui_copy's route
+# to it is checked against this file by test_tray_copy_names_real_menu_items.
+CLEAR_SYNC_STOP_LABEL = "CLEAR THE SYNC STOP ON THIS COMPUTER"
+
+
+# The jump strip's padding and the gap between its buttons (px), shared by the
+# window and _flow_rows so the arithmetic is the layout's own.
+_STRIP_PADX = 18
+_STRIP_GAP = 8
+
+
+def _flow_rows(widths: list, available: int, gap: int = _STRIP_GAP) -> list:
+    """Row index per button for a left-to-right strip that wraps at
+    `available` px (ui-comp-windows-4). A button wider than the whole strip
+    still gets a row of its own rather than none."""
+    rows: list = []
+    row = 0
+    used = 0
+    for width in widths:
+        need = int(width or 0) + gap
+        if used and used + need > max(1, int(available)):
+            row += 1
+            used = 0
+        rows.append(row)
+        used += need
+    return rows
+
+
+def _line_wrap_px(canvas_width: int) -> int:
+    """A Line's wraplength for a canvas this wide (ui-comp-windows-4): the
+    body frame's padding on both sides plus a small margin. 660 until the
+    canvas has a real width, which is what the 720 px default gives anyway."""
+    try:
+        width = int(canvas_width)
+    except (TypeError, ValueError):
+        width = 0
+    if width <= 1:
+        return 660
+    return max(240, width - 2 * _STRIP_PADX - 7)
+
+
+def _drive_owed_line(owed: str, root_state=None) -> str:
+    """The CR-92 "work still owed" line, in the words the tray line, the
+    balloon and the reminder use for the SAME drive state (ui-comp-windows-5,
+    2026-09-25).
+
+    `root_unfinished` is set whenever the tree is gone, and that covers a
+    drive that is plugged in and not answering (SYNC-120) or mounted at the
+    wrong place (SYNC-105), not only a pulled one. "Plug it back in" sent the
+    editor to a cable that was fine, and on a misplaced mount it reproduces
+    the fault."""
+    drive = site_mod.drive_phrase(capitalised=True)
+    state = str(root_state or "")
+    if state == root_guard_mod.ROOT_NOT_ANSWERING:
+        return (f"{drive} is not answering with {owed} still to go - reconnect "
+                f"it or restart this computer to finish syncing")
+    if state == root_guard_mod.ROOT_MISPLACED:
+        return (f"{drive} is mounted at the wrong place with {owed} still to go "
+                f"- eject it, delete the leftover empty folder, then plug it "
+                f"back in")
+    return (f"{drive} was disconnected with {owed} still to go - plug it back "
+            f"in to finish syncing")
 
 
 def action_accept_licence(app: "CompanionApp") -> None:
@@ -1100,7 +1190,11 @@ def _fleet_jobs_controls(app: "CompanionApp") -> list:
         f"[{'x' if enabled else ' '}] Let the fleet use this computer",
         lambda: action_write_setting(
             app, "jobs_enabled", not enabled,
-            "This computer will take work for the fleet again."
+            # ui-comp-windows-10 (2026-09-25): every jobs_* key is read at
+            # start, so switching it back ON waits for a restart too; the
+            # editor who ticked it expected work to start now.
+            "This computer will take work for the fleet again. Takes effect "
+            "the next time CCSync starts."
             if not enabled else
             "This computer will stop taking work for the fleet. Takes effect "
             "the next time CCSync starts.")))
@@ -1193,11 +1287,18 @@ def action_set_job_kind(app: "CompanionApp", kind: str, value: str,
             app, "That is the last kind of work this computer takes. Untick "
                  "'Let the fleet use this computer' instead.")
         return
-    action_write_setting(
-        app, "jobs_kinds", value,
-        f"This computer will {'no longer ' if was_on else ''}take "
-        f"{_kind_label(kind).lower()} for the fleet. Takes effect the next "
-        "time CCSync starts.")
+    action_write_setting(app, "jobs_kinds", value, _kind_change_sentence(kind, was_on))
+
+
+def _kind_change_sentence(kind: str, was_on: bool) -> str:
+    """ui-comp-windows-10 (2026-09-25): the kind is quoted as its own label,
+    not folded into the sentence. The labels are imperative checkbox text
+    ("Transcribe audio (uses the graphics card)"), and lower-cased after
+    "take" they read "will no longer take transcribe audio (uses the
+    graphics card) for the fleet"."""
+    verb = "no longer do this" if was_on else "now do this"
+    return (f"This computer will {verb} for the fleet: {_kind_label(kind)}. "
+            "Takes effect the next time CCSync starts.")
 
 
 def _jobs_section(app: "CompanionApp") -> list:
@@ -1357,8 +1458,8 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
         # CR-92: the drive went out with work owed. The balloon says it
         # every half hour; this is where it stays readable in between.
         lane_items.append(Line(
-            f"Your drive was disconnected with {snap['root_unfinished']} still to "
-            f"go - plug it back in to finish syncing", style="warning"))
+            _drive_owed_line(snap["root_unfinished"], snap.get("root_state")),
+            style="warning"))
     lane_items.extend(_drive_reminder_items(app))
     if snap.get("ytdl_line"):
         lane_items.append(Line(snap["ytdl_line"]))
@@ -1408,8 +1509,12 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     halt_active = bool((guard.get("halt") or {}).get("active"))
     halt_is_fleet = (guard.get("halt") or {}).get("scope") == "fleet"
     if halt_active and not halt_is_fleet:
+        # ui-comp-windows-6 (2026-09-25): named for its CAUSE, as the tray
+        # row has been since UX-19. "START SYNCING AGAIN" is false while a
+        # pause is also set (the click leaves the computer not syncing), and
+        # the STOP ALL SYNCING confirm tells the editor to look for this name.
         lane_items.append(Button(
-            "START SYNCING AGAIN", lambda: tray_mod.action_release_halt(app)))
+            CLEAR_SYNC_STOP_LABEL, lambda: tray_mod.action_release_halt(app)))
 
     proxy_gap = snap.get("proxy_gap") or {}
     for text in tray_mod.proxy_advisory_lines(proxy_gap):
@@ -1766,7 +1871,7 @@ def _build_settings_window(app: "CompanionApp", lock, closer: Optional[list] = N
     # APP-17: the jump strip lives OUTSIDE the canvas, so it does not scroll
     # away from the reader who needs it. Packed before the canvas because
     # pack order is what puts it at the top.
-    strip = tk.Frame(root, bg=theme.BG, padx=18, pady=6)
+    strip = tk.Frame(root, bg=theme.BG, padx=_STRIP_PADX, pady=6)
     strip.pack(side="top", fill="x")
 
     canvas = tk.Canvas(root, bg=theme.BG, highlightthickness=0)
@@ -1780,8 +1885,23 @@ def _build_settings_window(app: "CompanionApp", lock, closer: Optional[list] = N
     def _on_body_configure(_e=None) -> None:
         canvas.configure(scrollregion=canvas.bbox("all"))
 
+    # ui-comp-windows-4 (2026-09-25): every Line wraps to the canvas it is
+    # drawn in. A fixed 660 was right for the 720 px default and cut the end
+    # of each advisory (where the action is named) once the window was
+    # narrowed toward its 560 px minsize.
+    line_labels: list = []
+    wrap_px: list = [_line_wrap_px(0)]
+
     def _on_canvas_configure(event) -> None:
         canvas.itemconfigure(body_window, width=event.width)
+        wrap = _line_wrap_px(event.width)
+        if wrap != wrap_px[0]:
+            wrap_px[0] = wrap
+            for label in line_labels:
+                try:
+                    label.configure(wraplength=wrap)
+                except Exception:
+                    pass  # destroyed by a render in between
 
     body.bind("<Configure>", _on_body_configure)
     canvas.bind("<Configure>", _on_canvas_configure)
@@ -1807,11 +1927,39 @@ def _build_settings_window(app: "CompanionApp", lock, closer: Optional[list] = N
         except Exception:
             log.debug("settings window: could not jump to a section", exc_info=True)
 
+    strip_width: list = [None]
+
+    def _reflow_strip(_e=None) -> None:
+        """ui-comp-windows-4: the jump buttons wrap onto as many rows as the
+        window needs. One packed row was 841 px wide at the 720 px default,
+        so ADVANCED was cut and HELP (the section APP-17 built the strip to
+        reach) could not be seen or clicked."""
+        try:
+            width = strip.winfo_width()
+            if _e is not None and width == strip_width[0]:
+                return  # a height change from the reflow itself
+            strip_width[0] = width
+            buttons = list(strip.winfo_children())
+            available = (width if width > 1 else 720) - 2 * _STRIP_PADX
+            rows = _flow_rows([b.winfo_reqwidth() for b in buttons], available,
+                              _STRIP_GAP)
+            column = 0
+            for i, (button, row) in enumerate(zip(buttons, rows)):
+                column = 0 if i == 0 or row != rows[i - 1] else column + 1
+                button.grid(row=row, column=column, sticky="w",
+                            padx=(0, _STRIP_GAP), pady=(0, 4))
+        except Exception:
+            log.debug("settings window: could not lay out the jump strip",
+                      exc_info=True)
+
+    strip.bind("<Configure>", _reflow_strip)
+
     def _render(sections: list[Section]) -> None:
         for child in body.winfo_children():
             child.destroy()
         for child in strip.winfo_children():
             child.destroy()
+        line_labels.clear()
         for section in sections:
             header = tk.Label(body, text=f"[ {section.title} ]", bg=theme.BG,
                               fg=theme.RED, font=theme.mono(11, bold=True),
@@ -1820,19 +1968,22 @@ def _build_settings_window(app: "CompanionApp", lock, closer: Optional[list] = N
             theme.neon_button(
                 tk, strip, section.title,
                 (lambda header=header: _jump_to(header)), primary=False,
-            ).pack(side="left", padx=(0, 8))
+            )
             tk.Label(body, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM,
                      font=theme.mono(9)).pack(anchor="w")
             for item in section.items:
                 if isinstance(item, Line):
                     fg = {"muted": theme.MUTED, "warning": theme.RED}.get(item.style, theme.TEXT)
-                    tk.Label(body, text=item.text, bg=theme.BG, fg=fg, font=theme.mono(10),
-                             justify="left", anchor="w", wraplength=660
-                             ).pack(anchor="w", pady=(2, 0))
+                    label = tk.Label(body, text=item.text, bg=theme.BG, fg=fg,
+                                     font=theme.mono(10), justify="left", anchor="w",
+                                     wraplength=wrap_px[0])
+                    label.pack(anchor="w", pady=(2, 0))
+                    line_labels.append(label)
                 elif isinstance(item, Button):
                     theme.neon_button(
                         tk, body, item.label, _run(item.label, item.on_click),
                     ).pack(anchor="w", pady=(4, 0))
+        _reflow_strip()
 
     refresh_job: list = [None]
     rendered: list = [None, 0.0]   # [signature, monotonic time of last render]

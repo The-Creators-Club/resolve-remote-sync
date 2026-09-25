@@ -46,7 +46,7 @@ from __future__ import annotations
 import sqlite3
 from html import escape
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.responses import FileResponse, RedirectResponse, Response
 
@@ -171,12 +171,26 @@ def share_page(token: str, conn: sqlite3.Connection = Depends(cf.get_shares_db))
 @router.get("/{token}/api/folder")
 def share_folder(token: str, folder: sqlite3.Row = Depends(_live_folder),
                  conn: sqlite3.Connection = Depends(cf.get_shares_db),
-                 index: sqlite3.Connection = Depends(get_db)) -> Response:
+                 index: sqlite3.Connection = Depends(get_db),
+                 preview: str | None = Query(default=None),
+                 x_ccsync_user: str | None = Header(default=None)) -> Response:
     """The folder as the viewer draws it. Counts as a view: it is fetched
     once per page load, not per interaction, so view_count means "times the
-    page was opened" and nothing finer."""
+    page was opened" and nothing finer.
+
+    Not when the opener is one of US (logic-broll-music-4, 2026-09-25). The
+    panel shows this counter as the answer to "has the client looked yet?",
+    and the curator's own "open" check was counted as the client, so a folder
+    nobody outside the studio had seen read "Opened 1 time, last today". Two
+    signs, either enough: the dashboard gate stamps `X-CCSync-User` from a
+    valid session cookie on every request it passes, share paths included
+    (and strips an inbound one, so a client cannot forge it; standalone, a
+    forged one only hides a view), and the panel's own "open" link carries
+    `?preview=1` for a public base on another origin, where no cookie rides.
+    Suppressing a count is the only thing either can do."""
     items = cf.resolve_items(conn, index, folder["id"], public=True)
-    cf.record_view(conn, folder["id"])
+    if not (x_ccsync_user or "").strip() and preview != "1":
+        cf.record_view(conn, folder["id"])
     body = {
         "title": folder["title"],
         "description": folder["description"],
@@ -207,10 +221,13 @@ def share_video(token: str, video_id: int, folder: sqlite3.Row = Depends(_live_f
     # rebuilt index hands the clip a new id, and the curator's caption is
     # filed under the old one (broll-1, 2026-08-21). The grid gets this right
     # via resolve_items; the detail panel used to lose the note.
-    note_row = conn.execute(
-        "SELECT note FROM client_folder_items WHERE folder_id = ? "
-        "AND (video_id = ? OR (share = ? AND rel_path = ?))",
-        (folder["id"], vid, v["share"], v["rel_path"])).fetchone()
+    # bug-broll-1 (2026-09-25): and by what the item RESOLVES to, not "stored
+    # id OR name": after a rebuild `vid` can be another item's stale stored
+    # id, and fetchone() of the two matches handed the client the other
+    # clip's caption. The first match in display order is the card the grid
+    # drew (resolve_items keeps the first of two items for one clip).
+    holders = cf.items_holding(conn, index, vid, folder["id"])
+    note_row = holders[0] if holders else None
     segments = [
         {"t_start": r["t_start"], "t_end": r["t_end"], "description": r["description"],
          "setting": r["setting"], "motion": r["motion"]}

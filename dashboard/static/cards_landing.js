@@ -360,6 +360,12 @@
 
   // ---------------------------------------------------- while one opens
   var watching = rows.some(function (r) { return r.getAttribute('data-state') === 'loading'; });
+  // logic-cards-4 (2026-09-25): the episode `?want=` named. When the one this
+  // page is waiting for turns READY, go INTO it rather than reloading the
+  // list; `replace`, so Back does not land on a waiting page that would
+  // forward again. Only a change seen while watching forwards: a page opened
+  // on an already-ready `want` just shows its button.
+  var want = page.getAttribute('data-want') || '';
   if (watching && window.fetch) {
     var delay = 3000;
     var tick = function () {
@@ -379,7 +385,16 @@
             if (!Object.prototype.hasOwnProperty.call(now, slug)) return was !== '';
             return now[slug] !== was;
           });
-          if (moved) { window.location.reload(); return; }
+          if (moved) {
+            var hit = null;
+            (state.episodes || []).forEach(function (e) { if (e.slug === want) hit = e; });
+            if (want && hit && hit.state === 'ready' && hit.href) {
+              window.location.replace(hit.href);
+              return;
+            }
+            window.location.reload();
+            return;
+          }
           setTimeout(tick, delay);
         })
         .catch(function () {

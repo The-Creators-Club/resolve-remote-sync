@@ -708,7 +708,7 @@ def preflight(settings, app_state, *, version: str, force: bool) -> dict[str, An
     if not newer_than_image(version):
         raise DashboardUpdateError(
             409, f"dashboard {version} is not newer than the code in this container image "
-                 f"({image_version()}), and the image always wins at boot -- applying it "
+                 f"({image_version()}), and the image always wins at boot: applying it "
                  "would land right back on the image's own code. To go back, roll back "
                  "instead.")
 
@@ -720,7 +720,7 @@ def preflight(settings, app_state, *, version: str, force: bool) -> dict[str, An
         probe.unlink()
     except OSError as exc:
         raise DashboardUpdateError(
-            500, f"{root} is not writable ({exc}) -- the data volume has to hold the new "
+            500, f"{root} is not writable ({exc}): the data volume has to hold the new "
                  "code tree. Check the mount and the uid the container runs as.")
 
     record = _find_record(app_state, version)
@@ -761,15 +761,15 @@ def preflight(settings, app_state, *, version: str, force: bool) -> dict[str, An
 def _refuse_unsafe_member(member: tarfile.TarInfo) -> None:
     name = member.name
     if name.startswith("/") or name.startswith("\\") or ":" in name.split("/")[0]:
-        raise DashboardUpdateError(400, f"bundle member {name!r} is an absolute path -- refused")
+        raise DashboardUpdateError(400, f"bundle member {name!r} is an absolute path: refused")
     if any(part in ("..",) for part in Path(name).parts):
-        raise DashboardUpdateError(400, f"bundle member {name!r} escapes the bundle -- refused")
+        raise DashboardUpdateError(400, f"bundle member {name!r} escapes the bundle: refused")
     if member.issym() or member.islnk():
-        raise DashboardUpdateError(400, f"bundle member {name!r} is a link -- refused")
+        raise DashboardUpdateError(400, f"bundle member {name!r} is a link: refused")
     if member.isdev() or member.isfifo():
-        raise DashboardUpdateError(400, f"bundle member {name!r} is a device or fifo -- refused")
+        raise DashboardUpdateError(400, f"bundle member {name!r} is a device or fifo: refused")
     if not (member.isfile() or member.isdir()):
-        raise DashboardUpdateError(400, f"bundle member {name!r} is not a regular file -- refused")
+        raise DashboardUpdateError(400, f"bundle member {name!r} is not a regular file: refused")
 
 
 def extract_bundle(archive: Path, dest: Path) -> dict[str, Any]:
@@ -796,7 +796,7 @@ def extract_bundle(archive: Path, dest: Path) -> dict[str, Any]:
             tar.extract(member, path=str(dest), set_attrs=False, filter="data")
     manifest = _read_json(dest / "manifest.json")
     if not manifest:
-        raise DashboardUpdateError(400, "the bundle has no readable manifest.json -- refused")
+        raise DashboardUpdateError(400, "the bundle has no readable manifest.json: refused")
     return manifest
 
 
@@ -808,20 +808,20 @@ def verify_extracted_tree(dest: Path, manifest: dict[str, Any], record: dict[str
     catch the boring failures: a manifest that disagrees with the record it
     travelled with, and a file that did not survive extraction."""
     if str(manifest.get("kind")) != release_feed.DASHBOARD_KIND:
-        raise DashboardUpdateError(400, "the bundle's manifest is not a dashboard bundle -- refused")
+        raise DashboardUpdateError(400, "the bundle's manifest is not a dashboard bundle: refused")
     for field in ("version", "runtime_id"):
         if str(manifest.get(field) or "") != str(record.get(field) or ""):
             raise DashboardUpdateError(
-                400, f"the bundle's manifest {field} does not match the signed record -- refused")
+                400, f"the bundle's manifest {field} does not match the signed record: refused")
     files = manifest.get("files_sha256")
     if not isinstance(files, dict) or not files:
-        raise DashboardUpdateError(400, "the bundle's manifest lists no files -- refused")
+        raise DashboardUpdateError(400, "the bundle's manifest lists no files: refused")
     for name, expected in files.items():
         path = dest / name
         if not path.is_file():
-            raise DashboardUpdateError(400, f"the bundle is missing {name} -- refused")
+            raise DashboardUpdateError(400, f"the bundle is missing {name}: refused")
         if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
-            raise DashboardUpdateError(400, f"{name} does not match the bundle manifest -- refused")
+            raise DashboardUpdateError(400, f"{name} does not match the bundle manifest: refused")
 
 
 def bundle_pythonpath(root: Path) -> list[str]:
@@ -927,7 +927,7 @@ def stage_verify(root: Path, db_copies: dict[str, Path], *,
         )
     except subprocess.TimeoutExpired:
         raise DashboardUpdateError(
-            500, f"the staged code did not finish its checks within {int(timeout)}s -- "
+            500, f"the staged code did not finish its checks within {int(timeout)}s: "
                  "nothing was swapped")
     except OSError as exc:
         raise DashboardUpdateError(500, f"could not run the staged code's checks: {exc}")
@@ -1408,7 +1408,7 @@ def apply(settings, app_state, *, version: str, force: bool = False,
                started_at=db.utcnow_iso(), started_by=started_by, finished_at="")
     url = str(record.get("url") or "")
     if not url.lower().startswith("https://"):
-        raise DashboardUpdateError(400, "the feed record's url is not https -- refused")
+        raise DashboardUpdateError(400, "the feed record's url is not https: refused")
     try:
         sha, size = release_feed.fetch_artifact_to(
             url, archive, expected_sha256=str(record.get("sha256") or ""),
@@ -1560,7 +1560,7 @@ def rollback(settings, *, to_version: str = "", restore_db: str = "",
     if state.get("in_progress"):
         raise DashboardUpdateError(
             409, f"an update to {state.get('version') or 'another version'} is in progress "
-                 f"(step: {state.get('step')}) -- rolling back underneath it would race the "
+                 f"(step: {state.get('step')}): rolling back underneath it would race the "
                  "swap. Wait for it to finish or fail.")
     current = _read_json(current_json_path(settings))
     if not current.get("version"):

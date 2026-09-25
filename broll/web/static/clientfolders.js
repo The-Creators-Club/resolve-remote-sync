@@ -43,6 +43,14 @@ const cf = {
  * mount prefix (`/broll/`) is whatever it really is and never spelled here.
  * With no base, the dashboard's own origin -- which reaches only inside the
  * tailnet, and the panel says so. */
+/* bug-broll-1 (2026-09-25): the panel's own rows are named by their LEDGER
+   row id. `item.video_id` is the id the clip was STORED under, which after a
+   renumbering index rebuild can be another clip's current id, and the server
+   used to act on both: one click removed two clips from a live client link. */
+function cfItemQuery(item) {
+  return item && item.item_id != null ? `?item_id=${encodeURIComponent(item.item_id)}` : "";
+}
+
 function cfShareUrl(folder) {
   const rel = `share/${folder.token}/`;
   const local = new URL(rel, document.baseURI);
@@ -282,7 +290,10 @@ function cfRenderFolder() {
   const copyBtn = el("button", { className: "primary-btn", text: "Copy", attrs: { type: "button" } });
   copyBtn.addEventListener("click", () => cfCopy(field.value));
   linkRow.appendChild(copyBtn);
-  const openBtn = el("a", { className: "text-btn cf-open-link", text: "open", attrs: { href: field.value, target: "_blank", rel: "noopener" } });
+  // logic-broll-music-4 (2026-09-25): `?preview=1` so the curator checking
+  // their own link is not counted as the client opening it. Only on this
+  // button: the field above, and so the copied link, stays clean.
+  const openBtn = el("a", { className: "text-btn cf-open-link", text: "open", attrs: { href: `${field.value}?preview=1`, target: "_blank", rel: "noopener" } });
   linkRow.appendChild(openBtn);
   linkBox.appendChild(linkRow);
   const linkNote = el("div", { className: "muted small" });
@@ -398,30 +409,53 @@ function cfItemRow(item, idx, total) {
   row.appendChild(thumb);
 
   const body = el("div", { className: "cf-item-body" });
+  // ui-broll-web-12 review (2026-09-25): the line is a flex row and only the
+  // name itself is ellipsized. With the ellipsis on the whole line, a camera
+  // name of ~30 characters pushed the duration and the "saved" mark past the
+  // clip edge, so a save that worked still showed nothing.
   const name = el("div", { className: "cf-item-name" });
-  name.textContent = item.missing
+  name.appendChild(el("span", { className: "cf-item-name-text", text: item.missing
     ? `${basename(item.rel_path)} (no longer in the archive index)`
-    : item.name;
+    : item.name }));
   if (!item.missing && item.duration_s != null) {
-    name.appendChild(el("span", { className: "muted", text: ` · ${formatDuration(item.duration_s)}` }));
+    name.appendChild(el("span", { className: "muted cf-item-dur", text: ` · ${formatDuration(item.duration_s)}` }));
   }
   body.appendChild(name);
   if (!item.missing) {
     const note = el("input", { attrs: { type: "text", placeholder: "caption the client sees (optional)", maxlength: "500" } });
     note.value = item.note || "";
+    const saved = el("span", { className: "small cf-note-saved", text: "" });
+    // ui-broll-web-12 (2026-09-25): the model is updated BEFORE the PUT is
+    // awaited. Pressing a move arrow straight after typing blurs the field
+    // (change fires, the PUT starts) and the click then redraws every row from
+    // cf.current.items at once; with the assignment after the await, the
+    // redrawn field showed the OLD caption while the server held the new one.
+    // The redraw may also have replaced this row, so the "saved" mark and a
+    // failure's revert go to whichever field shows this item NOW.
+    cfNoteFields.set(item, { note, saved });
     note.addEventListener("change", async () => {
+      const folderId = cf.current.id;
+      const previous = item.note || "";
+      const wanted = note.value;
+      item.note = wanted;
       try {
-        await fetchJson(`api/client-folders/${cf.current.id}/items/${item.video_id}/note`, {
+        await fetchJson(`api/client-folders/${folderId}/items/${item.video_id}/note${cfItemQuery(item)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ note: note.value }),
+          body: JSON.stringify({ note: wanted }),
         });
-        item.note = note.value;
+        const shown = cfNoteFields.get(item);
+        if (shown && item.note === wanted) cfFlashSaved(shown.saved);
       } catch (e) {
+        // Back to what the server holds, unless a later edit has already
+        // replaced it. The field keeps the typed words so they are not lost;
+        // editing it again is the retry.
+        if (item.note === wanted) item.note = previous;
         toast(`Caption not saved: ${e.message}`, "error");
       }
     });
     body.appendChild(note);
+    name.appendChild(saved);
   }
   row.appendChild(body);
 
@@ -435,7 +469,7 @@ function cfItemRow(item, idx, total) {
   const rm = el("button", { className: "text-btn cf-remove", text: "✕", attrs: { type: "button", title: "remove from this folder" } });
   rm.addEventListener("click", async () => {
     try {
-      await fetchJson(`api/client-folders/${cf.current.id}/items/${item.video_id}`, { method: "DELETE" });
+      await fetchJson(`api/client-folders/${cf.current.id}/items/${item.video_id}${cfItemQuery(item)}`, { method: "DELETE" });
       cf.current.items.splice(idx, 1);
       cfRenderFolder();
     } catch (e) {
@@ -445,6 +479,18 @@ function cfItemRow(item, idx, total) {
   ctl.append(up, down, rm);
   row.appendChild(ctl);
   return row;
+}
+
+// ui-broll-web-12 (2026-09-25): item -> the caption field and "saved" mark that
+// currently draw it. A WeakMap so a redraw simply replaces the entry and a
+// dropped folder's items take theirs with them.
+const cfNoteFields = new WeakMap();
+
+function cfFlashSaved(mark) {
+  if (!mark) return;
+  mark.textContent = "saved";
+  clearTimeout(mark._cfTimer);
+  mark._cfTimer = setTimeout(() => { mark.textContent = ""; }, 1800);
 }
 
 async function cfMove(idx, delta) {
@@ -553,6 +599,9 @@ function cfRenderPopover() {
     const row = el("label", { className: "cf-pop-row" });
     const box = el("input", { attrs: { type: "checkbox" } });
     box.checked = !!folder.contains;
+    // ui-broll-web-11 (2026-09-25): the count beside the title is redrawn on
+    // a toggle; it used to keep the number from when the popover opened.
+    const count = el("span", { className: "muted small cf-pop-count", text: `${folder.n_items}` });
     box.addEventListener("change", async () => {
       box.disabled = true;
       try {
@@ -571,6 +620,7 @@ function cfRenderPopover() {
           folder.n_items = Math.max(0, folder.n_items - 1);
           toast(`Removed from "${folder.title}"`);
         }
+        count.textContent = `${folder.n_items}`;
         // Keep an open panel honest.
         if (cf.current && cf.current.id === folder.id) cfOpenFolder(folder.id);
       } catch (e) {
@@ -582,36 +632,70 @@ function cfRenderPopover() {
     });
     row.appendChild(box);
     row.appendChild(el("span", { className: "cf-pop-title", text: folder.title }));
-    row.appendChild(el("span", { className: "muted small", text: `${folder.n_items}` }));
+    row.appendChild(count);
     pop.appendChild(row);
   }
   const newBtn = el("button", { className: "text-btn cf-pop-new", text: "+ new folder…", attrs: { type: "button" } });
   newBtn.addEventListener("click", async () => {
     await cfCreateFlow(async (folder) => {
-      await fetchJson(`api/client-folders/${folder.id}/items`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ video_ids: [video.id] }),
-      });
-      toast(`Added to "${folder.title}"`, "success");
-      await cfLoadFolders(video.id);
-      cfRenderPopover();
+      // ui-broll-web-5 (2026-09-25): the folder exists by now, so a failed add
+      // must say so. Unguarded, it was an unhandled rejection after a green
+      // "Created" toast, the popover was never redrawn to show the new
+      // folder, and the editor sent a client link to an empty folder.
+      try {
+        await fetchJson(`api/client-folders/${folder.id}/items`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ video_ids: [video.id] }),
+        });
+        toast(`Added to "${folder.title}"`, "success");
+      } catch (e) {
+        toast(`Folder "${folder.title}" was created, but the clip was not added: ${e.message}`, "error");
+      }
+      // The popover may have been closed or moved to another clip meanwhile.
+      if (cf.popoverVideo !== video) return folder;
+      try {
+        await cfLoadFolders(video.id);
+      } catch (e) {
+        /* the list below is the one the popover already had */
+      }
+      if (cf.popoverVideo === video) cfRenderPopover();
+      return folder;
     });
   });
   pop.appendChild(newBtn);
   const manage = el("button", { className: "text-btn", text: "manage folders", attrs: { type: "button" } });
   manage.addEventListener("click", () => { cfClosePopover(); cfOpen(); });
   pop.appendChild(manage);
+  // The list is taller now than the "loading" placeholder it was placed as.
+  if (cf.popoverAnchor) cfPlacePopover(cf.popoverAnchor);
 }
 
+/* ui-broll-web-11 (2026-09-25): placed under the anchor with no vertical
+ * clamp, a fixed popover under a card near the bottom of the window (or the
+ * detail view's "+ client folder" under the player) ran off the screen where
+ * nothing could scroll to it. It now goes on whichever side of the anchor has
+ * room, or more room, and scrolls inside the room it got. */
 function cfPlacePopover(anchor) {
   const pop = $("#cf-popover");
   const r = anchor.getBoundingClientRect();
   const width = 260;
+  const margin = 8;
   let left = r.left;
-  if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8;
-  pop.style.left = `${Math.max(8, left)}px`;
-  pop.style.top = `${r.bottom + 4}px`;
+  if (left + width > window.innerWidth - margin) left = window.innerWidth - width - margin;
+  pop.style.left = `${Math.max(margin, left)}px`;
+  const below = window.innerHeight - r.bottom - 4 - margin;
+  const above = r.top - 4 - margin;
+  pop.style.maxHeight = "none";
+  const height = pop.scrollHeight;
+  if (height <= below || below >= above) {
+    pop.style.top = `${r.bottom + 4}px`;
+    pop.style.maxHeight = `${Math.max(80, below)}px`;
+  } else {
+    const shown = Math.min(height, above);
+    pop.style.top = `${Math.max(margin, r.top - 4 - shown)}px`;
+    pop.style.maxHeight = `${Math.max(80, above)}px`;
+  }
 }
 
 function cfClosePopover() {

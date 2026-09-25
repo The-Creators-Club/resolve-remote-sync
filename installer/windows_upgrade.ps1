@@ -652,6 +652,38 @@ function Test-VersionAtLeast {
     return $true
 }
 
+# logic-onboarding-3 (2026-09-25): WHERE the licence gets accepted, as a pure
+# decision so installer\tests\Test-LicenceRoute.ps1 can table it. A licence
+# problem alone used to launch onboard.exe, i.e. the whole reinstall (clean
+# slate, companion killed, autostart deleted, tree drive remounted), while the
+# companion this script had just relaunched opened its own one-click licence
+# dialog (_licence_watch, CR-27) about three seconds later: two prompts at once,
+# one of which walks a working machine through a reinstall to write a three-line
+# JSON file. APP-9 / CR-27 settled that the smallest action is the companion's
+# dialog, which starts syncing without a restart. So a RUNNING companion owns
+# the question ("tray"); the wizard is only for a machine where nothing else
+# can ask it. A DRY RUN relaunched nothing, so it is never "tray" (review
+# round 2026-09-25: $relaunchAlive starts true and a dry run never clears it,
+# which made every dry run claim "the companion that was just relaunched is
+# asking for it now"); its own branch says what a real run would do.
+function Select-LicenceRoute {
+    param(
+        [bool]$Needed,
+        [bool]$CompanionRunning,
+        [bool]$SkipWizard,
+        [bool]$IsBaseRig,
+        [bool]$DryRun,
+        [bool]$OnboardPresent
+    )
+    if (-not $Needed) { return "none" }
+    if ($CompanionRunning -and -not $DryRun) { return "tray" }
+    if ($SkipWizard) { return "skip" }
+    if ($IsBaseRig) { return "base" }
+    if ($DryRun) { return "dryrun" }
+    if (-not $OnboardPresent) { return "missing" }
+    return "wizard"
+}
+
 if (-not (Test-Path -LiteralPath $acceptancePath)) {
     $wizardNeeded = $true
     $wizardReason = "the licence agreement has not been accepted on this machine"
@@ -695,20 +727,32 @@ if (Test-Path -LiteralPath $ConfigPath) {
 }
 
 $wizardLaunched = $false
-if (-not $wizardNeeded) {
+$licenceRoute = Select-LicenceRoute -Needed $wizardNeeded -CompanionRunning ($copySucceeded -and $relaunchAlive -and -not $DryRun) `
+    -SkipWizard ([bool]$SkipWizard) -IsBaseRig $isBaseRig -DryRun ([bool]$DryRun) `
+    -OnboardPresent (Test-Path -LiteralPath $OnboardExe)
+if ($licenceRoute -eq "none") {
     Write-Skip "licence agreement already accepted on this machine"
 }
-elseif ($SkipWizard) {
-    Write-Warn2 "$wizardReason -- the sync lanes will NOT start (all three tray lines read `"this machine isn't set up yet`"). -SkipWizard was passed; run onboard.exe when someone is at the machine."
+elseif ($licenceRoute -eq "tray") {
+    # logic-onboarding-3: see Select-LicenceRoute. Named in the tray's own words
+    # (ui_copy.ACCEPT_LICENCE) so the editor can find it if the window is lost.
+    Write-Warn2 "$wizardReason -- the sync lanes will NOT start until it is accepted. The companion that was just relaunched is asking for it now: accept in its licence window, or from the tray (Tray > Accept the licence agreement). The setup wizard is not needed for this."
 }
-elseif ($isBaseRig) {
+elseif ($licenceRoute -eq "skip") {
+    # logic-onboarding-3: the old copy claimed every tray line read 'this
+    # machine isn't set up yet', which has not been true since CR-88.
+    Write-Warn2 "$wizardReason -- the sync lanes will NOT start, and the tray says NOT SYNCING until it is accepted. -SkipWizard was passed; accept it from the tray (Tray > Accept the licence agreement) or run onboard.exe when someone is at the machine."
+}
+elseif ($licenceRoute -eq "base") {
     Write-Warn2 "$wizardReason -- the sync lanes will NOT start. This machine is mode = `"base`", so the wizard is NOT being launched over its hand-built config: accept from the tray (`"Accept the licence agreement to start syncing`"), or run onboard.exe deliberately."
 }
-elseif ($DryRun) {
-    Write-Step "[dry-run] would launch $OnboardExe ($wizardReason)"
-    $wizardLaunched = $true
+elseif ($licenceRoute -eq "dryrun") {
+    # Nothing was launched, so $wizardLaunched stays false: the summary then
+    # says NOT SYNCING (true of this machine as it stands) rather than "the
+    # setup wizard is open".
+    Write-Step "[dry-run] $wizardReason -- a real run would leave this to the relaunched companion's licence window, and launch $OnboardExe only if that companion failed to start"
 }
-elseif (-not (Test-Path -LiteralPath $OnboardExe)) {
+elseif ($licenceRoute -eq "missing") {
     Write-Warn2 "$wizardReason -- the sync lanes will NOT start, and there is no onboard.exe beside this script to fix it. Get the current installer from the dashboard's [ INSTALLER ] link and run it."
 }
 else {
@@ -748,8 +792,11 @@ Write-Step "Syncthing identity, rclone key, drive mapping, and settings were pre
 if ($wizardLaunched) {
     Write-Step "The setup wizard is open: work through it to accept the licence agreement. UNTIL YOU DO, THIS MACHINE IS NOT SYNCING."
 }
+elseif ($licenceRoute -eq "tray") {
+    Write-Step "THIS MACHINE IS NOT SYNCING until the licence agreement is accepted: the companion is asking for it now (Tray > Accept the licence agreement)."
+}
 elseif ($wizardNeeded) {
-    Write-Warn2 "THIS MACHINE IS NOT SYNCING: $wizardReason, and the companion will not start its sync lanes without one (all three tray lines read `"this machine isn't set up yet`")."
+    Write-Warn2 "THIS MACHINE IS NOT SYNCING: $wizardReason, and the companion will not start its sync lanes without one (the tray says NOT SYNCING)."
 }
 if (-not $DashboardToken -and (Test-Path -LiteralPath $ConfigPath)) {
     # -Encoding UTF8 for the same reason as the migration read above (INST-3).

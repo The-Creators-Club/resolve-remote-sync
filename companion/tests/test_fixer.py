@@ -723,7 +723,11 @@ def test_fix_clip_tmp_name_is_unique_per_process_and_call(tmp_path):
         import shutil as _sh
         _sh.copy2(s, d)
 
-    for _ in range(2):
+    # Different bytes each time (logic-resolve-1, 2026-09-25): a second call
+    # for an IDENTICAL source now relinks to the first copy instead of
+    # copying again, so it would make no tmp at all.
+    for n in range(2):
+        src.write_bytes(b"x" * (n + 1))
         fixer.fix_clip(str(src), "B-roll", str(root), [], copy_fn=record,
                        replace_clip_fn=lambda mpi, p: {"ok": True, "message": ""})
     assert len(set(tmp_names)) == 2

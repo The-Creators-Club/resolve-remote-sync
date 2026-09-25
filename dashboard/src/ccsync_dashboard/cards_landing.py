@@ -103,6 +103,7 @@ def _state(request: Request) -> dict:
                      # explicitly or the page would never see them.
                      "last_in": (entry or {}).get("last_in", ""),
                      "last_in_seconds": (entry or {}).get("last_in_seconds"),
+                     "opening_seconds": (entry or {}).get("opening_seconds"),
                      "href": f"/cards/p/{row['slug']}/"})
     # An episode that is open but no longer under the vault scan (a share
     # that went away, a folder renamed) is still listed: it holds a seat, and
@@ -127,8 +128,18 @@ def _state(request: Request) -> dict:
         # press into a judgement. "" when nobody has ever been in it.
         row["last_in_phrase"] = _last_in_phrase(row.get("last_in") or "",
                                                 row.get("last_in_seconds"))
+        row["opening_phrase"] = _opening_phrase(row.get("state") or "",
+                                                row.get("opening_seconds"))
+        # logic-cards-1 (2026-09-25): the CONFIRM names the person the press
+        # takes the episode from, never the presser. `last_in` is whoever sent
+        # the newest request, which is usually the person about to press, so
+        # the confirm read "ruskin is in it now" to ruskin while alex was
+        # editing in it.
+        other = pool.get(row.get("slug", "")) if pool is not None else None
+        other_phrase = (_last_in_phrase(*other.last_in_other_than(me))
+                        if other is not None else "")
         row["close_prompt"] = _close_prompt(row.get("name") or "this episode",
-                                            row["last_in_phrase"])
+                                            other_phrase)
         row["may_close"] = bool(
             pool is not None
             and row.get("state") in (cards_pool.LOADING, cards_pool.READY,
@@ -227,6 +238,19 @@ def _close_prompt(name: str, last_in_phrase: str) -> str:
             "stays in that browser until it reconnects.")
 
 
+def _opening_phrase(state: str, seconds: float | None) -> str:
+    """"opening for 4 min", or "" under a minute or when not opening.
+
+    logic-cards-7 (2026-09-25): an episode stuck on a hung share read
+    "OPENING" all afternoon with nothing to tell it from a slow one. The
+    pool gives up at BUILD_DEADLINE_SECONDS; until then the row says how long.
+    """
+    if state != cards_pool.LOADING or seconds is None or seconds < 60:
+        return ""
+    return (f"opening for {int(seconds // 60)} min; it gives up at "
+            f"{int(cards_pool.BUILD_DEADLINE_SECONDS // 60)} min")
+
+
 def _last_in_phrase(who: str, ago: float | None) -> str:
     """"ruskin was last in 22 min ago", or "" when nobody ever was.
 
@@ -296,7 +320,14 @@ async def cards_open(request: Request) -> Response:
     if pool is None:
         return RedirectResponse("/cards/?refused=Timeline+Cards+is+not+mounted",
                                 status_code=303)
-    row = next((r for r in _episodes(request) if r["slug"] == slug), None)
+    # bug-dash-cards-jobs-6 (2026-09-25): this route is `async` (it awaits the
+    # form), and once the 30 s scan cache has lapsed `_episodes` walks four
+    # levels of the vault share. On the event loop that stalled the whole
+    # single-worker dashboard - fleet reports, every page - for as long as
+    # the share took, and for ever on a share that hangs. The GET routes are
+    # plain `def` and already ran in the threadpool; this one did not.
+    rows = await asyncio.to_thread(_episodes, request)
+    row = next((r for r in rows if r["slug"] == slug), None)
     if row is None:
         return RedirectResponse("/cards/?refused=that+episode+is+not+in+the+vault",
                                 status_code=303)
@@ -356,7 +387,10 @@ async def cards_close(request: Request) -> Response:
         return RedirectResponse(f"/cards/?refused={quote(refusal)}",
                                 status_code=303)
     log.info("Timeline Cards: %s closed %s", user, slug)
-    pool.drop(slug)
+    # bug-dash-cards-jobs-6 (2026-09-25): `drop` calls the engine's `stop()`
+    # (the other repo's code, which may join a worker) and shuts down the
+    # episode's WSGI executor. Neither belongs on the event loop.
+    await asyncio.to_thread(pool.drop, slug)
     return RedirectResponse("/cards/", status_code=303)
 
 

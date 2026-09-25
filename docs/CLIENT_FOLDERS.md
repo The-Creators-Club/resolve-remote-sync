@@ -87,7 +87,11 @@ What the public routes will **not** answer, by construction
 
 The viewer counts an opening of the folder (`view_count`, `last_viewed_at`),
 which the panel shows as "opened 3 times, last …". Nothing finer, and nothing
-about who.
+about who. The studio's own looks are not counted (logic-broll-music-4,
+2026-09-25): a request the dashboard gate stamped with a signed-in editor,
+or one carrying `?preview=1` (the panel's "open" link adds it, for a public
+base on another origin where no session cookie rides), leaves the counter
+alone.
 
 ## 3. Making the link reach outside the tailnet (Tailscale Funnel)
 

@@ -1,0 +1,1048 @@
+{
+ "c-app": [
+  {
+   "id": "bug-comp-app-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-app-3",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-app-4",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-app-5",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-app-6",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-app-7",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-core-3",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-wire-6",
+   "sev": "low"
+  },
+  {
+   "id": "ui-comp-windows-3",
+   "sev": "low"
+  }
+ ],
+ "c-sync": [
+  {
+   "id": "bug-comp-rclone-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-rclone-3",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-rclone-4",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-rclone-5",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-syncthing-1",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-syncthing-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-syncthing-3",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-syncthing-4",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-syncthing-5",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-syncthing-6",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-syncthing-7",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-core-5",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-sync-truth-2",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-sync-truth-3",
+   "sev": "low"
+  },
+  {
+   "id": "logic-sync-truth-4",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-plans-5",
+   "sev": "low"
+  }
+ ],
+ "c-ui": [
+  {
+   "id": "bug-comp-ui-1",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-ui-2",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-ui-3",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-ui-4",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-ui-5",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-ui-6",
+   "sev": "low"
+  },
+  {
+   "id": "logic-sync-truth-6",
+   "sev": "low"
+  },
+  {
+   "id": "ui-comp-windows-1",
+   "sev": "low"
+  },
+  {
+   "id": "ui-comp-windows-2",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-comp-windows-4",
+   "sev": "low"
+  },
+  {
+   "id": "ui-comp-windows-5",
+   "sev": "low"
+  },
+  {
+   "id": "ui-comp-windows-6",
+   "sev": "low"
+  },
+  {
+   "id": "ui-comp-windows-7",
+   "sev": "low"
+  },
+  {
+   "id": "ui-comp-windows-8",
+   "sev": "low"
+  },
+  {
+   "id": "ui-comp-windows-9",
+   "sev": "low"
+  },
+  {
+   "id": "ui-comp-windows-10",
+   "sev": "low"
+  },
+  {
+   "id": "ui-comp-windows-11",
+   "sev": "low"
+  },
+  {
+   "id": "ui-onboarding-9",
+   "sev": "low"
+  },
+  {
+   "id": "ui-copy-5",
+   "sev": "low"
+  }
+ ],
+ "c-resolve": [
+  {
+   "id": "bug-comp-resolve-1",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-resolve-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-resolve-3",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-resolve-4",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-resolve-5",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-resolve-6",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-resolve-7",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-resolve-8",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-resolve-9",
+   "sev": "low"
+  },
+  {
+   "id": "logic-resolve-1",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-resolve-2",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-resolve-3",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-resolve-4",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-resolve-5",
+   "sev": "low"
+  },
+  {
+   "id": "logic-cards-9",
+   "sev": "low"
+  }
+ ],
+ "c-broll-music": [
+  {
+   "id": "bug-comp-broll-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-broll-3",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-broll-4",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-broll-5",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-broll-6",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-media-6",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-media-7",
+   "sev": "low"
+  },
+  {
+   "id": "bug-wire-7",
+   "sev": "low"
+  },
+  {
+   "id": "logic-broll-music-2",
+   "sev": "medium"
+  }
+ ],
+ "c-ytdl": [
+  {
+   "id": "bug-comp-ytdl-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-ytdl-3",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-ytdl-4",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-ytdl-5",
+   "sev": "low"
+  },
+  {
+   "id": "ui-copy-4",
+   "sev": "low"
+  }
+ ],
+ "c-core": [
+  {
+   "id": "bug-comp-core-4",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-core-6",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-core-7",
+   "sev": "low"
+  }
+ ],
+ "c-media": [
+  {
+   "id": "bug-comp-media-3",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-media-4",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-comp-media-5",
+   "sev": "low"
+  },
+  {
+   "id": "bug-comp-media-8",
+   "sev": "low"
+  }
+ ],
+ "d-db": [
+  {
+   "id": "bug-dash-db-1",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-db-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-db-3",
+   "sev": "low"
+  },
+  {
+   "id": "bug-wire-1",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-plans-1",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-plans-4",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-ytdl-jobs-5",
+   "sev": "low"
+  }
+ ],
+ "d-api": [
+  {
+   "id": "bug-dash-api-1",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-api-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-api-3",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-api-4",
+   "sev": "low"
+  },
+  {
+   "id": "bug-wire-3",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-wire-4",
+   "sev": "low"
+  },
+  {
+   "id": "bug-wire-5",
+   "sev": "low"
+  }
+ ],
+ "d-diag": [
+  {
+   "id": "bug-dash-diag-1",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-diag-2",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-diag-3",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-diag-4",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-ops-1",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-ops-5",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-ops-6",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-ops-7",
+   "sev": "low"
+  },
+  {
+   "id": "logic-sync-truth-1",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-sync-truth-5",
+   "sev": "low"
+  },
+  {
+   "id": "logic-admin-1",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-admin-4",
+   "sev": "low"
+  },
+  {
+   "id": "logic-admin-5",
+   "sev": "low"
+  },
+  {
+   "id": "logic-alerts-1",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-alerts-2",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-alerts-3",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-alerts-4",
+   "sev": "low"
+  },
+  {
+   "id": "logic-alerts-5",
+   "sev": "low"
+  },
+  {
+   "id": "logic-alerts-6",
+   "sev": "low"
+  },
+  {
+   "id": "logic-alerts-7",
+   "sev": "low"
+  },
+  {
+   "id": "logic-alerts-8",
+   "sev": "low"
+  },
+  {
+   "id": "logic-alerts-9",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-admin-10",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-admin-13",
+   "sev": "low"
+  },
+  {
+   "id": "ui-copy-1",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-copy-2",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-copy-3",
+   "sev": "low"
+  }
+ ],
+ "d-auth": [
+  {
+   "id": "bug-dash-auth-1",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-auth-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-auth-3",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-auth-4",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-auth-5",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-auth-6",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-auth-7",
+   "sev": "low"
+  }
+ ],
+ "d-cards": [
+  {
+   "id": "bug-dash-cards-jobs-1",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-cards-jobs-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-cards-jobs-3",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-cards-jobs-4",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-cards-jobs-5",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-cards-jobs-6",
+   "sev": "low"
+  },
+  {
+   "id": "logic-ytdl-jobs-1",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-ytdl-jobs-6",
+   "sev": "low"
+  },
+  {
+   "id": "logic-cards-1",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-cards-2",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-cards-3",
+   "sev": "low"
+  },
+  {
+   "id": "logic-cards-4",
+   "sev": "low"
+  },
+  {
+   "id": "logic-cards-5",
+   "sev": "low"
+  },
+  {
+   "id": "logic-cards-6",
+   "sev": "low"
+  },
+  {
+   "id": "logic-cards-7",
+   "sev": "low"
+  },
+  {
+   "id": "logic-cards-8",
+   "sev": "low"
+  }
+ ],
+ "d-ops": [
+  {
+   "id": "bug-dash-ops-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-ops-3",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-ops-4",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-dash-ops-8",
+   "sev": "low"
+  },
+  {
+   "id": "bug-dash-ops-9",
+   "sev": "low"
+  },
+  {
+   "id": "logic-release-3",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-release-4",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-admin-8",
+   "sev": "low"
+  }
+ ],
+ "broll": [
+  {
+   "id": "bug-broll-1",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-broll-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-broll-3",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-broll-4",
+   "sev": "low"
+  },
+  {
+   "id": "bug-wire-2",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-broll-music-1",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-broll-music-4",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-1",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-2",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-3",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-broll-web-4",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-5",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-6",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-7",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-8",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-9",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-10",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-11",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-12",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-13",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-14",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-15",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-16",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-17",
+   "sev": "low"
+  },
+  {
+   "id": "ui-broll-web-18",
+   "sev": "low"
+  }
+ ],
+ "music-ytdl": [
+  {
+   "id": "bug-music-ytdl-2",
+   "sev": "medium"
+  },
+  {
+   "id": "bug-music-ytdl-3",
+   "sev": "low"
+  },
+  {
+   "id": "bug-music-ytdl-4",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-broll-music-3",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-ytdl-jobs-3",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-ytdl-jobs-4",
+   "sev": "low"
+  },
+  {
+   "id": "ui-music-ytdl-web-1",
+   "sev": "low"
+  },
+  {
+   "id": "ui-music-ytdl-web-2",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-music-ytdl-web-3",
+   "sev": "low"
+  },
+  {
+   "id": "ui-music-ytdl-web-4",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-music-ytdl-web-5",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-music-ytdl-web-6",
+   "sev": "low"
+  },
+  {
+   "id": "ui-music-ytdl-web-7",
+   "sev": "low"
+  },
+  {
+   "id": "ui-music-ytdl-web-8",
+   "sev": "low"
+  },
+  {
+   "id": "ui-music-ytdl-web-9",
+   "sev": "low"
+  },
+  {
+   "id": "ui-music-ytdl-web-10",
+   "sev": "low"
+  }
+ ],
+ "release-tools": [
+  {
+   "id": "bug-ops-2",
+   "sev": "low"
+  },
+  {
+   "id": "bug-ops-3",
+   "sev": "low"
+  },
+  {
+   "id": "logic-release-2",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-release-5",
+   "sev": "low"
+  },
+  {
+   "id": "logic-release-6",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-release-7",
+   "sev": "low"
+  }
+ ],
+ "onboarding": [
+  {
+   "id": "bug-ops-4",
+   "sev": "low"
+  },
+  {
+   "id": "logic-onboarding-1",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-onboarding-2",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-onboarding-3",
+   "sev": "low"
+  },
+  {
+   "id": "logic-onboarding-4",
+   "sev": "low"
+  },
+  {
+   "id": "logic-onboarding-5",
+   "sev": "low"
+  },
+  {
+   "id": "ui-onboarding-1",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-onboarding-2",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-onboarding-3",
+   "sev": "low"
+  },
+  {
+   "id": "ui-onboarding-4",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-onboarding-5",
+   "sev": "low"
+  },
+  {
+   "id": "ui-onboarding-6",
+   "sev": "low"
+  },
+  {
+   "id": "ui-onboarding-7",
+   "sev": "low"
+  },
+  {
+   "id": "ui-onboarding-8",
+   "sev": "low"
+  },
+  {
+   "id": "ui-onboarding-10",
+   "sev": "low"
+  },
+  {
+   "id": "ui-onboarding-11",
+   "sev": "low"
+  },
+  {
+   "id": "ui-onboarding-12",
+   "sev": "low"
+  }
+ ],
+ "d-ui": [
+  {
+   "id": "logic-plans-2",
+   "sev": "low"
+  },
+  {
+   "id": "logic-admin-2",
+   "sev": "medium"
+  },
+  {
+   "id": "logic-admin-3",
+   "sev": "low"
+  },
+  {
+   "id": "logic-admin-6",
+   "sev": "low"
+  },
+  {
+   "id": "logic-admin-7",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-main-1",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-main-2",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-main-3",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-main-4",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-main-5",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-main-6",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-main-7",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-main-8",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-main-9",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-main-10",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-admin-2",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-admin-3",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-admin-4",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-admin-5",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-admin-6",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-admin-7",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-admin-9",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-admin-11",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-admin-12",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-admin-14",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-static-1",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-static-2",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-static-3",
+   "sev": "medium"
+  },
+  {
+   "id": "ui-dash-static-4",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-static-5",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-static-6",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-static-7",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-static-8",
+   "sev": "low"
+  },
+  {
+   "id": "ui-dash-static-9",
+   "sev": "low"
+  },
+  {
+   "id": "ui-copy-6",
+   "sev": "low"
+  },
+  {
+   "id": "ui-copy-7",
+   "sev": "low"
+  }
+ ]
+}

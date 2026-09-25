@@ -339,6 +339,17 @@ class ManifestCache:
         except Exception:
             log.exception("manifest cache: refresh failed")
             return
+        if not self._root_is_present():
+            # bug-comp-core-5 (2026-09-25): presence was sampled only BEFORE a
+            # walk that takes minutes on a big tree, and os.walk swallows the
+            # scandir errors of a volume that has gone. A drive ejected
+            # mid-walk read as 0 files for every project not yet walked, and
+            # that replaced the cache for as long as the drive stayed out --
+            # the "indistinguishable from deleted" report the check above
+            # exists to prevent.
+            log.info("manifest cache: local_root %s went away during the scan -- "
+                     "discarding it and keeping the last scan", self.local_root)
+            return
         with self._lock:
             self._cache = scanned
             self._conflicts = {

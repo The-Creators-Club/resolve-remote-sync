@@ -10,7 +10,7 @@
   ({{ halt_hours }} hour{{ "s" if halt_hours != 1 }} so far, {{ halt_machines }} computer{{ "s" if halt_machines != 1 }} in the fleet).
   {% if halt.reason %}<span class="mono-sm">{{ halt.reason }}</span>{% endif %}
   <span class="mono-sm muted">set by {{ halt.set_by }} {{ halt.set_at | ago }}{% if halt.expires_at %};
-    it releases itself {{ halt.expires_at | ago }} unless somebody keeps it on{% endif %}.</span>
+    it releases itself {{ halt.expires_at | until }} unless somebody keeps it on{% endif %}.</span>
   {% if session_is_admin %}
   <span class="mono-sm"><a href="/admin/users#admin-fleet-halt">Start syncing again on Settings, Users.</a></span>
   {% endif %}
@@ -22,5 +22,10 @@
   &#9650; THE FLEET-WIDE STOP HAS EXPIRED and syncing has started again everywhere.
   {% if halt.reason %}<span class="mono-sm">It was set for: {{ halt.reason }}</span>{% endif %}
   <span class="mono-sm muted">set by {{ halt.set_by }} {{ halt.set_at | ago }}, expired {{ halt.expires_at | ago }}.</span>
+  {# logic-admin-3 (2026-09-25): say where it goes away, or it is a notice
+     nobody can take down. #}
+  {% if session_is_admin %}
+  <span class="mono-sm"><a href="/admin/users#admin-fleet-halt">Take this notice down on Settings, Users.</a></span>
+  {% endif %}
 </div>
 {% endif %}

@@ -80,7 +80,7 @@ def test_topbar_partial_serves_the_marked_header(tmp_path):
         assert r.status_code == 200
         assert "data-dash-topbar" in r.text
         assert "[ TRANSFERS ]" in r.text
-        assert "[ LOGOUT ]" in r.text
+        assert "[ SIGN OUT ]" in r.text
         # No mounts in this app instance -> no platform links to advertise.
         assert 'href="/broll/"' not in r.text
         assert 'href="/music/"' not in r.text
@@ -161,14 +161,14 @@ def test_only_an_admin_gets_the_settings_gear_and_the_settings_entry(tmp_path):
         # UX-3: the guide is one click from every page, for everyone.
         assert '[ ? ]' in admin_body and 'href="/help"' in admin_body
         # LOGOUT ALL moved into the drawer's foot; it stays reachable.
-        assert "[ LOGOUT ALL ]" in admin_body
+        assert "[ SIGN OUT EVERYWHERE ]" in admin_body
 
         editor_body = as_user(c, "jsmith").get("/partials/topbar").text
         assert "gear-link" not in editor_body
         # ...but HELP is not admin-only: an editor needs it most.
         assert 'href="/help"' in editor_body
         assert "[ SETTINGS ]" not in editor_body
-        assert "[ LOGOUT ALL ]" in editor_body
+        assert "[ SIGN OUT EVERYWHERE ]" in editor_body
 
 
 def test_the_drawer_only_names_modules_that_are_mounted(tmp_path):

@@ -16,8 +16,12 @@
    partials/invariant_checks.html use, so the three read as one family. #}
 <div id="protection">
 
-  {% if protection_error %}<div class="banner">▲ {{ protection_error }}</div>{% endif %}
-  {% if protection_notice %}<div class="muted" style="margin:0.4rem 0">{{ protection_notice }}</div>{% endif %}
+  {# ui-dash-admin-5 (2026-09-25): error-banner / result-banner are what
+     static/htmx_errors.js moves next to the button that posted. This panel
+     swaps outerHTML with scroll kept, so a result painted here at the top
+     landed a screen or more above a button far down the panel. #}
+  {% if protection_error %}<div class="banner error-banner">▲ {{ protection_error }}</div>{% endif %}
+  {% if protection_notice %}<div class="muted result-banner" style="margin:0.4rem 0">{{ protection_notice }}</div>{% endif %}
 
   <div class="side-head">[ WHAT IS PROTECTED ]
     <span class="muted">{{ protection.counts.ok }} of {{ protection.lines | length }}

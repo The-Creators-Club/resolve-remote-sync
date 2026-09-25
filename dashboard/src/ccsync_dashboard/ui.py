@@ -46,6 +46,8 @@ from .api import fled_push_refusal as api_fled_push_refusal
 from .api import make_current_refusal as api_make_current_refusal
 from .api import roll_fleet_back as api_roll_fleet_back_impl
 from .api import _purge_user_credentials as api_purge_user_credentials
+from .api import revoke_sessions_after_password_reset as api_revoke_sessions_after_password_reset
+from .api import api_machine_resolve_undo, _undo_state_sentence as api_undo_state_sentence
 from .api import _scope_editors_view as api_scope_editors_view
 from .api import _scope_projects_view as api_scope_projects_view
 from .nas import NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
@@ -117,6 +119,38 @@ def ago(ts: str | None) -> str:
     return f"{seconds // 86400}d ago"
 
 
+def until(ts: str | None) -> str:
+    """How far AWAY a future stamp is ("in 23h").
+
+    ui-dash-admin-2 / logic-admin-2 (2026-09-25): the fleet halt's release
+    time went through `ago`, which clamps a negative delta to 0 and always
+    says "ago", so for the whole 24 h of every halt each page read "it
+    releases itself 0s ago" - the one number UX-8 added, and it said the stop
+    had already ended. A stamp already past answers "any moment now": the
+    caller only shows this while the thing has not happened yet, and the
+    next render moves it to the expired wording. Unparseable stamps are
+    shown as they are, like `ago`, because a page must render.
+    """
+    if not ts:
+        return "never"
+    try:
+        stamp = db.parse_iso(ts)
+    except ValueError:
+        return ts
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    seconds = int((stamp - dt.datetime.now(dt.timezone.utc)).total_seconds())
+    if seconds < 60:
+        return "any moment now"
+    if seconds < 3600:
+        return f"in {seconds // 60}m"
+    if seconds < 86400:
+        hours, minutes = seconds // 3600, seconds % 3600 // 60
+        return f"in {hours}h {minutes}m" if minutes else f"in {hours}h"
+    days, hours = seconds // 86400, seconds % 86400 // 3600
+    return f"in {days}d {hours}h" if hours else f"in {days}d"
+
+
 def bar(completion, width: int = 10) -> str:
     if completion is None:
         return "?" * width
@@ -139,6 +173,7 @@ def eta(seconds) -> str:
 
 templates.env.filters["human_bytes"] = human_bytes
 templates.env.filters["ago"] = ago
+templates.env.filters["until"] = until
 templates.env.filters["bar"] = bar
 templates.env.filters["eta"] = eta
 
@@ -321,10 +356,32 @@ CHIP_HELP: dict[str, str] = {
         "{n} project folder(s) on this computer's disk are not in the sync "
         "tree, holding {bytes}. Nothing in them is on the server or visible "
         "to anybody else."),
+    # logic-sync-truth-4 (2026-09-25): this said ".ccsync-trash cannot prune
+    # while proxy download is stopped", false since SYNC-16: the sequencer
+    # prunes under disk pressure and, while the free-space park is set, prunes
+    # towards its CLEAR threshold, which releases the park (bug-comp-rclone-3).
+    # The lane B breaker is the one state that holds proxy download regardless.
+    # logic-sync-truth-4 review round (2026-09-25): the prune-to-the-clear-
+    # threshold half is bug-comp-rclone-3, new in the release AFTER 0.9.78.
+    # Every companion in the field (0.9.77/0.9.78) prunes only down to the
+    # floor, so its park waits for free space to reach twice the floor by
+    # other means (DiskFloorLatch clears itself there) or for [ RESUME ].
+    # The tray's, not this row's: fleet_grid.html draws [ RESUME ] only for
+    # `breaker_tripped`, though app.resume_lane_b clears both latches.
+    # Worded by version rather than claimed for every machine, so an admin
+    # reading an old machine's chip is told what to do, not to wait.
     "disk": (
         "this computer's sync drive has {free} free of {total}{system}. "
-        "Measured {at}. Proxy download fills a drive file by file, and "
-        ".ccsync-trash cannot prune while proxy download is stopped."),
+        "Measured {at}. Proxy download fills a drive file by file. When the "
+        "drive drops below its floor, proxy download stops and .ccsync-trash "
+        "is emptied oldest first. On CC Sync newer than 0.9.78 it is emptied "
+        "until the drive has twice the floor free, which starts proxy "
+        "download again. On 0.9.78 or older it stops emptying at the floor, "
+        "so proxy download starts again only once somebody frees space up to "
+        "twice the floor, or presses [ RESUME ] in that computer's tray. "
+        "Either way, a proxy download the safety breaker "
+        "has stopped waits for somebody to resume it, from that computer's "
+        "tray or by an admin with [ RESUME ] on this row."),
     # `lane` is filled through ui.lane_word (fleet_grid.html), so this
     # reads "proxy download on this computer made no progress...".
     "stalled": (
@@ -471,11 +528,34 @@ def safe_to_close(transfers_view: dict | None, editor: str | None) -> dict | Non
                      if q.get("direction") != "up") + len(down_live)
     speed = sum(int(t.get("speed_bps") or 0) for t in up_live)
     seconds = int(up_bytes / speed) if speed > 1 and up_bytes else None
+    # logic-sync-truth-2 (2026-09-25): a machine whose ORIGINALS list was
+    # capped (more held than listed) can owe uploads nobody here can see, and
+    # the zero-file diff above read that as "Safe to close" over footage on
+    # one disk only. db.fetch_sync_backlog flags such a pair `uncertain` (and
+    # keeps it even at zero files); that is never "safe". The key is optional:
+    # a view without it reads exactly as before.
+    unsure = sorted({(str(q.get("machine") or "").strip(), str(q.get("label") or q.get("slug") or ""))
+                     for q in queues
+                     if q.get("direction") == "up" and q.get("uncertain")})
+    unsure_where = "; ".join(
+        f"{m or 'one of your computers'} ({label})" if label else (m or "one of your computers")
+        for m, label in unsure)
+    if not up_files and unsure:
+        sentence = (f"Cannot tell yet: {unsure_where} holds more video originals "
+                    f"than it can list to the dashboard, so some may not have "
+                    f"uploaded. Leave it running and check its tray.")
+        return {"safe": False, "sentence": sentence, "up_files": 0,
+                "up_bytes": 0, "eta_seconds": None, "uncertain": True}
     if not up_files:
         if down_files:
+            # ui-dash-main-10 (2026-09-25): the count is known, so the word
+            # agrees with it (UX-10's rule; "(s)" is not a word).
             sentence = (f"Safe to close: nothing of yours is waiting to go to "
-                        f"the server. {down_files} file(s) are still coming down and "
-                        f"carry on where they left off next time.")
+                        f"the server. " + (
+                            "1 file is still coming down and carries on where it "
+                            "left off next time." if down_files == 1 else
+                            f"{down_files} files are still coming down and carry on "
+                            f"where they left off next time."))
         else:
             sentence = "Safe to close: nothing is transferring."
         return {"safe": True, "sentence": sentence, "up_files": 0,
@@ -494,10 +574,14 @@ def safe_to_close(transfers_view: dict | None, editor: str | None) -> dict | Non
         leave = "Leave those computers running."
     else:
         leave = "Leave that computer running."
-    sentence = (f"Not yet: {up_files} file(s) still uploading{where}"
+    sentence = (f"Not yet: {up_files} file{'' if up_files == 1 else 's'} still uploading{where}"
                 f" ({human_bytes(up_bytes)}){about}. {leave}")
+    if unsure:
+        # logic-sync-truth-2: the count above is only what the listed part owes.
+        sentence += (f" There may be more: {unsure_where} holds more video "
+                     f"originals than it can list to the dashboard.")
     return {"safe": False, "sentence": sentence, "up_files": up_files,
-            "up_bytes": up_bytes, "eta_seconds": seconds}
+            "up_bytes": up_bytes, "eta_seconds": seconds, "uncertain": bool(unsure)}
 
 
 def _render(request: Request, name: str, context: dict) -> HTMLResponse:
@@ -627,6 +711,24 @@ def _queue_editor(request: Request) -> str | None:
     if target and auth.is_admin(settings, user):
         return target
     return user
+
+
+def _tick_confirms(conn, editor: str | None, slug: str) -> dict:
+    """What the project page's person-level tick and mode buttons need to
+    ask before they write (logic-plans-2, 2026-09-25).
+
+    Only the full page used to build these, through _sidebar_context, so the
+    first 10 s poll of #project-detail (and every tick, link or move answer)
+    re-rendered the buttons with no capacity sentence and no machine list:
+    the UX-1 confirm on [ TICK ] lasted ten seconds, and [ SWITCH TO FULL
+    SYNC ], which ticks the project in full onto every computer the person
+    uses, never had one."""
+    if not editor:
+        return {"toggle_editor_machines": [], "tick_warning": None}
+    return {
+        "toggle_editor_machines": db.machines_of(conn, editor),
+        "tick_warning": tick_capacity_warning(conn, editor, slug),
+    }
 
 
 def _queue_machine(request: Request, conn: sqlite3.Connection,
@@ -782,8 +884,10 @@ def page_login(request: Request):
         # COMMERCIAL_READINESS.md item 6).
         raise HTTPException(
             status_code=400,
+            # ui-copy-6 (2026-09-25): " -- " is the typewriter em dash DUI-14
+            # banned in templates; these Python strings reach the same pages.
             detail="this dashboard is configured for https only (DASH_COOKIE_SECURE=1) "
-                   "but you reached it over http -- use the https URL",
+                   "but you reached it over http. Use the https URL.",
         )
     local = request.query_params.get("local", "") == "1"
     return _render(request, "login.html", _login_context(request, next_path, None, local))
@@ -826,8 +930,8 @@ async def page_login_submit(request: Request):
     if not settings.session_secret:
         error = "login not configured on the server (DASH_SESSION_SECRET unset)"
     elif auth.refuse_plaintext_login(settings, request):
-        error = ("this dashboard is configured for https only (DASH_COOKIE_SECURE=1) "
-                 "-- use the https URL")
+        error = ("this dashboard is configured for https only (DASH_COOKIE_SECURE=1): "
+                 "use the https URL")
     elif (throttled_for := auth.login_throttled(request, username)):
         # DCORE-8 (2026-09-04): the wait is NAMED now. The username-oracle
         # worry this branch was written with does not apply to it: every
@@ -856,7 +960,7 @@ async def page_login_submit(request: Request):
             # Saturated probe pool (see auth.MAX_CONCURRENT_SMB_PROBES): this
             # is NOT a failed password, so it must not count toward the
             # throttle either.
-            error = "the server is busy checking sign-ins -- try again in a moment"
+            error = "the server is busy checking sign-ins. Try again in a moment."
         else:
             if verified:
                 auth.clear_login_failures(request, username)
@@ -1274,7 +1378,7 @@ async def partial_project_setup_link(
             "SELECT 1 FROM project_roots WHERE resolve_project=?", (name,)
         ).fetchone() if name else None
         if existing is not None and not auth.is_admin(settings, user):
-            error = "this Resolve project is already mapped -- ask an admin to change it"
+            error = "this Resolve project is already mapped: ask an admin to change it"
         else:
             try:
                 # Full-tree NAS I/O off the event loop: this walk takes tens of
@@ -1462,12 +1566,27 @@ def partial_toggle(
                         "move_projects": [dict(r) for r in conn.execute(
                             "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
                         "tick_editor": editor,
-                        # DASH-8: the person-level untick confirm (see
-                        # _sidebar_context; this render does not build one).
-                        "toggle_editor_machines": db.machines_of(conn, editor),
+                        # DASH-8: the person-level untick confirm, and the
+                        # UX-1 capacity sentence (logic-plans-2).
+                        **_tick_confirms(conn, editor, page_slug),
                         "as_qs": _as_qs(request, editor)})
+    # ui-dash-main-9 (2026-09-25): the queue panel's own untick. It answered
+    # with the PERSON's queue and no "safe to close" sentence, so on
+    # /?machine=MacBook the panel became about the other computer and the
+    # "Not yet: 3 files still uploading" line vanished - which reads as safe
+    # to close - until the next 10 s poll put both back. `queue_machine` is a
+    # view key only (the write above stays the person's, as the confirm
+    # says), checked like _queue_machine: a computer this person does not
+    # own is the person's view. partial_queue builds the same two values.
+    view_machine = (request.query_params.get("queue_machine") or "").strip()
+    if view_machine and view_machine not in db.machines_of(conn, editor):
+        view_machine = ""
+    if target is not None:
+        view_machine = target
     return _render(request, "partials/my_queue.html", {
-        "queue": build_queue_view(conn, editor, machine=target),
+        "queue": build_queue_view(conn, editor, machine=view_machine or None),
+        "queue_machine": view_machine,
+        "safe_to_close": safe_to_close(build_transfers_view(conn, editor=editor), editor),
     })
 
 
@@ -1690,10 +1809,39 @@ def partial_notice_dismiss(
     return _render(request, "partials/notices.html", _notices_context(conn, error))
 
 
+def _project_label(conn, slug: str) -> str:
+    """The folder a person recognises, for a slug; the slug when the project
+    row is gone (an archived or renamed project is still undoable by slug)."""
+    try:
+        row = conn.execute("SELECT label FROM projects WHERE slug=?", (slug,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    return str(row["label"]) if row and row["label"] else slug
+
+
 def _plan_changes_context(request: Request, conn, error: str | None = None,
                           notice: str | None = None) -> dict:
+    rows = db.recent_plan_changes(conn, db.utcnow_iso())
+    labels: dict[str, str] = {}
+    for row in rows:
+        detail = row.get("detail") or {}
+        slug = str(detail.get("slug") or row.get("subject") or "")
+        if slug not in labels:
+            labels[slug] = _project_label(conn, slug)
+        row["label"] = labels[slug]
+        # ui-dash-main-7 (2026-09-25): the computers this row's [ UNDO ] takes
+        # the project OFF - exactly what partial_plan_change_undo removes (in
+        # `after`, not in `before`). Undoing a person-level TICK is a
+        # person-wide untick, and every other untick in the product asks
+        # first, naming the computers (DASH-8, after CR-49's wrong-row click).
+        keep = {str(r.get("machine") or "") for r in (detail.get("before") or [])}
+        row["undo_removes"] = sorted({
+            str(r.get("machine") or "") or "unassigned"
+            for r in (detail.get("after") or [])
+            if str(r.get("machine") or "") not in keep
+        })
     return {
-        "plan_changes": db.recent_plan_changes(conn, db.utcnow_iso()),
+        "plan_changes": rows,
         "plan_error": error,
         "plan_notice": notice,
     }
@@ -1766,8 +1914,12 @@ def partial_plan_change_undo(
             from .api import _nudge_collector
 
             _nudge_collector(request)
-            notice = (f"put {slug} back for {editor}"
-                      if before else f"removed {slug} again for {editor}")
+            # ui-dash-main-7 (2026-09-25): the folder, not the slug. A folder id
+            # in the one sentence that says what an undo did is how a wrong
+            # row goes unnoticed.
+            label = _project_label(conn, slug)
+            notice = (f"put {label} back for {editor}"
+                      if before else f"removed {label} again for {editor}")
     return _render(request, "partials/plan_changes.html",
                    _plan_changes_context(request, conn, error=error, notice=notice))
 
@@ -1891,6 +2043,25 @@ def _health_rows(request: Request, conn) -> list[dict]:
     def add(**row) -> None:
         rows.append(row)
 
+    # ui-dash-admin-7 (2026-09-25). A source that raised used to be logged
+    # and then simply absent: its rows vanished, and with all four down (a
+    # locked database, a bad migration) the page said "Every check this
+    # server runs answered" -- the unverified-reads-as-OK shape
+    # docs/SELF_DIAGNOSIS.md forbids, on the page SYS-6 made the
+    # authoritative one. A source that cannot answer is one NOT CHECKED row
+    # now, counted in that band, so the all-clear sentence cannot render.
+    def failed(source: str, source_label: str, what: str, detail_page: str,
+               detail_label: str, exc: Exception) -> None:
+        add(source=source, source_label=source_label, band="unknown",
+            title=f"Could not read {what}",
+            subject=f"{type(exc).__name__}: {str(exc)[:160]}",
+            diagnosis=("This page could not ask this source, so nothing it "
+                       "would report is shown here. That is not checked, not OK."),
+            fix=(f"Open {detail_label} for its own list. If that page fails "
+                 "too, the dashboard log names the error."),
+            href="", href_label="",
+            detail_page=detail_page, detail_label=detail_label)
+
     try:
         # The registry's own sentence for the kind, so a row here reads the
         # same as the row on the notices panel rather than showing a raw key.
@@ -1904,8 +2075,10 @@ def _health_rows(request: Request, conn) -> list[dict]:
                 diagnosis=str(n.get("body") or ""), fix=str(n.get("fix") or ""),
                 href=href, href_label=href_label,
                 detail_page="/#server-notices", detail_label="[ NOTICES ]")
-    except Exception:  # noqa: BLE001 - see the docstring
+    except Exception as exc:  # noqa: BLE001 - see the docstring
         log.exception("health: could not read the open notices")
+        failed("notice", "PROBLEM THE SERVER FOUND", "the open notices",
+               "/#server-notices", "[ NOTICES ]", exc)
 
     try:
         for f in alerts_mod.scan(conn, settings, db.utcnow_iso()):
@@ -1915,8 +2088,10 @@ def _health_rows(request: Request, conn) -> list[dict]:
                 diagnosis=str(f.get("diagnosis") or ""), fix=str(f.get("fix") or ""),
                 href="", href_label="",
                 detail_page="/admin/alerts", detail_label="[ ALERTS ]")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.exception("health: could not run the alert scan")
+        failed("alert", "ALERT", "the alert checks", "/admin/alerts",
+               "[ ALERTS ]", exc)
 
     try:
         for inv in invariants_mod.page_view(conn):
@@ -1932,8 +2107,10 @@ def _health_rows(request: Request, conn) -> list[dict]:
                 diagnosis=str(inv.get("consequence") or ""),
                 fix=str(inv.get("fix") or ""), href="", href_label="",
                 detail_page="/admin/invariants", detail_label="[ INVARIANTS ]")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.exception("health: could not read the invariants")
+        failed("invariant", "INVARIANT", "the invariants", "/admin/invariants",
+               "[ INVARIANTS ]", exc)
 
     try:
         for line in protection_mod.page_view(conn).get("lines", []):
@@ -1949,8 +2126,10 @@ def _health_rows(request: Request, conn) -> list[dict]:
                 diagnosis=str(line.get("consequence") or ""),
                 fix=str(line.get("fix") or ""), href="", href_label="",
                 detail_page="/admin/protection", detail_label="[ PROTECTION ]")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.exception("health: could not read the protection lines")
+        failed("protection", "PROTECTION", "the protection lines",
+               "/admin/protection", "[ PROTECTION ]", exc)
 
     rows.sort(key=lambda r: (HEALTH_BAND_ORDER.index(r["band"])
                              if r["band"] in HEALTH_BAND_ORDER else len(HEALTH_BAND_ORDER),
@@ -2090,6 +2269,44 @@ async def partial_admin_protection_ack(
 # dataset in it is worse than no command at all.
 
 
+def _resolve_undo_view(conn: sqlite3.Connection) -> list[dict]:
+    """Every computer that has told us about a clip-path change it could undo,
+    or has been asked to undo one, with what came of each request.
+
+    ui-copy-2 (2026-09-25): the undo existed only as two API routes that
+    nothing called, so the recovery page's "Resolve" answer had to send the
+    owner to the editor's own tray. A machine cannot be ASKED what it holds
+    (no inbound connection), so this is the list its reports left in
+    `machine_state.resolve_journals`; db.machine_resolve_journals survives a
+    damaged blob by answering []."""
+    pairs = sorted({(r[0], r[1]) for r in conn.execute(
+        "SELECT editor_username, machine FROM machine_state"
+        " WHERE resolve_journals IS NOT NULL AND resolve_journals NOT IN ('', '[]')"
+        " UNION SELECT editor_username, machine FROM resolve_undo_requests")})
+    out: list[dict] = []
+    for editor, machine in pairs:
+        journals = db.machine_resolve_journals(conn, editor, machine)
+        requests = db.resolve_undos_for_machine(conn, editor, machine, limit=5)
+        for row in requests:
+            row["state_sentence"] = api_undo_state_sentence(row)
+        # A journal with an unanswered request shows that instead of a second
+        # button: the command already rides every report until it is answered.
+        # ui-copy-2 review round (2026-09-25): read from EVERY open request,
+        # not the five newest drawn below. Built from `requests` alone, an old
+        # unanswered ask with five newer rows above it fell out of the set and
+        # its journal offered [ UNDO THIS CHANGE ] again, a duplicate ask.
+        asked = {str(r[0] or "") for r in conn.execute(
+            "SELECT journal_id FROM resolve_undo_requests"
+            " WHERE editor_username=? AND machine=? AND applied_at IS NULL",
+            (editor, machine))}
+        for j in journals:
+            j["asked"] = str(j.get("id") or "") in asked
+        if journals or requests:
+            out.append({"editor": editor, "machine": machine,
+                        "journals": journals, "requests": requests})
+    return out
+
+
 def _recovery_context(request: Request, conn, problem: str = "",
                       error: str = "", notice: str = "",
                       preview: dict | None = None,
@@ -2103,6 +2320,8 @@ def _recovery_context(request: Request, conn, problem: str = "",
         "recovery_notice": notice,
         "recovery_preview": preview,
         "recovery_result": result,
+        # Only the Resolve answer draws it: the other problems never need it.
+        "resolve_undo": _resolve_undo_view(conn) if problem == "resolve" else [],
     }
 
 
@@ -2150,7 +2369,9 @@ async def partial_admin_recovery_preview(
 async def partial_admin_recovery_restore(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ):
-    """Copy what is missing into `<project>/.restored-<ts>/`.
+    """Copy what is missing into `<tree>/.restored-<ts>/<project>/`
+    (bug-dash-diag-3, 2026-09-25: outside the project's Syncthing folder, so
+    it is not sent to the editors who have the project ticked).
 
     There is no overwrite here and there is not going to be one: quarantine
     instead of overwrite is what makes the snapshot choice safe to get wrong,
@@ -2176,6 +2397,33 @@ async def partial_admin_recovery_restore(
     return _render(request, "partials/recovery.html",
                    _recovery_context(request, conn, str(form.get("problem") or ""),
                                      error, notice, result=result))
+
+
+@router.post("/partials/admin/recovery/resolve-undo")
+async def partial_admin_recovery_resolve_undo(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """[ UNDO THIS CHANGE ] on the recovery page (ui-copy-2, 2026-09-25).
+
+    One implementation: the JSON route's own function, so the button can
+    never be a softer door than POST /api/v1/admin/machines/.../resolve-undo
+    (it 404s a journal the machine has not reported, and audits the ask)."""
+    _require_admin_page(request)
+    form = await _form(request)
+    editor = str(form.get("editor") or "")
+    machine = str(form.get("machine") or "")
+    journal = str(form.get("journal") or "")
+    error, notice = "", ""
+    try:
+        api_machine_resolve_undo(editor, machine, request, journal=journal, conn=conn)
+        notice = (f"Asked {machine.strip()} to put those clip paths back. It happens "
+                  "when that computer next reports, and only while that project is "
+                  "open in its Resolve; the answer shows in its list below.")
+    except HTTPException as exc:
+        conn.rollback()
+        error = str(exc.detail)
+    return _render(request, "partials/recovery.html",
+                   _recovery_context(request, conn, "resolve", error, notice))
 
 
 @router.post("/partials/admin/recovery/drill")
@@ -2275,6 +2523,14 @@ async def partial_admin_alerts_password(request: Request,
             notice = "password stored."
     except alerts.AlertError as exc:
         error = str(exc)
+    # ui-dash-admin-9 (2026-09-25): the page no longer offers these buttons
+    # while the environment's password is in use, but a tab drawn before
+    # the deployment set it still does. The file was written or removed all
+    # the same; the answer must not say mail now uses it.
+    if notice and alerts.read_password(settings)[1] == "env":
+        notice = (notice + " The deployment's environment password is still the one "
+                  "in use, and it wins over the one stored here: change it where this "
+                  "server is deployed.")
     return _render(request, "partials/admin_alerts.html",
                    _alerts_context(request, conn, error, notice))
 
@@ -2384,7 +2640,7 @@ def partial_project(slug: str, request: Request, conn: sqlite3.Connection = Depe
         # UX-12 / DASH-8 (2026-08-28): the person's computers, so this render
         # carries the same person-level untick confirm and the same
         # [ TICK FOR ALL OF ...'S COMPUTERS (N) ] label as the full page.
-        "toggle_editor_machines": db.machines_of(conn, tick_editor) if tick_editor else [],
+        **_tick_confirms(conn, tick_editor, slug),
         "as_qs": _as_qs(request, tick_editor),
     })
 
@@ -2423,6 +2679,7 @@ async def _partial_project_link_edit(
         "selected_modes": db.fetch_all_selection_modes(conn),
         "moves": db.file_moves_for_project(conn, slug),
         "tick_editor": tick_editor,
+        **_tick_confirms(conn, tick_editor, slug),
         "as_qs": _as_qs(request, tick_editor),
         "link_error": error,
     })
@@ -2470,6 +2727,7 @@ async def partial_project_move(slug: str, request: Request,
         # nothing.
         "enforce_notes": db.enforce_notes(conn),
         "tick_editor": tick_editor,
+        **_tick_confirms(conn, tick_editor, slug),
         "as_qs": _as_qs(request, tick_editor),
         "move_error": error,
         "move_done": done,
@@ -2499,6 +2757,7 @@ def _rendered_project_detail(request, conn, slug: str, *, error=None, done=None)
         # nothing.
         "enforce_notes": db.enforce_notes(conn),
         "tick_editor": tick_editor,
+        **_tick_confirms(conn, tick_editor, slug),
         "as_qs": _as_qs(request, tick_editor),
         "move_error": error,
         "move_done": done,
@@ -2734,6 +2993,7 @@ async def partial_admin_create_user(
         })
 
     error = None
+    notice = None
     if not nas_factory.nas_configured(settings):
         # UX-13 (2026-09-04): the NEW name first, and the two places an owner
         # can actually set it. The old text named TRUENAS_PW and asked for a
@@ -2775,6 +3035,20 @@ async def partial_admin_create_user(
             # enforce shared them nothing (KNOWN_BUGS DASH-2, 2026-08-11).
             db.record_known_editor(conn, username, "admin")
             conn.commit()
+            if password:
+                # bug-dash-api-4 review round (2026-09-25): this form takes an
+                # EXISTING username with a key and a password too (the create
+                # is create-or-update), and set_known_password on that account
+                # is a password reset by another door. It left the leaked
+                # password's sessions signed in, the shape [ SET ] was fixed
+                # for. Unconditional once the password landed: a new account
+                # has no sessions, so the call answers 0 and changes nothing.
+                revoked = api_revoke_sessions_after_password_reset(
+                    request, username, admin=admin)
+                if revoked:
+                    notice = (f"Password set for {username}, and signed out "
+                              f"{revoked} session{'' if revoked == 1 else 's'} "
+                              f"of theirs.")
             if result["warnings"]:
                 error = f"{username}: created with warnings ({'; '.join(result['warnings'])})"
         except NasError as exc:
@@ -2783,12 +3057,13 @@ async def partial_admin_create_user(
     return _render(request, "partials/admin_users.html", {
         "admin_users": build_admin_users_view(settings, conn),
         "error": error,
+        "notice": notice,
     })
 
 
 @router.post("/partials/admin/users/password")
 async def partial_admin_set_password(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
-    _require_admin_page(request)
+    admin = _require_admin_page(request)
     settings = request.app.state.settings
     form = await _form(request)
     username = form.get("username", "").strip().lower()
@@ -2799,6 +3074,19 @@ async def partial_admin_set_password(request: Request, conn: sqlite3.Connection 
     # click that did nothing. It gets a result line of its own -- `notice`,
     # not `error`, which the panel already renders without the triangle.
     done = f"Password set for {username}. Tell them the new password: it is not shown here again."
+
+    def _signed_out() -> str:
+        # bug-dash-api-4 (2026-09-25): a reset changed the hash and nothing
+        # else, so whoever had signed in with the old (possibly leaked)
+        # password kept a working session for up to seven days. This [ SET ]
+        # is the door admins actually use; the API route already revokes.
+        # Called only after the change has landed (the helper never raises).
+        n = api_revoke_sessions_after_password_reset(request, username, admin=admin)
+        if not n:
+            return done
+        return (f"Password set for {username}, and signed out {n} "
+                f"session{'' if n == 1 else 's'} of theirs. Tell them the new "
+                f"password: it is not shown here again.")
 
     if str(settings.auth_method or "smb").strip().lower() == "local":
         error = None
@@ -2812,7 +3100,7 @@ async def partial_admin_set_password(request: Request, conn: sqlite3.Connection 
                 error = str(exc)
             else:
                 conn.commit()
-                notice = done
+                notice = _signed_out()
         return _render(request, "partials/admin_users.html", {
             "admin_users": build_admin_users_view(settings, conn),
             "error": error,
@@ -2848,7 +3136,7 @@ async def partial_admin_set_password(request: Request, conn: sqlite3.Connection 
         except NasError as exc:
             error = str(exc)
         else:
-            notice = done
+            notice = _signed_out()
 
     return _render(request, "partials/admin_users.html", {
         "admin_users": build_admin_users_view(settings, conn),
@@ -3320,11 +3608,22 @@ async def partial_admin_set_fleet_halt(
     # reason and start time and moving only the expiry, so the banner still
     # counts from when the fleet actually stopped.
     extend = form.get("extend", "") == "1"
+    if not active and form.get("ack_expired", "") == "1":
+        # logic-admin-3 (2026-09-25): [ OK, IT CAN STAY OFF ] is drawn only
+        # on an EXPIRED stop and means "take the notice down". If a new stop
+        # was set since that panel was drawn, the same POST would release it,
+        # so it is refused and the panel redrawn with the live stop.
+        if db.get_fleet_halt(conn)["active"]:
+            return _fleet_halt_render(
+                request, conn,
+                error="a new stop was set since this page loaded, so nothing "
+                      "was changed. Use [ START SYNCING AGAIN ] if you mean "
+                      "to end it.")
     if active and not extend and len(reason) < 3:
         # The reason is shown in EVERY editor's tray. A halt with no reason
         # produces a fleet of people who cannot work and cannot find out why.
         return _fleet_halt_render(
-            request, conn, error="say why -- every editor's tray will show this")
+            request, conn, error="say why: every editor's tray will show this")
     try:
         db.set_fleet_halt(conn, active, reason, admin, extend=extend)
     except ValueError as exc:
@@ -3476,10 +3775,20 @@ def partial_admin_cancel_job(
                                      error=f"job #{job_id} has already finished"))
     log.warning("job #%s cancelled from the jobs page by %s (%s)",
                 job_id, admin, state)
-    notice = (f"job #{job_id} is over"
-              if state == db.JOB_FAILED else
-              f"job #{job_id} will stop on its next report - the computer "
-              f"running it is the only thing that can end it")
+    # logic-admin-7 (2026-09-25): a PINNED job is run by this dashboard's own
+    # Timeline Cards worker (cards_exec.py polls should_stop), not by any
+    # computer, and db.request_job_cancel answers "requested" for it exactly
+    # as for a held one. Telling the owner to wait for "the computer running
+    # it" sent him to the fleet grid looking for a machine that holds nothing.
+    job = db.get_job(conn, job_id) if state != db.JOB_FAILED else None
+    if state == db.JOB_FAILED:
+        notice = f"job #{job_id} is over"
+    elif job is not None and job["state"] == db.JOB_PINNED:
+        notice = (f"job #{job_id} will stop when this server's own worker next "
+                  f"checks it: it is running here, not on any computer")
+    else:
+        notice = (f"job #{job_id} will stop on its next report - the computer "
+                  f"running it is the only thing that can end it")
     return _render(request, "partials/admin_jobs.html",
                    _jobs_context(request, conn, show_finished=bool(finished),
                                  notice=notice))
@@ -3564,7 +3873,7 @@ def page_download_platform(
 ):
     platform = platform.strip().lower()
     if platform not in ("windows", "macos"):
-        return PlainTextResponse("unknown platform -- use /download/windows or /download/macos",
+        return PlainTextResponse("unknown platform: use /download/windows or /download/macos",
                                  status_code=404)
     settings = request.app.state.settings
     row = db.get_current_package(conn, platform, kind="onboard")
@@ -3588,7 +3897,7 @@ def page_download_platform(
         )
     path = settings.packages_path() / row["platform"] / row["filename"]
     if not path.is_file():
-        return PlainTextResponse("installer file is missing on the server -- re-publish it",
+        return PlainTextResponse("installer file is missing on the server: re-publish it",
                                  status_code=404)
     # The stored (versioned) filename is what lands in the editor's Downloads
     # folder, so "which installer did you run?" has an answer.
@@ -3647,6 +3956,17 @@ def _ordered(values: list[str], order: tuple[str, ...]) -> list[str]:
     return known + sorted(v for v in values if v not in order)
 
 
+def _version_sort_key(version) -> tuple:
+    """0.9.77 above 0.9.9 above 0.9.7+dirty; anything unparsable sorts last."""
+    text = str(version or "").split("+", 1)[0]
+    parts = []
+    for piece in text.split("."):
+        if not piece.isdigit():
+            return (-1,)
+        parts.append(int(piece))
+    return tuple(parts) if parts else (-1,)
+
+
 def _kind_platform_groups(rows: list[dict]) -> list[dict]:
     """[{kind, platforms: [{platform, rows}]}], in PACKAGE_KIND_ORDER and
     PACKAGE_PLATFORM_ORDER. Row order inside a platform is the caller's:
@@ -3656,6 +3976,15 @@ def _kind_platform_groups(rows: list[dict]) -> list[dict]:
         kind = str(row.get("kind") or "").strip().lower()
         platform = str(row.get("platform") or "").strip().lower()
         by_kind.setdefault(kind, {}).setdefault(platform, []).append(row)
+    # CR-335 (2026-09-25, owner: "latest builds should be at the top, older
+    # builds underneath"): newest first in EVERY list, not by trusting the
+    # caller. The vendor section arrives in the channel's append order, which
+    # is oldest first.
+    for platforms_ in by_kind.values():
+        for plat, plat_rows in platforms_.items():
+            platforms_[plat] = sorted(
+                plat_rows, key=lambda r: _version_sort_key(r.get("version")),
+                reverse=True)
     groups = []
     for kind in _ordered(list(by_kind), PACKAGE_KIND_ORDER):
         platforms = by_kind[kind]
@@ -3716,8 +4045,20 @@ def _vendor_rows(app_state, packages: dict) -> list[dict]:
             "size_bytes": record.get("size_bytes") or 0,
             "notes": record.get("notes") or "",
             "published_at": record.get("published_at") or "",
-            "git_dirty": bool(record.get("git_dirty")),
+            # CR-334 (2026-09-25, owner: "why are all these builds stamped
+            # dirty"): the feed spells the flag as the STRING "0"/"1", and
+            # bool("0") is True, so every clean CI build in the vendor section
+            # wore (+dirty). CR-267b fixed the same reading where a package is
+            # STORED (release_feed._feed_flag) and missed this second reader.
+            "git_dirty": release_feed._feed_flag(record.get("git_dirty")),
             "git_sha": str(record.get("git_sha") or ""),
+            # CR-335: what the row needs to offer the typed override itself
+            # when the soak gate (or a missing signature) holds a build this
+            # server already has. Only meaningful for state "held".
+            "needs_override": bool(mine) and (
+                bool((mine.get("soak") or {}) and not (mine.get("soak") or {}).get("ok"))
+                or not mine.get("signature")),
+            "signed": bool(mine and mine.get("signature")),
             # "available" is exactly build_feed_view's `available`: no row
             # here at all. The other two are the answer to the owner's
             # question, said on the row itself.
@@ -3747,7 +4088,7 @@ def _vendor_rows(app_state, packages: dict) -> list[dict]:
 
 def _packages_and_feed(conn, request: Request, error: str | None = None,
                        refused: list | None = None,
-                       current_refused: str = "") -> dict:
+                       current_refused: str = "", error_for: str = "") -> dict:
     settings = request.app.state.settings
     feed = release_feed.build_feed_view(conn, settings, request.app.state)
     # REL-11 (2026-09-03): the panel said when it LAST checked and never when
@@ -3776,6 +4117,9 @@ def _packages_and_feed(conn, request: Request, error: str | None = None,
         "feed_next_check_seconds": _feed_next_check_seconds(
             feed.get("last_checked_at"), interval),
         "error": error,
+        # "kind/platform/version" of the row whose click produced `error`
+        # (CR-335), so the row can say it where the admin is looking.
+        "error_for": error_for,
         # What the check REFUSED to take, from the check's own answer rather
         # than the stored view (2026-09-04, with the dashboard-core builder's
         # `refused` list): a build the vendor offers and this dashboard would
@@ -3874,7 +4218,12 @@ async def partial_admin_package_current(
                   "forced": force})
         conn.commit()
 
-    return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
+    # CR-335 (2026-09-25): the refusal is ALSO drawn on the row that was
+    # clicked. At the top of a long panel it was out of view, so the button
+    # read as dead and the owner clicked it again and again.
+    return _render(request, "partials/admin_packages.html",
+                   _packages_and_feed(conn, request, error,
+                                      error_for=f"{kind}/{platform}/{version}" if error else ""))
 
 
 @router.post("/partials/admin/packages/push-one")

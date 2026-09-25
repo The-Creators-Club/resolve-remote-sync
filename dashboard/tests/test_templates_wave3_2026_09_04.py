@@ -165,7 +165,7 @@ def test_the_editor_is_told_whether_the_laptop_can_be_closed(env):
     # No machine on either row (an older companion's report), so the sentence
     # names none: it never claims to know which computer the browser is on
     # (dash-mounts-ui-2, 2026-09-11).
-    assert "4 file(s) still uploading (" in busy["sentence"]
+    assert "4 files still uploading (" in busy["sentence"]  # ui-dash-main-10 (2026-09-25)
     assert "this computer" not in busy["sentence"]
     # An ADMIN's view is the fleet's, which has no "this computer" in it.
     assert ui.safe_to_close({"transfers": [], "queues": []}, None) is None
@@ -229,7 +229,10 @@ def test_the_four_long_controls_on_packages_show_that_they_are_working():
             head = form.split(">")[0]
             assert 'hx-indicator="this"' in head, route
             assert 'hx-disabled-elt="this"' in head, route
-    assert source.count('hx-indicator="this"') == 4
+    # CR-335 (2026-09-25) gave every MAKE CURRENT form (the held row, its
+    # MAKE CURRENT ANYWAY, the vendor row and its override) the same busy
+    # state, so the panel now carries eight, not four.
+    assert source.count('hx-indicator="this"') == 8
     assert "[ ASKING THAT COMPUTER... ]" in source
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     assert ".htmx-request .btn" in css and "form.htmx-request" in css

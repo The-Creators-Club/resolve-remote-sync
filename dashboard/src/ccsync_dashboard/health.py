@@ -7,9 +7,10 @@ amber means work in flight, green means fully synced and quiet.
 from __future__ import annotations
 
 import re
+from datetime import timezone
 from typing import Any, Iterable, Mapping
 
-from .db import age_seconds
+from .db import age_seconds, parse_iso
 
 GREEN = "green"
 AMBER = "amber"
@@ -216,6 +217,14 @@ def lane_stall_detail(seconds: float) -> str:
     return f"syncing, no progress for {int(seconds // 60)} min"
 
 
+# logic-sync-truth-1 (2026-09-25): the two sentences a lane carries when the
+# whole companion has gone quiet. fleet_headline recognises them, so a silent
+# computer's row leads with "not heard from", never with one lane's fault.
+LANE_SILENT_AMBER_REASON = "this companion has been silent for 15 minutes or more"
+LANE_SILENT_RED_REASON = "this companion has been silent for 6 hours or more"
+_LANE_SILENT_REASONS = frozenset({LANE_SILENT_AMBER_REASON, LANE_SILENT_RED_REASON})
+
+
 def lane_chip(
     lane: Mapping[str, Any], now: str, rotation_seconds: float | None = None
 ) -> tuple[str, str | None]:
@@ -227,8 +236,17 @@ def lane_chip(
     """
     if lane["state"] == "error":
         return RED, lane.get("last_error") or None
-    if age_seconds(lane["received_at"], now) >= STALE_REPORT_SECONDS * 3:
-        return RED, "this companion has been silent for 15 minutes or more"
+    # logic-sync-truth-1 (2026-09-25): silence is the COMPUTER's, not the
+    # lane's, and it keeps report_freshness's two steps (UX-2): amber at 15
+    # minutes, red at 6 hours. It used to be red for every lane at 15 minutes,
+    # so a laptop with its lid shut at 18:00 led the fleet grid at 18:15 with
+    # a red "Upload has stopped" all night, every night, and the amber window
+    # the freshness rule was written for never showed.
+    silent = age_seconds(lane["received_at"], now)
+    if silent >= STALE_EDITOR_RED_SECONDS:
+        return RED, LANE_SILENT_RED_REASON
+    if silent >= STALE_EDITOR_AMBER_SECONDS:
+        return AMBER, LANE_SILENT_AMBER_REASON
     stalled = lane_stall(
         lane["state"], lane.get("progress_token_since"), now, rotation_seconds)
     if stalled is not None:
@@ -531,7 +549,13 @@ CLOCK_SKEW_WHY_SECONDS = 60.0
 # an admin to it reads this one constant (ui.py republishes it to the
 # templates as a Jinja global, alerts.py interpolates it), so the next time
 # the companion moves a button there is one string to change.
-COMPANION_DIAGNOSTICS_PATH = "Settings > Help > Copy diagnostics"
+# ui-copy-5 (2026-09-25): the companion's own copy (ui_copy.DIAGNOSTICS) says
+# "Tray > Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN", and an editor
+# told one route by the tray and another by the admin's mail went looking for
+# a "Copy diagnostics" row that is labelled differently. Kept word for word
+# with the companion, "Tray >" included: on a dashboard page "Settings" alone
+# reads as the dashboard's own Settings page.
+COMPANION_DIAGNOSTICS_PATH = "Tray > Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN"
 
 _LANE_WORDS = {
     "A": "upload",
@@ -1093,6 +1117,71 @@ def lane_strip(lanes: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return strip
 
 
+def _silence(row: Mapping[str, Any]) -> str | None:
+    """RED / AMBER when this row's companion has gone quiet, else None.
+
+    logic-sync-truth-1 (2026-09-25), review round the same day: keyed on the
+    ROW's own freshness, never on any one lane's. build_editors_view puts
+    report_freshness's "no report since ..." into `status_reason` first and
+    only when the row itself is stale, so that prefix is the gate. A lane row
+    outlives its lane for LANE_HISTORY_MAX_AGE_DAYS after a companion stops
+    sending it (a config change, an upgrade), and its old received_at used to
+    make a computer that reported ten seconds ago lead with "Not heard from
+    since <ten seconds ago>".
+
+    The level (amber until 6 hours, then red) comes from the lanes carried by
+    the row's LATEST report - those whose received_at is the row's own, since
+    the row's received_at is the max of its lanes' - because their silence is
+    exactly the row's. A machine with no such lane speaking of silence (no
+    lane rows, or its latest lanes are all in error, which wins inside
+    lane_chip) falls back to the row's own dot.
+    """
+    if not str(row.get("status_reason") or "").startswith("no report since"):
+        return None
+    stamp = str(row.get("received_at") or "")
+    level = None
+    for lane in row.get("lanes") or []:
+        if not isinstance(lane, Mapping):
+            continue
+        if str(lane.get("received_at") or "") != stamp:
+            continue
+        reason = lane.get("chip_reason")
+        if reason == LANE_SILENT_RED_REASON:
+            return RED
+        if reason == LANE_SILENT_AMBER_REASON:
+            level = AMBER
+    if level is None:
+        level = RED if row.get("status") == RED else AMBER
+    return level
+
+
+def _received_utc(row: Mapping[str, Any]) -> str | None:
+    stamp = str(row.get("received_at") or "").strip()
+    try:
+        when = parse_iso(stamp)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
+def _silence_text(row: Mapping[str, Any]) -> str:
+    when = _received_utc(row)
+    if when is None:
+        return "Not heard from this computer for 15 minutes or more"
+    return f"Not heard from since {when} UTC"
+
+
+def _last_heard_text(row: Mapping[str, Any]) -> str:
+    """The neutral twin of _silence_text, for a computer whose quiet is not a
+    problem (nothing ticked): when, without "not heard from"."""
+    when = _received_utc(row)
+    if when is None:
+        return "Last report 15 minutes or more ago"
+    return f"Last report {when} UTC"
+
+
 def _lane_fault(lanes: Iterable[Mapping[str, Any]]) -> tuple[str, str] | None:
     """(lane words, reason) for the first lane this machine cannot run, or None."""
     for lane in lanes or []:
@@ -1127,6 +1216,27 @@ def fleet_headline(row: Mapping[str, Any]) -> dict[str, Any]:
     if sentence and not informational:
         return {"reason": reason or "blocked", "text": sentence, "level": RED}
 
+    # logic-sync-truth-1 (2026-09-25): a computer that has stopped reporting
+    # is ONE fact about the whole computer, and everything below it (its
+    # build, its lanes) is only what it said last. Amber until report
+    # freshness says red at 6 hours, like the row's own dot.
+    silent = _silence(row)
+    if silent is not None:
+        # logic-sync-truth-1, Fable round (2026-09-25): a computer with
+        # NOTHING TICKED owes nothing, so its going quiet is a laptop that is
+        # shut, not a stall, and the owner's rule is that such a computer is
+        # never an error, warning or alert on any surface. The silence check
+        # sits above the informational return, so without this it led the row
+        # with an amber "Not heard from since ...". Said as a fact, muted; a
+        # computer WITH ticks keeps the amber/red headline, because there the
+        # silence is footage not moving.
+        if reason == "no_selection" and sentence:
+            return {"reason": reason,
+                    "text": f"{sentence}. {_last_heard_text(row)}",
+                    "level": HEADLINE_MUTED}
+        return {"reason": "not_reporting", "text": _silence_text(row),
+                "level": silent}
+
     if row.get("companion_outdated"):
         current = str(row.get("current_companion_version") or "").strip()
         running = str(row.get("companion_version") or "").strip() or "an unknown build"
@@ -1153,9 +1263,24 @@ def fleet_headline(row: Mapping[str, Any]) -> dict[str, Any]:
 
     busy = any(str((l or {}).get("state") or "") == "syncing"
                for l in (row.get("lanes") or []) if isinstance(l, Mapping))
-    return {"reason": "syncing" if busy else "idle",
-            "text": "Syncing" if busy else "Idle, nothing owed",
-            "level": HEADLINE_MUTED}
+    if busy:
+        return {"reason": "syncing", "text": "Syncing", "level": HEADLINE_MUTED}
+    # logic-sync-truth-5 (2026-09-25): "nothing owed" was claimed from lane
+    # STATES alone, and lanes sit idle between sequencer passes and for every
+    # project that is not the current one, so the grid said "nothing owed"
+    # while the transfers page listed 60 originals still to upload. The claim
+    # is made only from `owed_files` (the row's file-level backlog, optional:
+    # absent means nobody counted, so the line claims nothing).
+    owed = row.get("owed_files")
+    if isinstance(owed, int) and not isinstance(owed, bool):
+        if owed > 0:
+            return {"reason": "idle",
+                    "text": (f"Idle between passes, {owed} "
+                             f"file{'' if owed == 1 else 's'} still to move"),
+                    "level": HEADLINE_MUTED}
+        return {"reason": "idle", "text": "Idle, nothing owed",
+                "level": HEADLINE_MUTED}
+    return {"reason": "idle", "text": "Idle", "level": HEADLINE_MUTED}
 
 
 # CR-317 (2026-09-24): what `resolve_health.missing_clips` MEANS depends on

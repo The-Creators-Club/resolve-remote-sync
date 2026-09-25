@@ -118,10 +118,13 @@ def test_restricted_ignore_lines_shape():
 
 
 def test_restricted_ignore_lines_escapes_glob_specials():
-    lines = restricted_ignore_lines(["Interviewees/What? [Take 2]"])
+    # The backslash form is the macOS Syncthing's. bug-comp-syncthing-5
+    # (2026-09-25) made the escape per platform, so this pins the posix half
+    # explicitly (the Windows half is in test_bug_hunt_2026_09_24_w2_c-sync).
+    lines = restricted_ignore_lines(["Interviewees/What? [Take 2]"], windows=False)
     assert "!/Interviewees/What\\? \\[Take 2\\]" in lines
-    assert escape_ignore_glob("a*b") == "a\\*b"
-    assert escape_ignore_glob("a\\b") == "a\\\\b"
+    assert escape_ignore_glob("a*b", windows=False) == "a\\*b"
+    assert escape_ignore_glob("a\\b", windows=False) == "a\\\\b"
 
 
 def test_is_restricted_shapes():

@@ -744,13 +744,13 @@ async function loadProjects() {
     }
     // BOTH submit buttons: the destination picker is shared, so with no
     // project neither a search nor a paste has anywhere to land.
-    $('#go').disabled = true;
-    $('#golinks').disabled = true;
+    state.hasProjects = false;
+    syncSubmitButtons();
     return;
   }
   setBanner('projects', null);
-  $('#go').disabled = false;
-  $('#golinks').disabled = false;
+  state.hasProjects = true;
+  syncSubmitButtons();
   r.projects.forEach(p => {
     const o = el('option', null, p.label);
     o.value = p.slug;
@@ -1974,8 +1974,12 @@ function renderGrid() {
   // 2026-08-19). The 400 for "nothing new is selected" and the 409 for "you
   // already have a job running" are the server's to give, and both already
   // arrive as a toast; a permanently grey button is not a better error message.
-  $('#download').disabled =
-    !sel.length || !['ready_for_review', 'done'].includes(m.job.phase);
+  // ui-music-ytdl-web-3 (2026-09-25): ...and not before the download terms
+  // are accepted. This line re-enabled the button on every poll over
+  // setAttested's lock; `=== false` because a server too old to answer
+  // api/attestation leaves it undefined, and the server is the gate there.
+  $('#download').disabled = state.attested === false
+    || !sel.length || !['ready_for_review', 'done'].includes(m.job.phase);
   // The way out of a parked review (owner, 2026-08-24): only a job actually
   // WAITING here can be cancelled from here. A done job's review is the
   // re-download view (CR-35) and has nothing to cancel.
@@ -2008,6 +2012,12 @@ function card(v) {
   a.href = v.url;
   a.target = '_blank';
   a.rel = 'noreferrer';
+  // ui-music-ytdl-web-2 (2026-09-25): the title opens YouTube and must not
+  // also reach the card's onclick below. It bubbled, so previewing a clip
+  // flipped its tick, and `toggle` persists that server-side, which is what
+  // DOWNLOAD takes: an editor previewing each promising title unticked the
+  // clips they wanted with no sign but a checkbox in a tab they had left.
+  a.onclick = e => e.stopPropagation();
   meta.appendChild(a);
   meta.appendChild(el('div', 'sub',
     [v.channel || '?', fmtDur(v.duration), fmtDate(v.upload_date)].filter(Boolean).join(' · ')));
@@ -2140,12 +2150,18 @@ async function runSearch() {
   // a double-click created two active jobs, and the orphaned first one then
   // 409'd every later search naming a job_id nothing was tracking
   // (YTDL-25, 2026-08-11).
-  if (go.disabled) return;
+  // ui-music-ytdl-web-3: Enter reaches here past a button the terms lock
+  // greyed out, so it says why instead of doing nothing.
+  if (go.disabled) {
+    if (state.attested === false) toast(ATTEST_TITLE, true);
+    return;
+  }
   const term = $('#q').value.trim();
   if (!term) return;
   const slug = $('#project').value;
   if (!slug) { toast('pick a project first', true); return; }
-  go.disabled = true;
+  state.searching = true;
+  syncSubmitButtons();
   // Hoisted out of the POST so the discard-and-retry path below re-sends
   // EXACTLY what was refused, not whatever the form says by the time the
   // editor has answered the confirm.
@@ -2219,7 +2235,8 @@ async function runSearch() {
       toast(e.message, true, 12000);
     }
   } finally {
-    go.disabled = false;
+    state.searching = false;
+    syncSubmitButtons();
   }
 }
 
@@ -2230,12 +2247,16 @@ async function runSearch() {
 // shared: detach/attach, the banner slots, the 409 re-attach (YTDL-8).
 async function runUrls() {
   const btn = $('#golinks');
-  if (btn.disabled) return;           // no project, or a POST already in flight
+  if (btn.disabled) {                 // no project, the terms, or a POST in flight
+    if (state.attested === false) toast(ATTEST_TITLE, true);
+    return;
+  }
   const urls = $('#urls').value.trim();
   if (!urls) return;
   const slug = $('#project').value;
   if (!slug) { toast('pick a project first', true); return; }
-  btn.disabled = true;
+  state.linking = true;
+  syncSubmitButtons();
   // Hoisted for the same reason runSearch's payload is: the discard-and-retry
   // path re-sends what was refused, not the form's current state.
   const box = $('#urlfolder');
@@ -2290,7 +2311,8 @@ async function runUrls() {
       toast(e.message, true, 12000);
     }
   } finally {
-    btn.disabled = false;
+    state.linking = false;
+    syncSubmitButtons();
   }
 }
 
@@ -2403,11 +2425,26 @@ const PROBE_RETRY_MS = 5000;
 // is said once; everything else in the fast path stays silent (see §11 and
 // test_the_probe_is_bounded_and_every_failure_of_it_is_silent).
 let lastCompanionRefusal = "";
+// logic-ytdl-jobs-4 (2026-09-25): this toast used to carry its own route,
+// "right-click the tray icon, then 'Accept YouTube Terms'", and the item left
+// the right-click menu with CR-88 (2026-08-27, companion 0.9.54): it lives in
+// the Settings window now. The companion's refusal already ends with the
+// route that is true FOR THAT BUILD (ytdl_executor.REASON_NOT_ATTESTED, "...
+// on this computer: Tray > Settings > Accept YouTube Terms" since CYT-4; an
+// older build's "tray > 'Accept YouTube Terms...'" was right for its own
+// menu), so the page repeats that route instead of guessing. A reason without
+// one falls back to the current route, the same constant ui_copy.YOUTUBE_TERMS.
+const TERMS_ROUTE_FALLBACK = 'Tray > Settings > Accept YouTube Terms';
+function termsRoute(reason) {
+  const at = reason.lastIndexOf(':');
+  const route = at >= 0 ? reason.slice(at + 1).trim() : '';
+  return /accept youtube terms/i.test(route) ? route : TERMS_ROUTE_FALLBACK;
+}
 function explainCompanionRefusal(reason) {
   if (reason === lastCompanionRefusal) return;
   lastCompanionRefusal = reason;
-  toast("Please first accept the download terms in the CC Sync tray: right-click " +
-        "the tray icon, then 'Accept YouTube Terms'. This download runs on the server instead.",
+  toast("Please first accept the download terms in the CC Sync tray: " +
+        termsRoute(reason) + ". This download runs on the server instead.",
         true, 12000);
 }
 
@@ -2590,7 +2627,15 @@ async function dispatchLocal(jobId, quality, createdLocal) {
     // 202 dispatched; 409 already busy, 503 declined (its claim was refused, or
     // the capability went away between the probe and now) -- and any of those
     // simply means the server worker keeps the job, which it has all along.
-    if (res.status === 202) return true;
+    if (res.status === 202) {
+      // logic-ytdl-jobs-3 (2026-09-25): a 202 is "dispatched", not "will
+      // download". Most of the companion's whole-job hand-backs (too little
+      // free space, an unmounted tree, a project this computer does not sync)
+      // happen after it, some before a lease exists, and none of them turns
+      // this job's mode to `local`, so ensureLocalProgress never asked.
+      watchHandBack(jobId);
+      return true;
+    }
     noteLocalSkipped(res.status === 409
       ? 'this computer is already downloading another job'
       : `this computer declined the job (HTTP ${res.status})`);
@@ -2702,6 +2747,9 @@ async function pollLocalProgress(jobId) {
   const jobs = (body && Array.isArray(body.jobs)) ? body.jobs : [];
   const mine = jobs.filter(j => String(j.job_id) === String(jobId))[0] || null;
   state.localLive = mine;
+  // logic-ytdl-jobs-3: a hand-back in the middle of a local run (the tree
+  // unmounted, the sign-in refused) lands in this same row.
+  announceHandBack(jobId, mine);
   localProgressBusy = false;
   // Re-render off the LAST poll response rather than asking the server again:
   // this is the same job, and only the loopback's half of the line changed.
@@ -2712,6 +2760,58 @@ async function pollLocalProgress(jobId) {
   }
   if (state.jobId === jobId && !localProgressOff) {
     localProgressTimer = setTimeout(() => pollLocalProgress(jobId), LOCAL_PROGRESS_MS);
+  }
+}
+
+// logic-ytdl-jobs-3 (2026-09-25): WHY this computer gave a job back, in the
+// companion's own sentence. CR-171 gave every whole-job hand-back an
+// editor-readable `handed_back_reason` on /ytdl/progress (LOOPBACK_API.md:
+// "a page that polls after the 202 learns why the badge is about to flip")
+// and nothing on this page ever read it, so the editor pressed DOWNLOAD, got
+// a 202, and the clips quietly stayed on the NAS - the outcome the owner
+// asked to be told about (2026-08-19). Once per job: the row survives the
+// job on the companion, and every poll would otherwise say it again. The
+// editor's own [ STOP ] is `cancelled`, not `handed_back`, and has its own
+// toast already.
+const HAND_BACK_WATCH_MS = 240000;   // past the 180 s lease, with room to spare
+const HAND_BACK_POLL_MS = 3000;
+const _handBackSaid = new Set();
+
+function announceHandBack(jobId, row) {
+  if (!row || String(row.job_id) !== String(jobId)) return false;
+  if (row.phase !== 'handed_back' || !row.handed_back_reason) return false;
+  if (_handBackSaid.has(String(jobId))) return true;
+  _handBackSaid.add(String(jobId));
+  const what = row.title ? `"${row.title}": ` : '';
+  toast(`${what}${String(row.handed_back_reason).trim()} YouTube originals `
+        + 'only sync upwards, so use the download history to fetch a clip '
+        + 'onto this computer.', false, 15000);
+  return true;
+}
+
+// A short watch of the loopback after a 202, whatever the job's mode says.
+// Same rules as every other loopback read here: one second of budget, every
+// failure is "ask again", and a 404 (a companion older than /ytdl/progress)
+// ends it, since that companion has no reason to give.
+async function watchHandBack(jobId) {
+  const until = Date.now() + HAND_BACK_WATCH_MS;
+  while (Date.now() < until && !localProgressOff) {
+    await new Promise(r => setTimeout(r, HAND_BACK_POLL_MS));
+    if (_handBackSaid.has(String(jobId))) return;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), PROBE_MS);
+    let body = null;
+    try {
+      const res = await fetch(`${COMPANION_URL}/ytdl/progress`, {signal: ctl.signal});
+      if (res.status === 404) return;
+      if (res.ok) body = await res.json();
+    } catch { /* not answering: ask again on the next tick */ }
+    finally { clearTimeout(timer); }
+    const jobs = (body && Array.isArray(body.jobs)) ? body.jobs : [];
+    const row = jobs.filter(j => String(j.job_id) === String(jobId))[0];
+    if (!row) continue;
+    if (announceHandBack(jobId, row)) return;
+    if (row.phase === 'finished' || row.phase === 'cancelled') return;
   }
 }
 
@@ -2789,7 +2889,12 @@ async function loadRecent() {
   r.jobs.forEach(j => {
     const row = el('div', 'recentrow');
     row.appendChild(el('span', 'when', (j.created_at || '').slice(0, 16).replace('T', ' ')));
-    row.appendChild(el('span', 'ph', j.phase));
+    // ui-music-ytdl-web-10 (2026-09-25): the words the progress strip uses,
+    // not the database's enum. The raw value stays in the tooltip for support,
+    // and an unknown phase (a newer server) still shows as itself.
+    const ph = el('span', 'ph', PHASE_LABEL[j.phase] || j.phase);
+    ph.title = j.phase || '';
+    row.appendChild(ph);
     // A search has a topic; a paste has neither a topic nor a folder any more
     // (its clips go straight into the project's Youtube root), so naming its
     // empty `term` would print a dangling arrow.
@@ -3098,13 +3203,43 @@ async function loadAttestation() {
 function setAttested(accepted) {
   state.attested = accepted;
   $('#attest').classList.toggle('hidden', accepted);
-  for (const id of ['#go', '#golinks', '#download']) {
-    const el = document.querySelector(id);
-    if (el) {
-      el.disabled = !accepted;
-      el.title = accepted ? el.dataset.title || el.title
-                          : 'Accept the download terms at the top of this page first';
-    }
+  syncSubmitButtons();
+  // DOWNLOAD's own rule (a selection, a reviewable phase) lives in
+  // renderGrid; accepting re-runs it rather than enabling the button over an
+  // empty selection.
+  if (accepted && state.manifest) renderGrid();
+}
+
+const ATTEST_TITLE = 'Accept the download terms at the top of this page first';
+
+// ui-music-ytdl-web-3 (2026-09-25): the ONE place SEARCH, GET LINKS and
+// DOWNLOAD are locked or unlocked. Four writers used to set `disabled`
+// independently and the last one won: loadProjects re-enabled both submit
+// buttons over the attestation lock on every page load, accepting re-enabled
+// them over "no projects ticked", and every submit's `finally` re-enabled
+// them over both. The server still refuses in each case, with a toast, which
+// is what the lock is there to spare the editor. `=== false` in each test:
+// undefined means "not known yet" (an old server with no api/attestation, or
+// the project list not loaded), and the server is the gate for those.
+// The tooltip was the same shape: setAttested(true) restored
+// `el.dataset.title`, which nothing ever set, so the lock's sentence stayed on
+// after accepting. The button's own title is captured once, before the first
+// lock overwrites it (an empty title is an empty tooltip, which is correct for
+// SEARCH and DOWNLOAD).
+const OWN_TITLES = new Map();
+function syncSubmitButtons() {
+  const locked = state.attested === false;
+  const noProjects = state.hasProjects === false;
+  const rules = [['#go', noProjects || !!state.searching],
+                 ['#golinks', noProjects || !!state.linking],
+                 ['#download', null]];
+  for (const [id, busy] of rules) {
+    const node = document.querySelector(id);
+    if (!node) continue;
+    if (!OWN_TITLES.has(id)) OWN_TITLES.set(id, node.title || '');
+    if (busy !== null) node.disabled = locked || busy;
+    else if (locked) node.disabled = true;
+    node.title = locked ? ATTEST_TITLE : OWN_TITLES.get(id);
   }
 }
 

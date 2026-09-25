@@ -16,12 +16,25 @@
 }
 .share-header .brand .dim { color: var(--red-dim); }
 .share-header .brand { display: inline-flex; align-items: center; gap: 10px; }
+/* ui-broll-web-2 (2026-09-25): style.css's `.topbar > *` makes every header
+   item unbreakable and unshrinkable, and the org name is site data of any
+   length: "The Creators Club Documentary Studio" made the brand 505 px wide
+   and the whole public page scrolled sideways on a 390 px phone. The brand
+   may shrink and wrap; the clip count keeps its own line end. */
+.share-header .topbar > .brand { flex: 0 1 auto; min-width: 0; white-space: normal; }
+.share-header #share-org { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* The keyboard line under the player names keys a phone does not have
+   (ui-broll-web-7, 2026-09-25). */
+@media (hover: none) {
+  .share-body .keyhelp { display: none; }
+}
 /* White on transparent, so it reads on the dark ground; sized to the line. */
 .share-mark { height: 30px; width: auto; display: inline-block; opacity: 0.95; }
 .share-header .rule { color: var(--red-dim); overflow: hidden; white-space: nowrap; font-size: 11px; line-height: 1; }
 .share-count { font-size: 12px; }
 
 .share-intro { max-width: 900px; margin: 12px 0 18px; }
+.share-retry { margin-top: 4px; }
 .share-intro h1 {
   font-size: 18px; margin: 0 0 6px; color: var(--text); letter-spacing: 0.04em;
 }
@@ -35,12 +48,23 @@
    a card is what the SPA deliberately dropped for editors (they choose by
    eye); a client is READING a folder somebody wrote for them. */
 .share-caption {
-  padding: 5px 7px 6px;
+  padding: 5px 7px 0;
+  margin-bottom: 6px;
   font-size: 11.5px;
   line-height: 1.4;
   color: var(--muted);
   border-top: 1px solid var(--border);
-  max-height: 3.9em;
+  /* ui-broll-web-8 (2026-09-25): 3.9em in a border-box with 12 px of padding
+     was about two lines and a sliver, so a third line showed cut through its
+     letters. Three whole lines, ellipsed; the max-height is the cap for an
+     engine without line-clamp (3 x 1.4em plus the top padding and border).
+     The bottom gap is a margin, not padding: overflow clips at the padding
+     box, so bottom padding showed a sliver of the fourth line. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  max-height: calc(4.2em + 6px);
   overflow: hidden;
 }
 .share-caption .share-caption-name { color: var(--text); }
@@ -59,9 +83,16 @@
   border: 1px solid var(--red-dim);
 }
 .share-layout { margin-top: 0; }
+/* ui-broll-web-1 (2026-09-25): `1fr` is minmax(auto, 1fr), so the single
+   phone column could not get narrower than its min-content, and a camera
+   filename with no break opportunity (DJI_20260503_142233_0042_D_...MP4)
+   widened the whole grid, player included, past a 390 px screen. A zero
+   floor on the track plus a wrap-anywhere title keeps it on the screen. */
 @media (max-width: 860px) {
-  .share-layout { grid-template-columns: 1fr; }
+  .share-layout { grid-template-columns: minmax(0, 1fr); }
 }
+.share-layout .video-meta .title,
+.share-caption .share-caption-name { overflow-wrap: anywhere; }
 .share-note { color: var(--text); font-style: italic; margin: 6px 0 8px; }
 
 .share-footer {

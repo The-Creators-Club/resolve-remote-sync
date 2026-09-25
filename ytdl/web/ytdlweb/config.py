@@ -425,6 +425,22 @@ REPORT_TOKEN = os.environ.get('DASH_REPORT_TOKEN') or ''
 # broken in a much louder way first.
 SESSION_SECRET = os.environ.get('DASH_SESSION_SECRET') or ''
 
+
+def session_secrets_previous():
+    """DASH_SESSION_SECRET_PREVIOUS, comma-separated, blanks dropped: the
+    dashboard's ACCEPT-ONLY retired keys, parsed exactly as its settings.py
+    parses them.
+
+    bug-wire-2 (2026-09-25): the dashboard keeps accepting a companion identity
+    signed with a retired key for the whole of a rotation drain, while the fleet
+    routes here verified against SESSION_SECRET alone, so every un-re-signed
+    machine's claims, completions and hand-backs 403'd "sign in again" and the
+    NAS worker quietly took every download. Read live rather than bound like
+    SESSION_SECRET: nothing else caches it, and a test can set it.
+    """
+    raw = os.environ.get('DASH_SESSION_SECRET_PREVIOUS') or ''
+    return tuple(s.strip() for s in raw.split(',') if s.strip())
+
 HOST = os.environ.get('YTDL_HOST') or '127.0.0.1'
 PORT = int(os.environ.get('YTDL_PORT') or '8791')
 

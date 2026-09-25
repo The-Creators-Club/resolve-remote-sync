@@ -20,7 +20,8 @@ different for music.
   (`music/web/musicweb/routes_ingest.py`, `ingest_queue` + `uid` journal
   (migrations 002/003), `music/indexer/index_music.py --queue`,
   `musicweb/drain.py` bundle export/apply with identity/agreement/atomicity).
-  Uploads land flat under the music share (`db.unique_dest`), duplicates are
+  Uploads land flat under the music share (`db.claim_dest` since 2026-09-25,
+  which also steps around names a fleet batch has promised; bug-music-ytdl-2), duplicates are
   refused twice (normalised stem + duration; blake2b content hash), `.ogg` is
   transcoded to 320k mp3, and the container's `MAX_INGEST_*` are 64 files /
   512 MiB per request.

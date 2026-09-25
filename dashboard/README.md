@@ -102,8 +102,8 @@ which is why this is a refusal and not a warning.
 HMAC token (`auth.py`), but every live session also has a row in
 `auth_sessions` keyed by `HMAC(secret, cookie)` — a keyed digest, so the table
 holds nothing replayable. A cookie with no row is not a session. Therefore:
-`[ LOGOUT ]` revokes rather than just deleting the browser's copy;
-`[ LOGOUT ALL ]` (in the menu drawer's foot since the 2026-08-18 nav
+`[ SIGN OUT ]` revokes rather than just deleting the browser's copy;
+`[ SIGN OUT EVERYWHERE ]` (in the menu drawer's foot since the 2026-08-18 nav
 redesign) signs the account out on every device; and an admin can
 revoke anyone's from **Settings ▸ Users ▸ SIGNED-IN BROWSERS**
 (`POST /partials/admin/sessions/revoke`). Lifetimes are 12h idle (refreshed by

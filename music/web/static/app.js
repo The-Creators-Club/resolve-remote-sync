@@ -375,7 +375,10 @@ async function sendToResolve(t, action, btn, msg) {
     // permission on an http:// dashboard origin does exactly this).
     msg.textContent = e.message.startsWith('tray ')
       ? `the CC Sync tray answered but refused the request (${e.message}). `
-        + 'Settings > Help > Copy diagnostics in the tray has the reason.'
+        // ui-copy-5 (2026-09-25): the route the tray itself and the dashboard
+        // say (companion ui_copy.DIAGNOSTICS); this was a fourth wording that
+        // named a Help menu the tray does not have.
+        + 'Tray > Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN has the reason.'
       : 'couldn’t reach the CC Sync tray: it is not running, or the browser '
         + 'blocked local connections (self-test: open '
         + 'http://127.0.0.1:8899/status)';
@@ -548,6 +551,12 @@ async function loadTracks() {
   if (state.facet) bits.push(`${state.facet.category}: ${state.facet.label}`);
   if (state.axis) bits.push(`${state.axis.axis} ≥ ${state.axis.min}`);
   if (state.bpm.min || state.bpm.max) bits.push(`${state.bpm.min || 0}–${state.bpm.max || '∞'} bpm`);
+  // ui-music-ytdl-web-6 (2026-09-25): the length boxes filter too. Left out
+  // of the headline, a length-only filter read "All tracks", and one that
+  // matched nothing chose the no-filters sentence: "The library is empty" over
+  // a library of hundreds.
+  if (state.dur.min || state.dur.max) bits.push(`${state.dur.min || 0}–${state.dur.max || '∞'} s`);
+  sortApplies(true);
   const seq = ++state.seq;
   let answer;
   try {
@@ -568,6 +577,7 @@ async function loadTracks() {
 async function runSearch(q) {
   if (!q.trim()) return loadTracks();
   $('#q').value = q;
+  sortApplies(false);
   render([], 'Searching…', false, 'Searching…');
   const pool = $('#pool').value;
   const seq = ++state.seq;
@@ -588,8 +598,40 @@ async function runSearch(q) {
   noteUnknownHidden(answer);
 }
 
+// ui-music-ytdl-web-5 (2026-09-25): what a rail control, the sort or the
+// `[ include them ]` offer re-runs. They all called loadTracks(), the BROWSE
+// route, so changing a filter under a search threw the ranked results away
+// for an unranked list headed "All tracks" while the box still showed the
+// query - and runSearch draws the `[ include them ]` offer itself, so the
+// one button a search result offers undid the search. MUSIC-4 made the
+// filters travel WITH a search; this is the other direction. Only a facet
+// click and [ clear ] empty the box, and they still mean "browse".
+function refreshResults() {
+  const q = $('#q').value;
+  return q.trim() ? runSearch(q) : loadTracks();
+}
+
+// ui-music-ytdl-web-5 review round (2026-09-25): the sort orders the BROWSE
+// list only. /api/search and /api/similar answer in order of match and take
+// no sort, so under a ranked answer the control re-ran the search (a fresh
+// CLAP embed) and handed back the same order: a control that looked live and
+// did nothing. It is switched off while a ranked answer is showing (or on its
+// way), and says why beside it, since a title does not show on a phone.
+function sortApplies(on) {
+  const sort = $('#sort');
+  if (sort) {
+    sort.disabled = !on;
+    sort.title = on ? 'How the list below is ordered'
+                    : 'Search results are ordered by how well they match. '
+                      + 'Clear the search to sort the library.';
+  }
+  const note = $('#sortnote');
+  if (note) note.hidden = !!on;
+}
+
 async function showSimilar(t) {
   render([], 'Finding similar…', false, 'Finding similar…');
+  sortApplies(false);
   const seq = ++state.seq;
   let answer;
   try {
@@ -620,7 +662,7 @@ function noteUnknownHidden(answer) {
   head.appendChild(note);
   const btn = el('button', 'text-btn', '[ include them ]');
   btn.title = 'Show tracks the indexing computer has not analysed yet';
-  btn.onclick = () => { state.includeUnknown = true; syncUnknownToggle(); loadTracks(); };
+  btn.onclick = () => { state.includeUnknown = true; syncUnknownToggle(); refreshResults(); };
   head.appendChild(btn);
 }
 
@@ -696,7 +738,7 @@ function paintAxes(axes) {
         if (o !== r) { o.value = 0; o.parentElement.querySelector('.val').textContent = 'off'; }
       });
       state.axis = r.value === '0' ? null : {axis, min: +r.value};
-      loadTracks();
+      refreshResults();
     };
     wrap.appendChild(r);
     box.appendChild(wrap);
@@ -870,15 +912,47 @@ async function loadDashboardTopbar() {
 }
 
 // ---------------------------------------------------------------- init
-async function init() {
-  loadDashboardTopbar();
-  const s = await api('api/stats');
-  paintStats(s);
+// ui-music-ytdl-web-8 (2026-09-25): the filter rail parks at
+// `top: var(--header-h)`, and --header-h was a constant (134 px) while the
+// header's real height depends on how its rows wrap and on which topbar was
+// injected: 150 px at 1246 wide, so the rail's FEEL heading slid half under
+// the header once the page scrolled. The header measures itself instead,
+// including after the dashboard topbar replaces the fallback.
+function trackHeaderHeight() {
+  const header = document.getElementById('app-header');
+  if (!header) return;
+  const apply = () => document.documentElement.style.setProperty(
+    '--header-h', `${Math.ceil(header.getBoundingClientRect().height)}px`);
+  apply();
+  if (typeof ResizeObserver === 'function') new ResizeObserver(apply).observe(header);
+}
 
-  FACETS = await api('api/facets');
+// ui-music-ytdl-web-7 (2026-09-25): the header stats and the facet rail are
+// DECORATION around the list, and init used to await both before it wired a
+// single button. One 401 or 500 on either left a page whose SEARCH, clear and
+// ADD MUSIC did nothing, over the raw line `Failed to load: api/stats -> 401`.
+// Best-effort now, like refreshLibrary: the list below is loaded regardless
+// and says what went wrong in failureText's words (which, for an expired
+// session, is "reload the page to sign in again").
+async function loadLibraryMeta() {
+  try {
+    paintStats(await api('api/stats'));
+  } catch (e) {
+    const node = $('#stats');
+    node.textContent = 'library totals did not load';
+    node.title = failureText('Loading the totals', e);
+  }
+  try {
+    FACETS = await api('api/facets');
+  } catch { /* an empty rail beats a dead page; the list says why */ }
   paintFacets();
   paintAxes(FACETS._axes || []);
   syncUnknownToggle();
+}
+
+async function init() {
+  loadDashboardTopbar();
+  trackHeaderHeight();
 
   const ex = $('#examples');
   EXAMPLES.forEach(q => {
@@ -903,13 +977,15 @@ async function init() {
   }
   const sort = $('#sort');
   if (sort) {
+    // Enabled only while the browse list is showing (sortApplies), so this
+    // re-orders that list; a query typed and not yet searched stays unsent.
     sort.onchange = () => { state.sort = sort.value; loadTracks(); };
   }
   const unknown = $('#includeUnknown');
   if (unknown) {
     unknown.onchange = () => {
       state.includeUnknown = unknown.checked;
-      loadTracks();
+      refreshResults();
     };
   }
   $('#clear').onclick = () => {
@@ -927,7 +1003,7 @@ async function init() {
   $('#applyRange').onclick = () => {
     state.bpm = {min: +$('#bpmMin').value || null, max: +$('#bpmMax').value || null};
     state.dur = {min: +$('#durMin').value || null, max: +$('#durMax').value || null};
-    loadTracks();
+    refreshResults();
   };
 
   audio().addEventListener('ended', () => {
@@ -938,9 +1014,10 @@ async function init() {
   wireDropzone();
   refreshResolveStatus();
   setInterval(refreshResolveStatus, 30000);
+  await loadLibraryMeta();
   await loadTracks();
 }
 
 init().catch(e => {
-  document.querySelector('#list').textContent = 'Failed to load: ' + e.message;
+  document.querySelector('#list').textContent = failureText('Loading the page', e);
 });

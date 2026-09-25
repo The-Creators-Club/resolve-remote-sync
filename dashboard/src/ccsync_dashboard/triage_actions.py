@@ -246,6 +246,15 @@ def _x_cancel_job(conn, settings, p, actor) -> str:
         raise ActionRefused(f"job #{p['job_id']} has already finished")
     if state == db.JOB_FAILED:
         return f"job #{p['job_id']} is over"
+    # logic-admin-7 (2026-09-25): request_job_cancel answers "requested" for a
+    # PINNED job too, and that one runs in this container's own Timeline
+    # Cards worker (its should_stop), not on any computer: the owner's mail
+    # must not send them to look for a machine. The request writes only the
+    # cancel_requested_* columns, so re-reading the row gives its real state.
+    job = db.get_job(conn, p["job_id"]) or {}
+    if job.get("state") == db.JOB_PINNED:
+        return (f"job #{p['job_id']} will stop when this server's own worker "
+                f"next checks it; it is running here, not on any computer")
     return (f"job #{p['job_id']} will stop on its next report; the computer "
             f"running it is the only thing that can end it")
 

@@ -1052,11 +1052,16 @@ class JobRunner:
         job_id = int(job["id"])
         try:
             argv, folder, episode = self._whisper_command(job)
-        except job_paths.JobPathError as exc:
+        except (ValueError, OSError) as exc:
             # A path this machine cannot place is not a transient failure, but
             # it IS retryable elsewhere: another machine may have the root.
+            # bug-comp-media-8 (2026-09-25): ValueError/OSError, not only
+            # JobPathError -- anything else Path raised used to escape tick()
+            # with no result posted, and every claimant dropped the job in
+            # silence until its lease expired.
             log.warning("jobs: job #%s cannot be placed here: %s", job_id, exc)
-            self._post_result(job_id, False, str(exc), retryable=True)
+            self._post_result(job_id, False, str(exc),
+                              retryable=_placement_retryable(exc))
             return
         log.info("jobs: job #%s transcribing %s (episode root %s)",
                  job_id, folder, episode)
@@ -1101,11 +1106,13 @@ class JobRunner:
         kind = str(job["kind"])
         try:
             source, out_dir, stem, out_root, out_rel = self._media_paths(job)
-        except job_paths.JobPathError as exc:
+        except (ValueError, OSError) as exc:
             # A path this machine cannot place is retryable ELSEWHERE: another
-            # machine may have the root this one is missing.
+            # machine may have the root this one is missing. A fault in the
+            # job itself is not (bug-comp-media-3/-8, _placement_retryable).
             log.warning("jobs: job #%s cannot be placed here: %s", job_id, exc)
-            self._post_result(job_id, False, str(exc), retryable=True)
+            self._post_result(job_id, False, str(exc),
+                              retryable=_placement_retryable(exc))
             return
         log.info("jobs: job #%s %s of %s -> %s", job_id, kind, source, out_dir)
 
@@ -1223,7 +1230,11 @@ class JobRunner:
                 "(out_root + out_rel) -- nothing here guesses where a cache "
                 "belongs in somebody's vault")
         out_dir = job_paths.resolve(self.cfg, out_root, out_rel)
-        stem = str(inputs.get("out_stem") or "").strip() or source.stem
+        # bug-comp-media-3 (2026-09-25): the stem is checked like the paths
+        # above it (job_paths.safe_stem says why), including the source's own
+        # stem, which is only ever a name but costs nothing to hold to it.
+        stem = job_paths.safe_stem(
+            str(inputs.get("out_stem") or "").strip() or source.stem)
         return source, out_dir, stem, out_root, out_rel
 
     def _whisper_command(self, job: dict[str, Any]) -> tuple[list[str], Path, Path]:
@@ -1352,6 +1363,19 @@ class JobRunner:
                 self._heartbeat(job_id, 1.0)
             return True, output, ""
         return False, output, f"pipeline.py transcribe exited {code}"
+
+
+def _placement_retryable(exc: BaseException) -> bool:
+    """Whether a job this machine could not PLACE should go to another one.
+
+    bug-comp-media-3/-8 (2026-09-25): a JobPathError says for itself (a
+    missing root is "not here"; a NUL byte or a directory in out_stem is "not
+    anywhere"). Any other ValueError is the path's own shape, the same on
+    every machine; an OSError may be this machine's share, so it moves on.
+    """
+    if isinstance(exc, job_paths.JobPathError):
+        return bool(getattr(exc, "retryable", True))
+    return isinstance(exc, OSError)
 
 
 def _now_iso() -> str:

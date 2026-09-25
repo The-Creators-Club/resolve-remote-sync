@@ -237,7 +237,12 @@ class CardsBridge:
             # and re-checking a uid it never claimed would refuse everything.
             return self._items(tl_uid)
         try:
-            answer = resolve_bridge.get_timeline_items(allow_cached=True)
+            # bug-comp-resolve-3 (2026-09-25): the library-only entry point.
+            # get_timeline_items() takes the API walk under _API_LOCK before
+            # it returns, so the "api" check below used to run AFTER paying
+            # for the walk it refuses, on every sweep of every machine with
+            # no readable library.
+            answer = resolve_bridge.library_timeline_items()
         except Exception:
             log.debug("cards: the library sweep failed", exc_info=True)
             return None

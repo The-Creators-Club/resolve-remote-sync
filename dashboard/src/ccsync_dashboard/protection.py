@@ -57,7 +57,7 @@ import logging
 import os
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from . import db
@@ -797,7 +797,15 @@ def set_ack(conn: sqlite3.Connection, key: str, date: str, by: str,
         db.parse_iso(text if "T" in text else text + "T00:00:00+00:00")
     except (ValueError, TypeError):
         raise ValueError("that is not a date this server can read. Use YYYY-MM-DD.")
-    if text[:10] > stamp[:10]:
+    # ui-dash-admin-10 (2026-09-25): the date picker offers the admin's LOCAL
+    # date and `stamp` is UTC, so in Taiwan (UTC+8) today was refused as "in
+    # the future" until 08:00. No zone on earth is more than a day ahead of
+    # UTC (+14:00 at most), so one day of slack admits every admin's today
+    # without trusting a browser's clock, and still refuses the fat-fingered
+    # year the check exists for.
+    latest = (db.parse_iso(stamp[:10] + "T00:00:00+00:00")
+              + timedelta(days=1)).date().isoformat()
+    if text[:10] > latest:
         # A date in the future would make the line green for a year on a
         # fat-fingered year. Refuse it where it is typed.
         raise ValueError("that date is in the future.")
@@ -837,6 +845,57 @@ def stored_results(conn: sqlite3.Connection) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ the pass
 
+def _carry_no_verdict(results: list[dict[str, Any]], stored: dict[str, Any],
+                      now: str) -> list[dict[str, Any]]:
+    """Results with a no-verdict line standing on its last MISSING verdict.
+
+    bug-dash-diag-1 (2026-09-25): a line that was MISSING and on this pass
+    could not be asked at all (the NAS did not answer, the probe raised) used
+    to be stored as CANNOT VERIFY, so the MISSING notice was closed and the
+    protection_missing alert mailed "this has cleared on its own" about the
+    snapshot schedule, then "new" again when the NAS came back: every NAS
+    blip flapped the most important safety line, and in the gap nothing said
+    it was missing. A pass that could not look has not seen it fixed, so the
+    previous BROKEN row stands (subjects and all), marked `carried`, with this
+    pass's reason appended to its detail. invariants.run_cycle has had the
+    same rule since dash-collector-2 (`stored_broken`). A real verdict (OK or
+    BROKEN) always replaces it.
+
+    Every BROKEN row records `verdict_at`/`verdict_detail` so a second carry
+    in a row keeps the ORIGINAL detail and date rather than nesting."""
+    previous = {str(r.get("key")): r for r in (stored.get("lines") or [])
+                if isinstance(r, dict)}
+    fallback_at = str(stored.get("checked_at") or "")
+    out: list[dict[str, Any]] = []
+    for result in results:
+        old = previous.get(str(result.get("key")))
+        line = BY_KEY.get(str(result.get("key")))
+        if (line is not None and result.get("state") in (NOT_CHECKED, CHECK_FAILED)
+                and isinstance(old, dict) and old.get("state") == BROKEN
+                and old.get("subjects")):
+            since = str(old.get("verdict_at") or fallback_at)
+            base = str(old.get("verdict_detail") or old.get("detail") or "")
+            carried = dict(result)
+            carried.update({
+                "state": BROKEN,
+                "label": STATE_LABELS.get(BROKEN, BROKEN.upper()),
+                "subjects": list(old.get("subjects") or []),
+                "carried": True,
+                "verdict_at": since,
+                "verdict_detail": base,
+                "detail": (f"{base} (last seen {since or 'on an earlier pass'}; "
+                           f"this pass could not check it again: "
+                           f"{result.get('detail') or 'no answer'})"),
+            })
+            out.append(carried)
+            continue
+        if result.get("state") == BROKEN:
+            result = dict(result, verdict_at=now,
+                          verdict_detail=str(result.get("detail") or ""))
+        out.append(result)
+    return out
+
+
 def evaluate(ctx: Ctx) -> list[dict[str, Any]]:
     """Every line's verdict. NEVER RAISES: a line whose check raised becomes
     its own COULD NOT RUN, because a check that could not run must never read
@@ -875,13 +934,18 @@ def run_cycle(conn: sqlite3.Connection, settings: Any, now: str,
     """
     ctx = Ctx(conn, settings, now, tasks_fn=tasks_fn,
               folder_versioning=folder_versioning)
-    results = evaluate(ctx)
+    results = _carry_no_verdict(evaluate(ctx), stored_results(conn), now)
     missing: list[str] = []
     unverifiable: list[str] = []
     for result in results:
         line = BY_KEY[result["key"]]
         try:
-            if result["state"] == BROKEN:
+            if result["state"] == BROKEN and result.get("carried"):
+                # bug-dash-diag-1: held open, not re-filed. Its notice keeps
+                # the body and date of the pass that actually saw it.
+                missing.extend(f"{line.key}: {subject['subject']}"
+                               for subject in result["subjects"])
+            elif result["state"] == BROKEN:
                 for subject in result["subjects"]:
                     key = f"{line.key}: {subject['subject']}"
                     missing.append(key)
@@ -952,6 +1016,9 @@ def refresh_line(conn: sqlite3.Connection, settings: Any, key: str,
             "subjects": [{"subject": s, "detail": d} for s, d in outcome.subjects],
         }
         stored = stored_results(conn)
+        # bug-dash-diag-1: the same carry run_cycle applies, so a click that
+        # re-runs a line which then cannot be asked does not close its notice.
+        result = _carry_no_verdict([result], stored, now)[0]
         lines = [r for r in (stored.get("lines") or [])
                  if isinstance(r, dict) and r.get("key") != line.key]
         lines.append(result)
@@ -965,7 +1032,7 @@ def refresh_line(conn: sqlite3.Connection, settings: Any, key: str,
                    if r.get("state") == BROKEN for s in (r.get("subjects") or [])]
         unverifiable = [r["key"] for r in lines
                         if r.get("state") in (NOT_CHECKED, CHECK_FAILED)]
-        if result["state"] == BROKEN:
+        if result["state"] == BROKEN and not result.get("carried"):
             for subject in result["subjects"]:
                 db.notice(
                     conn, NOTICE_MISSING, line.severity,

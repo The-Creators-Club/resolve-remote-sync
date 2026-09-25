@@ -158,12 +158,29 @@ async function shareInit() {
 
   let data;
   try {
-    data = await fetchJson("api/folder");
+    // logic-broll-music-4 (2026-09-25): the curator's own "open" link carries
+    // ?preview=1 so their check is not counted as the client's view.
+    const preview = new URLSearchParams(location.search).get("preview") === "1";
+    data = preview ? await fetchJson("api/folder?preview=1") : await fetchJson("api/folder");
   } catch (e) {
-    $("#share-title").textContent = "This link is not available";
-    $("#share-desc").textContent = e.status === 404
-      ? "The preview you were sent has been closed or has expired. Please ask whoever sent it for a fresh link."
-      : `Could not load the folder (${e.message}). Please try again in a moment.`;
+    // ui-broll-web-10 (2026-09-25): only a 404 means the link is gone (the
+    // server answers 404 for a revoked, expired or unknown token alike). A
+    // 502 from the Funnel or a network blip while the container restarts
+    // used to be headed "This link is not available" too, with a raw
+    // "HTTP 502" under it, and a prospective licensee reading that does not
+    // try again although the link is fine.
+    $("#share-howto").classList.add("hidden");
+    if (e.status === 404) {
+      $("#share-title").textContent = "This link is not available";
+      $("#share-desc").textContent =
+        "The preview you were sent has been closed or has expired. Please ask whoever sent it for a fresh link.";
+    } else {
+      $("#share-title").textContent = "The preview could not load just now";
+      $("#share-desc").textContent = "This is usually brief. Please try again in a moment.";
+      const retry = el("button", { className: "primary-btn share-retry", text: "Try again", attrs: { type: "button" } });
+      retry.addEventListener("click", () => location.reload());
+      $("#share-desc").after(retry);
+    }
     return;
   }
   share.folder = data;

@@ -222,7 +222,8 @@ def test_a_standalone_agent_is_a_refusal_and_is_not_killed(tmp_path, caplog):
         assert role.start() is False
     state, detail = role.refusal()
     assert state == role_mod.STATE_STANDALONE_AGENT
-    assert "reorder_web.py" in detail and "CR-68" in detail
+    # ui-copy-4 (2026-09-25): no bug id in the visible sentence.
+    assert "reorder_web.py" in detail and "CR-68" not in detail
     # Nothing in this module may terminate somebody else's process.
     source = Path(role_mod.__file__).read_text(encoding="utf-8")
     assert "terminate(" not in source and "taskkill" not in source
@@ -303,7 +304,10 @@ def test_an_engine_with_no_bridge_contract_is_refused(tmp_path):
     assert role.start() is False
     status = role.status()
     assert status["state"] == role_mod.STATE_NO_ENGINE
-    assert "7c" in status["detail"] and "BRIDGE_CONTRACT_VERSION" in status["detail"]
+    # ui-copy owed round 3 (2026-09-25): the admin reads this on the machine
+    # row, so it names what to define and no longer cites §7c or CR-68.
+    assert "BRIDGE_CONTRACT_VERSION" in status["detail"]
+    assert "7c" not in status["detail"] and "CR-68" not in status["detail"]
 
 
 def test_a_different_contract_version_is_refused(tmp_path):
@@ -407,8 +411,13 @@ def test_the_push_goes_to_the_dashboard_with_the_fleet_credential(tmp_path):
     dashboard = FakeDashboard()
     role = a_role(tmp_path, dashboard=dashboard)
     role.start()
-    _wait_for(lambda: dashboard.calls)
-    method, url, body, headers = dashboard.calls[0]
+    # The state push and the pending poll run on two loops started together,
+    # so which call lands FIRST is a race (under the full gate's load the GET
+    # poll sometimes won and this read calls[0] as the push, 2026-09-25).
+    # The assertion is about the push, so find the push.
+    _wait_for(lambda: any(c[1].endswith("/cards/agent/state") for c in dashboard.calls))
+    method, url, body, headers = next(c for c in dashboard.calls
+                                      if c[1].endswith("/cards/agent/state"))
     assert method == "POST"
     assert url == f"{DASH}/cards/agent/state"
     assert headers["X-CCSync-Token"] == TOKEN

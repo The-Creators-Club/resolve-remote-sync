@@ -131,6 +131,15 @@ class _bridge_call:
             self._nested = True
             _API_LOCK.acquire()
             return self
+        # bug-comp-resolve-5 (2026-09-25): the CR-68 probe runs HERE, before
+        # the lock, and connect() reads this thread's answer. On a Mac the
+        # probe is an lsof spawn (5 s timeout) re-run whenever its 250 ms
+        # cache has lapsed, and every public call connects first, so the
+        # probe inside connect() was a subprocess under _API_LOCK -- the one
+        # thing _NOT_CONNECTED's comment below forbids -- with the watcher,
+        # the pool refresh, the b-roll insert and the Cards sweep all parked
+        # behind it, and the wedge warning blaming "connect".
+        _prime_script_server_probe()
         started = time.monotonic()
         while not _API_LOCK.acquire(timeout=BRIDGE_WEDGE_SECONDS):
             _note_wedge(self._name, time.monotonic() - started)
@@ -145,8 +154,46 @@ class _bridge_call:
                 if (_call_in_flight is not None
                         and _call_in_flight[1] == threading.get_ident()):
                     _call_in_flight = None
+            _primed_probe.answer = None
         _API_LOCK.release()
         return None
+
+
+# bug-comp-resolve-5 (2026-09-25): the script-server answer an outermost
+# _bridge_call took on this thread just before it queued for _API_LOCK.
+# (monotonic taken, (phase, why)), or None.
+_primed_probe = threading.local()
+
+# How old a primed answer connect() will still act on. Longer than the probe's
+# own 250 ms cache on purpose: the answer was taken before a lock wait of
+# unknown length, and re-probing once the wait ran past 250 ms would put the
+# spawn back under the lock. Staleness is safe in the direction that matters:
+# the ONLY answer that must never be acted on late is "connect" while the truth
+# is STARTING, and READY/UNKNOWN cannot become STARTING inside two seconds
+# (that needs Resolve to quit, relaunch and reach its script server, 90 s at
+# the least). A stale ABSENT or STARTING only delays a connection by as long.
+# A wait longer than this (a wedge) falls back to probing under the lock, the
+# behaviour before this fix.
+_PRIMED_PROBE_MAX_AGE = 2.0
+
+
+def _prime_script_server_probe() -> None:
+    """Take the CR-68 probe's answer for this thread, outside _API_LOCK.
+
+    Never raises: a probe that cannot answer leaves nothing primed and
+    connect() asks for itself, exactly as before."""
+    try:
+        _primed_probe.answer = (time.monotonic(), script_server.state())
+    except Exception:  # pragma: no cover -- state() never raises
+        _primed_probe.answer = None
+
+
+def _script_server_phase() -> tuple[str, str]:
+    """This thread's primed probe answer when it is fresh, else a probe now."""
+    primed = getattr(_primed_probe, "answer", None)
+    if primed is not None and (time.monotonic() - primed[0]) <= _PRIMED_PROBE_MAX_AGE:
+        return primed[1]
+    return script_server.state()
 
 
 def bridge_activity() -> dict[str, Any]:
@@ -358,7 +405,7 @@ def connect():
         # and fails OPEN, so the only thing it can ever withhold is a
         # connection that would have killed the API.
         try:
-            phase, why = script_server.state()
+            phase, why = _script_server_phase()
         except Exception:  # pragma: no cover -- state() never raises
             phase, why = script_server.UNKNOWN, ""
         if phase == script_server.STARTING:
@@ -1240,6 +1287,32 @@ def get_timeline_items(allow_cached: bool = False) -> dict[str, Any]:
     return _explain_disconnection(result)
 
 
+def library_timeline_items() -> Optional[dict[str, Any]]:
+    """The open timeline's items FROM THE PROJECT LIBRARY, or None. Never
+    the API walk, never raises.
+
+    bug-comp-resolve-3 (2026-09-25): Timeline Cards' sweep wants the library
+    answer or nothing -- on None it asks Resolve itself -- and it used to get
+    that by calling get_timeline_items() and throwing away an "api" answer.
+    But get_timeline_items() falls back to the API walk BEFORE returning, so
+    on every machine without a readable library (walk off, no library found,
+    the 60 s back-off after any failure) each 1 s engine sweep paid a
+    lock-held track walk only to discard it. This is the half of
+    get_timeline_items() that holds _API_LOCK only for the four head calls.
+
+    It reads the watcher's poll cache (same fingerprint, so the answer is as
+    good) but does NOT advance the watcher's full-walk counter: a 1 s sweep
+    counting as a poll made the "full walk every 10th poll" valve fire every
+    7-8 s instead of about 30 s.
+    """
+    ui_state.wait_while_menu_open()
+    try:
+        return _library_timeline_items(allow_cached=True, count_poll=False)
+    except Exception:
+        log.debug("resolve: the library-only read failed", exc_info=True)
+        return None
+
+
 def poll_timeline_items() -> dict[str, Any]:
     """get_timeline_items() with the poll cache armed — the WATCHER'S entry
     point and nobody else's.
@@ -1297,16 +1370,24 @@ def reset_timeline_cache() -> None:
         _polls_since_full_walk = 0
 
 
-def _cached_timeline_result(fingerprint: tuple) -> Optional[dict[str, Any]]:
+def _cached_timeline_result(fingerprint: tuple,
+                            count_poll: bool = True) -> Optional[dict[str, Any]]:
     """The previous poll's answer if this poll is provably the same one, else
-    None meaning "walk it properly"."""
+    None meaning "walk it properly".
+
+    `count_poll=False` reads without advancing the safety valve: a reader
+    that is not the watcher (library_timeline_items) must not make the
+    watcher's full walk come round sooner (bug-comp-resolve-3, 2026-09-25).
+    It still honours a valve that is due, so it never serves an answer the
+    watcher would have re-walked."""
     global _polls_since_full_walk
     with _TIMELINE_CACHE_LOCK:
         if _timeline_cache_result is None or fingerprint != _timeline_cache_fingerprint:
             return None
         if _polls_since_full_walk >= _FULL_WALK_EVERY_POLLS - 1:
             return None  # safety valve: walk it anyway
-        _polls_since_full_walk += 1
+        if count_poll:
+            _polls_since_full_walk += 1
         # A fresh outer dict and list: the watcher and the fixer own what they
         # are handed, and a caller appending to `items` must not edit the cache.
         return {**_timeline_cache_result, "items": list(_timeline_cache_result["items"])}
@@ -1343,7 +1424,8 @@ def _timeline_head_locked() -> tuple[Optional[dict[str, Any]], Any, str, str, st
             _safe_attr_str(timeline, "GetUniqueId"))
 
 
-def _library_timeline_items(allow_cached: bool = False) -> Optional[dict[str, Any]]:
+def _library_timeline_items(allow_cached: bool = False,
+                            count_poll: bool = True) -> Optional[dict[str, Any]]:
     """The open timeline's items out of the project library, or None.
 
     None means "the API walk, please" -- the walk is switched off, no
@@ -1395,7 +1477,7 @@ def _library_timeline_items(allow_cached: bool = False) -> Optional[dict[str, An
             fingerprint = ("library", project_name, timeline_name, timeline_uid,
                            _library_generation)
             if allow_cached:
-                cached = _cached_timeline_result(fingerprint)
+                cached = _cached_timeline_result(fingerprint, count_poll=count_poll)
                 if cached is not None:
                     return cached
             walked = project_library.timeline_items(timeline_uid)
@@ -2224,7 +2306,15 @@ def _before_mutation(source: str) -> str:
     """Take a save point if one is due, and return the project name to
     journal against. Never raises: see save_project()."""
     try:
-        name = current_project_name()
+        # bug-comp-resolve-2 (2026-09-25): max_age=0, never the 20 s cache.
+        # The tray's undo line and the 120 s proxy pass keep that cache warm,
+        # so an editor who switched A -> B had B's first unprompted relink
+        # journalled, save-pointed (ExportProject BY NAME) and rate-limited
+        # as A -- and undo in A then passed its A == A check and replayed B's
+        # entries against A's pool through the Assets paths both share, the
+        # comp-resolve-2 (2026-08-21) hazard back through a side door. One
+        # GetCurrentProject per mutation is noise beside the ReplaceClip.
+        name = current_project_name(max_age=0.0)
         if resolve_journal.save_point_due(name):
             outcome = save_project(name)
             resolve_journal.note_save_point(
@@ -2596,9 +2686,19 @@ def undo_last_relink(session_path: Any = None) -> dict[str, Any]:
     if session_path is not None:
         path: Optional[Path] = Path(session_path)
     else:
-        path = resolve_journal.latest_session(open_project) if open_project else None
+        # logic-resolve-2 (2026-09-25): the newest journal NOT already undone.
+        # latest_session() handed a second press the same file again, and
+        # replaying it found nothing at its new paths and said the clips had
+        # left the media pool.
+        path = (resolve_journal.latest_undoable_session(open_project)
+                if open_project else None)
+        if (path is None and open_project
+                and resolve_journal.latest_session(open_project) is not None):
+            return {"ok": False, "undone": 0, "skipped": 0, "message": (
+                f"Every clip-path change CCSync made in “{open_project}” "
+                "has already been put back.")}
         if path is None:
-            elsewhere = resolve_journal.latest_session()
+            elsewhere = resolve_journal.latest_undoable_session()
             other = (str(resolve_journal.read_session(elsewhere).get("project") or "")
                      if elsewhere is not None else "")
             # A journal that names no project at all (the bridge could not
@@ -2649,12 +2749,21 @@ def undo_last_relink(session_path: Any = None) -> dict[str, Any]:
 
     undone = 0
     skipped = 0
+    # logic-resolve-2 (2026-09-25): a clip found at its OLD path is already
+    # back -- replayed before (by a companion that did not stamp the journal,
+    # or by the admin's undo by id) or put back by hand. It used to be
+    # counted with the clips that left the pool, which told the editor
+    # something false about their project.
+    already_back = 0
     for entry in reversed(entries):
         kind = str(entry.get("kind") or "")
         old = str(entry.get("old") or "")
         new = str(entry.get("new") or "")
         if kind == resolve_journal.KIND_REPLACE_CLIP:
             found = by_path.get(_norm_path(new))
+            if found is None and old and _norm_path(old) in by_path:
+                already_back += 1
+                continue
             mpi = resolve_media_pool_item(found)
             if mpi is None or not old:
                 skipped += 1
@@ -2684,13 +2793,26 @@ def undo_last_relink(session_path: Any = None) -> dict[str, Any]:
         else:
             skipped += 1
 
-    message = (f"Put {undone} clip path(s) back the way they were "
-               f"(from {Path(path).name}).")
-    if skipped:
-        message += (f" {skipped} could not be undone: those clips are no longer in "
-                    "this project's media pool.")
-    log.info("resolve: undo replayed %s -- %d undone, %d skipped", path, undone, skipped)
-    return {"ok": undone > 0, "undone": undone, "skipped": skipped, "message": message}
+    if undone == 0 and already_back and not skipped:
+        message = (f"Those clip paths were already back the way they were "
+                   f"(from {Path(path).name}): nothing to put back.")
+    else:
+        message = (f"Put {undone} clip path(s) back the way they were "
+                   f"(from {Path(path).name}).")
+        if already_back:
+            message += f" {already_back} were already back."
+        if skipped:
+            message += (f" {skipped} could not be undone: those clips are no longer "
+                        "in this project's media pool.")
+    log.info("resolve: undo replayed %s -- %d undone, %d already back, %d skipped",
+             path, undone, already_back, skipped)
+    ok = undone > 0 or (already_back > 0 and not skipped)
+    if ok:
+        # Retired only when something was, or already had been, put back: a
+        # replay Resolve refused outright is worth pressing again.
+        resolve_journal.mark_undone(path, undone=undone)
+    return {"ok": ok, "undone": undone, "skipped": skipped,
+            "already_back": already_back, "message": message}
 
 
 def _find_by_clip_name(items: list[dict[str, Any]], name: Any) -> Any:
@@ -3046,8 +3168,10 @@ def _attach_adjacent_proxy(media_pool_item, local_path: str) -> None:
                 # seconds ago by this same call, so there is no prior state
                 # an export would preserve -- only the attachment is worth
                 # being able to reverse (item 9, 2026-08-17).
+                # bug-comp-resolve-2 (2026-09-25): fresh, for the reason
+                # _before_mutation reads it fresh.
                 resolve_journal.record(
-                    resolve_journal.KIND_LINK_PROXY, current_project_name(),
+                    resolve_journal.KIND_LINK_PROXY, current_project_name(max_age=0.0),
                     clip_name=_safe_clip_name(media_pool_item),
                     clip_path=local_path, old_path="", new_path=candidate,
                     source="insert-adjacent-proxy",

@@ -223,9 +223,18 @@ def summarize_fix_results(
             head += f" Stopped: {batch_size - len(results)} left alone."
         return head
     fixed = sum(1 for r in results if r.get("ok"))
-    skipped = sum(1 for r in results if r.get("aborted"))
-    failed = len(results) - fixed - skipped
+    # logic-resolve-5 (2026-09-25): a relink the user stopped part way is a
+    # FOURTH outcome. fixer returns it `aborted` (the user pressed the
+    # button), but the copy LANDED and some clips were repointed, so counting
+    # it as "skipped by you" told the editor nothing had happened to a clip
+    # Resolve now plays from the new copy.
+    partial = sum(1 for r in results if r.get("partial_relink"))
+    skipped = sum(1 for r in results
+                  if r.get("aborted") and not r.get("partial_relink"))
+    failed = len(results) - fixed - skipped - partial
     parts = [f"{fixed} of {batch_size} copied in"]
+    if partial:
+        parts.append(f"{partial} stopped part way")
     if skipped:
         parts.append(f"{skipped} skipped by you")
     if failed:
@@ -253,8 +262,11 @@ def fix_copied_bytes(rows: list[dict[str, Any]], results: list[dict[str, Any]]) 
     # A rehearsal's rows are ok and copied NOTHING (RES-15), so they are
     # excluded here: "copied 12 GB" under "nothing was copied" is the exact
     # contradiction that made a dry run unreadable.
+    # logic-resolve-1 (2026-09-25): a result that REUSED a copy an earlier
+    # run left behind (a retry after a failed relink) copied nothing this
+    # run, and counting its source again inflated the "copied N GB" figure.
     ok = {str(r.get("file_path") or "") for r in results
-          if r.get("ok") and not r.get("dry_run")}
+          if r.get("ok") and not r.get("dry_run") and not r.get("reused_copy")}
     return sum(_safe_size(str(row.get("file_path") or ""))
                for row in rows if str(row.get("file_path") or "") in ok)
 
@@ -281,9 +293,82 @@ def fix_summary_text(results: list[dict[str, Any]], batch_size: int,
         reason = str(failures[0].get("message") or "").strip() or "no reason given"
         parts.append(f"{len(failures)} could not be fixed: {reason}")
     text = ", ".join(parts)
-    if fixed:
+    # logic-resolve-4 (2026-09-25): "Fixed N of M" was the whole sentence
+    # for a copy filed at the tree root, which lane A never uploads - the
+    # clip plays here and reaches nobody. Said as its own line, naming the
+    # clips, so it is not read as part of the success.
+    local = stays_local_names(results)
+    if local:
+        text += "\n" + stays_local_sentence(local)
+    if fixed or any(_changed_something(r) for r in results):
         text += f"\n{UNDO_POINTER}"
     return text
+
+
+def _changed_something(result: dict[str, Any]) -> bool:
+    """Did this attempt leave a change the undo can take back?
+
+    logic-resolve-5 (2026-09-25): not only `ok`. A relink stopped part way
+    (or one that failed after the copy landed) has repointed clips through
+    replace_clip, which journals them, and the window that stays open to
+    retry never said so.
+
+    Review round (2026-09-25): a landed copy is NOT a change the undo takes
+    back. UNDO LAST FIX replays the newest resolve_edits journal
+    (resolve_journal.describe_latest), and only a clip that replace_clip
+    repointed is journaled. A .srt that ReplaceClip always refuses leaves
+    `copied_to` set and nothing journaled, so pointing at the undo there
+    sends the editor to undo an EARLIER fix. The count of clips actually
+    repointed is the only honest test; a result without it (an older
+    fixer's relink-failure shape) gets no pointer, because under-claiming an
+    undo is harmless and over-claiming one reverts the wrong fix."""
+    if result.get("dry_run"):
+        return False
+    if result.get("ok"):
+        return True
+    try:
+        return int(result.get("relinked") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def stays_local_names(results: list[dict[str, Any]]) -> list[str]:
+    """Clip names whose copy landed outside every synced folder
+    (fixer's `stays_local`, logic-resolve-4)."""
+    return [canon.basename(str(r.get("file_path") or ""))
+            for r in results
+            if r.get("stays_local") and r.get("copied_to") and not r.get("dry_run")]
+
+
+def stays_local_sentence(names: list[str]) -> str:
+    shown = ", ".join(names[:6])
+    if len(names) > 6:
+        shown += f" and {len(names) - 6} more"
+    if len(names) == 1:
+        tail = ("Its copy is outside every project, so it stays on this "
+                "computer and never reaches the server or other editors.")
+    else:
+        tail = ("Their copies are outside every project, so they stay on this "
+                "computer and never reach the server or other editors.")
+    return f"Will not sync: {shown}. {tail}"
+
+
+# logic-resolve-4 (2026-09-25): said under the destination BEFORE the click.
+# fixer.destination_stays_local is the one test (Projects/ and Assets/ sync,
+# anything else at the tree root does not). An editor may still choose such a
+# folder on purpose (fixer does not refuse it either), so this warns and does
+# not disable FIX ALL.
+STAYS_LOCAL_WARNING = ("This folder is outside every project and will not "
+                       "sync. Pick one under Projects to share the copy.")
+
+
+def dest_stays_local_warning(dest: str) -> str:
+    """The red line under a row's destination, or "" when it syncs."""
+    try:
+        return STAYS_LOCAL_WARNING if fixer.destination_stays_local(dest) else ""
+    except Exception:
+        log.debug("popup: could not classify destination %r", dest, exc_info=True)
+        return ""
 
 
 def _relink_entry(item: dict[str, Any]) -> Any:
@@ -849,6 +934,47 @@ IGNORE_FOLDER_FAILED = (
     f"you restart. {ui_copy.DIAGNOSTICS}.")
 
 
+# ui-comp-windows-8 (2026-09-25): the destination field and its drop-down (a
+# ttk popdown is as wide as its combobox) were a fixed 52 characters, and every
+# option starts with the same project prefix, so the part that tells one folder
+# from another ("ruskin", "Day 3/A-cam") was the part cut off. Sized to the
+# longest option instead, with a floor so a short list does not look broken
+# and a cap so a pathological path cannot push the FIX ALL bar off a laptop
+# screen (100 characters of mono 9 is about 700 px). Past the cap the field is
+# scrolled to show the tail.
+DEST_COMBO_MIN_CHARS = 52
+DEST_COMBO_MAX_CHARS = 100
+
+
+def dest_combo_width(options: Any, suggested: Any = "") -> int:
+    longest = max((len(str(o)) for o in list(options or []) + [suggested or ""]),
+                  default=0)
+    # +2: the ttk field eats about two characters in its border and arrow.
+    return max(DEST_COMBO_MIN_CHARS, min(DEST_COMBO_MAX_CHARS, longest + 2))
+
+
+# ui-comp-windows-9 (2026-09-25): the fixer's clip rows wrap at the same
+# width as its header, and the whole window is held inside this fraction of
+# the screen, so the right-aligned FIX ALL bar is always on it.
+FIXER_ROW_WRAP_PX = 620
+FIXER_MAX_SCREEN_FRACTION = 0.9
+
+
+def fixer_canvas_width(content_width: int, total_width: int, screen_width: int) -> int:
+    """The row list's width once the fixer window is held inside
+    FIXER_MAX_SCREEN_FRACTION of the screen. `total_width` is the window's
+    requested width with the canvas at `content_width`; everything that is
+    not the canvas (padding, scrollbar) keeps its size. A screen that cannot
+    be read (0) leaves the width alone rather than inventing one."""
+    if screen_width <= 0:
+        return content_width
+    budget = int(screen_width * FIXER_MAX_SCREEN_FRACTION)
+    if total_width <= budget:
+        return content_width
+    chrome = max(0, total_width - content_width)
+    return max(200, budget - chrome)
+
+
 class PopupDialog:
     """tkinter Toplevel wrapper. Only imported/instantiated at call time (see
     show_popup below) so a headless environment (no display) degrades to a
@@ -1146,21 +1272,49 @@ class PopupDialog:
 
         rr = 0
         for row in rows:
+            # ui-comp-windows-9 (2026-09-25): the name and the path WRAP. The
+            # widest unwrapped path set the window's width, and the button bar
+            # is pinned to its right edge, so one clip on a deep card dump
+            # pushed FIX ALL / SKIP past the right edge of a laptop screen
+            # while everything else looked normal. Tk breaks a path with no
+            # spaces at a character, which keeps all of it readable.
             _label(rows_frame, f"▌ {row['clip_name'] or row['file_path']}",
-                   font=theme.mono(10, bold=True)).grid(row=rr, column=0, columnspan=2, sticky="w")
+                   font=theme.mono(10, bold=True), wraplength=FIXER_ROW_WRAP_PX
+                   ).grid(row=rr, column=0, columnspan=2, sticky="w")
             rr += 1
-            _label(rows_frame, f"  {row['file_path']}", fg=theme.MUTED, font=theme.mono(8)).grid(
+            _label(rows_frame, f"  {row['file_path']}", fg=theme.MUTED, font=theme.mono(8),
+                   wraplength=FIXER_ROW_WRAP_PX).grid(
                 row=rr, column=0, columnspan=2, sticky="w")
             rr += 1
-            _label(rows_frame, "  dest:", fg=theme.RED_DIM).grid(row=rr, column=0, sticky="w")
+            # ui-comp-windows-11 (2026-09-25): MUTED, not RED_DIM. RED_DIM is a
+            # rule colour (1.86:1 on BG) and this is a word the editor reads.
+            _label(rows_frame, "  dest:", fg=theme.MUTED).grid(row=rr, column=0, sticky="w")
             # master=self.root: a masterless var binds to ui_dispatch's hidden
             # root on macOS, so every combobox would read back empty and the
             # fixer would file media at the tree root (see _build_sign_in_dialog).
             var = tk.StringVar(master=self.root, value=row["suggested_dest"])
-            combo = ttk.Combobox(rows_frame, textvariable=var, values=_dest_options_for(row),
-                                 width=52, style=combo_style, font=theme.mono(9))
+            options = _dest_options_for(row)
+            combo = ttk.Combobox(rows_frame, textvariable=var, values=options,
+                                 width=dest_combo_width(options, row["suggested_dest"]),
+                                 style=combo_style, font=theme.mono(9))
             combo.grid(row=rr, column=1, sticky="w", pady=(0, 8))
+            # ui-comp-windows-8: a path longer than the cap shows its TAIL, the
+            # part that tells one destination from another.
+            try:
+                combo.icursor("end")
+                combo.xview_moveto(1.0)
+            except Exception:
+                log.debug("popup: could not scroll a destination to its end", exc_info=True)
             self._vars.append((row["file_path"], var))
+            rr += 1
+            # logic-resolve-4 (2026-09-25): with no matched project the
+            # suggestion is B-roll/Editor Added/<editor> at the TREE ROOT,
+            # which lane A never uploads, and nothing said so until after the
+            # copy. Live: it follows whatever the editor picks or types.
+            local_warning = _label(rows_frame, "", fg=theme.RED, font=theme.mono(9),
+                                   wraplength=FIXER_ROW_WRAP_PX)
+            local_warning.grid(row=rr, column=1, sticky="w", pady=(0, 8))
+            self._watch_destination(combo, var, local_warning)
             rr += 1
 
         # Cap the window at ~80% of screen height (36+ rows would otherwise
@@ -1183,8 +1337,47 @@ class PopupDialog:
             canvas.configure(height=max(120, max_total_height - chrome_height))
             self.root.update_idletasks()
 
+        # ui-comp-windows-9 (2026-09-25): the width is capped like the height.
+        # The rows wrap now, so this is the backstop for whatever still asks
+        # for more (a 100-character destination field in a large font on a
+        # small screen): the canvas gives way, never the button bar.
+        total_width = self.root.winfo_reqwidth()
+        capped = fixer_canvas_width(content_width, total_width,
+                                    self.root.winfo_screenwidth())
+        if capped != content_width:
+            canvas.configure(width=capped)
+            self.root.update_idletasks()
+
         self.root.geometry(f"{self.root.winfo_reqwidth()}x{self.root.winfo_reqheight()}")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
+
+    def _watch_destination(self, combo: Any, var: Any, label: Any) -> None:
+        """Keep a row's "will not sync" line in step with its destination
+        (logic-resolve-4). Shown only while the value stays local, so a row
+        that syncs costs no height.
+
+        Widget BINDINGS, not a StringVar trace: a trace is a Tcl command that
+        belongs to no widget, so destroying the window does not delete it,
+        and its closure (var -> interpreter) would pin this dialog's Tcl
+        interpreter for the life of the process (CR-93's holder rule). A
+        binding is deleted with the combobox."""
+        def _update(*_args: Any) -> None:
+            try:
+                text = dest_stays_local_warning(var.get())
+                label.config(text=text)
+                if text:
+                    label.grid()
+                else:
+                    label.grid_remove()
+            except Exception:
+                log.debug("popup: could not update the destination warning", exc_info=True)
+
+        for sequence in ("<<ComboboxSelected>>", "<KeyRelease>", "<FocusOut>"):
+            try:
+                combo.bind(sequence, _update, add="+")
+            except Exception:
+                log.debug("popup: could not watch a destination", exc_info=True)
+        _update()
 
     def _on_close_request(self) -> None:
         """The X during a FIX ALL means CANCEL ALL -- it does NOT close the
@@ -1449,7 +1642,14 @@ class PopupDialog:
         # malfunctioned, the partial has already been deleted by fix_clip and
         # nothing was relinked -- so it must not be counted as one, or the
         # summary accuses CCSync of breaking what the user chose to abandon.
-        aborted = [r for r in results if r.get("aborted")]
+        # logic-resolve-5 (2026-09-25): a relink stopped part way is its OWN
+        # outcome. It arrives `aborted`, but its copy landed and some clips
+        # already play from it, so the "you skipped, nothing was copied in or
+        # relinked, the half-copied files were deleted" block below was false
+        # about every word of it.
+        partial = [r for r in results if r.get("partial_relink")]
+        aborted = [r for r in results
+                   if r.get("aborted") and not r.get("partial_relink")]
         failures = [r for r in results if not r.get("ok") and not r.get("aborted")]
         stopped_early = self._stop_requested and len(results) < len(batch)
         # RES-15: a rehearsal reports instead of finishing. It must not fall
@@ -1464,12 +1664,14 @@ class PopupDialog:
         # this clip again" (nothing goes into the IgnoreTracker either), and
         # a file abandoned by mistake must be one click from being redone.
         by_path = {row["file_path"]: row for row in batch}
-        self._failed_rows = [by_path[r["file_path"]] for r in failures + aborted
+        # A part-way row is retryable too: the retry relinks the copy that
+        # already landed instead of copying again (logic-resolve-1).
+        self._failed_rows = [by_path[r["file_path"]] for r in failures + partial + aborted
                              if r["file_path"] in by_path]
         for r in failures:
             log.warning("fix all: FAILED %s -- %s", r["file_path"], r["message"])
 
-        if failures or aborted or stopped_early or rehearsal:
+        if failures or aborted or partial or stopped_early or rehearsal:
             try:
                 self._fix_btn.config(state="normal")
                 self._ignore_btn.config(state="normal")
@@ -1497,6 +1699,18 @@ class PopupDialog:
                 blocks.append(shown)
                 blocks.append(REHEARSAL_WARNING + " Turn it off in "
                               "Settings, ADVANCED, [ TURN REHEARSAL OFF ].")
+            if partial:
+                # fixer's own message names the copy and how many clips were
+                # repointed; it is the truth, so it is shown as it is.
+                shown = "\n".join(
+                    f"■ {canon.basename(r['file_path'])}: "
+                    f"{str(r.get('message') or '').strip() or 'stopped part way'}"
+                    for r in partial[:12])
+                if len(partial) > 12:
+                    shown += (f"\n… and {len(partial) - 12} more "
+                              f"(see {ui_copy.OPEN_LOG})")
+                blocks.append(shown + "\nPress RETRY FAILED to finish repointing "
+                              "them. The copy is not made again.")
             if aborted:
                 names = ", ".join(canon.basename(r["file_path"]) for r in aborted[:6])
                 blocks.append(
@@ -1529,12 +1743,18 @@ class PopupDialog:
                     shown += ("\nThese are online-only cloud files. Make them available "
                               "offline in your cloud drive, then press RETRY FAILED.")
                 blocks.append(shown)
-            if not failures and not aborted and not rehearsal:
+            if not failures and not aborted and not partial and not rehearsal:
                 blocks.append("Nothing was moved or deleted.")
-            if any(r.get("ok") and not r.get("dry_run") for r in results):
+            local = stays_local_names(results)
+            if local:
+                # logic-resolve-4 (2026-09-25)
+                blocks.append(stays_local_sentence(local))
+            if any(_changed_something(r) for r in results):
                 # RES-13: a partial run changed the project database too, and
                 # the window that stays open to retry never said the change
-                # could be taken back.
+                # could be taken back. logic-resolve-5: that includes a relink
+                # stopped part way or failed after its copy landed, not only
+                # an `ok` row.
                 blocks.append(UNDO_POINTER)
             self.status_label.config(text="\n".join([head + ":"] + blocks))
             if failures:
@@ -2145,6 +2365,10 @@ class WorkProgressWindow:
         self._open = threading.Event()
         self._closed = threading.Event()
         self._closed.set()
+        # bug-comp-ui-3 (2026-09-25): a close() that arrives before the root
+        # exists (or before its event loop does) is REMEMBERED, and the
+        # window thread honours it -- see close().
+        self._close_requested = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._buttons: dict[str, Any] = {}
         self._closing = False
@@ -2168,6 +2392,7 @@ class WorkProgressWindow:
         if self._open.is_set():
             return False
         self._closed.clear()
+        self._close_requested.clear()
         self._closing = False
         self._open.set()
         self._thread = threading.Thread(target=self._serve, name="ccsync-work-window",
@@ -2177,17 +2402,32 @@ class WorkProgressWindow:
 
     def close(self) -> None:
         """Ask the window to go away. Safe from any thread, and safe to call
-        on a window that never opened."""
-        root = self.root
-        if root is None:
+        on a window that never opened.
+
+        bug-comp-ui-3 (2026-09-25): `_closed` is set ONLY by the window
+        thread's own exit (`_serve`'s finally), so wait_closed() means the
+        window is really gone. It used to be set right here whenever the root
+        did not exist yet: open() had started the thread but tk.Tk() had not
+        run, the caller's wait_closed() returned at once, the app forgot the
+        window -- and the thread then built and showed it anyway, a live Tk
+        root nothing would ever close or wait for. A close() between tk.Tk()
+        and the event loop was the same leak by another road (the
+        cross-thread after() raised). The request is now a flag the window
+        thread checks after building and on its first tick."""
+        self._close_requested.set()
+        thread = self._thread
+        if thread is None or not thread.is_alive():
             self._open.clear()
             self._closed.set()
             return
+        root = self.root
+        if root is None:
+            return      # the window thread sees the flag once it has a root
         try:
             root.after(0, root.destroy)
         except Exception:
+            # Not in its event loop yet: the first _tick reads the flag.
             log.debug("work window: could not marshal the close", exc_info=True)
-            self._open.clear()
 
     def wait_closed(self, timeout: float = 5.0) -> bool:
         return self._closed.wait(timeout)
@@ -2286,6 +2526,10 @@ class WorkProgressWindow:
             # docstring. Cancelling a two-hour batch because someone tidied
             # their desktop is not a thing this window may do.
             root.protocol("WM_DELETE_WINDOW", root.destroy)
+            if self._close_requested.is_set():
+                # bug-comp-ui-3: closed while it was being built.
+                root.destroy()
+                return
             root.after(self.POLL_MS, self._tick)
             ui_dispatch.run_dialog(root)
         finally:
@@ -2341,6 +2585,14 @@ class WorkProgressWindow:
         root = self.root
         if root is None:
             return
+        if self._close_requested.is_set():
+            # bug-comp-ui-3: a close() whose after() could not be marshalled
+            # because the event loop had not started yet.
+            try:
+                root.destroy()
+            except Exception:
+                pass
+            return
         try:
             model = self._snapshot_fn()
         except Exception:
@@ -2390,6 +2642,12 @@ class WorkProgressWindow:
                 pass
 
 
+# The body width of confirm_dialog / notice_dialog, in pixels. The typed-word
+# confirm (tray._build_typed_confirmation) has wrapped at 520 since it was
+# written; these two now match it (ui-comp-windows-1, 2026-09-25).
+DIALOG_WRAP_PX = 520
+
+
 def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
     """Modal neon confirm dialog. Returns True if the user clicked the OK
     button, False on cancel/close. Falls back to False (safe default: do
@@ -2417,8 +2675,15 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
         tk.Label(root, text=f"► {title}", bg=theme.BG, fg=theme.RED,
                  font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
         tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+        # ui-comp-windows-1 (2026-09-25): wrapped, like the typed confirm
+        # beside it. Unwrapped, a one-line paragraph (the WIRED TO THE SERVER
+        # confirm is 330 characters) asked for a 2,280 px window; Tk clamps
+        # that to the screen and cuts the LABEL, so the end of the sentence
+        # (where the "this is not the setting you want" warning lives) was
+        # lost off the right edge.
         tk.Label(root, text=body, bg=theme.BG, fg=theme.TEXT, font=theme.mono(10),
-                 justify="left", anchor="w").pack(anchor="w", pady=(6, 12))
+                 justify="left", anchor="w", wraplength=DIALOG_WRAP_PX
+                 ).pack(anchor="w", pady=(6, 12))
 
         btn_bar = tk.Frame(root, bg=theme.BG)
         btn_bar.pack(anchor="e")
@@ -2430,9 +2695,17 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
         def _cancel():
             root.destroy()
 
-        theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
+        cancel_btn = theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False)
+        cancel_btn.pack(side="left", padx=(0, 18))
         theme.neon_button(tk, btn_bar, ok_label, _ok, primary=True).pack(side="left")
         root.protocol("WM_DELETE_WINDOW", _cancel)
+        # ui-comp-windows-11 (2026-09-25): a keyboard user could not answer
+        # this at all: no key was bound and nothing had focus. Escape is
+        # CANCEL, and focus starts on CANCEL, so Space/Tab work and the one
+        # key a stray press lands on is the safe answer. Return is left
+        # unbound on purpose: several callers confirm something destructive.
+        root.bind("<Escape>", lambda _e: _cancel())
+        cancel_btn.focus_set()
         # No release_root() here on purpose: every Tk object this dialog makes
         # is a LOCAL of this frame, so they all die together on this thread
         # when it returns. See ui_dispatch's CR-93 note -- the guard is for
@@ -2476,12 +2749,22 @@ def notice_dialog(title: str, body: str, ok_label: str = "OK") -> None:
         tk.Label(root, text=f"► {title}", bg=theme.BG, fg=theme.RED,
                  font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
         tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+        # ui-comp-windows-1 (2026-09-25): wrapped for the same reason as
+        # confirm_dialog's body.
         tk.Label(root, text=body, bg=theme.BG, fg=theme.TEXT, font=theme.mono(10),
-                 justify="left", anchor="w").pack(anchor="w", pady=(6, 12))
+                 justify="left", anchor="w", wraplength=DIALOG_WRAP_PX
+                 ).pack(anchor="w", pady=(6, 12))
         btn_bar = tk.Frame(root, bg=theme.BG)
         btn_bar.pack(anchor="e")
-        theme.neon_button(tk, btn_bar, ok_label, root.destroy, primary=True).pack(side="left")
+        ok_btn = theme.neon_button(tk, btn_bar, ok_label, root.destroy, primary=True)
+        ok_btn.pack(side="left")
         root.protocol("WM_DELETE_WINDOW", root.destroy)
+        # ui-comp-windows-11 (2026-09-25): a one-button notice has nothing to
+        # get wrong, so both Return and Escape dismiss it, and the button has
+        # focus. Before, a keyboard user could not close it.
+        root.bind("<Return>", lambda _e: root.destroy())
+        root.bind("<Escape>", lambda _e: root.destroy())
+        ok_btn.focus_set()
         ui_dispatch.run_dialog(root)
 
     try:
@@ -2718,45 +3001,174 @@ def _tk_pick(kind: str) -> Any:
     return ui_dispatch.dispatch(_ask)
 
 
+# bug-comp-ui-1 (2026-09-25): the ONE picker dialog this process may have up.
+# Before this a second click on "Choose from this computer" opened a second
+# Tk root on a second thread beside the first (CORE-M3's sibling roots), and
+# the picker was the one tk.Tk() site that neither took nor checked the app's
+# popup lock, so it also sat beside the fixer popup / Settings / an update
+# dialog and apply_upgrade's stand-down could not see it.
+_picker_state_lock = threading.Lock()
+_live_picker: Optional[dict[str, Any]] = None
+# The app's _popup_active_lock, registered once at startup
+# (set_picker_popup_lock). None -- a bare server, the tests -- means only the
+# one-picker rule above applies.
+_picker_popup_lock: Optional[Any] = None
+
+# How long the waiter gives a dialog it has asked to close to actually go.
+PICK_CLOSE_GRACE_SECONDS = 5.0
+
+PICKER_BUSY_MESSAGE = ("Another CCSync window is open on this computer. "
+                       "Close it, then choose again.")
+
+
+class PickerBusy(RuntimeError):
+    """The picker was NOT opened because another CCSync window holds the
+    popup lock. Its message is written for the editor (no em dash)."""
+
+    def __init__(self, message: str = PICKER_BUSY_MESSAGE) -> None:
+        super().__init__(message)
+
+
+def set_picker_popup_lock(lock: Any) -> None:
+    """Hand the picker the app's `_popup_active_lock` (bug-comp-ui-1). The
+    loopback server that opens the picker has no app to ask, so the lock is
+    registered here once, the way every other Tk site reaches it."""
+    global _picker_popup_lock
+    _picker_popup_lock = lock
+
+
+def _close_picker_dialog(live: dict[str, Any]) -> int:
+    """Ask the open native picker to cancel itself, from ANOTHER thread,
+    without touching Tk: post WM_CLOSE to the dialog windows (class #32770)
+    owned by the picker's thread. The dialog then returns "" through Tk's own
+    path, and its root is released on the thread that built it (CR-93).
+    Returns how many windows were asked. Windows only: on macOS the panel is
+    modal on the main thread and cannot be closed from here, so it stays up
+    and the next pick JOINS it rather than opening another (bug-comp-ui-1)."""
+    import sys
+
+    tid = live.get("tid")
+    if sys.platform != "win32" or not tid:
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumThreadWindows.argtypes = [wintypes.DWORD, enum_proc, wintypes.LPARAM]
+        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                        wintypes.WPARAM, wintypes.LPARAM]
+        found: list[int] = []
+
+        def _each(hwnd, _lparam):
+            name = ctypes.create_unicode_buffer(64)
+            if user32.GetClassNameW(hwnd, name, 64) and name.value == "#32770":
+                found.append(hwnd)
+            return True
+
+        user32.EnumThreadWindows(int(tid), enum_proc(_each), 0)
+        for hwnd in found:
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE: the dialog's Cancel
+        return len(found)
+    except Exception:  # noqa: BLE001 - failing to close leaves it joinable
+        log.debug("ingest picker: could not ask the dialog to close", exc_info=True)
+        return 0
+
+
+def _start_picker(live: dict[str, Any], ask: Callable[[str], Any], kind: str,
+                  lock: Optional[Any]) -> None:
+    """The picker's own thread. It, not the waiter, releases the popup lock,
+    because the dialog it guards can outlive every waiter (bug-comp-ui-1)."""
+
+    def _run() -> None:
+        global _live_picker
+        # On Windows ui_dispatch runs the dialog inline, so THIS thread owns
+        # the native dialog window _close_picker_dialog looks for.
+        live["tid"] = threading.get_native_id()
+        try:
+            live["box"]["value"] = ask(kind)
+        except Exception as exc:  # noqa: BLE001 - a picker is never fatal
+            log.warning("ingest picker: the dialog failed (%s)", exc, exc_info=True)
+        finally:
+            live["done"].set()
+            with _picker_state_lock:
+                if _live_picker is live:
+                    _live_picker = None
+                if live["waiters"] <= 0 and live["box"].get("value"):
+                    log.warning("ingest picker: a choice arrived after the page "
+                                "stopped waiting for it -- it was not used; "
+                                "the editor has to choose again")
+            if lock is not None:
+                try:
+                    lock.release()
+                except RuntimeError:
+                    log.debug("ingest picker: the popup lock was already released")
+
+    threading.Thread(target=_run, name="ccsync-ingest-picker", daemon=True).start()
+
+
 def pick_media_sources(kind: str, timeout: float = 300.0,
                        dialog_fn: Optional[Callable[[str], Any]] = None,
-                       exts: Optional[Any] = None) -> list[dict[str, Any]]:
-    """"Choose from this computer…" -> [{path, name, size, rel_dir, top}].
+                       exts: Optional[Any] = None,
+                       popup_lock: Optional[Any] = None) -> list[dict[str, Any]]:
+    """"Choose from this computer..." -> [{path, name, size, rel_dir, top}].
 
     The ONE place this companion learns a local path from a person rather than
     from a server, and the reason the feature can index a 400-clip card in
-    place instead of copying it into staging first (plan §1 step 1).
+    place instead of copying it into staging first (plan section 1 step 1).
 
     Runs the dialog on a helper thread and waits `timeout` for it. An editor
-    who opens the picker and wanders off must not park the request thread --
-    or, on macOS, the UI dispatcher's main thread -- for the life of the
-    process; after the timeout this answers "nothing was picked" and the
-    dialog's eventual result is dropped. `dialog_fn` is the tests' seam.
+    who opens the picker and wanders off must not park the request thread
+    for the life of the process. bug-comp-ui-1 (2026-09-25): at the timeout
+    the dialog is now CLOSED (it used to be abandoned on screen, and a folder
+    chosen in it afterwards was silently dropped), and while one picker is up
+    a second call JOINS it instead of opening a second Tk root. With the
+    app's popup lock registered (set_picker_popup_lock, or `popup_lock`) the
+    picker holds it for as long as the dialog is up, and raises PickerBusy
+    instead of opening beside another CCSync window. `dialog_fn` is the
+    tests' seam.
     """
+    global _live_picker
     from .broll_server import INGEST_VIDEO_EXTS
 
     wanted = exts if exts is not None else INGEST_VIDEO_EXTS
     ask = dialog_fn or _tk_pick
-    box: dict[str, Any] = {}
-    done = threading.Event()
+    lock = popup_lock if popup_lock is not None else _picker_popup_lock
 
-    def _run() -> None:
-        try:
-            box["value"] = ask(kind)
-        except Exception as exc:  # noqa: BLE001 - a picker is never fatal
-            log.warning("ingest picker: the dialog failed (%s)", exc, exc_info=True)
-        finally:
-            done.set()
+    with _picker_state_lock:
+        live = _live_picker
+        if live is None or live["done"].is_set():
+            if lock is not None and not lock.acquire(blocking=False):
+                raise PickerBusy()
+            live = {"done": threading.Event(), "box": {}, "tid": None,
+                    "kind": kind, "waiters": 0}
+            _live_picker = live
+            _start_picker(live, ask, kind, lock)
+        else:
+            log.info("ingest picker: a picker is already open -- waiting on that "
+                     "one instead of opening a second")
+        live["waiters"] += 1
 
-    thread = threading.Thread(target=_run, name="ccsync-ingest-picker", daemon=True)
-    thread.start()
-    if not done.wait(timeout):
-        log.warning("ingest picker: nothing chosen within %.0fs -- treating it "
-                    "as cancelled", timeout)
-        return []
-    chosen = box.get("value")
+    done = live["done"]
+    try:
+        if not done.wait(timeout):
+            log.warning("ingest picker: nothing chosen within %.0fs -- closing the "
+                        "dialog and treating it as cancelled", timeout)
+            if _close_picker_dialog(live):
+                done.wait(PICK_CLOSE_GRACE_SECONDS)
+            if not done.is_set():
+                return []
+    finally:
+        with _picker_state_lock:
+            live["waiters"] -= 1
+    chosen = live["box"].get("value")
     if not chosen:
         return []
+    # The dialog that was OPENED decides how its answer is read: a "files"
+    # click that joined an open folder picker gets that folder's clips.
+    kind = live["kind"]
 
     if kind == "folder":
         return _walk_folder_for_media(chosen, wanted)

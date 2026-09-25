@@ -614,7 +614,7 @@ def test_consolidate_project_confirm_flow(tmp_path, monkeypatch):
     # the same gates every other sync path does (CORE-M13), and a blank
     # active_project with no server-root mapping means subpath is None, which
     # would build `rclone copy <the whole local_root>` (CORE-C2).
-    app = _make_app(tmp_path, popup_enabled=False, sync_enabled=True,
+    app = _make_app(tmp_path, require_login=False, popup_enabled=False, sync_enabled=True,
                     active_project="Projects/2026/Creator Profiles/Season 1")
     monkeypatch.setattr(resolve_bridge, "get_media_pool_items",
                         lambda: _mp_result(item, project_name="CCT Creator Profiles"))
@@ -1318,7 +1318,7 @@ def test_consolidate_refuses_a_blank_active_project_and_never_runs_lane_a(
     stray.write_bytes(b"x" * 10)
 
     # Blank active_project AND no server-root mapping -> subpath is None.
-    app = _make_app(tmp_path, sync_enabled=True, active_project="", popup_enabled=False)
+    app = _make_app(tmp_path, require_login=False, sync_enabled=True, active_project="", popup_enabled=False)
     tray = _FakeTray()
     app._tray_icon = tray
 
@@ -1424,7 +1424,7 @@ def test_consolidate_holds_the_popup_lock_while_its_window_is_up(tmp_path, monke
     stray = other / "A001.braw"
     stray.write_bytes(b"x" * 10)
 
-    app = _make_app(tmp_path, sync_enabled=True,
+    app = _make_app(tmp_path, require_login=False, sync_enabled=True,
                     active_project="Projects/2026/X/Y", popup_enabled=False)
     monkeypatch.setattr(resolve_bridge, "get_media_pool_items",
                         lambda: _mp_result(_item(str(stray))))
@@ -1462,7 +1462,7 @@ def test_consolidate_shows_the_batches_queued_while_its_window_was_up(tmp_path, 
     late = other / "A002.braw"
     late.write_bytes(b"x" * 10)
 
-    app = _make_app(tmp_path, sync_enabled=True, active_project="Projects/2026/X/Y")
+    app = _make_app(tmp_path, require_login=False, sync_enabled=True, active_project="Projects/2026/X/Y")
     monkeypatch.setattr(resolve_bridge, "get_media_pool_items",
                         lambda: _mp_result(_item(str(stray))))
     monkeypatch.setattr(consolidate, "reconcile_with_nas",
@@ -1670,7 +1670,12 @@ def test_the_dialog_shows_the_document_this_build_bundles(tmp_path, monkeypatch)
 
     assert len(shown) == 1
     intro, document = shown[0]
-    assert document == eula_mod.BUNDLED_TEXT
+    # ui-comp-windows-3 (2026-09-25): the whole document, as a person reads
+    # it - the authoring comment and the Markdown markup are gone, nothing
+    # the agreement says is.
+    from ccsync_companion.app import _licence_display_text
+    assert document == _licence_display_text(eula_mod.BUNDLED_TEXT)
+    assert "Governing law" in document or "governing" in document.lower()
     assert document.strip(), "the fixture build must actually bundle assets/EULA.md"
     assert eula_mod.EULA_VERSION in intro
 
@@ -2428,7 +2433,7 @@ def test_consolidate_refuses_a_project_root_outside_local_root(tmp_path, monkeyp
     stray.write_bytes(b"x" * 10)
 
     app = _make_app(
-        tmp_path, sync_enabled=True, popup_enabled=False,
+        tmp_path, require_login=False, sync_enabled=True, popup_enabled=False,
         active_project="Projects/../../../Windows/Temp",
     )
     tray = _FakeTray()
@@ -5182,7 +5187,7 @@ def test_consolidate_stops_at_the_failure_report(tmp_path, monkeypatch):
     stray = other / "A001.braw"
     stray.write_bytes(b"x" * 10)
 
-    app = _make_app(tmp_path, sync_enabled=True, popup_enabled=False,
+    app = _make_app(tmp_path, require_login=False, sync_enabled=True, popup_enabled=False,
                     active_project="Projects/2026/X/Y")
     app._tray_icon = _FakeTray()
     monkeypatch.setattr(resolve_bridge, "get_media_pool_items",

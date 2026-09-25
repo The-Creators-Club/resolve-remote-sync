@@ -116,7 +116,7 @@ SSH_PATH_EXPORT = "export PATH=/usr/syno/bin:/usr/syno/sbin:/usr/local/bin:$PATH
 # The text is what an admin reads in the banner, so it says what to DO.
 DSM_ERRORS = {
     103: "no such method (this DSM does not implement the call)",
-    105: ("the logged-in session has no privilege for this call -- the usual cause is a sid "
+    105: ("the logged-in session has no privilege for this call: the usual cause is a sid "
           f"minted with SYNO.API.Auth < {LOGIN_VERSION}, which DSM refuses on every mutation. "
           "If this account really is in `administrators` and login already used version "
           f"{LOGIN_VERSION}, the next thing to try is SYNO.Core.User.PasswordConfirm"),
@@ -124,10 +124,10 @@ DSM_ERRORS = {
     400: "invalid account or password",
     401: "the account is disabled",
     402: "the account has no permission to log in to DSM",
-    403: "the account needs a 2-factor code -- give the dashboard an account with 2FA off",
+    403: "the account needs a 2-factor code: give the dashboard an account with 2FA off",
     404: "the 2-factor code was wrong",
     3101: "bad argument (a name that had to be a JSON array was sent as a string)",
-    3103: ("invalid parameter -- classically a Python bool serialised as \"True\"/\"False\" "
+    3103: ("invalid parameter: classically a Python bool serialised as \"True\"/\"False\" "
            "instead of JSON true/false"),
     3106: "no such user",
     3107: "that user already exists",
@@ -223,6 +223,48 @@ chmod 600 "$home/.ssh/authorized_keys"
 printf 'HOME %s\\n' "$(stat -c '%a %U' "$home")"
 printf 'SSHDIR %s\\n' "$(stat -c '%a %U' "$home/.ssh")"
 printf 'KEYS %s\\n' "$(stat -c '%a %U' "$home/.ssh/authorized_keys")"
+printf 'SHELL %s\\n' "$(getent passwd {user} | cut -d: -f7)"
+"""
+
+# bug-dash-api-1 (2026-09-25): the APPEND form, for approving a second
+# computer's key. _INSTALL_KEY_SCRIPT replaces the file, which is right for
+# "this is the account's key" on create and wrong for "add this computer's
+# key": an editor may own two computers (MULTI_MACHINE_PLAN.md), and the
+# replace erased the first one's key, so its lanes A and B started failing
+# SFTP auth. The old file is copied into the tmp first and the new key is
+# added below it, so the tmp+mv, the umask and the chown/chmod of ~/.ssh stay
+# exactly the install script's. A key already present (same type and body in
+# adjacent fields, so a line behind an options prefix or with another comment
+# still counts) is not written twice. A file that does not end in a newline
+# gets one, or the new key would be glued onto the last line's comment.
+_APPEND_KEY_SCRIPT = """\
+{path_export}
+set -e
+home={home}
+if [ ! -d "$home" ]; then echo MISSING_HOME; exit 3; fi
+umask 077
+mkdir -p "$home/.ssh"
+keys="$home/.ssh/authorized_keys"
+tmp="$home/.ssh/.authorized_keys.ccsync"
+if [ -f "$keys" ] && awk -v t={key_type} -v b={key_body} \\
+    '{{for (i = 1; i < NF; i++) if ($i == t && $(i + 1) == b) f = 1}} END {{exit f ? 0 : 1}}' \\
+    "$keys"; then
+  echo ALREADY
+else
+  : > "$tmp"
+  if [ -f "$keys" ]; then
+    cat "$keys" > "$tmp"
+    if [ -s "$tmp" ] && [ -n "$(tail -c 1 "$tmp")" ]; then printf '\\n' >> "$tmp"; fi
+  fi
+  printf '%s\\n' {key} >> "$tmp"
+  mv -f "$tmp" "$keys"
+fi
+chown -R {owner} "$home/.ssh"
+chmod 700 "$home/.ssh"
+chmod 600 "$keys"
+printf 'HOME %s\\n' "$(stat -c '%a %U' "$home")"
+printf 'SSHDIR %s\\n' "$(stat -c '%a %U' "$home/.ssh")"
+printf 'KEYS %s\\n' "$(stat -c '%a %U' "$keys")"
 printf 'SHELL %s\\n' "$(getent passwd {user} | cut -d: -f7)"
 """
 
@@ -378,7 +420,7 @@ class SynologyClient:
         body = self._json(self._http(self._url(api), params, post), what)
         if not body.get("success"):
             code = int((body.get("error") or {}).get("code") or 0)
-            raise DsmApiError(code, f"{what} failed: DSM error {code} -- {_dsm_message(code)}")
+            raise DsmApiError(code, f"{what} failed: DSM error {code}: {_dsm_message(code)}")
         return body.get("data") or {}
 
     def _call(self, api: str, method: str, version: int = 1, post: bool = False,
@@ -410,7 +452,7 @@ class SynologyClient:
         body = self._json(resp, "SYNO.API.Info.query")
         if not body.get("success"):
             raise NasError(
-                f"the DSM web API at {self.host}:{self.port} refused SYNO.API.Info -- "
+                f"the DSM web API at {self.host}:{self.port} refused SYNO.API.Info: "
                 "this does not look like a DSM 7 box")
         return body.get("data") or {}
 
@@ -441,7 +483,7 @@ class SynologyClient:
                 "this DSM does not offer the web API shapes CC Sync provisions with: "
                 + "; ".join(problems)
                 + ". Provision editors in DSM's Control Panel instead, or open an issue with "
-                  "this message -- guessing at a different shape risks half-created accounts."
+                  "this message: guessing at a different shape risks half-created accounts."
             )
         self._shapes_checked = True
 
@@ -463,7 +505,7 @@ class SynologyClient:
         if not body.get("success"):
             code = int((body.get("error") or {}).get("code") or 0)
             raise NasError(
-                f"DSM login for {self.user!r} failed: error {code} -- {_dsm_message(code)}")
+                f"DSM login for {self.user!r} failed: error {code}: {_dsm_message(code)}")
         data = body.get("data") or {}
         sid = data.get("sid")
         if not sid:
@@ -698,19 +740,19 @@ class SynologyClient:
                 "lowercase letters, digits, '.', '_', '-'")
         reserved = self._reserved_reason(username)
         if reserved:
-            raise NasError(f"{reserved} -- refusing to {action}. Pick a different username.")
+            raise NasError(f"{reserved}: refusing to {action}. Pick a different username.")
         existing = self.find_user(username)
         if existing is None:
             return None
         uid = existing.get("uid")
         if not self._uid_is_provisionable(uid):
             raise NasError(
-                f"{username!r} is a system or package account (uid {uid}) -- refusing to "
+                f"{username!r} is a system or package account (uid {uid}): refusing to "
                 f"{action}. Pick a different username.")
         if EDITORS_GROUP not in (existing.get("groups") or []):
             raise NasError(
                 f"{username!r} already exists on the NAS and is not in the {EDITORS_GROUP!r} "
-                "group -- refusing to take over an account this dashboard didn't create. "
+                "group: refusing to take over an account this dashboard didn't create. "
                 "Add it to the group in DSM first, or pick a different username.")
         return existing
 
@@ -757,7 +799,7 @@ class SynologyClient:
                     # not show -- a package account. Refuse rather than adopt.
                     raise NasError(
                         f"DSM says {username!r} already exists but does not list it as a local "
-                        "account -- it is probably a package account. Pick a different username."
+                        "account: it is probably a package account. Pick a different username."
                     ) from exc
                 raise
             uid = data.get("uid")
@@ -779,6 +821,42 @@ class SynologyClient:
         home_ok, key_warnings = self._install_ssh_key(username, ssh_pubkey)
         warnings.extend(key_warnings)
         return {"created": created, "username": username, "uid": uid,
+                "home_ok": home_ok, "warnings": warnings}
+
+    def add_editor_ssh_key(self, username: str, ssh_pubkey: str) -> dict[str, Any]:
+        """ADD one key to an existing editor's authorized_keys, keeping the rest.
+
+        bug-dash-api-1 (2026-09-25): approving a second computer's key went
+        through create_or_update_editor, whose install script REPLACES the
+        file, so the editor's first computer lost its key and its lanes A and
+        B started failing SFTP auth. DSM's find_user never shows the key text
+        (it costs an SSH session), so api.py cannot merge from outside the way
+        it does for TrueNAS; the merge has to happen on the box, which is what
+        _APPEND_KEY_SCRIPT does. api._install_nas_key_keeping_others prefers
+        this method whenever a backend has it.
+
+        Same refusals as create_or_update_editor. An account that does not
+        exist yet has no other key to keep, so it goes down the create path
+        and the result is the same summary dict. Unlike create, a key that
+        could not be WRITTEN raises: this call has no other work to report,
+        and the approve route keeps the queued offer only when the backend
+        raises, so a warning here would drop the offer with no key installed.
+        A key that was written but whose StrictModes read-back is off is a
+        written key, so that stays a warning, as on create.
+        """
+        key = ssh_pubkey.strip()
+        # One line, "<type> <body> [comment]": the type and body are what the
+        # duplicate check matches on, and a newline would let one approve
+        # write a second, unreviewed key line into the file.
+        if "\n" in key or "\r" in key or len(key.split()) < 2:
+            raise NasError("refusing to add an SSH key that is not a single "
+                           "'<type> <key> [comment]' line")
+        existing = self._refuse_non_editor(username, "add a key to it")
+        if existing is None:
+            return self.create_or_update_editor(username, key, None)
+        home_ok, warnings = self._install_ssh_key(username, key, append=True,
+                                                  unwritten_raises=True)
+        return {"created": False, "username": username, "uid": existing.get("uid"),
                 "home_ok": home_ok, "warnings": warnings}
 
     def set_known_password(self, username: str, password: str) -> None:
@@ -849,7 +927,9 @@ class SynologyClient:
 
     # --------------------------------------------------------------- the SSH half
 
-    def _install_ssh_key(self, username: str, ssh_pubkey: str) -> tuple[bool, list[str]]:
+    def _install_ssh_key(self, username: str, ssh_pubkey: str, *,
+                         append: bool = False,
+                         unwritten_raises: bool = False) -> tuple[bool, list[str]]:
         """Write ~/.ssh/authorized_keys as the editor, over SSH.
 
         DSM has no API for this and FileStation is not a substitute: a key file
@@ -862,13 +942,19 @@ class SynologyClient:
         from `stat`, not assumed from an exit code.
         """
         home = f"{HOME_ROOT}/{username}"
-        script = _INSTALL_KEY_SCRIPT.format(
+        fields = dict(
             path_export=SSH_PATH_EXPORT,
             home=shlex.quote(home),
             key=shlex.quote(ssh_pubkey.strip()),
             owner=shlex.quote(f"{username}:{PRIMARY_GROUP}"),
             user=shlex.quote(username),
         )
+        if append:
+            parts = ssh_pubkey.split()
+            script = _APPEND_KEY_SCRIPT.format(
+                key_type=shlex.quote(parts[0]), key_body=shlex.quote(parts[1]), **fields)
+        else:
+            script = _INSTALL_KEY_SCRIPT.format(**fields)
         try:
             rc, out, err = self._run_ssh(script)
         except NasError as exc:
@@ -876,18 +962,28 @@ class SynologyClient:
             # the whole create: the account exists and is in `editors`, and an
             # operator can paste the key by hand. Failing here would leave the
             # dashboard's editors table and the NAS disagreeing.
-            return False, [f"could not install the SSH key over SSH: {exc}"]
+            unwritten = f"could not install the SSH key over SSH: {exc}"
+            rc, out, err = None, "", ""
+        else:
+            unwritten = None
+        if unwritten is None and "MISSING_HOME" in out:
+            unwritten = (
+                f"{home} does not exist: DSM's User Home service is off, so the account has "
+                "nowhere to keep an authorized_keys. Turn it on in Control Panel > User & "
+                "Group > Advanced, then re-run this.")
+        elif unwritten is None and rc != 0:
+            unwritten = f"installing the SSH key failed (exit {rc}): {(err or out).strip()[:200]}"
+        if unwritten is not None:
+            # bug-dash-api-1 (2026-09-25): add_editor_ssh_key has nothing else
+            # to report, and its caller keeps a queued key offer only when the
+            # backend RAISES; a warning would drop the offer with no key on the
+            # NAS. create keeps the warning, for the reason above.
+            if unwritten_raises:
+                raise NasError(unwritten)
+            return False, [unwritten]
 
         warnings: list[str] = []
         strict_modes_ok = True
-        if "MISSING_HOME" in out:
-            return False, [
-                f"{home} does not exist -- DSM's User Home service is off, so the account has "
-                "nowhere to keep an authorized_keys. Turn it on in Control Panel > User & "
-                "Group > Advanced, then re-run this."]
-        if rc != 0:
-            return False, [f"installing the SSH key failed (exit {rc}): {(err or out).strip()[:200]}"]
-
         stats = dict(
             (line.split(" ", 1)[0], line.split(" ", 1)[1].strip())
             for line in out.splitlines() if " " in line
@@ -904,7 +1000,7 @@ class SynologyClient:
             strict_modes_ok = False
             warnings.append(
                 f"{home} is mode {home_mode}: sshd's StrictModes will refuse the key and log "
-                "nothing. Repair with `synoacltool -enforce-inherit` -- do NOT chmod it, that "
+                "nothing. Repair with `synoacltool -enforce-inherit`: do NOT chmod it, that "
                 "deletes the Synology ACL.")
         if (ssh_mode, ssh_owner) != ("700", username):
             strict_modes_ok = False

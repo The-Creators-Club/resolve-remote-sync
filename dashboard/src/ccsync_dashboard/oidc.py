@@ -249,7 +249,7 @@ async def oidc_login(request: Request):
         log.error("OIDC discovery failed for %s: %s", settings.oidc_issuer, exc)
         raise HTTPException(
             status_code=503,
-            detail="the identity provider is unreachable -- an admin can sign in at "
+            detail="the identity provider is unreachable. An admin can sign in at "
                    "/login?local=1",
         ) from exc
 
@@ -457,11 +457,11 @@ async def oidc_callback(request: Request):
     if flow is None:
         # Expired, tampered, or a callback that no login of ours started.
         raise HTTPException(status_code=400,
-                            detail="this sign-in expired or did not start here -- try again")
+                            detail="this sign-in expired or did not start here: try again")
     presented_state = request.query_params.get("state", "")
     if not hmac.compare_digest(str(flow.get("state") or ""), presented_state):
         log.warning("OIDC callback with a mismatched state from %s", auth.client_ip(request))
-        raise HTTPException(status_code=400, detail="bad sign-in state -- try again")
+        raise HTTPException(status_code=400, detail="bad sign-in state: try again")
     if request.query_params.get("error"):
         # The IdP refused (consent declined, account disabled). Its own
         # description is not echoed into the page.

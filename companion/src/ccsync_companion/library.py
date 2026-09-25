@@ -633,9 +633,23 @@ class ProjectLibrary:
         if not rows:
             raise LibraryUnavailable(
                 "%s has no project named %r" % (self.info.describe(), self.project_name))
-        # A library CAN hold two rows with one name (a restored copy). The
-        # first is what Resolve's own project manager shows; picking it is
-        # no worse than the API, which cannot tell them apart either.
+        # bug-comp-resolve-8 (2026-09-25): a library CAN hold two rows with
+        # one name (the same name in two project-manager folders, or a
+        # restored copy), and nothing in this row says which one is OPEN.
+        # rows[0] used to be taken on the claim that the API "cannot tell
+        # them apart either" -- but the API always answers for the open
+        # project, so picking one here served the OTHER project's media pool
+        # and fingerprint about half the time: proxy relink and the
+        # non-canonical pass then planned on uids the open pool does not hold
+        # and every op failed as "not in the media pool". Refusing costs that
+        # project the library speed-up and nothing else: the bridge falls
+        # back to the API walk, which is right by construction.
+        distinct = {_uid_str(row[0]) for row in rows}
+        if len(distinct) > 1:
+            raise LibraryUnavailable(
+                "%s has %d projects named %r (in different folders), and the "
+                "library cannot tell which one is open"
+                % (self.info.describe(), len(distinct), self.project_name))
         return _uid_str(rows[0][0])
 
     def _ready(self) -> None:

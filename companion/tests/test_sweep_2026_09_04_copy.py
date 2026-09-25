@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from ccsync_companion import ytdl_attestation as _ytdl_attestation
 from test_no_em_dash import _docstring_nodes, _log_argument_nodes, _py_files
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "ccsync_companion"
@@ -412,6 +413,17 @@ MODULES: tuple[str, ...] = (
     # the caller and not the callee would have left the page saying both
     # words in one sentence.
     "broll_vlm_sidecar.py", "music_clap_sidecar.py",
+    # ui-copy-4 (2026-09-25): read and reworded by their owners in the
+    # eleventh hunt's fix pass - the YouTube stack (its capability reasons and
+    # loopback refusals reach the ytdl page's toast verbatim), the proxy
+    # generator's balloon, the undo journal's "Waiting:" line, the Timeline
+    # Cards role's refusals and the identity sentence.
+    "ytdl_executor.py", "ytdl_server.py", "ytdlp_manager.py", "ytdl_attestation.py",
+    "proxy_gen.py", "resolve_undo.py", "timeline_cards_role.py", "identity.py",
+    # owed-2 (2026-09-25): the file-move answers ("lane B had already moved
+    # this folder on this machine" and ten siblings) reach the dashboard's
+    # project page verbatim; c-sync reworded them in the same fix pass.
+    "file_moves.py",
 )
 
 # Where the word is not the concept. Each entry is the EXACT string, and each
@@ -432,9 +444,24 @@ VOCABULARY_ALLOWED: dict[str, str] = {
         "a self.log.info line in broll_ingest, not copy",
     "%s stays on this machine for the base rig - %s":
         "a self.log.warning line in music_ingest, not copy",
+    # ui-copy-4 (2026-09-25): the YouTube notice is LEGAL text pinned to
+    # ytdl_attestation.TEXT_VERSION and mirrored word for word in
+    # ytdlweb.attestation.NOTICE_TEXT. It changes with a version bump on both
+    # sides (which re-asks every editor), never in a copy sweep.
+    _ytdl_attestation.NOTICE_TEXT:
+        "versioned legal text, changed only with TEXT_VERSION on both sides",
+    # owed-2 (2026-09-25), caught once the pattern took plurals: a section
+    # header in app.py's Copy diagnostics dump, pasted into a bug report and
+    # read by whoever debugs it, above `vars(status)` of each lane. A log line
+    # in all but name.
+    "-- lanes --": "a Copy diagnostics section header in app.py, not copy",
 }
 
-_WORD_RE = re.compile(r"\b(" + "|".join(RETIRED_WORDS) + r")\b", re.IGNORECASE)
+# owed-2 (2026-09-25): an optional plural. Without it "both sync lanes are
+# failing" and "edited on two machines at once" passed a scan that failed on
+# "lane" and "machine": the plural is the same concept said about more than
+# one, and it is the form a sentence about the whole fleet reaches for.
+_WORD_RE = re.compile(r"\b(" + "|".join(RETIRED_WORDS) + r")s?\b", re.IGNORECASE)
 
 
 def _key_string_nodes(tree: ast.AST) -> set[int]:

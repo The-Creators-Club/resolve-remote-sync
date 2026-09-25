@@ -94,6 +94,11 @@ class IndexIn(BaseModel):
     """POST /api/ingest/index body."""
 
     video_id: int
+    # bug-broll-2 (2026-09-25): the clip's identity, which wins over
+    # `video_id` when both are sent (routes_ingest._target_video_id). Optional
+    # so an indexer that predates it is unaffected.
+    share: str | None = None
+    rel_path: str | None = None
     themes: list[str] = Field(default_factory=list)
     quality_flags: list[str] = Field(default_factory=list)
     category_hint: str | None = None
@@ -106,6 +111,10 @@ class MovedIn(BaseModel):
 
     video_id: int
     new_rel_path: str
+    # bug-broll-2 (2026-09-25): where the clip is moving FROM, which wins over
+    # `video_id` when sent. Optional, as on IndexIn.
+    share: str | None = None
+    rel_path: str | None = None
 
 
 # --- dashboard b-roll ingest (docs/BROLL_INGEST_PLAN.md §4.2/§4.3, 2026-08-18) --

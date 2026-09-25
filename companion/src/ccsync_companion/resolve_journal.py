@@ -41,6 +41,7 @@ consent to something that happens every 30 seconds.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -109,6 +110,10 @@ _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _lock = threading.Lock()
 # {project slug: {"path": Path, "last": float}} -- the open burst per project.
 _sessions: dict[str, dict[str, Any]] = {}
+# logic-resolve-2 (2026-09-25): how many hold_sessions() blocks are open, and
+# when the current unbroken run of them began (wall clock, like `last`).
+_holds = 0
+_hold_since: Optional[float] = None
 # {project slug: float} -- when the last save point was taken.
 _save_points: dict[str, float] = {}
 # {(project slug, source): float} -- the automatic-path rate limiter. WALL
@@ -150,8 +155,10 @@ def reset_for_tests() -> None:
     """Drop the in-memory burst/rate-limit state AND the persisted copy. The
     module keeps its state in globals (one companion, one Resolve), so a test
     that does not clear it inherits the previous test's open session."""
-    global _auto_state_loaded
+    global _auto_state_loaded, _holds, _hold_since
     with _lock:
+        _holds = 0
+        _hold_since = None
         _sessions.clear()
         _save_points.clear()
         _automatic_at.clear()
@@ -381,6 +388,66 @@ def _write(path: Path, data: dict[str, Any]) -> None:
         raise
 
 
+def _burst_continues(open_at: dict[str, Any], now: float) -> bool:
+    """Does an edit at `now` belong to the open burst `open_at`? Caller holds
+    `_lock`.
+
+    Quiet for SESSION_GAP_SECONDS ends a burst -- except across a
+    hold_sessions() block that began while the burst was still open
+    (logic-resolve-2, 2026-09-25)."""
+    last = float(open_at["last"])
+    if (now - last) <= SESSION_GAP_SECONDS:
+        return True
+    return (_holds > 0 and _hold_since is not None
+            and (_hold_since - last) <= SESSION_GAP_SECONDS)
+
+
+@contextlib.contextmanager
+def hold_sessions(clock: Optional[Callable[[], float]] = None):
+    """Keep every open burst open for as long as this block runs.
+
+    logic-resolve-2 (2026-09-25): FIX ALL relinks each clip right after its
+    OWN copy, and one copy of more than SESSION_GAP_SECONDS (about 4 GB at
+    the 33 MB/s SMB rate, or any Google Drive hydration) split one FIX ALL
+    into several journals. The popup's "To undo: ... [ UNDO LAST FIX ]"
+    then reached only the last of them. fixer.fix_clip runs inside one of
+    these, so the gap is measured between CLIPS again, which is what the
+    constant's comment always assumed. A burst that had already gone quiet
+    before the hold began is not revived. Never raises.
+    """
+    global _holds, _hold_since
+    if clock is None:
+        # Looked up per call, not bound at def time, so a caller several
+        # frames up (fixer.fix_clip) and the suite share one clock.
+        clock = time.time
+    try:
+        with _lock:
+            if _holds == 0:
+                _hold_since = float(clock())
+            _holds += 1
+    except Exception:                                   # pragma: no cover - defensive
+        log.debug("resolve journal: could not take a session hold", exc_info=True)
+    try:
+        yield
+    finally:
+        try:
+            with _lock:
+                now = float(clock())
+                if _hold_since is not None:
+                    # The quiet gap restarts at the END of the hold for every
+                    # burst the hold kept open, so the next clip's relink a
+                    # moment later still joins it.
+                    for open_at in _sessions.values():
+                        if (_hold_since - float(open_at["last"])) <= SESSION_GAP_SECONDS:
+                            open_at["last"] = max(float(open_at["last"]), now)
+                _holds = max(0, _holds - 1)
+                if _holds == 0:
+                    _hold_since = None
+        except Exception:                               # pragma: no cover - defensive
+            log.debug("resolve journal: could not release a session hold",
+                      exc_info=True)
+
+
 def open_session(project_name: Any, *, clock: Callable[[], float] = time.time,
                  backup: str = "", saved: Optional[bool] = None) -> Optional[Path]:
     """The journal file the next edit belongs in, creating it if the burst is
@@ -391,8 +458,8 @@ def open_session(project_name: Any, *, clock: Callable[[], float] = time.time,
     try:
         with _lock:
             open_at = _sessions.get(slug)
-            if open_at is not None and (now - float(open_at["last"])) <= SESSION_GAP_SECONDS:
-                open_at["last"] = now
+            if open_at is not None and _burst_continues(open_at, now):
+                open_at["last"] = max(float(open_at["last"]), now)
                 path = Path(open_at["path"])
                 if backup or saved is not None:
                     data = _read(path)
@@ -526,6 +593,52 @@ def read_session(path: Any) -> dict[str, Any]:
     return _read(Path(path))
 
 
+def is_undone(path: Any) -> bool:
+    """Has this journal already been replayed by an undo?"""
+    return bool(read_session(path).get("undone_at"))
+
+
+def latest_undoable_session(project_name: Any = None) -> Optional[Path]:
+    """The newest journal an undo has not already replayed, or None.
+
+    logic-resolve-2 (2026-09-25): the tray's UNDO LAST FIX replayed
+    latest_session() and never retired it, so a second press replayed the
+    same file, found nothing at its `new` paths and told the editor the
+    clips had left the media pool. Retired journals are kept (they are the
+    record of what happened) and skipped here, so the button moves on to
+    the change before."""
+    for path in reversed(sessions(project_name)):
+        if not is_undone(path):
+            return path
+    return None
+
+
+def mark_undone(path: Any, *, undone: int = 0) -> None:
+    """Stamp a journal as replayed. Never raises: an undo that worked must
+    not be reported as failed because its bookkeeping could not be written.
+
+    The stamp is an extra top-level key; an older companion reading the file
+    ignores it."""
+    try:
+        target = Path(path)
+        with _lock:
+            data = _read(target)
+            if not data:
+                return
+            data["undone_at"] = _iso_now()
+            data["undone_count"] = int(undone)
+            _write(target, data)
+        # An edit made after this undo must not be appended to a journal that
+        # now says "already put back".
+        with _lock:
+            for slug, open_at in list(_sessions.items()):
+                if Path(open_at["path"]) == target:
+                    _sessions.pop(slug, None)
+    except Exception:
+        log.warning("resolve journal: could not mark %s as undone -- UNDO LAST FIX "
+                    "would offer it again", path, exc_info=True)
+
+
 # -- naming one journal from off the machine (SYS-15b, 2026-08-29) ---------
 #
 # The dashboard's admin-side undo has to NAME a journal, and the only thing
@@ -598,8 +711,12 @@ def summaries(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def describe_latest(project_name: Any = None) -> str:
-    """One line for a tray menu / popup: what the last pass did."""
-    path = latest_session(project_name)
+    """One line for a tray menu / popup: what the last pass did.
+
+    The pass UNDO LAST FIX would put back, i.e. the newest one not already
+    undone (logic-resolve-2, 2026-09-25): describing a replayed journal
+    offered the editor an undo of something already undone."""
+    path = latest_undoable_session(project_name)
     if path is None:
         return ""
     data = read_session(path)

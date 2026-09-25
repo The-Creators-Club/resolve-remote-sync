@@ -314,14 +314,27 @@ class Collector:
                     # the connection. Nothing restarts it, so db.prune -- which
                     # is reachable only from here -- never ran again for the
                     # life of the process (KNOWN_BUGS DASH-8, 2026-08-11).
+                    # bug-dash-diag-4 (2026-09-25): opened into a LOCAL and
+                    # handed to `conn` only once migrate succeeded. Assigning
+                    # first meant a migrate that raised left `conn` set, so
+                    # the retry never ran again and every cycle used a
+                    # connection whose schema nobody had confirmed; the
+                    # failed connection is closed rather than leaked.
+                    fresh = None
                     try:
-                        conn = self._open_conn()
-                        db.migrate(conn)
+                        fresh = self._open_conn()
+                        db.migrate(fresh)
                     except Exception:
                         log.exception("collector could not open %s; retrying in %.0fs",
                                       self.settings.db_path, DB_OPEN_RETRY_SECONDS)
+                        if fresh is not None:
+                            try:
+                                fresh.close()
+                            except Exception:  # noqa: BLE001 - best effort
+                                pass
                         self._stop.wait(DB_OPEN_RETRY_SECONDS)
                         continue
+                    conn = fresh
                 try:
                     due = [k for k in KINDS if time.monotonic() >= next_due[k]]
                     if due:
@@ -646,14 +659,40 @@ class Collector:
                 # not a project to anybody, and the only sign of it was this
                 # line in a container log.
                 unreadable.append(rel)
+                # The id Syncthing serves this folder under, when it is one:
+                # the value the marker's "slug" has to hold again.
+                served_as = next(
+                    (str(f["id"]) for f in folders_by_id.values()
+                     if str(f.get("path", "")).rstrip("/") == f"{prefix}/{rel}"), "")
+                if served_as:
+                    fix_text = (
+                        f"Replace the damaged .ccsync-project file in {rel} on the "
+                        "server: copy the one from a working project and change its "
+                        f"\"slug\" to \"{served_as}\". The server usually writes a "
+                        "fresh marker there by itself within a few minutes, because "
+                        "Syncthing still serves that folder as that project, so look "
+                        "again before editing by hand.")
+                else:
+                    fix_text = (
+                        f"Replace the damaged .ccsync-project file in {rel} on the "
+                        "server: copy the one from a working project and change its "
+                        "\"slug\" to this project's id, the last part of its page "
+                        "address on this dashboard (/project/<id>). If the folder was "
+                        "never a project, delete the damaged file instead.")
                 db.notice(
                     conn, "unreadable_project_marker", "warn", rel,
                     body=(f"The folder {rel} on the server has a damaged CCSync marker "
                           "file, so it is not a project as far as this dashboard is "
                           "concerned: nobody can tick it and nothing in it syncs."),
-                    fix=("Copy a working project's .ccsync-project file into that folder "
-                         "and correct its id, or delete the damaged file and set the "
-                         "project up again from Settings, Projects."),
+                    # ui-copy-3 (2026-09-25): Settings has no Projects page.
+                    # Review round: nor is the tray's "Set up ... on the
+                    # server" a way back. It appears only while the open
+                    # Resolve project has NO project_roots row (api.py report
+                    # ingest -> resolve_project_unmapped), and a folder that
+                    # lost its marker was a project, so its Resolve project is
+                    # almost always already mapped and the item never shows.
+                    # Restoring the file is the one instruction that works.
+                    fix=fix_text,
                     now=self.now_fn())
                 continue
             by_slug.setdefault(slug, []).append(rel)
@@ -707,9 +746,11 @@ class Collector:
                     body=(f"The project folder {', '.join(rels)} could not be set up for "
                           f"syncing: {str(exc)[:200]}. Until this clears, nothing in that "
                           "project reaches anybody."),
+                    # ui-copy-2 (2026-09-25): "Settings, Diagnostics" is not a page.
                     fix=("Look at the other problems listed here first. If there is none, "
-                         "check that Syncthing is running on the server (Settings, "
-                         "Diagnostics)."),
+                         "check that Syncthing is running on the server (the [ COLLECTOR ] "
+                         "panel under the computers table on SYNC STATUS shows whether it "
+                         "answers)."),
                     now=self.now_fn())
         # -- 5. shared asset libraries -------------------------------------
         # Deliberately after the project loop and outside its per-slug fault
@@ -2295,7 +2336,14 @@ class Collector:
         except Exception:  # noqa: BLE001 - never let this stop the prune
             log.debug("collector: could not ask whether jobs may be pinned",
                       exc_info=True)
-        db.prune(conn, self.now_fn(), pin=pin)
+        # logic-ytdl-jobs-5 (2026-09-25): the lease sweep hands a computer
+        # that went quiet mid-job the same cooldown a reported failure earns,
+        # and DASH_JOBS_COOLDOWN_SECONDS is the operator's length for it. The
+        # api's claim/fail routes read it; this path used the 120 s default,
+        # so a sleeping laptop came back into the rank on the wrong clock.
+        db.prune(conn, self.now_fn(), pin=pin,
+                 jobs_cooldown_seconds=getattr(
+                     self.settings, "jobs_cooldown_seconds", None))
         if self.session_prune_fn is None:
             return
         # COMMIT FIRST. `db.prune` above leaves this connection in an open

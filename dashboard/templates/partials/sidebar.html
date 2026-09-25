@@ -19,7 +19,12 @@
            {% else %}
              title="sync this project to every computer {{ toggle_editor }} uses. Per-computer plans live on Settings, SYNC PLANS."
              hx-post="/partials/selection/{{ toggle_editor }}/{{ p.slug }}/toggle?view=sidebar{{ '&slug_page=' ~ current_slug if current_slug }}{{ as_qs }}"
-             hx-target="closest .projects" hx-swap="outerHTML"
+             {# ui-dash-main-1 (2026-09-25): the INNERHTML of the aside, the
+                same swap its 30 s poll makes. The answer is this whole
+                partial (sheet handle + nav), so an outerHTML swap of the nav
+                alone added a second [ PROJECTS ] handle on every tick, and
+                it handed base.html's keeper a detached target. #}
+             hx-target="closest .sidebar" hx-swap="innerHTML"
              {% if p.slug in selected_slugs and toggle_editor_machines is defined and toggle_editor_machines %}
              {# DASH-8 (2026-08-28): this box is the PERSON, so unticking it
                 stops the project syncing on every computer they own. Named,

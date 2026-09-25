@@ -459,7 +459,9 @@ def test_breaker_and_halt_actions_appear_in_sync_lanes():
     app2 = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app2.sync_guard = lambda: {"halt": {"active": True, "scope": "local"}}
     lines2 = _labels(_section(build_settings_model(_tray_snapshot(app2), app2), "SYNCING"))
-    assert any("START SYNCING AGAIN" in l for l in lines2)
+    # ui-comp-windows-6 (2026-09-25): named for its cause, like the tray row.
+    assert any("CLEAR THE SYNC STOP ON THIS COMPUTER" in l for l in lines2)
+    assert not any("START SYNCING AGAIN" in l for l in lines2)
 
 
 # -- YOUTUBE ---------------------------------------------------------------

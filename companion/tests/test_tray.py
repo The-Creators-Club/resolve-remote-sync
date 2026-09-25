@@ -3012,14 +3012,17 @@ def test_sync_line_both_directions_at_once():
     assert _sync_line(_snap(statuses=[up, down])) == "Sync: up 2 \u00b7 down 3 files"
 
 
-def test_sync_line_lane_c_counts_toward_both_totals():
-    """Lane C is "everything else, both ways" (LANE_LABELS) -- it has no
-    up/down split of its own."""
+def test_sync_line_lane_c_counts_once_in_its_own_direction():
+    """logic-sync-truth-6 (2026-09-25): lane C's count is one direction. It
+    used to be added to BOTH totals ("up 5, down 5" for five files); its need
+    count is a download unless the lane says it is sending."""
     from ccsync_companion.tray import _sync_line
 
     c = _status("lane_c_syncthing", "syncing")
     c.transferring = 5
-    assert _sync_line(_snap(statuses=[c])) == "Sync: up 5 \u00b7 down 5 files"
+    assert _sync_line(_snap(statuses=[c])) == "Sync: downloading 5 files"
+    c.detail = "sending 5 file(s) (2.0 MB) to the server"
+    assert _sync_line(_snap(statuses=[c])) == "Sync: uploading 5 files"
 
 
 def test_sync_line_queued_but_idle():

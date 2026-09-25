@@ -235,6 +235,15 @@ def _same_file(a: Path, b: Path) -> bool:
     return _cmp_key(a) == _cmp_key(b)
 
 
+def _is_the_same_disk_file(a: Path, b: Path) -> bool:
+    """Do two existing paths name ONE file on disk? Never raises: a disk that
+    cannot answer counts as two files, which leaves both where they are."""
+    try:
+        return os.path.samefile(str(a), str(b))
+    except (OSError, ValueError):
+        return False
+
+
 def _is_inside(path: Path, root: Path) -> bool:
     p = _cmp_key(path)
     r = _cmp_key(root)
@@ -253,10 +262,19 @@ def _stem_key(stem: str) -> str:
     return unicodedata.normalize("NFC", str(stem)).lower()
 
 
-def move_proxy_siblings(src: Path, dest: Path) -> int:
+def move_proxy_siblings(src: Path, dest: Path,
+                        failed: Optional[list[str]] = None) -> int:
     """The `Proxy/<stem>.*` beside a file goes where the file goes -- the
     convention Resolve's auto-link and both rclone lanes are built on. Never
-    overwrites; returns how many were moved."""
+    overwrites; returns how many were moved.
+
+    bug-comp-syncthing-1 (2026-09-25): each proxy is its own attempt. One
+    proxy Resolve holds open in proxy playback (WinError 32) used to raise out
+    of the loop AFTER the original had moved, and apply_move turned a
+    completed move into a failed one whose retry then found nothing at the
+    old path and dropped the relink. A proxy that will not move is named in
+    `failed` (when given) and logged; it stays where it is, where lane B
+    replaces it from the server's new path."""
     proxy_dir = src.parent / "Proxy"
     if not proxy_dir.is_dir():
         return 0
@@ -266,13 +284,57 @@ def move_proxy_siblings(src: Path, dest: Path) -> int:
         if not candidate.is_file() or _stem_key(candidate.stem) != want:
             continue
         target_dir = dest.parent / "Proxy"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / candidate.name
-        if target.exists():
+        # bug-dash-api-2 (2026-09-25): the proxy takes the NEW stem, as
+        # rename_proxy_siblings_case_only already did and as the dashboard
+        # renames it on the NAS. Keeping `candidate.name` left a renaming move
+        # with `Proxy/<old stem>` here and `Proxy/<new stem>` on the server:
+        # lane B downloaded the new one and trashed the old one on every
+        # holding computer, and a same-folder rename targeted the proxy
+        # itself and moved nothing. A plain move keeps the name (the stems
+        # are equal). The 4b trash call passes a `dest` named like `src`, so
+        # it is unchanged. A stem that differs only in Unicode form (a Mac's
+        # NFD listing against the dashboard's NFC `to_rel`) keeps its own
+        # bytes: that is no rename, and the bytes on disk are the truth
+        # (CR-90, comp-sync-18).
+        if unicodedata.normalize("NFC", candidate.stem) == unicodedata.normalize("NFC", dest.stem):
+            target = target_dir / candidate.name
+        else:
+            target = target_dir / (dest.stem + candidate.suffix)
+        try:
+            if os.path.normpath(str(target)) == os.path.normpath(str(candidate)):
+                continue
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                candidate.replace(target)
+            elif _is_the_same_disk_file(target, candidate):
+                # The same file under another spelling (a case-only change of
+                # the stem on a case-folding disk): exists() alone would call
+                # it a collision and leave the old spelling. Asked of the
+                # disk, not of the folded names, so a case-SENSITIVE disk
+                # holding two real files is still never overwritten.
+                _rename_case_only(candidate, target)
+            else:
+                # Never overwrite: a real proxy is already there.
+                continue
+        except OSError as exc:
+            log.warning("file move: proxy %s could not follow its original (%s); "
+                        "it stays at the old path", candidate.name, exc)
+            if failed is not None:
+                failed.append(candidate.name)
             continue
-        candidate.replace(target)
         moved += 1
     return moved
+
+
+def _moved_detail(verb: str, proxies: int, failed: list[str]) -> str:
+    detail = verb + (f", {proxies} proxy file(s) with it" if proxies else "")
+    if failed:
+        # bug-comp-syncthing-1 (2026-09-25): said, not hidden. The original is
+        # where the server has it and Resolve is relinked to it; only the
+        # proxy is behind, and lane B brings the new one down.
+        detail += (f"; {len(failed)} proxy file(s) were in use and stayed at the "
+                   "old path")
+    return detail
 
 
 def _rename_case_only(src: Path, dest: Path) -> None:
@@ -634,11 +696,12 @@ def apply_move(move: dict[str, Any], local_root: str,
         # never held the file still answers "nothing at the old path".
         if ledger is not None and dest.exists():
             entry = ledger.entry(move["id"]) or {}
-            if entry.get("state") == STATE_APPLYING:
-                proxies = 0 if dest.is_dir() else move_proxy_siblings(src, dest)
-                detail = ("finished a move this machine was interrupted during"
-                          + (f", {proxies} proxy file(s) with it" if proxies else ""))
-                return True, detail, (str(src), str(dest))
+            if entry.get("state") == STATE_APPLYING or _attempt_moved_it(entry, src, dest):
+                failed: list[str] = []
+                proxies = 0 if dest.is_dir() else move_proxy_siblings(src, dest, failed)
+                return True, _moved_detail(
+                    "finished a move this computer was interrupted during",
+                    proxies, failed), (str(src), str(dest))
             # res-companion-2 (2026-09-18): lane B may have followed this move
             # already, on the server's locate answer, minutes before the
             # dashboard's detection made a command of it. It could not write
@@ -648,7 +711,7 @@ def apply_move(move: dict[str, Any], local_root: str,
             # Answering "nothing at the old path" here is what left the clips
             # Media Offline in Resolve while the move was recorded as done.
             if ledger.relocation_to(str(src), str(dest)):
-                return True, "lane B had already moved it on this machine", (
+                return True, "proxy download had already moved it on this computer", (
                     str(src), str(dest))
             # comp-sync-3 (2026-09-18b mediums): the FOLDER drag is the shape
             # this feature exists for, and it was the one shape the evidence
@@ -658,9 +721,9 @@ def apply_move(move: dict[str, Any], local_root: str,
             # and every clip under the folder stayed Media Offline while the
             # MOVES history said this machine had followed.
             if move.get("is_dir") and ledger.relocated_folder(str(src), str(dest)):
-                return True, "lane B had already moved this folder on this machine", (
+                return True, "proxy download had already moved this folder on this computer", (
                     str(src), str(dest))
-        return True, "nothing at the old path on this machine", None
+        return True, "nothing at the old path on this computer", None
     if _same_file(src, dest):
         # ...unless the two names differ in bytes and fold to the same key:
         # that is a real rename on the server's case-sensitive filesystem
@@ -669,14 +732,14 @@ def apply_move(move: dict[str, Any], local_root: str,
             return True, "already where the server has it", None
         if src.is_dir():
             return False, ("a folder cannot be renamed by spelling alone on this "
-                           "machine; ask your admin to do it in two steps"), None
+                           "computer; ask your admin to do it in two steps"), None
         if ledger is not None:
             ledger.record_intent(move, str(src), str(dest))
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             _rename_case_only(src, dest)
         except OSError as exc:
-            return False, f"could not rename it on this machine: {exc}", None
+            return False, f"could not rename it on this computer: {exc}", None
         proxies = rename_proxy_siblings_case_only(src, dest)
         detail = ("renamed to match the server's spelling"
                   + (f", {proxies} proxy file(s) with it" if proxies else ""))
@@ -692,9 +755,9 @@ def apply_move(move: dict[str, Any], local_root: str,
                 and ledger is not None
                 and ledger.relocated_folder(str(src), str(dest))
                 and not any(p.is_file() for p in src.rglob("*"))):
-            return True, "lane B had already moved this folder on this machine", (
+            return True, "proxy download had already moved this folder on this computer", (
                 str(src), str(dest))
-        return False, f"the destination already exists on this machine ({dest})", None
+        return False, f"the destination already exists on this computer ({dest})", None
     if src.is_dir() and _is_inside(dest, src):
         return False, "a folder cannot be moved into itself", None
     if not _dest_is_synced_here(move, project_rels):
@@ -742,7 +805,7 @@ def apply_move(move: dict[str, Any], local_root: str,
             trash.parent.mkdir(parents=True, exist_ok=True)
             src.replace(trash)
         except OSError as exc:
-            return False, f"could not move it out of the way on this machine: {exc}", None
+            return False, f"could not move it out of the way on this computer: {exc}", None
         # comp-sync-1 (2026-09-18b): the proxies go with it, as they do on
         # every other branch. Left behind they are an orphan whose original
         # has gone: lane B trashes them on its own next pass, in a different
@@ -769,11 +832,38 @@ def apply_move(move: dict[str, Any], local_root: str,
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         src.replace(dest)
-        proxies = 0 if src.is_dir() or dest.is_dir() else move_proxy_siblings(src, dest)
     except OSError as exc:
-        return False, f"could not move it on this machine: {exc}", None
-    detail = "moved" + (f", {proxies} proxy file(s) with it" if proxies else "")
-    return True, detail, (str(src), str(dest))
+        return False, f"could not move it on this computer: {exc}", None
+    # bug-comp-syncthing-1 (2026-09-25): the proxies are OUTSIDE the fatal
+    # try. Once the original has moved, the move has happened: answering
+    # not-ok here recorded it `retryable`, and the redelivery found src gone
+    # and answered "nothing at the old path" with no paths, so Resolve was
+    # never relinked and the clip stayed Media Offline.
+    failed: list[str] = []
+    proxies = 0 if src.is_dir() or dest.is_dir() else move_proxy_siblings(src, dest, failed)
+    return True, _moved_detail("moved", proxies, failed), (str(src), str(dest))
+
+
+def _attempt_moved_it(entry: dict[str, Any], src: Path, dest: Path) -> bool:
+    """A failed attempt row whose intent paths are exactly this move, with the
+    file now at `dest` (bug-comp-syncthing-1, 2026-09-25).
+
+    A build before this fix answered not-ok when a proxy would not follow an
+    original it had ALREADY moved, and the row it left is `retryable` (or
+    `blocked`), not `applying`. The resume arm trusted only `applying`, so the
+    redelivery answered "nothing at the old path" and dropped the relink.
+    The paths are the intent row's, carried forward by record(); a 4b intent
+    has an empty new_local and can never match."""
+    if entry.get("state") not in (STATE_RETRYABLE, STATE_BLOCKED):
+        return False
+    old_local = str(entry.get("old_local") or "")
+    new_local = str(entry.get("new_local") or "")
+    if not old_local or not new_local:
+        return False
+    try:
+        return _same_file(Path(old_local), src) and _same_file(Path(new_local), dest)
+    except Exception:
+        return False
 
 
 def _apply_4b_partial(move: dict[str, Any], src: Path, trash: Path,
@@ -1063,7 +1153,7 @@ class FileMoveLedger:
 
         Both halves are checked (res-companion-2): a machine that merely
         DOWNLOADED the file at the new path never wrote a row here, and must
-        still answer "nothing at the old path on this machine".
+        still answer "nothing at the old path on this computer".
         """
         with self._lock:
             now = float(self._now())
@@ -1142,7 +1232,7 @@ class FileMoveLedger:
         a real Resolve mutation. The move's own completion row sets
         relink_pending properly (app._apply_file_moves), including on the
         crash-resume path."""
-        return self.record(move, ok=False, detail="applying it on this machine",
+        return self.record(move, ok=False, detail="applying it on this computer",
                            state=STATE_APPLYING, paths=(old_local, new_local),
                            relink_pending=False)
 

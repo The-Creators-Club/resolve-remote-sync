@@ -343,6 +343,8 @@ def act_insert(req):
     Refuses when any affected item is linked to video: rippling one audio track
     under locked picture would silently desync sync sound, which is exactly the
     failure that is expensive to notice late. Use 'place underneath' there.
+    Refuses too when the playhead is INSIDE a clip on that track: the clip is
+    neither at nor after the playhead and cannot be rippled whole.
     """
     resolve, project, pool = connect()
     tl = project.GetCurrentTimeline()
@@ -360,6 +362,22 @@ def act_insert(req):
 
     items = tl.GetItemListInTrack("audio", track) or []
     affected = [i for i in items if int(i.GetEnd()) > rec]
+
+    # bug-comp-media-6 (2026-09-25): a clip that STARTS before the playhead
+    # and runs past it is in `affected`, and re-appending it whole at
+    # start + shift always lands inside the new cue's [rec, rec + shift):
+    # Resolve refuses the occupied span, the verify below raises, and the
+    # insert rolled back EVERY time the playhead sat in a music bed, which is
+    # the ordinary "drop a sting here" case (and the rollback re-appends each
+    # clip fresh, losing its volume and fades). Refused here, before anything
+    # is deleted, with the two ways through.
+    for it in affected:
+        if int(it.GetStart()) < rec:
+            raise RuntimeError(
+                "the playhead is inside a clip on A%d (frame %d to %d), so it "
+                "cannot be rippled whole. Move the playhead to a cut, or "
+                "razor the clip there first, or use 'place underneath'."
+                % (track, int(it.GetStart()), int(it.GetEnd())))
 
     snapshot = []
     for it in affected:

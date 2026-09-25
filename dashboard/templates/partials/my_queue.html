@@ -40,7 +40,13 @@
             {% elif item.completion == 100 %}<span class="dot green">●</span> synced
             {% else %}-{% endif %}
           </td>
-          <td data-label=""><button class="btn tap" hx-post="/partials/selection/{{ queue.editor }}/{{ item.slug }}/toggle"
+          {# ui-dash-main-9 (2026-09-25): `queue_machine` rides along as a
+             VIEW key, never as `machine=`: the untick is the person's (the
+             confirm below names every computer), but the panel it returns
+             must stay about the computer it was about. Without it the answer
+             was the person-wide queue with no "safe to close" line until
+             the next 10 s beat. #}
+          <td data-label=""><button class="btn tap" hx-post="/partials/selection/{{ queue.editor }}/{{ item.slug }}/toggle{{ ('?queue_machine=' ~ (queue_machine | urlencode)) if queue_machine is defined and queue_machine }}"
                       {% if queue.machines %}
                       {# DASH-8 (2026-08-28): every computer this person owns. #}
                       hx-confirm="This removes {{ item.label }} from {{ queue.editor }}'s {{ queue.machines | length }} computer{{ 's' if queue.machines | length != 1 }} ({{ queue.machines | join(', ') }}). Their copies stay on disk; nothing new comes down and proxy sync stops for it."

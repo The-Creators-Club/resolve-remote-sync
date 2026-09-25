@@ -3348,6 +3348,13 @@ NOTICE_SEVERITIES = ("info", "warn", "error")
 # the project the subject names). A column would have needed a migration for a
 # fact that never varies per row. The prose stays: a mail body has no links to
 # offer, and `fix` is what the sink sends.
+#
+# ui-copy-2 (2026-09-25): "the fleet page" is SYNC STATUS, served at `/`.
+# Every href here used to say `/fleet`, which no route or redirect serves, so
+# [ TAKE ME THERE ] on those kinds was a 404. The collector's own kinds point
+# at its [ COLLECTOR ] panel (`#fleet-collector`, under the computers table),
+# not `#fleet-diagnostics`, which only [ READ THE ANSWER ] ever fills; the two
+# whose detail is the notice text itself go to /admin/health.
 
 
 def _slug_href(subject: str) -> str:
@@ -3358,14 +3365,14 @@ def _slug_href(subject: str) -> str:
     slug = str(subject or "").strip()
     if slug and all(ch.isalnum() or ch in "._-" for ch in slug):
         return f"/project/{slug}"
-    return "/fleet"
+    return "/"
 
 
 def _plan_pair_href(subject: str) -> str:
     """`plan_without_share`'s subject is "editor/machine -> slug", and the
     untick-and-re-tick its fix names is on that project's page."""
     _, _, slug = str(subject or "").partition("->")
-    return _slug_href(slug.strip()) if slug.strip() else "/fleet"
+    return _slug_href(slug.strip()) if slug.strip() else "/"
 
 
 NOTICE_KINDS: dict[str, dict[str, Any]] = {
@@ -3389,16 +3396,16 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     # -- the collector itself ----------------------------------------------
     "collector_cycle_failed": {"severity": "error", "what":
         "one of the background jobs that keeps the fleet in step is failing",
-        "href": "/fleet#fleet-diagnostics"},
+        "href": "/#fleet-collector"},
     "collector_db_write_failed": {"severity": "error", "what":
         "the dashboard could not write to its own database",
         "href": "/admin/packages"},
     "collector_watchdog_restart": {"severity": "warn", "what":
         "the background job thread died and had to be restarted",
-        "href": "/fleet#fleet-diagnostics"},
+        "href": "/#fleet-collector"},
     "syncthing_unreachable": {"severity": "error", "what":
         "the sync engine on this server is not answering",
-        "href": "/fleet#fleet-diagnostics"},
+        "href": "/#fleet-collector"},
     # -- the tree -----------------------------------------------------------
     "projects_dir_missing": {"severity": "error", "what":
         "the projects folder on the server is missing or not mounted"},
@@ -3410,7 +3417,7 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     # be a guess, and a 404 is worse than one more click (DDIAG-8's rule).
     "file_move_detected": {"severity": "info", "what":
         "files moved by hand on the server, which the computers are now following",
-        "href": "/fleet"},
+        "href": "/"},
     "enforce_refusal": {"severity": "error", "what":
         "too many share removals in one pass, so none were applied",
         "href": _slug_href},
@@ -3422,10 +3429,10 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     # -- identity and plans --------------------------------------------------
     "duplicate_machine_id": {"severity": "error", "what":
         "one computer identity claimed by two hostnames (a cloned computer)",
-        "href": "/fleet"},
+        "href": "/"},
     "duplicate_device_id": {"severity": "error", "what":
         "one Syncthing device id claimed by two computers",
-        "href": "/fleet"},
+        "href": "/"},
     "pending_device_approval": {"severity": "warn", "what":
         "a computer has been waiting to be approved for the sync network",
         "href": "/admin/users"},
@@ -3434,7 +3441,7 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
         "href": _plan_pair_href},
     "share_without_plan": {"severity": "warn", "what":
         "a computer is being sent a project nobody ticked for it",
-        "href": "/fleet"},
+        "href": "/"},
     "editor_without_machine": {"severity": "info", "what":
         "an editor account no computer has ever reported for",
         "href": "/admin/users"},
@@ -3463,10 +3470,10 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
         "href": "/admin/packages"},
     "machine_disk_low": {"severity": "warn", "what":
         "an editor's computer is nearly out of room for footage",
-        "href": "/fleet"},
+        "href": "/"},
     "machine_trash_oversize": {"severity": "warn", "what":
         "deleted-file safety copies on a computer have grown large",
-        "href": "/fleet"},
+        "href": "/"},
     # DDIAG-3 (usability sweep 2026-09-03). A machine that has been retired,
     # reinstalled under another hostname or taken on a three-week shoot was an
     # `error` ALERT re-mailed once a day for ever. Past the give-up line it
@@ -3474,7 +3481,7 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     # ends it. Written by notices._check_forgotten_machines.
     "machine_forgotten": {"severity": "warn", "what":
         "a computer stopped reporting long enough that we gave up asking about it",
-        "href": "/fleet"},
+        "href": "/"},
     # -- the mounted apps (DDIAG-7, usability sweep 2026-09-03) ---------------
     # Each of /broll, /music, /ytdl and /cards computes a careful tri-state
     # with a sentence in `detail`, and that sentence went to the container log
@@ -3482,7 +3489,7 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     # simply disappeared, so "where has B-ROLL gone" had no answer anywhere.
     "feature_not_mounted": {"severity": "warn", "what":
         "one of the extra pages (b-roll, music, YouTube, cards) did not start on this server",
-        "href": "/fleet#fleet-diagnostics"},
+        "href": "/admin/health"},
     # -- the release channel ---------------------------------------------------
     "feed_unreachable": {"severity": "warn", "what":
         "the vendor release feed cannot be reached, so no new builds arrive",
@@ -3505,7 +3512,7 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
         "this server is running with its security checks relaxed"},
     "server_error": {"severity": "error", "what":
         "a page or an API call failed with an error",
-        "href": "/fleet#fleet-diagnostics"},
+        "href": "/admin/health"},
     # DDIAG-1 (2026-09-04). The pass ran out of its delivery budget, so some
     # of what it found was left for the next cycle. Written by alerts.run_cycle
     # (never registered without its writer, finding 1 of the 08-28 fix pass).
@@ -3541,10 +3548,10 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     # [ NOT CHECKED ] for ever.
     "db_busy": {"severity": "warn", "what":
         "a page or a companion was told to try again because the database was busy",
-        "href": "/fleet#fleet-diagnostics"},
+        "href": "/#fleet-collector"},
     "slow_write": {"severity": "warn", "what":
         "one write held the database longer than a request waits, so others waited on it",
-        "href": "/fleet#fleet-diagnostics"},
+        "href": "/#fleet-collector"},
     # dash-db-1 = dash-collector-alerts-4 (2026-09-18): a collector pass that
     # took a long time is NOT a write that held the lock - `_record_inventory`'s
     # own docstring says every filesystem walk happens BEFORE the first write,
@@ -3553,14 +3560,17 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     # Its own kind, its own words, and a pass under the threshold CLEARS it.
     "slow_poll": {"severity": "warn", "what":
         "one of this server's background passes is taking longer than a cycle",
-        "href": "/fleet#fleet-diagnostics"},
+        "href": "/#fleet-collector"},
     # dash-collector-alerts-2 (2026-09-18). Written by
     # `notices.record_moves_dropped` from the inventory pass, whose
     # `mark_notice_checked("file_move_detected")` is the evidence that the
     # pass ran - this kind shares that pass, so it is stamped there too.
     "file_moves_dropped": {"severity": "error", "what":
         "more file moves were made on the server in one go than could be followed",
-        "href": "/projects"},
+        # ui-copy-2 (2026-09-25): `/projects` is a 404 too (only
+        # /api/v1/projects exists); the project cards whose pages carry the
+        # MOVE button the fix names are on SYNC STATUS.
+        "href": "/"},
     # proxy-tiers-3's dashboard half (2026-09-18, owed here by
     # companion-media). Written by `notices._check_broll_archive`.
     "broll_archive_unreadable": {"severity": "error", "what":
@@ -5912,11 +5922,36 @@ def file_move_target_machines(
     disk holds, so an NFD spelling off a Mac matched nothing here and the
     machines holding the file outside their plan were never told."""
     targets: set[tuple[str, str]] = set()
-    for editor, machine in fetch_machine_selections(
-            conn, for_enforce=True).get(from_slug, []):
+    plans = fetch_machine_selections(conn, for_enforce=True)
+    for editor, machine in plans.get(from_slug, []):
         if machine:
             targets.add((editor, machine))
     media_key = media_rel_key(from_rel)
+    # logic-plans-4 (2026-09-25): the computers that BORROW the folder the
+    # file is in. A borrower ticks the borrowing project, not this one, and
+    # its manifest lists files only for its own ticked projects, so it was in
+    # neither set above -- yet it runs lane A over `<lender>/<sub_rel>` and
+    # never deletes, so a file it had uploaded into the shared folder came
+    # back to the old path the next pass after the move. The command names
+    # the lender's own path, which is where a borrower holds the file.
+    # Matched both ways: a move of a file inside the shared folder, and a
+    # move of the shared folder itself or of a directory above it. `missing`
+    # links count too: the folder having just moved away on the NAS is the
+    # likeliest reason a link reads missing at this moment, and the borrower
+    # still holds its copy.
+    for link in conn.execute(
+        """SELECT borrower_slug, sub_rel FROM project_links
+            WHERE lender_slug=? AND status IN ('ok', 'missing')
+              AND sub_rel IS NOT NULL AND sub_rel <> ''""",
+        (from_slug,),
+    ).fetchall():
+        sub = media_rel_key(str(link["sub_rel"])).strip("/")
+        key = media_key.strip("/")
+        if not (key == sub or key.startswith(sub + "/") or sub.startswith(key + "/")):
+            continue
+        for editor, machine in plans.get(link["borrower_slug"], []):
+            if machine:
+                targets.add((editor, machine))
     # dash-db-4 (2026-09-18): the prefix is ESCAPED. `_` is a single-character
     # wildcard in SQL LIKE and is in half the folder names this product
     # handles (`Gold_Card_Meetup`, `A_001`), and `%` is legal in a filename
@@ -6295,7 +6330,23 @@ def mark_file_move_applied(
          int(attempts or 0), None if ok else (detail or "")[:512] or None,
          int(bool(relink_pending)), move_id, editor, *names),
     )
-    return cur.rowcount > 0
+    if cur.rowcount > 0:
+        return True
+    if ok and not relink_pending and state in (None, "", "done"):
+        # bug-wire-1 (2026-09-25): the SECOND answer RES-10 sends. The first
+        # (`ok`, `relink_pending`) set applied_at, so the arm above can never
+        # match again, and "moved, Resolve not repointed yet" stayed on the
+        # project page for good after the companion relinked the clip on the
+        # next project open. Only a relink-pending success may be finished
+        # this way: a terminal failure stays exactly as it was answered.
+        cur = conn.execute(
+            f"""UPDATE file_move_targets SET relink_pending=0, detail=?
+                WHERE move_id=? AND editor_username=? AND machine IN ({placeholders})
+                  AND applied_at IS NOT NULL AND ok=1 AND relink_pending=1""",
+            ((detail or "")[:512] or None, move_id, editor, *names),
+        )
+        return cur.rowcount > 0
+    return False
 
 
 def file_moves_for_project(
@@ -6894,7 +6945,36 @@ def remove_selection(
                 WHERE editor_username=? AND machine=? AND project_slug=?""",
             (editor, ANY_MACHINE, slug),
         ).fetchone() is not None:
-            materialise_bucket(conn, editor, machine)
+            inherited = materialise_bucket(conn, editor, machine) > 0
+            known = machines_of(conn, editor)
+            if inherited and machine in known:
+                # logic-plans-1 (2026-09-25): the copy above was not enough.
+                # When this untick left the machine with ZERO own rows,
+                # selections_for_machine fell straight back to the bucket,
+                # which still held the project: the untick answered
+                # changed=true and the project stayed ticked (the grid box
+                # came back on reload), and the tray, seeing it still listed,
+                # widened to the person-wide DELETE and took it off the
+                # person's OTHER computers too. So the project leaves the
+                # bucket as well -- after every other registered, non-wired
+                # computer that still inherits the bucket has been given its
+                # own copy, so what they sync does not change. Only for a
+                # registered machine: an unknown hostname's untick must not
+                # end the inheritance a first report is still owed.
+                # And only when this machine WAS inheriting (the copy above
+                # found no own rows and copied the bucket): logic-plans-1
+                # review round, 2026-09-25. A machine with its own plan that
+                # never held the project is a no-op untick, and a no-op must
+                # not delete the bucket row and pin every other computer.
+                wired = base_machines(conn)
+                for other in known:
+                    if other != machine and (editor, other) not in wired:
+                        materialise_bucket(conn, editor, other)
+                conn.execute(
+                    """DELETE FROM selections
+                        WHERE editor_username=? AND machine=? AND project_slug=?""",
+                    (editor, ANY_MACHINE, slug),
+                )
         cur = conn.execute(
             """DELETE FROM selections
                 WHERE editor_username=? AND machine=? AND project_slug=?""",
@@ -6915,6 +6995,15 @@ def selection_placements(
     tick removed rows from two computers in two different modes, and nothing
     anywhere recorded that. `machine=None` is every computer, matching
     remove_selection's own meaning of the word.
+
+    A named machine that holds the project only by INHERITANCE (no own rows
+    at all, not wired, and the bucket holds it) is reported as holding it
+    under its own name, in the bucket's mode (logic-plans-1 review round,
+    2026-09-25). Its own rows alone read as [] there, so an untick of an
+    inherited project snapshotted before=[] and after=[]: audit_plan_change
+    dropped it as a no-op, which left no [ UNDO ] and no enforce-cycle
+    freeze for a project that really stopped syncing on that computer. The
+    undo then re-adds the row on that machine, which restores what it syncs.
     """
     q = ("SELECT machine, sync_mode FROM selections "
          "WHERE editor_username=? AND project_slug=?")
@@ -6922,8 +7011,21 @@ def selection_placements(
     if machine is not None:
         q += " AND machine=?"
         params.append(machine)
-    return [{"machine": r["machine"], "mode": r["sync_mode"]}
+    rows = [{"machine": r["machine"], "mode": r["sync_mode"]}
             for r in conn.execute(q + " ORDER BY machine", params)]
+    if (machine and machine != ANY_MACHINE and not rows
+            and (editor, machine) not in base_machines(conn)
+            and conn.execute(
+                "SELECT 1 FROM selections WHERE editor_username=? AND machine=? LIMIT 1",
+                (editor, machine)).fetchone() is None):
+        bucket = conn.execute(
+            """SELECT sync_mode FROM selections
+                WHERE editor_username=? AND machine=? AND project_slug=?""",
+            (editor, ANY_MACHINE, slug),
+        ).fetchone()
+        if bucket is not None:
+            rows = [{"machine": machine, "mode": bucket["sync_mode"]}]
+    return rows
 
 
 # ---------------------------------------------------------------- fleet audit
@@ -8292,6 +8394,32 @@ def _append_halt_history(conn: sqlite3.Connection, entry: dict[str, Any]) -> Non
     meta_set_json(conn, FLEET_HALT_HISTORY_KEY, entries[:FLEET_HALT_HISTORY_KEEP])
 
 
+def _halt_when_text(conn: sqlite3.Connection, when: str) -> str:
+    """A stored halt stamp as a person reads it, in the site's time zone.
+
+    ui-dash-admin-12 (2026-09-25): the stale [ KEEP HALTED ] refusal is shown
+    verbatim in the halt panel's error banner, and it printed the raw ISO
+    (`2026-09-25T08:14:03.512345+00:00`) beside a page that humanises every
+    other stamp. alerts is imported lazily because it imports this module;
+    any failure there (no tzdata, no site_settings table) falls back to UTC,
+    and garbage falls back to the stored text rather than hiding the refusal
+    behind a 500."""
+    try:
+        moment = parse_iso(str(when))
+    except (ValueError, TypeError):
+        return str(when)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    zone: Any = dt.timezone.utc
+    name = "UTC"
+    try:
+        from . import alerts  # noqa: PLC0415 - circular at import time
+        zone, name = alerts._zone_or_utc(conn)
+    except Exception:  # noqa: BLE001 - a refusal must still be readable
+        zone, name = dt.timezone.utc, "UTC"
+    return moment.astimezone(zone).strftime("%Y-%m-%d %H:%M ") + str(name)
+
+
 def set_fleet_halt(
     conn: sqlite3.Connection, active: bool, reason: str, by: str, now: str | None = None,
     hours: float | None = None, extend: bool = False,
@@ -8318,8 +8446,8 @@ def set_fleet_halt(
             when = prior["expires_at"] or prior["set_at"]
             if when:
                 raise ValueError(
-                    f"Syncing already started again at {when}. To stop it "
-                    f"again, give a reason."
+                    f"Syncing already started again at {_halt_when_text(conn, when)}. "
+                    f"To stop it again, give a reason."
                 )
             raise ValueError(
                 "Nothing is stopped, so there is nothing to keep stopped. "
@@ -8530,8 +8658,28 @@ def forget_machine(conn: sqlite3.Connection, editor: str, machine: str) -> dict[
             (editor, machine),
         )
         deleted[table] = cur.rowcount
+    deleted["diagnostics"] = _forget_diagnostics(conn, editor, machine)
     return {"editor": editor, "machine": machine,
             "syncthing_device_id": row["syncthing_device_id"], "deleted": deleted}
+
+
+def _forget_diagnostics(conn: sqlite3.Connection, editor: str,
+                        machine: str | None = None) -> int:
+    """bug-dash-db-3 (2026-09-25): a forgotten computer's (or person's)
+    diagnostics bundles go with it. The table is keyed `editor`/`machine`,
+    not `editor_username`, so it could not ride _MACHINE_STATE_TABLES and
+    nothing but the 30-day age bound ever deleted from it: the admin panel
+    kept a row for a computer the fleet no longer has, and a new user given
+    a departed editor's username was shown the old person's paths and log
+    lines. Unlike lane_report_history and transfer_history (kept on
+    purpose, see above), a bundle is rendered as that COMPUTER's newest
+    state, which is exactly what "forget" erases."""
+    if machine is None:
+        cur = conn.execute("DELETE FROM diagnostics WHERE editor=?", (editor,))
+    else:
+        cur = conn.execute(
+            "DELETE FROM diagnostics WHERE editor=? AND machine=?", (editor, machine))
+    return int(cur.rowcount or 0)
 
 
 def editor_device_ids(conn: sqlite3.Connection, editor: str) -> list[str]:
@@ -8577,6 +8725,9 @@ def forget_editor(conn: sqlite3.Connection, editor: str) -> dict[str, Any]:
         cur = conn.execute(f"DELETE FROM {table} WHERE editor_username=?", (editor,))
         deleted[table] = cur.rowcount + sum(
             (f or {}).get("deleted", {}).get(table, 0) for f in forgotten)
+    # bug-dash-db-3: every bundle under the person, registered machine or not.
+    deleted["diagnostics"] = _forget_diagnostics(conn, editor) + sum(
+        (f or {}).get("deleted", {}).get("diagnostics", 0) for f in forgotten)
     device_ids = [
         r["device_id"] for r in conn.execute(
             "SELECT device_id FROM devices WHERE editor_username=? AND is_server=0", (editor,))
@@ -8834,7 +8985,8 @@ def record_poll_run(
     )
 
 
-def prune(conn: sqlite3.Connection, now: str, pin: bool = False) -> None:
+def prune(conn: sqlite3.Connection, now: str, pin: bool = False,
+          jobs_cooldown_seconds: float | None = None) -> None:
     def cutoff(days: int = 0, hours: int = 0, seconds: int = 0) -> str:
         return (parse_iso(now) - dt.timedelta(days=days, hours=hours, seconds=seconds)).isoformat()
 
@@ -8962,7 +9114,13 @@ def prune(conn: sqlite3.Connection, now: str, pin: bool = False) -> None:
     # opened a page. Finished rows age out after JOBS_MAX_AGE_DAYS; queued
     # ones never do, because a job nobody can run is the thing phase 0 exists
     # to make visible.
-    expire_leases(conn, now, pin=pin)
+    # logic-ytdl-jobs-5 (2026-09-25): the operator's DASH_JOBS_COOLDOWN_SECONDS
+    # reaches this sweep too. It used to take expire_leases' 120 s default,
+    # and this is the path most leases actually end on, so a cooldown set to
+    # 0 still parked a laptop that slept mid-job.
+    expire_leases(conn, now, pin=pin, cooldown_seconds=(
+        JOB_COOLDOWN_SECONDS if jobs_cooldown_seconds is None
+        else float(jobs_cooldown_seconds)))
     prune_jobs(conn, now, JOBS_MAX_AGE_DAYS)
     purge_nas_media_for_inactive(conn)
 
@@ -9710,6 +9868,50 @@ def lane_a_skips(rel_path: str) -> bool:
     return bool(_LANE_A_SKIP_RE.match(base))
 
 
+def _proxy_manifest_capped(
+    conn: sqlite3.Connection, pair: Mapping[str, Any],
+) -> tuple[int, int] | None:
+    """(proxies held, their bytes) when this machine's per-file PROXY list
+    was capped, else None (bug-dash-db-2).
+
+    `truncated` is one flag for the whole project, set when EITHER kind hit
+    the companion's cap, so it cannot say which. The rollup `n_proxies`
+    counts every proxy on the machine's disk and the per-file rows stop at
+    the cap: more held than listed is the proxy list being the capped one."""
+    if not pair["truncated"]:
+        return None
+    held_n = int(pair["n_proxies"] or 0)
+    listed = conn.execute(
+        "SELECT COUNT(*) FROM editor_media WHERE editor_username=? AND machine=?"
+        " AND project_slug=? AND kind='proxy'",
+        (pair["editor"], pair["machine"], pair["slug"])).fetchone()[0]
+    if held_n <= int(listed):
+        return None
+    return held_n, int(pair["bytes_proxies"] or 0)
+
+
+def _original_manifest_capped(
+    conn: sqlite3.Connection, pair: Mapping[str, Any],
+) -> bool:
+    """True when this machine's per-file ORIGINAL list was capped
+    (logic-sync-truth-2, 2026-09-25): the twin of `_proxy_manifest_capped`.
+
+    The rollup `n_originals` counts every original on the machine's disk and
+    the per-file rows stop at the companion's cap, so more held than listed
+    means some originals were never named to us. Unlike the proxy case there
+    is no honest count to put in their place: the unlisted ones may or may not
+    be on the NAS, and the rollup also counts files lane A skips on purpose
+    (CR-315), so "held minus NAS" is not a lower bound either."""
+    if not pair["truncated"]:
+        return False
+    held_n = int(pair["n_originals"] or 0)
+    listed = conn.execute(
+        "SELECT COUNT(*) FROM editor_media WHERE editor_username=? AND machine=?"
+        " AND project_slug=? AND kind='original'",
+        (pair["editor"], pair["machine"], pair["slug"])).fetchone()[0]
+    return held_n > int(listed)
+
+
 def fetch_sync_backlog(
     conn: sqlite3.Connection, editor: str | None = None, files_per_group: int = 50
 ) -> list[dict[str, Any]]:
@@ -9733,6 +9935,7 @@ def fetch_sync_backlog(
     # it was behind on everything their desktop was ticked for.
     pair_q = """SELECT emp.editor_username AS editor, emp.machine,
                        emp.project_slug AS slug, emp.truncated,
+                       emp.n_proxies, emp.bytes_proxies, emp.n_originals,
                        p.id AS project_id, p.label, s.sync_mode
                 FROM editor_media_project emp
                 JOIN selections s ON s.editor_username = emp.editor_username
@@ -9770,6 +9973,7 @@ def fetch_sync_backlog(
 
     out: list[dict[str, Any]] = []
     for pair in conn.execute(pair_q, params):
+        up_uncertain = False
         specs = [
             ("down", "proxy",
              (pair["project_id"], pair["editor"], pair["machine"], pair["slug"]),
@@ -9794,7 +9998,14 @@ def fetch_sync_backlog(
                         if not lane_a_skips(r[0])]
                 n_files = len(owed)
                 total_bytes = sum(int(size or 0) for _name, size in owed)
-                if not n_files:
+                # logic-sync-truth-2 (2026-09-25): with the ORIGINALS list
+                # capped, an empty diff says nothing about the originals the
+                # companion never listed, and dropping the row here is what
+                # let "Safe to close" read true over footage that exists on
+                # one disk only. The row stays, flagged `uncertain`, even at
+                # zero files; the count is only what the listed part owes.
+                up_uncertain = _original_manifest_capped(conn, pair)
+                if not n_files and not up_uncertain:
                     continue
                 files = [{"name": name, "size": size}
                          for name, size in owed[:files_per_group]]
@@ -9804,6 +10015,30 @@ def fetch_sync_backlog(
                     continue
                 files = [{"name": r[0], "size": r[1]}
                          for r in conn.execute(files_q, (*args, files_per_group))]
+                capped = _proxy_manifest_capped(conn, pair)
+                if capped is not None:
+                    # bug-dash-db-2 (2026-09-25): the companion lists at most
+                    # MAX_PER_FILE_ENTRIES proxies per project, so every NAS
+                    # proxy past the listed ones had no editor_media row and
+                    # was a download owed FOR EVER on a machine holding them
+                    # all (CR-314 fixed only the combined-kind cap). With the
+                    # list capped, the per-file diff cannot tell a missing
+                    # proxy from an unlisted one, so the count comes from the
+                    # exact rollup the manifest still sends, and no names are
+                    # shown (any name here could be one the machine holds).
+                    # NAS minus held is a LOWER bound; a phantom that never
+                    # clears was the worse error.
+                    nas_n, nas_bytes = conn.execute(
+                        "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM nas_media"
+                        " WHERE project_id=? AND kind='proxy'",
+                        (pair["project_id"],)).fetchone()
+                    held_n, held_bytes = capped
+                    n_files = min(int(n_files), max(0, int(nas_n) - held_n))
+                    if not n_files:
+                        continue
+                    total_bytes = min(int(total_bytes),
+                                      max(0, int(nas_bytes) - held_bytes))
+                    files = []
             out.append({
                 "editor": pair["editor"], "machine": pair["machine"],
                 "slug": pair["slug"], "label": pair["label"],
@@ -9811,8 +10046,16 @@ def fetch_sync_backlog(
                 "direction": direction, "kind": kind,
                 "n_files": int(n_files), "bytes": int(total_bytes),
                 "files": files, "truncated": int(n_files) > len(files),
-                # The manifest itself was capped: the diff may UNDERCOUNT.
+                # The manifest itself was capped. For an UPLOAD that means
+                # the diff may undercount (unlisted originals are not in it);
+                # for a DOWNLOAD the count above is the rollup estimate
+                # (bug-dash-db-2), so the wording belongs to `direction`.
                 "manifest_truncated": bool(pair["truncated"]),
+                # logic-sync-truth-2: the listed diff cannot say whether this
+                # machine owes uploads beyond `n_files`. Optional key: a
+                # reader that ignores it sees the old row (or no row at all
+                # when n_files is 0, the pre-fix behaviour).
+                "uncertain": bool(direction == "up" and up_uncertain),
             })
     return out
 
@@ -10305,6 +10548,7 @@ def list_jobs(
 
 def queued_jobs(
     conn: sqlite3.Connection, kinds: Iterable[str] | None = None, limit: int = 200,
+    ids: Iterable[int] | None = None,
 ) -> list[dict[str, Any]]:
     """The candidates, in the order a scheduler should consider them: highest
     priority first, then oldest -- so a job that has been waiting is not
@@ -10316,7 +10560,21 @@ def queued_jobs(
     whose machine was asleep came back on the queue when the lease expired
     and was handed to the next capable computer. The belt to expire_leases's
     braces: even a row that reaches `queued` carrying the flag is invisible
-    here."""
+    here.
+
+    `limit` is PER KIND (bug-dash-db-1, 2026-09-25). It was one window over
+    the whole queue, and a queued job nobody can run is never claimed, never
+    spends its retry budget and (whisper) never pins -- so 200 GPU jobs
+    queued while the one GPU box was off for the week held the whole window,
+    and the peaks and audio-extract jobs behind them were never offered to
+    the base rig that could run them, while `explain` (which looks a job up
+    by id) called them schedulable. A kind's own backlog can still hold its
+    own window; it can no longer hold anyone else's. The result stays one
+    list in scheduler order, at most `limit` rows per kind.
+
+    `ids` narrows to those rows and skips the window: a caller that already
+    knows which jobs it means (a claim of an offered id) must be able to
+    reach one however deep in the queue it sits."""
     sql = "SELECT * FROM jobs WHERE state=? AND cancel_requested_at IS NULL"
     args: list[Any] = [JOB_QUEUED]
     kinds = list(kinds) if kinds is not None else None
@@ -10325,9 +10583,31 @@ def queued_jobs(
             return []
         sql += " AND kind IN (%s)" % ",".join("?" * len(kinds))
         args.extend(kinds)
-    sql += " ORDER BY priority DESC, id ASC LIMIT ?"
-    args.append(max(1, min(int(limit), 1000)))
-    return [job_row(r) for r in conn.execute(sql, args)]  # type: ignore[misc]
+    if ids is not None:
+        wanted = sorted({int(i) for i in ids})
+        if not wanted:
+            return []
+        rows: list[dict[str, Any]] = []
+        # Chunked under SQLite's host-parameter ceiling (999 on older builds).
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start:start + 500]
+            rows.extend(job_row(r) for r in conn.execute(  # type: ignore[misc]
+                sql + " AND id IN (%s)" % ",".join("?" * len(chunk)),
+                args + chunk))
+        rows.sort(key=lambda j: (-int(j.get("priority") or 0), int(j["id"])))
+        return rows
+    per_kind = max(1, min(int(limit), 1000))
+    sql = ("SELECT * FROM (SELECT *, ROW_NUMBER() OVER ("
+           "PARTITION BY kind ORDER BY priority DESC, id ASC) AS _kind_rank "
+           "FROM (" + sql + ")) WHERE _kind_rank <= ? "
+           "ORDER BY priority DESC, id ASC")
+    args.append(per_kind)
+    out: list[dict[str, Any]] = []
+    for r in conn.execute(sql, args):
+        job = job_row(r)  # type: ignore[misc]
+        job.pop("_kind_rank", None)
+        out.append(job)
+    return out
 
 
 # How far back the JOBS page's [ SHOW FINISHED ] list and the abandoned count
@@ -10582,7 +10862,15 @@ def claim_next_job(
     allowed = None if allowed_ids is None else {int(i) for i in allowed_ids}
     wanted = None if ids is None else {int(i) for i in ids}
     caps = None if max_running is None else dict(max_running)
-    for job in queued_jobs(conn, kinds=kinds):
+    # bug-dash-db-1 (2026-09-25): an offered id is looked up BY ID, not by
+    # scanning the head of the queue -- an id past the window used to be
+    # unclaimable even when the scheduler had offered it by name.
+    narrow: set[int] | None = None
+    if allowed is not None:
+        narrow = set(allowed)
+    if wanted is not None:
+        narrow = set(wanted) if narrow is None else narrow & wanted
+    for job in queued_jobs(conn, kinds=kinds, ids=narrow):
         if allowed is not None and int(job["id"]) not in allowed:
             continue
         if wanted is not None and int(job["id"]) not in wanted:

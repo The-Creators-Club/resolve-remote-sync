@@ -98,6 +98,16 @@ up at the path it had before the burst started. A clip that is no longer in
 the media pool is reported as skipped, never guessed at. The undo itself is
 not journalled, so pressing it twice does not redo the change.
 
+**A journal that has been undone is stamped** (`undone_at`, logic-resolve-2,
+2026-09-25) and the tray's undo skips it, so a second press puts back the
+change BEFORE it rather than replaying the same file and reporting that the
+clips "are no longer in this project's media pool". When every journal for
+the open project has been undone the button says so. A clip found at its OLD
+path is counted as already back, never as gone. A FIX ALL is one journal
+however long its copies take: `fixer.fix_clip` runs inside
+`resolve_journal.hold_sessions()`, so the two-minute quiet gap is measured
+between clips, not across a multi-GB copy.
+
 **The journal and the open project must match** (comp-resolve-2, 2026-08-21).
 This used to replay the newest journal of *any* project against whatever
 project happened to be open, matching clips by file path alone - and every

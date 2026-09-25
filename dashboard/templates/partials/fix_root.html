@@ -12,13 +12,23 @@
      whichever reported last with nothing on the page saying which. Plain
      links, not hx-get: the choice has to survive the 10s poll, and the poll
      URL is built from the page's own query string. #}
+  {# ui-dash-main-4 (2026-09-25): the links carry the ?as= the page is
+     viewed under. Without it the new page read the ADMIN'S queue, and
+     _queue_machine dropped the editor's computer as "not one of yours", so
+     the owner checking leso's laptop landed on his own open Resolve project.
+     Same test as fleet.html's poll URL, case-folded like _as_qs.
+     ui-dash-main-5 (2026-09-25): .fix-root-machines wraps, because a Mac's
+     `Name-MacBook-Pro-2024.local` pushed the second chip past a phone's
+     edge, where nothing scrolls sideways to reach it. #}
   {% if queue.machines and queue.machines | length > 1 %}
-  <div class="mono-sm" style="margin-top:0.3rem">
+  {% set fix_as = queue.editor if (session_user and queue.editor and queue.editor | lower != session_user | lower) else '' %}
+  {% set fix_as_qs = ('as=' ~ (fix_as | urlencode)) if fix_as else '' %}
+  <div class="mono-sm fix-root-machines" style="margin-top:0.3rem">
     <span class="muted">computer:</span>
-    <a class="chip {{ '' if queue_machine | default('', true) else 'amber' }}" href="/">[ LAST TO REPORT ]</a>
+    <a class="chip {{ '' if queue_machine | default('', true) else 'amber' }}" href="/{{ ('?' ~ fix_as_qs) if fix_as_qs }}">[ LAST TO REPORT ]</a>
     {% for m in queue.machines %}
       <a class="chip {{ 'amber' if (queue_machine | default('', true)) == m else '' }}"
-         href="/?machine={{ m | urlencode }}">[ {{ m }} ]</a>
+         href="/?machine={{ m | urlencode }}{{ ('&' ~ fix_as_qs) if fix_as_qs }}">[ {{ m }} ]</a>
     {% endfor %}
   </div>
   {% endif %}

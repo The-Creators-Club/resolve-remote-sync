@@ -28,7 +28,7 @@ Flow (Back/Next through a single window, frames swapped in place):
                     dashboard (on the tailnet) is reachable. "Check
                     connection" gates Next. (winget install on Windows,
                     download page on macOS.)
-    4. Sign in   -- TrueNAS username/password; verify_account() is the
+    4. Sign in   -- the account's username/password; verify_account() is the
                     install gate. Failure does NOT advance.
     5. Install   -- clean-slate removal of every previous-version trace
                     (steps.build_cleanup_plan/execute_cleanup, or their
@@ -98,11 +98,38 @@ def _entry(parent, textvariable, width=40, show=None):
         textvariable=textvariable, font=theme.mono(10), width=width,
         bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
         relief="flat", highlightthickness=1,
-        highlightbackground=theme.RED_DIM, highlightcolor=theme.RED,
+        # ui-onboarding-9 (2026-09-25): an input outline must reach 3:1 on BG and FIELD; RED_DIM
+        # measured 1.86:1 / 1.69:1. theme.FIELD_BORDER is grey so the RED focus outline still reads.
+        highlightbackground=theme.FIELD_BORDER, highlightcolor=theme.RED,
     )
     if show is not None:
         kwargs["show"] = show
     return tk.Entry(parent, **kwargs)
+
+
+def _button(parent, text, command, primary: bool = True):
+    """theme.neon_button, usable from the keyboard.
+
+    ui-onboarding-8 (2026-09-25): neon_button is drawn with
+    highlightthickness=0, so Tab moved focus between buttons with nothing on
+    screen saying where it was, and a tk.Button answers Space, never Enter.
+    The ring is invisible until the button has focus (highlightbackground is
+    the page colour). invoke() on a disabled button does nothing, so Enter
+    cannot press a NEXT the page has disabled. The companion's own windows
+    share neon_button; its focus ring is c-ui's (theme.py)."""
+    btn = theme.neon_button(tk, parent, text, command, primary=primary)
+    btn.config(takefocus=1, highlightthickness=1,
+               highlightbackground=theme.BG, highlightcolor=theme.TEXT)
+    for key in ("<Return>", "<KP_Enter>"):
+        btn.bind(key, lambda _e, b=btn: b.invoke())
+    return btn
+
+
+def _bind_enter(widget, action: Callable[[], None]) -> None:
+    """Enter in a form field presses the page's primary action
+    (ui-onboarding-8): typing a password and pressing Enter did nothing."""
+    for key in ("<Return>", "<KP_Enter>"):
+        widget.bind(key, lambda _e: action())
 
 
 class OnboardWizard:
@@ -124,7 +151,12 @@ class OnboardWizard:
         self._start_ui_pump()
 
         # -- accumulated state --------------------------------------------
-        self.role_var = tk.StringVar(value="editor")
+        # logic-onboarding-1 (2026-09-25): a re-run starts from this
+        # computer's own config.toml `mode`. The account's role no longer
+        # corrects the radio after sign-in (see steps.effective_install_role),
+        # so a hard-coded "editor" here would make the routine re-run on a
+        # wired machine default to the install that remaps the tree drive.
+        self.role_var = tk.StringVar(value=steps.initial_install_role())
         self.dashboard_url_var = tk.StringVar(value=steps.DEFAULT_DASHBOARD_URL)
         self.username_var = tk.StringVar()
         self.password_var = tk.StringVar()
@@ -134,10 +166,14 @@ class OnboardWizard:
         self.verified_username: Optional[str] = None
         self.identity_token: Optional[str] = None
         self.verified_role: Optional[str] = None
-        # What the radio said before verify_account overrode it, kept only so
-        # the install page can explain the switch (see show_install / B20).
-        self.picked_role: Optional[str] = None
         self.report_token: str = ""
+        # logic-onboarding-2 (2026-09-25): whether this install has to ask for
+        # a per-editor fleet key (the dashboard retired the shared one), and
+        # what was pasted. See steps.fleet_token_needed.
+        self.report_token_kind: Optional[str] = None
+        self.needs_fleet_token = False
+        self.fleet_token_var = tk.StringVar()
+        self.fleet_token_error_lbl = None
         # The dashboard's site manifest (GET /api/v1/site), fetched once the
         # sign-in proves we can reach it. Everything tenant-shaped this
         # installer used to have compiled in -- the NAS Syncthing device ID,
@@ -148,6 +184,9 @@ class OnboardWizard:
         self.bootstrap_output: str = ""
         self.device_id: Optional[str] = None
         self.pub_key: str = ""
+        # logic-onboarding-5: whether _offer_ssh_key got the key onto the
+        # dashboard, so the finish page does not ask for it a second time.
+        self.ssh_key_sent = False
         # Non-fatal problems that still mean "this machine is NOT ready":
         # a hard-capability miss in the bootstrap (no rclone, no Syncthing,
         # no device ID) or a missing SSH key. The Finish page reports them
@@ -157,7 +196,16 @@ class OnboardWizard:
         self._local_root_trace: Optional[str] = None
 
         self._last_back_btn = None
+        self._last_nav_bar = None
         self._install_back_btn = None
+        # ui-onboarding-12 (2026-09-25): one request per button at a time,
+        # keyed on the PAGE that asked (None when idle). A boolean kept a
+        # revisited page's button dead until an abandoned request came back,
+        # printing "still verifying..." forever (review round).
+        self._verify_page = None
+        self._verify_btn = None
+        self._check_page = None
+        self._check_btn = None
         # What the editor typed before normalise_dashboard_url put a scheme on
         # it, kept only so the next page can show the rewrite (OPS-6).
         self._url_rewritten_from: Optional[str] = None
@@ -175,6 +223,13 @@ class OnboardWizard:
         # (destroy everything, silently) applies.
         self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
         self._interrupted = steps.read_install_breadcrumb()
+        # ui-onboarding-3 (2026-09-25): FINISH THE INSTALL resumes the run that
+        # was interrupted, so its radio starts on that run's role. A first run
+        # closed before ensure_config has no config.toml `mode` to seed from,
+        # and a wired machine landed on the remote-editor install.
+        interrupted_role = steps.breadcrumb_role(self._interrupted)
+        if interrupted_role:
+            self.role_var.set(interrupted_role)
 
         # The licence comes before everything, including the welcome text --
         # it is what the editor is agreeing to by installing at all
@@ -197,6 +252,50 @@ class OnboardWizard:
         self.page_frame = frame
         return frame
 
+    def _pack_bottom_bar(self, frame, bar) -> None:
+        """Pack a page's button bar so it is the LAST thing to lose space.
+
+        ui-onboarding-1 (2026-09-25): every page packed its bar last, with
+        side="bottom", and pack hands out space in packing order, so a page
+        taller than the fixed 660x560 window lost its bar first. Measured: the
+        install page's BACK unmapped, the finish page's CLOSE squeezed to 1 px
+        with three real-length warnings and nine widgets gone with five, on
+        the page whose instruction is "send them this list". `before=` puts
+        the bar at the FRONT of the packing order whatever order the page was
+        built in, so the expanding middle (the log box, the licence text)
+        shrinks instead; _fit_window then grows the window to what the page
+        asked for, as far as the screen allows."""
+        slaves = [w for w in frame.pack_slaves() if w is not bar]
+        if slaves:
+            bar.pack(side="bottom", fill="x", pady=(16, 0), before=slaves[0])
+        else:
+            bar.pack(side="bottom", fill="x", pady=(16, 0))
+        try:
+            self.root.after_idle(self._fit_window)
+        except Exception:
+            pass  # the root is going away; nothing to size
+
+    def _fit_window(self) -> None:
+        """Grow (never shrink) the window to the current page's requested
+        size, capped by the screen. ui-onboarding-1: the window is resizable,
+        but nothing told an editor to drag it, and the clipped page gave no
+        sign that anything was below the edge."""
+        try:
+            self.root.update_idletasks()
+            # Height only: every label wraps at 560 px, so nothing is clipped
+            # sideways, and the Text widgets' default 80-column request would
+            # otherwise widen the window by a third for no reason.
+            base_w, base_h = (int(n) for n in WINDOW_SIZE.split("x"))
+            cur_w = max(self.root.winfo_width(), base_w)
+            cur_h = max(self.root.winfo_height(), base_h)
+            need_h = self.root.winfo_reqheight()
+            max_h = max(base_h, self.root.winfo_screenheight() - 80)
+            target_h = min(max(cur_h, need_h), max_h)
+            if target_h > cur_h:
+                self.root.geometry(f"{cur_w}x{target_h}")
+        except (tk.TclError, ValueError):
+            pass
+
     def _nav_bar(self, frame, back: Optional[Callable] = None, next_: Optional[Callable] = None,
                  next_label: str = "NEXT", next_enabled: bool = True):
         """Returns the NEXT widget (or None when the page has no NEXT). The
@@ -205,17 +304,23 @@ class OnboardWizard:
         reading it off this method's return value silently got None on exactly
         the page that has no NEXT button."""
         bar = tk.Frame(frame, bg=theme.BG)
-        bar.pack(side="bottom", fill="x", pady=(16, 0))
+        self._pack_bottom_bar(frame, bar)
+        self._last_nav_bar = bar
         self._last_back_btn = None
         if back is not None:
-            back_btn = theme.neon_button(tk, bar, "BACK", back, primary=False)
+            back_btn = _button(bar, "BACK", back, primary=False)
             back_btn.pack(side="left")
             self._last_back_btn = back_btn
         if next_ is not None:
-            btn = theme.neon_button(tk, bar, next_label, next_ if next_enabled else (lambda: None), primary=True)
+            btn = _button(bar, next_label, next_ if next_enabled else (lambda: None), primary=True)
             btn.pack(side="right")
             if not next_enabled:
                 btn.config(state="disabled", fg=theme.MUTED)
+            else:
+                # ui-onboarding-8 (2026-09-25): nothing had focus when a page
+                # opened, so Enter did nothing anywhere. Form pages move it on
+                # to their first field after this.
+                btn.focus_set()
             return btn
         return None
 
@@ -276,21 +381,24 @@ class OnboardWizard:
         if isinstance(self._interrupted, dict):
             started = str(self._interrupted.get("started_at") or "")
         when = f"\n\nIt started at {started}." if started else ""
+        # ui-onboarding-3 (2026-09-25): role- and platform-aware. It said "no
+        # <letter> drive" to a wired machine and to a Mac, neither of whose
+        # installs ever takes the drive down.
         _label(frame,
-               "This computer was part-way through an install when the wizard\n"
-               "closed. Until it is finished, there is no CCSync app and no\n"
-               f"{self._drive_letter()} drive on this machine, so nothing is syncing."
-               f"{when}\n\n"
+               steps.interrupted_install_message(
+                   self._drive_letter(), steps.breadcrumb_role(self._interrupted),
+                   IS_MACOS)
+               + f"{when}\n\n"
                "Finishing the install is safe and is the only thing that fixes\n"
                "it. You will be asked for your sign-in again.",
                wraplength=560).pack(anchor="w", pady=(0, 14))
 
         bar = tk.Frame(frame, bg=theme.BG)
-        bar.pack(side="bottom", fill="x", pady=(16, 0))
-        theme.neon_button(tk, bar, "CLOSE", self.root.destroy,
-                          primary=False).pack(side="left")
-        theme.neon_button(tk, bar, "FINISH THE INSTALL", self._on_finish_the_install,
-                          primary=True).pack(side="right")
+        self._pack_bottom_bar(frame, bar)
+        _button(bar, "CLOSE", self.root.destroy,
+                primary=False).pack(side="left")
+        _button(bar, "FINISH THE INSTALL", self._on_finish_the_install,
+                primary=True).pack(side="right")
 
     def _on_finish_the_install(self) -> None:
         # The breadcrumb is NOT cleared here: it is cleared when an install
@@ -307,7 +415,9 @@ class OnboardWizard:
         try:
             close_anyway = messagebox.askyesno(
                 "CCSync onboarding",
-                steps.install_close_warning(self._drive_letter()),
+                # ui-onboarding-3: the role this install is running as.
+                steps.install_close_warning(self._drive_letter(),
+                                            self._effective_role(), IS_MACOS),
                 default="no", icon="warning", parent=self.root)
         except Exception:
             log.exception("could not ask about closing mid-install -- staying open")
@@ -354,15 +464,18 @@ class OnboardWizard:
                "is changed.",
                wraplength=560).pack(anchor="w", pady=(0, 10))
 
+        # ui-onboarding-9 (2026-09-25): a box outline, same contrast rule as _entry.
         box = tk.Frame(frame, bg=theme.FIELD, highlightthickness=1,
-                       highlightbackground=theme.RED_DIM)
+                       highlightbackground=theme.FIELD_BORDER)
         box.pack(fill="both", expand=True, pady=(0, 4))
         text_widget = tk.Text(box, bg=theme.FIELD, fg=theme.TEXT, font=theme.mono(8),
                               relief="flat", wrap="word", height=16,
                               insertbackground=theme.RED)
         scroll = tk.Scrollbar(box, command=text_widget.yview)
         text_widget.configure(yscrollcommand=scroll.set)
-        text_widget.insert("1.0", steps.EULA_TEXT or (
+        # ui-onboarding-2 (2026-09-25): the display form (no internal draft
+        # comment, no markdown, no em dashes); the raw file is what is hashed.
+        text_widget.insert("1.0", steps.EULA_DISPLAY_TEXT or (
             "The licence document is missing from this build of the installer.\n\n"
             "Ask your administrator for a copy before continuing -- accepting\n"
             "here records that you agreed to an agreement this installer could\n"
@@ -378,11 +491,11 @@ class OnboardWizard:
                fg=theme.MUTED, font=theme.mono(9)).pack(anchor="w", pady=(6, 0))
 
         bar = tk.Frame(frame, bg=theme.BG)
-        bar.pack(side="bottom", fill="x", pady=(16, 0))
-        theme.neon_button(tk, bar, "DECLINE", self._on_eula_decline,
-                          primary=False).pack(side="left")
-        theme.neon_button(tk, bar, "ACCEPT", self._on_eula_accept,
-                          primary=True).pack(side="right")
+        self._pack_bottom_bar(frame, bar)
+        _button(bar, "DECLINE", self._on_eula_decline,
+                primary=False).pack(side="left")
+        _button(bar, "ACCEPT", self._on_eula_accept,
+                primary=True).pack(side="right")
 
     def _on_eula_decline(self) -> None:
         log.info("licence DECLINED -- closing the installer without changing anything")
@@ -406,27 +519,9 @@ class OnboardWizard:
     def show_welcome(self) -> None:
         frame = self._new_page()
         _heading(frame, "WELCOME")
-        if IS_MACOS:
-            welcome_text = (
-                "This installer sets up (or refreshes) this Mac for shared\n"
-                "editing: it removes every trace of older CCSync versions,\n"
-                "installs the sync tools and the current companion app (which\n"
-                "updates itself from the dashboard from now on), signs it in,\n"
-                f"and points DaVinci Resolve's {self._drive_letter()}:\\ mapping at your local copy\n"
-                "of the project tree.\n\n"
-                "You'll need the TrueNAS username and password your admin set\n"
-                "up for you -- nothing else. Safe to re-run any time."
-            )
-        else:
-            welcome_text = (
-                "This installer sets up (or refreshes) this machine for shared\n"
-                "editing: it removes every trace of older CCSync versions,\n"
-                "remounts the project drive, installs the current companion app\n"
-                "(which updates itself from the dashboard from now on), and\n"
-                "signs it in.\n\n"
-                "You'll need the TrueNAS username and password your admin set\n"
-                "up for you -- nothing else. Safe to re-run any time."
-            )
+        # ui-onboarding-6 (2026-09-25): the words live in steps.welcome_text,
+        # which names the dashboard address the next page requires.
+        welcome_text = steps.welcome_text(self._drive_letter(), IS_MACOS)
         _label(frame, welcome_text, wraplength=560).pack(anchor="w", pady=(0, 14))
 
         try:
@@ -499,11 +594,17 @@ class OnboardWizard:
         # given by their admin besides their account.
         _label(adv, "dashboard url (REQUIRED -- your admin gives you this):",
                fg=theme.MUTED, font=theme.mono(9)).pack(anchor="w")
-        _entry(adv, self.dashboard_url_var, width=44).pack(anchor="w", pady=(4, 0))
+        url_entry = _entry(adv, self.dashboard_url_var, width=44)
+        url_entry.pack(anchor="w", pady=(4, 0))
         self.role_status_lbl = _label(frame, "", fg=theme.RED, wraplength=560)
         self.role_status_lbl.pack(anchor="w", pady=(6, 0))
 
         self._nav_bar(frame, back=self.show_welcome, next_=self._on_role_next, next_label="NEXT")
+        # ui-onboarding-8 (2026-09-25): Enter in the url field is NEXT, and an
+        # empty (required) field is where the cursor starts.
+        _bind_enter(url_entry, self._on_role_next)
+        if not self.dashboard_url_var.get().strip():
+            url_entry.focus_set()
 
     def _wrong_profile_refusal(self) -> bool:
         """True when this page drew a refusal instead of the role question.
@@ -534,8 +635,8 @@ class OnboardWizard:
                fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(
             anchor="w", pady=(0, 10))
         bar = tk.Frame(frame, bg=theme.BG)
-        bar.pack(side="bottom", fill="x", pady=(16, 0))
-        theme.neon_button(tk, bar, "CLOSE", self.root.destroy, primary=True).pack(side="right")
+        self._pack_bottom_bar(frame, bar)
+        _button(bar, "CLOSE", self.root.destroy, primary=True).pack(side="right")
         return True
 
     def _site(self) -> Optional[dict]:
@@ -632,11 +733,12 @@ class OnboardWizard:
                        "sent you, then come back here and check the connection.",
                wraplength=560).pack(anchor="w", pady=(0, 14))
 
-        installed = steps.tailscale_installed()
-        install_status = "Tailscale: INSTALLED" if installed else "Tailscale: NOT INSTALLED"
-        install_color = theme.GREEN if installed else theme.AMBER
-        status_lbl = _label(frame, install_status, fg=install_color, font=theme.mono(10, bold=True))
-        status_lbl.pack(anchor="w", pady=(0, 10))
+        # ui-onboarding-4 (2026-09-25): kept on self and re-read after the
+        # winget install and on every CHECK CONNECTION. It was computed once
+        # at render, so it said NOT INSTALLED above a working Tailscale.
+        self.ts_status_lbl = _label(frame, "", font=theme.mono(10, bold=True))
+        self.ts_status_lbl.pack(anchor="w", pady=(0, 10))
+        self._refresh_tailscale_status()
 
         btn_row = tk.Frame(frame, bg=theme.BG)
         btn_row.pack(anchor="w", pady=(0, 14))
@@ -644,22 +746,26 @@ class OnboardWizard:
             # winget is Windows-only; on macOS the download page (a signed
             # .pkg, or the App Store build) is the supported route -- the
             # fleet's Macs do not have Homebrew.
-            theme.neon_button(tk, btn_row, "INSTALL TAILSCALE (winget)",
-                               self._on_install_tailscale, primary=False).pack(side="left", padx=(0, 12))
-        theme.neon_button(tk, btn_row, "OPEN DOWNLOAD PAGE",
-                           lambda: webbrowser.open(TAILSCALE_DOWNLOAD_URL),
-                           primary=False).pack(side="left")
+            _button(btn_row, "INSTALL TAILSCALE (winget)",
+                    self._on_install_tailscale, primary=False).pack(side="left", padx=(0, 12))
+        _button(btn_row, "OPEN DOWNLOAD PAGE",
+                lambda: webbrowser.open(TAILSCALE_DOWNLOAD_URL),
+                primary=False).pack(side="left")
 
         self._dashboard_url_note(frame)
 
         self.conn_status_lbl = _label(frame, "", fg=theme.MUTED, wraplength=560)
         self.conn_status_lbl.pack(anchor="w", pady=(6, 6))
 
-        theme.neon_button(tk, frame, "CHECK CONNECTION", self._on_check_connection,
-                           primary=True).pack(anchor="w", pady=(4, 4))
+        self._check_btn = _button(frame, "CHECK CONNECTION", self._on_check_connection,
+                                  primary=True)
+        self._check_btn.pack(anchor="w", pady=(4, 4))
 
         self._next_btn = self._nav_bar(frame, back=self.show_role, next_=self.show_signin,
                                         next_label="NEXT", next_enabled=False)
+        # ui-onboarding-8 (2026-09-25): NEXT starts disabled here, so the
+        # page's primary action is CHECK CONNECTION.
+        self._check_btn.focus_set()
 
     def _dashboard_url_note(self, frame) -> None:
         """The address every check on this page uses, and what it was typed as
@@ -678,46 +784,99 @@ class OnboardWizard:
                    fg=theme.AMBER, font=theme.mono(9), wraplength=560).pack(
                 anchor="w", pady=(0, 4))
 
+    def _refresh_tailscale_status(self, installed: Optional[bool] = None) -> None:
+        """INSTALLED / NOT INSTALLED, from the disk, now (ui-onboarding-4)."""
+        if installed is None:
+            try:
+                installed = steps.tailscale_installed()
+            except Exception:
+                installed = False
+        try:
+            self.ts_status_lbl.config(
+                text="Tailscale: INSTALLED" if installed else "Tailscale: NOT INSTALLED",
+                fg=theme.GREEN if installed else theme.AMBER)
+        except (tk.TclError, AttributeError):
+            pass  # the page moved on
+
     def _on_install_tailscale(self) -> None:
         self.conn_status_lbl.config(text="installing via winget… this opens its own window", fg=theme.AMBER)
 
         def _worker():
             import subprocess
+            returncode = None
             try:
-                subprocess.run(
+                result = subprocess.run(
                     ["winget", "install", "--id", "Tailscale.Tailscale", "-e",
                      "--accept-source-agreements", "--accept-package-agreements"],
                 )
-                msg, color = "winget install finished -- sign in to Tailscale, then Check connection", theme.GREEN
+                returncode = getattr(result, "returncode", None)
+                installed = steps.tailscale_installed()
+                # ui-onboarding-4: success is Tailscale on disk afterwards,
+                # never merely "winget returned" (a cancelled UAC prompt was
+                # reported in green).
+                msg, ok = steps.winget_tailscale_outcome(returncode, installed)
+                color = theme.GREEN if ok else theme.RED
             except Exception as exc:
-                msg, color = f"winget install failed: {exc} -- try the download page instead", theme.RED
-            self._safe_after(lambda: self.conn_status_lbl.config(text=msg, fg=color))
+                installed = False
+                msg, color = f"winget install failed: {exc}. Try OPEN DOWNLOAD PAGE instead.", theme.RED
+
+            def _ui():
+                self._refresh_tailscale_status(installed)
+                self.conn_status_lbl.config(text=msg, fg=color)
+            self._safe_after(_ui)
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_check_connection(self) -> None:
+        # ui-onboarding-12 (2026-09-25): one check at a time. Two in flight
+        # raced each other's verdicts onto the one status line, and a slow
+        # "not joined" could land after a fast "connected". Keyed on the page:
+        # a check started on a page the editor has since left (BACK, then
+        # NEXT again builds a NEW page) does not block this one; its verdict
+        # is dropped when it lands.
+        if self._check_page is not None and self._check_page is self.page_frame:
+            return
         if not self.dashboard_url_var.get().strip():
             self.conn_status_lbl.config(
                 text="no dashboard url set -- go Back and enter the one your admin gave you",
                 fg=theme.RED)
             return
         self.conn_status_lbl.config(text="checking…", fg=theme.MUTED)
+        page = self.page_frame
+        self._check_page = page
+        # Read on the Tk thread: the worker never touches a Tk variable.
+        url = self.dashboard_url_var.get()
+        check_btn = self._check_btn
+        self._set_busy(check_btn, True)
 
         def _worker():
-            up = steps.tailscale_up()
-            # OPS-6 (2026-09-04): the probe, not the boolean. "wait a few
-            # seconds and retry" was printed for a typo'd hostname too, which
-            # is a wait that never ends -- and for a missing scheme, which is
-            # not a network problem at all.
-            probe = (steps.dashboard_probe(self.dashboard_url_var.get()) if up
-                     else {"ok": False, "message": ""})
+            try:
+                installed = steps.tailscale_installed()
+                up = steps.tailscale_up()
+                # OPS-6 (2026-09-04): the probe, not the boolean. "wait a few
+                # seconds and retry" was printed for a typo'd hostname too, which
+                # is a wait that never ends -- and for a missing scheme, which is
+                # not a network problem at all.
+                probe = (steps.dashboard_probe(url) if up
+                         else {"ok": False, "message": ""})
+            except Exception as exc:  # noqa: BLE001 - never strand the busy flag
+                log.exception("the connection check raised")
+                installed, up = None, True  # None: the status line re-reads the disk
+                probe = {"ok": False, "message": f"the check itself failed: {exc}"}
 
             def _ui():
+                if self._check_page is page:
+                    self._check_page = None
+                if self.page_frame is not page:
+                    return  # ui-onboarding-12: the editor has left this page
+                self._set_busy(check_btn, False)
+                self._refresh_tailscale_status(installed)
                 if up and probe.get("ok"):
                     self.conn_status_lbl.config(text="connected: the dashboard is answering",
                                                 fg=theme.GREEN)
                     if self._next_btn is not None:
                         self._next_btn.config(state="normal", fg=theme.RED, command=self.show_signin)
+                        self._next_btn.focus_set()  # ui-onboarding-8
                 elif up:
                     self.conn_status_lbl.config(
                         text=str(probe.get("message") or "the dashboard is not reachable yet"),
@@ -737,7 +896,11 @@ class OnboardWizard:
     def show_signin(self) -> None:
         frame = self._new_page()
         _heading(frame, "STEP 3: SIGN IN")
-        _label(frame, "Enter the TrueNAS username and password your admin set up\n"
+        # logic-onboarding-4 (2026-09-25): no storage vendor's name. "TrueNAS"
+        # is false on a Synology site and on DASH_AUTH_METHOD=local, where the
+        # account is a dashboard one and an editor sent looking for a NAS
+        # login finds none (site.server_phrase's rule, SYNC-114 / APP-10).
+        _label(frame, "Enter the username and password your admin set up\n"
                        "for you. This is checked against the dashboard right now -- if\n"
                        "it doesn't match, the install will not proceed.",
                wraplength=560).pack(anchor="w", pady=(0, 14))
@@ -745,18 +908,53 @@ class OnboardWizard:
         form = tk.Frame(frame, bg=theme.BG)
         form.pack(anchor="w", pady=(0, 8))
         _label(form, "username:").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        _entry(form, self.username_var, width=30).grid(row=0, column=1, sticky="w", padx=(10, 0), pady=(0, 8))
+        user_entry = _entry(form, self.username_var, width=30)
+        user_entry.grid(row=0, column=1, sticky="w", padx=(10, 0), pady=(0, 8))
         _label(form, "password:").grid(row=1, column=0, sticky="w")
-        _entry(form, self.password_var, width=30, show="*").grid(row=1, column=1, sticky="w", padx=(10, 0))
+        pass_entry = _entry(form, self.password_var, width=30, show="*")
+        pass_entry.grid(row=1, column=1, sticky="w", padx=(10, 0))
 
         self._dashboard_url_note(frame)
         self.signin_status_lbl = _label(frame, "", fg=theme.RED, wraplength=560)
         self.signin_status_lbl.pack(anchor="w", pady=(12, 0))
 
         back = self.show_role if self.role_var.get() == "base" else self.show_tailscale
-        self._nav_bar(frame, back=back, next_=self._on_verify, next_label="VERIFY & CONTINUE")
+        self._verify_btn = self._nav_bar(frame, back=back, next_=self._on_verify,
+                                         next_label="VERIFY & CONTINUE")
+        # ui-onboarding-8 (2026-09-25): Enter in either field is VERIFY, and
+        # the cursor starts in the first empty one.
+        _bind_enter(user_entry, self._on_verify)
+        _bind_enter(pass_entry, self._on_verify)
+        (pass_entry if self.username_var.get().strip() else user_entry).focus_set()
+
+    def _set_busy(self, button, busy: bool) -> None:
+        """Grey a button out while its request is in flight, and back
+        (ui-onboarding-12). Never raises: the page may have moved on."""
+        if button is None:
+            return
+        try:
+            if busy:
+                button.config(state="disabled", fg=theme.MUTED)
+            else:
+                button.config(state="normal", fg=theme.RED)
+        except tk.TclError:
+            pass
 
     def _on_verify(self) -> None:
+        # ui-onboarding-12 (2026-09-25): one sign-in at a time. A double click
+        # (or Enter twice) started two verifications: two identity tokens
+        # minted, and each success called show_install, so the second rebuilt
+        # the install page, replacing a log widget a running install was
+        # writing to. Keyed on the page (review round): an attempt started on a
+        # sign-in page the editor has since left does not block the new one,
+        # and its result is dropped when it lands.
+        if self._verify_page is not None and self._verify_page is self.page_frame:
+            try:
+                self.signin_status_lbl.config(
+                    text="still verifying the last attempt…", fg=theme.MUTED)
+            except (tk.TclError, AttributeError):
+                pass
+            return
         username = self.username_var.get().strip()
         password = self.password_var.get()
         if not username or not password:
@@ -772,17 +970,41 @@ class OnboardWizard:
         # unknown url type" (OPS-6, 2026-09-04).
         self._normalise_dashboard_url_field()
         self.signin_status_lbl.config(text="verifying against the dashboard…", fg=theme.MUTED)
+        page = self.page_frame
+        self._verify_page = page
+        # Read on the Tk thread: the worker never touches a Tk variable.
+        url = self.dashboard_url_var.get()
+        verify_btn = self._verify_btn
+        self._set_busy(verify_btn, True)
 
         def _worker():
-            result = steps.verify_account(self.dashboard_url_var.get(), username, password)
+            try:
+                result = steps.verify_account(url, username, password)
+            except Exception as exc:  # noqa: BLE001 - never strand the busy flag
+                log.exception("verify_account raised")
+                result = {"ok": False, "error": str(exc)}
             # The one moment this process is known to be able to reach the
             # dashboard, and still on a worker thread: take the site manifest
             # now so the install has it (and the companion gets its cached
             # copy) without a second round trip. Never fatal -- {} means an
             # older dashboard, and every consumer has a fallback.
-            site = steps.fetch_site(self.dashboard_url_var.get()) if result.get("ok") else {}
+            try:
+                site = steps.fetch_site(url) if result.get("ok") else {}
+            except Exception:  # noqa: BLE001 - {} is the documented fallback
+                log.exception("fetch_site raised")
+                site = {}
 
             def _ui():
+                if self._verify_page is page:
+                    self._verify_page = None
+                # ui-onboarding-12: a result for a page the editor has left
+                # (BACK while it was in flight) is dropped. Acting on it would
+                # jump them to the install page from wherever they are, or
+                # clear a password field on a page that has moved on.
+                if self.page_frame is not page:
+                    log.info("a sign-in result arrived after its page closed; ignored")
+                    return
+                self._set_busy(verify_btn, False)
                 if not result.get("ok"):
                     self.signin_status_lbl.config(
                         text=f"sign-in failed: {result.get('error') or 'unknown error'}", fg=theme.RED)
@@ -792,20 +1014,17 @@ class OnboardWizard:
                 self.identity_token = result.get("token")
                 self.verified_role = result.get("role")
                 self.report_token = result.get("report_token") or ""
+                self.report_token_kind = result.get("report_token_kind")
+                self.needs_fleet_token = steps.fleet_token_needed(
+                    self.report_token, self.report_token_kind,
+                    steps.existing_editor_report_token())
                 self.site = site or {}
-                # B20: the account's role -- not the radio button -- decides
-                # which install runs, because only one of them is destructive.
-                # Snap the radio to it here, BEFORE the install page renders,
-                # so the role-keyed defaults (_on_role_changed's local_root
-                # and dashboard URL) follow it too instead of seeding a base
-                # rig's config.toml with an editor's C:\Creators_Club.
-                picked = self.role_var.get()
-                effective = steps.effective_install_role(picked, self.verified_role)
-                if effective != picked:
-                    self.picked_role = picked
-                    self.role_var.set(effective)
-                else:
-                    self.picked_role = None
+                # logic-onboarding-1 (2026-09-25): the account's role is NOT
+                # snapped onto the radio any more. It is derived from the
+                # admin list, i.e. from the person, and since CR-88 wired or
+                # remote is the computer's own setting; the radio (seeded from
+                # this machine's config.toml) is the answer. verified_role is
+                # still written to identity.json, where it is diagnostics only.
                 # UNCONDITIONALLY, not only when the role changed
                 # (installer-onboard-tools-4, 2026-08-21). The prefill was
                 # computed in __init__, before this machine had ever seen a
@@ -823,10 +1042,11 @@ class OnboardWizard:
     # -- page 4: install --------------------------------------------------
 
     def _effective_role(self) -> str:
-        """The role the install will actually run as. Belt-and-braces with the
-        role_var snap in _on_verify: every destructive decision on this page
-        goes through here, so the radio alone can never select the P:-teardown
-        path on an account the dashboard verified as 'base' (B20)."""
+        """The role the install will actually run as. Every decision on this
+        page goes through here. Since logic-onboarding-1 (2026-09-25) that is
+        the radio (steps.effective_install_role); a real NAS mapping on the
+        tree drive is protected by the cleanup's and the bootstrap's own
+        is-it-ours checks, not by the account's role (B20)."""
         return steps.effective_install_role(self.role_var.get(), self.verified_role)
 
     def show_install(self) -> None:
@@ -854,12 +1074,10 @@ class OnboardWizard:
                            "Syncthing (if needed) and the companion app. Safe to re-run.",
                    wraplength=560).pack(anchor="w", pady=(0, 10))
 
-        if self.picked_role and self.picked_role != role:
-            _label(frame, f"note: you picked '{self.picked_role}', but the dashboard says this "
-                           f"account is '{role}' -- so this is a '{role}' install. That is the "
-                           f"account's role, which the companion obeys anyway, and only the "
-                           f"'editor' install unmaps and re-creates the {self._drive_letter()}: drive.",
-                   fg=theme.AMBER, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(0, 8))
+        # logic-onboarding-1 (2026-09-25): the amber "you picked X, but the
+        # dashboard says this account is Y ... which the companion obeys
+        # anyway" note is gone with the override it explained. It had been
+        # false since CR-88 (companion 0.9.54 reads config `mode` only).
 
         form = tk.Frame(frame, bg=theme.BG)
         form.pack(anchor="w", pady=(0, 10))
@@ -888,6 +1106,26 @@ class OnboardWizard:
                            "add land here) -- doesn't have to be C:.",
                    fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(2, 10))
 
+        # logic-onboarding-2 (2026-09-25): only when this dashboard has retired
+        # the shared report token and this computer holds no per-editor one.
+        # Optional on purpose: an editor without the key yet still gets a
+        # whole install, and the finish page says NOT READY and why.
+        self.fleet_token_error_lbl = None
+        if self.needs_fleet_token:
+            _label(frame, "This dashboard gives every computer its own fleet key. Paste the\n"
+                           "report token your admin made for you (it starts with cce1.,\n"
+                           f"from {steps.FLEET_TOKEN_PANEL}). You can leave it empty and\n"
+                           "add it later, but nothing syncs until it is in.",
+                   fg=theme.AMBER, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(0, 4))
+            token_row = tk.Frame(frame, bg=theme.BG)
+            token_row.pack(anchor="w", pady=(0, 2))
+            _label(token_row, "report token:").grid(row=0, column=0, sticky="w")
+            _entry(token_row, self.fleet_token_var, width=34).grid(
+                row=0, column=1, sticky="w", padx=(10, 0))
+            self.fleet_token_error_lbl = _label(frame, "", fg=theme.RED, font=theme.mono(9),
+                                                wraplength=560)
+            self.fleet_token_error_lbl.pack(anchor="w", pady=(0, 6))
+
         # INST-21: the value below is forced into config.toml AND handed to
         # windows_bootstrap.ps1 as -LocalRoot, where a nonexistent drive is a
         # hard abort under EAP=Stop -- after clean-slate has already removed
@@ -906,13 +1144,13 @@ class OnboardWizard:
 
         btn_row = tk.Frame(frame, bg=theme.BG)
         btn_row.pack(anchor="w", pady=(0, 10))
-        self.install_btn = theme.neon_button(tk, btn_row, "BEGIN INSTALL", self._on_begin_install, primary=True)
+        self.install_btn = _button(btn_row, "BEGIN INSTALL", self._on_begin_install, primary=True)
         self.install_btn.pack(side="left")
         # OPS-5: the log is the only record of what happened, and the person
         # who needs it is usually on the other end of a message from the
         # editor. One click puts the whole file on the clipboard.
-        self.copy_log_btn = theme.neon_button(tk, btn_row, "COPY LOG", self._on_copy_log,
-                                              primary=False)
+        self.copy_log_btn = _button(btn_row, "COPY LOG", self._on_copy_log,
+                                    primary=False)
         self.copy_log_btn.pack(side="left", padx=(12, 0))
 
         # One trace for the wizard's lifetime -- the callback reads whichever
@@ -923,7 +1161,9 @@ class OnboardWizard:
                 "write", lambda *_a: self._revalidate_local_root())
         self._revalidate_local_root()
 
-        log_frame = tk.Frame(frame, bg=theme.FIELD, highlightthickness=1, highlightbackground=theme.RED_DIM)
+        # ui-onboarding-9 (2026-09-25): a box outline, same contrast rule as _entry.
+        log_frame = tk.Frame(frame, bg=theme.FIELD, highlightthickness=1,
+                             highlightbackground=theme.FIELD_BORDER)
         log_frame.pack(fill="both", expand=True, pady=(0, 4))
         self.log_text = tk.Text(log_frame, bg=theme.FIELD, fg=theme.TEXT, font=theme.mono(8),
                                  relief="flat", wrap="word", height=14, state="disabled",
@@ -1025,6 +1265,10 @@ class OnboardWizard:
         except tk.TclError:
             pass  # page swapped out from under the trace
 
+    def _fleet_token(self) -> str:
+        """The pasted per-editor fleet key, or "" when none was asked for."""
+        return self.fleet_token_var.get().strip() if self.needs_fleet_token else ""
+
     def _on_begin_install(self) -> None:
         if self._installing:
             return
@@ -1032,17 +1276,26 @@ class OnboardWizard:
         if problem:
             self._revalidate_local_root()
             return
+        # logic-onboarding-2: refused HERE, before the clean slate, like the
+        # local root. A mangled key would otherwise be forced into config.toml
+        # and outrank nothing useful, which is the silent 401 all over again.
+        token_problem = (steps.fleet_token_problem(self.fleet_token_var.get())
+                         if self.needs_fleet_token else None)
+        if self.fleet_token_error_lbl is not None:
+            self.fleet_token_error_lbl.config(text=f"✖ {token_problem}" if token_problem else "")
+        if token_problem:
+            return
         self._installing = True
         self.install_btn.config(state="disabled", fg=theme.MUTED)
         if self._install_back_btn is not None:
             self._install_back_btn.config(state="disabled", fg=theme.MUTED)
         self._append_log("starting install…")
 
-        # B20: the VERIFIED role, never the radio. _worker_editor's
-        # _clean_slate("editor") sets unmount_p=True -- `subst P: /D` +
-        # `net use P: /delete /y` -- and on the base rig P: is the real NAS
-        # share mapping every P:\Projects\... clip path in Resolve resolves
-        # through. A default-radio re-run there used to destroy it.
+        # B20 / logic-onboarding-1 (2026-09-25): through _effective_role, the
+        # one place the rule lives. It is the radio now, seeded from this
+        # machine's config.toml `mode`; _clean_slate("editor")'s unmount is
+        # gated on p_mapping_is_ours, so a real NAS mapping on the tree drive
+        # is left alone whichever radio was picked.
         role = self._effective_role()
         worker = self._worker_base if role == "base" else self._worker_editor
         self._append_log(f"role: {role}")
@@ -1093,10 +1346,20 @@ class OnboardWizard:
             # back to the CACHED manifest rather than to the literal default
             # prefix (bug-hunt-2026-09-03 install-onboard-1).
             site=self._site(),
+            report_token=self._fleet_token(),
         )
         self._append_log(f"config written (mode={role}).")
+        # logic-onboarding-2 (2026-09-25): a machine with no credential the
+        # dashboard will accept is NOT READY, and both finish pages say so.
+        if self.needs_fleet_token and not self._fleet_token():
+            self.install_warnings.append(steps.missing_fleet_token_warning())
+            self._append_log("WARNING: no report token entered -- this computer's "
+                             "reports will be refused until one is added.")
+        elif self._fleet_token():
+            self._append_log("per-editor report token written to config.toml.")
         if self.identity_token:
-            steps.write_identity(self.verified_username, self.identity_token, role=self.verified_role)
+            steps.write_identity(self.verified_username, self.identity_token,
+                                 role=self.verified_role, report_token=self.report_token)
             self._append_log(
                 f"companion identity written (role={self.verified_role or 'editor'}) "
                 f"-- it will already be signed in."
@@ -1124,6 +1387,7 @@ class OnboardWizard:
         result = steps.submit_ssh_key(
             self.dashboard_url_var.get(), self.verified_username,
             self.identity_token, self.pub_key, machine)
+        self.ssh_key_sent = bool(result.get("ok"))
         if result.get("ok"):
             self._append_log("SSH public key sent to the dashboard: your admin approves "
                              "it on the Users page.")
@@ -1269,6 +1533,8 @@ class OnboardWizard:
                 return
             self._append_log(f"found bundled companion app: {companion_src}")
 
+            # logic-onboarding-2: the base finish page reads this list now too.
+            self.install_warnings = []
             self._clean_slate("base")
             self._write_config_and_identity("base")
 
@@ -1347,11 +1613,9 @@ class OnboardWizard:
                        wraplength=560).pack(anchor="w", pady=(0, 2))
             _label(frame, "", font=theme.mono(4)).pack(anchor="w")
         else:
-            _heading(frame, "DONE: SEND THESE TWO VALUES TO YOUR ADMIN")
-            _label(frame, "Nothing syncs and no project will be shared with you until your\n"
-                           "admin approves both of these. The companion is installed, signed\n"
-                           f"in as {self.verified_username}, and will start automatically next login.",
-                   wraplength=560).pack(anchor="w", pady=(0, 16))
+            copy = steps.finish_page_copy(self.ssh_key_sent, self.verified_username)
+            _heading(frame, copy["heading"])
+            _label(frame, copy["intro"], wraplength=560).pack(anchor="w", pady=(0, 16))
 
         # OPS-25 (2026-09-04): the placeholder is instructions to the EDITOR,
         # and [ COPY ] used to put it on the clipboard, from where it was
@@ -1368,17 +1632,30 @@ class OnboardWizard:
         self._labeled_copy_field(frame, "SSH public key:", pub_display,
                                  copyable=pub_copyable)
 
-        icon_hint = ("the CCSync menu-bar icon's \"Sign in…\"" if IS_MACOS
-                     else "right-click the tray icon → \"Sign in…\"")
-        _label(frame, f"One more step: {icon_hint} is already\n"
-                       "done for you, but nothing downloads until your admin approves the\n"
-                       "two values above.", fg=theme.MUTED, font=theme.mono(9),
+        # logic-onboarding-5 (2026-09-25): the hint used to announce "One more
+        # step: ... Sign in" and then say it was already done, and the page
+        # asked for the SSH key by hand after _offer_ssh_key had already put
+        # it in the admin's approval queue. steps.finish_page_copy owns the
+        # words so both cases are pinned by a test.
+        copy = steps.finish_page_copy(self.ssh_key_sent, self.verified_username)
+        _label(frame, copy["hint"], fg=theme.MUTED, font=theme.mono(9),
                wraplength=560).pack(anchor="w", pady=(6, 0))
-        _label(frame, "Send these to your admin to finish signup.", fg=theme.AMBER,
-               font=theme.mono(10, bold=True)).pack(anchor="w", pady=(10, 0))
+        _label(frame, copy["send"], fg=theme.AMBER, font=theme.mono(10, bold=True),
+               wraplength=560).pack(anchor="w", pady=(10, 0))
 
         self._finish_log_note(frame)
+        self._finish_nav(frame)
+
+    def _finish_nav(self, frame) -> None:
+        """CLOSE, plus a COPY LOG of its own (ui-onboarding-5, 2026-09-25).
+        The warning list's truncation line sent the editor to "COPY LOG on
+        the previous page", and the finish pages have no BACK: the only copy
+        of the full list was out of reach on the one page that says "send
+        them this list"."""
         self._nav_bar(frame, back=None, next_=self.root.destroy, next_label="CLOSE")
+        self.copy_log_btn = _button(self._last_nav_bar, "COPY LOG", self._on_copy_log,
+                                    primary=False)
+        self.copy_log_btn.pack(side="left")
 
     def _finish_log_note(self, frame) -> None:
         """Name the install log on the way out (OPS-5). This window is about
@@ -1393,7 +1670,17 @@ class OnboardWizard:
     def show_finish_base(self) -> None:
         self._install_finished()
         frame = self._new_page()
-        _heading(frame, "DONE: CONNECTED TO THE NAS")
+        warnings = list(self.install_warnings)
+        if warnings:
+            # logic-onboarding-2 (2026-09-25): a wired machine with no fleet
+            # credential never reports either, and "DONE" hid it.
+            _heading(frame, f"INSTALLED WITH {len(warnings)} WARNING(S): NOT READY YET")
+            for warning in steps.finish_warning_lines(warnings):
+                _label(frame, f"  • {warning}", fg=theme.RED, font=theme.mono(9),
+                       wraplength=560).pack(anchor="w", pady=(0, 2))
+            _label(frame, "", font=theme.mono(4)).pack(anchor="w")
+        else:
+            _heading(frame, "DONE: CONNECTED TO THE NAS")
         icon_word = "menu bar" if IS_MACOS else "tray"
         _label(frame, "The companion app is installed, signed in as\n"
                        f"{self.verified_username}, and will start automatically at login.\n\n"
@@ -1407,7 +1694,7 @@ class OnboardWizard:
                fg=theme.MUTED, font=theme.mono(10)).pack(anchor="w", pady=(0, 10))
 
         self._finish_log_note(frame)
-        self._nav_bar(frame, back=None, next_=self.root.destroy, next_label="CLOSE")
+        self._finish_nav(frame)
 
     def _labeled_copy_field(self, parent, label_text, value, copyable: bool = True):
         block = tk.Frame(parent, bg=theme.BG)
@@ -1419,7 +1706,8 @@ class OnboardWizard:
         var = tk.StringVar(value=value)
         entry = tk.Entry(row, textvariable=var, font=theme.mono(10), width=52,
                           bg=theme.FIELD, fg=theme.TEXT, relief="flat",
-                          highlightthickness=1, highlightbackground=theme.RED_DIM,
+                          # ui-onboarding-9 (2026-09-25): input outline, see _entry.
+                          highlightthickness=1, highlightbackground=theme.FIELD_BORDER,
                           highlightcolor=theme.RED, state="readonly",
                           readonlybackground=theme.FIELD)
         entry.pack(side="left", fill="x", expand=True)
@@ -1429,8 +1717,8 @@ class OnboardWizard:
             self.root.clipboard_append(value)
             self._flash_button(btn, "COPY")
 
-        btn = theme.neon_button(tk, row, "COPY" if copyable else "NOTHING TO COPY",
-                                _copy if copyable else (lambda: None), primary=False)
+        btn = _button(row, "COPY" if copyable else "NOTHING TO COPY",
+                      _copy if copyable else (lambda: None), primary=False)
         if not copyable:
             btn.config(state="disabled", fg=theme.MUTED)
         btn.pack(side="left", padx=(8, 0))

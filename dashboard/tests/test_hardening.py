@@ -191,14 +191,29 @@ def base_payload(**extra):
     lambda p: p["lanes"][0].update(current_project="C" * 513),
     lambda p: p["lanes"][0].update(transfers=[{"name": "n" * 513}]),
     lambda p: p.update(media_tree={"P": [{"clip_name": "c" * 513}]}),
+])
+def test_long_lane_and_clip_strings_truncate_rather_than_reject(report_client, mutate):
+    """bug-wire-3 (2026-09-25): these used to 422 the whole report, and lane
+    C's `last_error` is an unbounded join of every errored folder's Syncthing
+    text -- a pulled sync drive took the machine off the fleet grid and cut
+    its command channel. Truncated now, like every other report ceiling since
+    B6 / SYS-3."""
+    payload = base_payload()
+    mutate(payload)
+    resp = report_client.post("/api/v1/report", json=payload, headers=report_headers())
+    assert resp.status_code == 200, resp.text[:300]
+
+
+@pytest.mark.parametrize("mutate", [
     lambda p: p.update(local_manifest={"p": {"n_originals": -5}}),
     lambda p: p.update(local_manifest={"p": {"n_originals": 10_000_001}}),
 ])
 def test_report_fields_are_capped(report_client, mutate):
-    """Per-VALUE caps still reject: a 513-char clip name or a negative file
-    count is a broken companion, not a big one. The per-COLLECTION caps
+    """Per-VALUE numeric caps still reject: a negative file count is a
+    broken companion, not a big one. The per-COLLECTION caps
     (projects/queue/clips/manifest files) truncate instead -- see
-    test_a_sixty_fifth_project_does_not_take_the_machine_off_the_grid."""
+    test_a_sixty_fifth_project_does_not_take_the_machine_off_the_grid -- and
+    so, since bug-wire-3, do the lane and clip string caps (above)."""
     payload = base_payload()
     mutate(payload)
     resp = report_client.post("/api/v1/report", json=payload, headers=report_headers())

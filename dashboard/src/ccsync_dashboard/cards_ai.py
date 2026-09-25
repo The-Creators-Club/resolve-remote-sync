@@ -178,7 +178,8 @@ SESSION_LOST = "session_lost"
 
 # How much of a conversation is kept. A montage is a handful of describes and
 # a dozen searches; a page left open for a week is not a reason to send a
-# megabyte of history. The first turn is NEVER trimmed -- it is the corpus,
+# megabyte of history. The corpus turns are NEVER trimmed (the first, and
+# since bug-dash-cards-jobs-5 every part after it) -- they are the corpus,
 # and it is the cached block, so dropping it would cost both the context and
 # the cache hit.
 MAX_TURNS = 40
@@ -1180,7 +1181,8 @@ def _with_selection(prompt: str, selection: Any) -> str:
 
 
 def _trimmed(messages: list[Any]) -> list[Any]:
-    """The first turn plus the last MAX_TURNS - 1, in whole turns.
+    """The leading corpus turns plus the most recent turns, MAX_TURNS in all
+    (never fewer than one recent turn), in whole turns.
 
     Whole PAIRS, so the history stays user/assistant/user/assistant: the
     first turn (the corpus and its reply) is kept, and the cut is made after
@@ -1189,8 +1191,19 @@ def _trimmed(messages: list[Any]) -> list[Any]:
     """
     if len(messages) <= MAX_TURNS * 2:
         return list(messages)
-    keep = (MAX_TURNS - 1) * 2
-    return list(messages[:2]) + list(messages[-keep:])
+    # bug-dash-cards-jobs-5 (2026-09-25): EVERY leading corpus turn, not just
+    # the first. Since 2026-09-07 a corpus too big for one message arrives as
+    # one turn per part (`montage_open` sends a turn per chunk), so parts 2..n
+    # were messages 2..2n-1 and the first ones this cut dropped: past 40
+    # turns a search silently stopped seeing the interviews those parts held,
+    # and the moving cut changed the prefix after message 1 on every call, so
+    # the last-part breakpoint in `_for_send` never hit again.
+    lead = 1
+    while (2 * lead + 1 < len(messages)
+           and _is_corpus_message(messages[2 * lead])):
+        lead += 1
+    keep = max(1, MAX_TURNS - lead) * 2
+    return list(messages[:2 * lead]) + list(messages[2 * lead:][-keep:])
 
 
 def _session_path(settings: Any, sid: str) -> Path:

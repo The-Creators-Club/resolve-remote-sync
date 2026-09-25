@@ -454,7 +454,9 @@ def test_a_move_interrupted_before_the_ledger_row_is_finished_on_redelivery(tmp_
 
     real = file_moves.move_proxy_siblings
 
-    def die(src, dest):
+    # *failed: bug-comp-syncthing-1 (2026-09-25) added the optional third
+    # argument apply_move passes; the crash being simulated is unchanged.
+    def die(src, dest, *failed):
         raise boom
 
     file_moves.move_proxy_siblings = die
@@ -488,7 +490,7 @@ def test_a_machine_that_never_held_the_file_still_answers_nothing_here(tmp_path)
     ok, detail, paths = file_moves.apply_move(
         _move(to_project="2026/FF5/Selects"), str(tmp_path), ledger=ledger)
     assert (ok, paths) == (True, None)
-    assert detail == "nothing at the old path on this machine"
+    assert detail == "nothing at the old path on this computer"  # ui-copy-4 (2026-09-25)
 
 
 # -- comp-sync-13: the re-armed relink offer --------------------------------

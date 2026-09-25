@@ -168,7 +168,7 @@ class YtdlGate:
         stamp = self._fleet_stamp(headers)
         if stamp is not None:
             headers.append((FLEET_AUTH_HEADER, stamp))
-        username = auth.read_session_cookie(self._secret, _session_cookie(headers))
+        username = self._session_user(scope, headers)
         if username:
             encoded = _header_value(username)
             if encoded is None:
@@ -182,6 +182,52 @@ class YtdlGate:
         new_scope = dict(scope)
         new_scope["headers"] = headers
         return new_scope
+
+    def _session_user(self, scope: dict,
+                      headers: list[tuple[bytes, bytes]]) -> str | None:
+        """Whose session this request is, by the SAME rule login_gate used.
+
+        bug-dash-ops-2 / bug-dash-ops-3 (2026-09-25). This used to re-read the
+        cookie itself, and disagreed with login_gate three ways: it knew no
+        DASH_SESSION_SECRET_PREVIOUS key (so after a DASH-2 rotation every
+        editor got past the gate and then a bare 401 from ytdlweb until they
+        signed in again), it took the FIRST ccsync_session cookie where
+        Starlette's parser takes the LAST (so the stamped name could be a
+        different person's from the one the gate authenticated), and it never
+        asked the session store (so a session revoked by "log out
+        everywhere" still named its owner to the sub-app). auth.get_session_user
+        is login_gate's own answer, cached on the request state login_gate
+        already filled, so on the normal path this costs nothing extra.
+        """
+        # bug-dash-cards-jobs-4 (2026-09-25, owed from d-cards): login_gate's
+        # verdict is taken from the request state FIRST, whether or not the
+        # scope carries the dashboard app, so this gate and broll/music's
+        # `_session_user` answer by one rule. Before, a scope whose state
+        # already said "not live" (a revoked session) but carried no app with
+        # settings fell through to the cookie, which only knows signature and
+        # expiry, and stamped the revoked session's owner. None in the state
+        # means no header; a malformed entry fails closed the same way.
+        state = scope.get("state")
+        if isinstance(state, dict) and "ccsync_session" in state:
+            try:
+                session = state.get("ccsync_session")
+                return (session[0] if session else None) or None
+            except Exception:  # noqa: BLE001 - fail closed: no header at all
+                return None
+        app = scope.get("app")
+        if getattr(getattr(app, "state", None), "settings", None) is not None:
+            try:
+                from starlette.requests import Request
+                return auth.get_session_user(Request(scope)) or None
+            except Exception:  # noqa: BLE001 - fail closed: no header at all
+                return None
+        # A gate driven with no dashboard app around it (unit tests, a
+        # standalone wrapper): no session store to consult, so signature and
+        # expiry are all there is -- but still every accepted key, and the
+        # same cookie the dashboard's parser would pick.
+        return auth.read_session_cookie(
+            self._secret, _session_cookie(headers),
+            previous=auth.previous_session_secrets(self._settings))
 
     def _fleet_stamp(self, headers: list[tuple[bytes, bytes]]) -> bytes | None:
         """Our verdict on this request's X-CCSync-Token, or None.
@@ -313,15 +359,22 @@ def _session_cookie(headers: list[tuple[bytes, bytes]]) -> str | None:
     only -- the token is `v2.session.<b64url>.<expires>.<hmac>` and base64url
     padding is stripped, but a cookie parser that loses everything after a
     second "=" is a bug waiting for the day that changes.
+
+    The LAST match wins (bug-dash-ops-3, 2026-09-25), as in Starlette's
+    cookie_parser, which is what login_gate reads through request.cookies: a
+    browser holding two ccsync_session cookies (a narrower Path, or one
+    planted from another port on the same host) must not be one person to
+    the gate and another to the sub-app.
     """
+    found: str | None = None
     for key, value in headers:
         if key.lower() != b"cookie":
             continue
         for part in value.decode("latin-1").split(";"):
             name, sep, raw = part.strip().partition("=")
             if sep and name == auth.COOKIE_NAME:
-                return raw.strip()
-    return None
+                found = raw.strip()
+    return found
 
 
 def sub_paths(scope: dict) -> tuple[str, ...]:

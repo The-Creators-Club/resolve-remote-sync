@@ -227,7 +227,17 @@ template or sidecar skew, a quality only the server names, a destination this
 machine cannot resolve or create, an unmounted tree, not enough free space,
 the identical-failure breaker, and the everyday one - the editor downloaded
 into a project this computer does not sync. It survives the job, so a page
-that polls after the 202 learns why the badge is about to flip.
+that polls after the 202 learns why the badge is about to flip. Since
+2026-09-25 (logic-ytdl-jobs-3) it also carries a CLAIM the dashboard refused
+for a reason about this computer: download terms not accepted, yt-dlp below
+the fleet floor, a refused sign-in (a bare 401/403, or the `identity` /
+`identity_mismatch` reason: an expired or retired identity token, or a report
+token that is another editor's), a naming or sidecar skew, a
+quality this computer does not run, or the editor's own other computer
+already holding the lease. The ordinary refusals (job over, cancelled, pinned
+or created for the server, a lost race, a 5xx, another editor's lease, the
+server missing its own identity secret, a reason code this build does not know) stay
+`null`: `FleetClient.claim_refusal_sentence` is the list.
 
 **`POST /ytdl/cancel`** `{"job_id": 7}` or `{"all": true}` (CYT-14) stops the
 download running on this machine: the child is killed, its partials go with

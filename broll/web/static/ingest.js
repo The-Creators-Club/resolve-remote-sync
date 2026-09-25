@@ -1450,7 +1450,9 @@ function ingestRenderLive() {
     const list = el("div", { className: "ingest-item-states" });
     for (const item of ing.batchItems.slice(0, 200)) {
       const row = el("div", { className: `ingest-item-state state-${item.state}` });
-      row.textContent = `${item.state.padEnd(10, " ")} ${item.rel_dir ? item.rel_dir + "/" : ""}${item.orig_name}` +
+      // ui-broll-web-14 (2026-09-25): the same words as the batch card below
+      // (wire-1): this list printed the raw `proxies_live` token.
+      row.textContent = `${ingestItemStateText(item.state).padEnd(10, " ")} ${item.rel_dir ? item.rel_dir + "/" : ""}${item.orig_name}` +
                         (item.error ? ` - ${item.error}` : "");
       list.appendChild(row);
     }
@@ -1465,12 +1467,33 @@ function ingestRenderLive() {
                     "#ingest-pause-upload", "#ingest-cancel"]) {
     $(id).disabled = !!over;
   }
+  // ui-broll-web-15 (2026-09-25): Pause, Resume and Start now were all on
+  // screen and enabled whatever the batch was doing, so the buttons never said
+  // whether indexing was paused. Now one of Pause/Resume, driven by the tray's
+  // own `paused` flag (the gate for a companion that sends no flag), and Start
+  // now only where the tray offers it too (broll_ingest.progress_model: the
+  // batch is waiting for the editor to step away or for Resolve to close).
+  // Every one of these is a loopback call, so with the tray not answering
+  // Pause stays visible but cannot be pressed.
+  const indexPaused = lb ? (lb.paused != null ? !!lb.paused : lb.gate === "paused") : false;
+  $("#ingest-pause").classList.toggle("hidden", indexPaused);
+  $("#ingest-resume").classList.toggle("hidden", !indexPaused);
+  $("#ingest-start-now").classList.toggle(
+    "hidden", !(lb && !indexPaused && ING_START_NOW_GATES.includes(lb.gate)));
+  if (!lb) {
+    for (const id of ["#ingest-pause", "#ingest-resume", "#ingest-start-now"]) $(id).disabled = true;
+  }
 }
+
+// The gates at which the tray's own progress window offers "start now".
+const ING_START_NOW_GATES = ["user-active", "resolve-open"];
 
 async function ingestControl(action) {
   try {
     const answer = await ingestLoopback("POST", "/broll/ingest/control", { action: action });
-    toast(`CC Sync tray: ${(answer && answer.state) || action}.`, "");
+    // ui-broll-web-15: the gate in words, not the companion's token.
+    const word = answer && answer.state ? ingGateLabel(answer.state) : action;
+    toast(`CC Sync tray: ${word}.`, "");
   } catch (e) {
     toast(e.message, "error");
   }

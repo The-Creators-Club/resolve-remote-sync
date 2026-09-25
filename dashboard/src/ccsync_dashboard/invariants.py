@@ -634,8 +634,8 @@ def _check_snapshot_schedule(ctx: Ctx) -> Outcome:
     for the dataset the tree is on -- a container sees `/data`, not the pool
     path (`dashboard_update.snapshot_before` says so) -- so it asks the
     narrower question it can answer honestly: does this NAS have any enabled
-    periodic snapshot task, and does it cover the dataset the deployment
-    named, if it named one.
+    periodic snapshot task, and does it cover each dataset the deployment
+    named (DASH_TREE_DATASET, DASH_UPDATE_SNAPSHOT_DATASET), if it named them.
     """
     tasks = ctx.snapshot_tasks()
     if tasks is None:
@@ -649,18 +649,48 @@ def _check_snapshot_schedule(ctx: Ctx) -> Outcome:
             f"{len(tasks)} snapshot task(s), none enabled")
     import os
 
-    named = (os.environ.get("DASH_UPDATE_SNAPSHOT_DATASET") or "").strip()
-    if named:
-        covered = any(
-            str(t.get("dataset") or "") == named
-            or (t.get("recursive") and named.startswith(str(t.get("dataset") or "") + "/"))
-            for t in enabled)
-        if not covered:
-            return broken(
-                [(named, "no enabled snapshot task covers this dataset, so the "
-                         "dashboard's own data has nothing to restore from")],
-                f"{len(enabled)} enabled task(s), none covering {named}")
-    return ok(f"{len(enabled)} enabled snapshot task(s) on this NAS")
+    # logic-alerts-5 (2026-09-25): this used to name only the dashboard's own
+    # dataset, so a NAS whose one task was on `tank/apps/ccsync-dashboard`
+    # (CR-227) read green "the customer's data is on a snapshot schedule"
+    # while the Protection panel's tree line said MISSING, and a broken
+    # verdict about the dashboard's data carried a fix sending the owner to
+    # snapshot the project tree. Both datasets the deployment names are
+    # checked now, each with its own sentence, through protection's own
+    # coverage rule (a recursive parent covers its children) so the two
+    # surfaces cannot disagree about one task list.
+    from .protection import ENV_APPS_DATASET, ENV_TREE_DATASET, _covers
+
+    wanted = (
+        (ENV_TREE_DATASET, "the project tree", "there is nothing to restore "
+         "footage from if a project folder is deleted, overwritten or lost"),
+        (ENV_APPS_DATASET, "this dashboard's own data", "the dashboard's own "
+         "data has nothing to restore from"),
+    )
+    bad: list[tuple[str, str]] = []
+    covered: list[str] = []
+    unnamed: list[str] = []
+    for var, human, matters in wanted:
+        named = (os.environ.get(var) or "").strip()
+        if not named:
+            unnamed.append(f"{human} ({var})")
+            continue
+        if any(_covers(t, named) for t in enabled):
+            covered.append(named)
+        else:
+            bad.append((named, f"{human} is on this dataset and no enabled snapshot "
+                               f"task covers it, so {matters}"))
+    if bad:
+        return broken(bad, f"{len(enabled)} enabled task(s), none covering "
+                           + " or ".join(name for name, _ in bad))
+    detail = f"{len(enabled)} enabled snapshot task(s) on this NAS"
+    if covered:
+        detail += ", covering " + " and ".join(covered)
+    if unnamed:
+        # Unset is "never told", not "fine": say which dataset this pass
+        # could not look for, as protection's CANNOT VERIFY line does.
+        detail += ("; not told which dataset holds " + " or ".join(unnamed)
+                   + ", so whether a task covers it is not checked here")
+    return ok(detail)
 
 
 # How many orphaned clips a proxy_pairs subject names before it counts the
@@ -1067,9 +1097,17 @@ INVARIANTS: tuple[Invariant, ...] = (
         "A project folder that has lost or changed its CCSync marker stops being "
         "that project to this server: everyone's ticks for it quietly stop meaning "
         "anything and it can be set up a second time under a new name.",
-        "Restore the .ccsync-project file in that folder on the server (copy a "
-        "working one and correct its id), or set the project up again from "
-        "Settings, Projects.",
+        # ui-copy-3 (2026-09-25): there is no Projects page in Settings. Review
+        # round: nor is the tray's "Set up ... on the server" a way back; it
+        # shows only for a Resolve project with no project_roots row, and a
+        # project that lost its marker is almost always already mapped.
+        "Restore the .ccsync-project file in each folder named below: copy the "
+        "one from a working project and change its \"slug\" to the id this "
+        "check names for that folder (the last part of the project's page "
+        "address, /project/<id>). A missing or unreadable file in a folder "
+        "Syncthing still serves is usually written back by the server itself "
+        "within a few minutes; a file that names another id is never "
+        "overwritten, so that one has to be corrected by hand.",
         _check_project_markers),
     Invariant(
         "tree_markers", 5,
@@ -1116,8 +1154,9 @@ INVARIANTS: tuple[Invariant, ...] = (
         "the customer's data is on a snapshot schedule",
         "Without a snapshot schedule there is nothing to restore from: a deleted "
         "folder, a bad sync or a failed disk is simply gone.",
-        "On the NAS: Data Protection, Periodic Snapshot Tasks, add a task for the "
-        "dataset the project tree lives on and enable it.",
+        "On the NAS: Data Protection, Periodic Snapshot Tasks, add a task for "
+        "each dataset named below (or for its parent, with Recursive ticked) and "
+        "enable it.",
         _check_snapshot_schedule),
     Invariant(
         "proxy_pairs", 10,
@@ -1363,7 +1402,25 @@ def run_cycle(
     db.clear_notices_of_kind(conn, "invariant_check_failed", failed_subjects, now=now)
     conn.commit()
     counts = _counts(results)
-    return {"results": results, "note": _note(counts), "counts": counts}
+    return {"results": results, "note": _note(_counts(_checkable(results))),
+            "counts": counts}
+
+
+def _checkable(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The results of invariants this build can check at all.
+
+    logic-alerts-6 (2026-09-25): `versioning_agrees` and
+    `cards_tree_matches_source` carry a registry `skip_reason`, so every pass
+    on every site had two NOT_CHECKED results and the note read "2 not
+    checked here". `db.collector_health` renders any note amber, so the
+    invariants job was amber for ever and an owner learned to ignore it -
+    the moment a real "1 invariant(s) broken" arrives unread. A static skip
+    is "not checkable in this build", which the Invariants page still says
+    row by row; the panel's note counts only what a pass could have
+    answered and did not."""
+    return [r for r in results
+            if not ((inv := BY_KEY.get(str(r.get("key")))) is not None
+                    and (inv.skip_reason or inv.check is None))]
 
 
 def _counts(results: list[dict[str, Any]]) -> dict[str, int]:

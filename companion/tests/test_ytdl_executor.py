@@ -2919,8 +2919,10 @@ def test_swap_in_moves_a_locked_original_aside_and_keeps_the_work_otherwise(
     assert (tmp_path / "clip [id].original.mp4").read_bytes() == b"old"
     assert note == "original was in use, kept as clip [id].original.mp4"
 
-    # every rename refused, including the fallback's own: the converted file
-    # stays where ffmpeg wrote it rather than the work being thrown away
+    # every rename refused, including the fallback's own: NOTHING is
+    # delivered (bug-comp-ytdl-5, 2026-09-25) - the `.editready` name this
+    # rung used to return is litter every reader sweeps or ignores - and the
+    # original is untouched for the caller to disown
     original.write_bytes(b"old")
     tmp.write_bytes(b"new")
 
@@ -2929,9 +2931,10 @@ def test_swap_in_moves_a_locked_original_aside_and_keeps_the_work_otherwise(
 
     monkeypatch.setattr(ex.os, "replace", locked)
     name, note = ex.swap_in(tmp, original, original)
-    assert name == tmp.name and tmp.read_bytes() == b"new"
+    assert name is None
     assert original.read_bytes() == b"old"
-    assert note == "converted, but could not replace clip [id].mp4: saved as clip [id].editready.mp4"
+    assert note == ("converted, but neither clip [id].mp4 nor its converted "
+                    "copy could be renamed into place")
     assert "—" not in note
 
 

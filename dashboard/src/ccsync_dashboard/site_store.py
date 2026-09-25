@@ -255,7 +255,39 @@ def _validate_csv(key: str, raw: str) -> str:
         if ".." in [p for p in re.split(r"[/\\]", item)]:
             raise SiteValidationError(
                 key, f"{item!r} must stay under the tree root: '..' is not allowed")
+    if key == "shared_asset_folders":
+        _check_asset_folder_ids(key, items)
     return ",".join(items)
+
+
+def _check_asset_folder_ids(key: str, items: list[str]) -> None:
+    """bug-dash-auth-4 (2026-09-25): every shared asset library becomes a
+    Syncthing folder whose id is provision.slugify(rel), and slugify keeps
+    ASCII letters and digits only. A name with none (`音效`, `---`) used to
+    be stored here and then raise out of every `resolved_manifest`, which
+    500'd /api/v1/site for every installer and companion; two names that
+    slug alike (`Assets/SFX`, `Assets-SFX`) gave two libraries one folder
+    id. Refused at the door, in words, with the rel normalised the way
+    provision.shared_asset_folders_for will normalise it."""
+    from . import provision
+
+    seen: dict[str, str] = {}
+    for item in items:
+        rel = str(item).replace("\\", "/").strip("/")
+        rel = "/".join(p for p in rel.split("/") if p and p != "..")
+        if not rel:
+            continue
+        try:
+            fid = provision.slugify(rel)
+        except ValueError:
+            raise SiteValidationError(
+                key, f"{item!r} needs at least one letter A-Z or digit 0-9 in its name: "
+                     "the folder id every computer syncs it by is made from those") from None
+        if fid in seen:
+            raise SiteValidationError(
+                key, f"{item!r} and {seen[fid]!r} would share the folder id {fid!r}: "
+                     "rename one of them")
+        seen[fid] = item
 
 
 def _validate_nas_kind(raw: str) -> str:
@@ -761,6 +793,8 @@ def shared_asset_folders(conn: sqlite3.Connection, settings: Any) -> list[tuple[
 
 
 def _settings_fallback(key: str, settings: Any) -> str:
+    from . import provision
+
     mapping = {
         "org_name": settings.site_org_name,
         "org_short": settings.site_org_short,
@@ -785,8 +819,17 @@ def _settings_fallback(key: str, settings: Any) -> str:
         "features.ai_cli_auto_update": "1" if settings.site_feature_ai_cli_auto_update else "0",
         "features.auto_update": "1" if settings.site_feature_auto_update else "0",
         "indexer_model_tier": settings.site_indexer_model_tier,
-        "template_folders": "",
-        "shared_asset_folders": "",
+        # bug-dash-auth-3 (2026-09-25): "no row" for these two means
+        # provision's lists (`_shape` reads the key's absence, not this
+        # value), so that is what the fallback has to SAY. It said "", which
+        # `diff_against_current` recorded as the change's `from`; [ UNDO ]
+        # then wrote an explicit "" row back and every new project came out
+        # with no folders while /api/v1/site published no shared libraries.
+        # Same join `seed_from_env_once` stores, so an undo restores exactly
+        # what the site was already resolving to.
+        "template_folders": ",".join(provision.TEMPLATE_FOLDERS),
+        "shared_asset_folders": ",".join(
+            rel for _fid, rel, _label in provision.SHARED_ASSET_FOLDERS),
         # No DASH_SITE_ANDROID_* environment twin, on purpose (2026-08-30):
         # these two are set by an admin pasting what a build printed, which is
         # a Settings action and never a deploy-time one. Blank means "no
@@ -853,7 +896,7 @@ def export_toml(conn: sqlite3.Connection, settings: Any) -> str:
     manifest route) as `site.toml`-shaped text -- Settings -> Export."""
     manifest = resolved_manifest(conn, settings)
     lines = [
-        "# CC Sync site manifest -- exported from the dashboard's Settings page.",
+        "# CC Sync site manifest, exported from the dashboard's Settings page.",
         "# See site.example.toml for the full annotated reference; this export",
         "# carries only the fields the dashboard itself stores (site_settings).",
         "",

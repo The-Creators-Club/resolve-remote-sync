@@ -583,11 +583,21 @@ def _check_admin(ctx: SetupContext) -> TaskState:
         source = ("your identity provider (oidc)" if method == "oidc"
                   else f"NAS accounts ({kind})")
         return TaskState(status="ok", detail=f"admins are {source}: {', '.join(admins)}")
-    if method == "oidc" and str(getattr(ctx.settings, "oidc_admin_claim", "") or ""):
+    if method == "oidc":
+        # bug-dash-auth-5 (2026-09-25): this said ok on the strength of
+        # DASH_OIDC_ADMIN_CLAIM alone, but auth.is_admin never reads a claim
+        # (oidc.py only LOGS it, by design: DASH_ADMIN_USERS is the one list
+        # every authorization check reads). So a site with the claim and no
+        # DASH_ADMIN_USERS showed a green admin step while nobody could open
+        # an admin page, and break-glass /login?local=1 is limited to that
+        # same empty list.
+        claim = str(getattr(ctx.settings, "oidc_admin_claim", "") or "").strip()
+        note = (f" (the {claim} claim is only logged at sign-in; it does not make "
+                "anyone an admin)") if claim else ""
         return TaskState(
-            status="ok",
-            detail="admins come from your identity provider's "
-                   f"{ctx.settings.oidc_admin_claim} claim",
+            status="todo",
+            detail="no admin is configured for oidc login: set DASH_ADMIN_USERS to the "
+                   f"account(s) that may administer this dashboard, then redeploy{note}",
         )
     return TaskState(
         status="todo",
@@ -606,7 +616,9 @@ def _admin_state_from_probe(ctx: SetupContext, status: dict[str, Any]) -> TaskSt
 
 register(Task(
     id="admin", title="Create your admin account",
-    description="A local account for you -- no NAS credential involved.",
+    # ui-copy-6 (2026-09-25): the wizard shows these task strings, and " -- "
+    # is the typewriter em dash the no-em-dash rule bans in visible copy.
+    description="A local account for you. No NAS credential is involved.",
     check=_check_admin, run=None,   # account creation is WP C's route, not this task's
 ))
 
@@ -725,11 +737,11 @@ def _check_storage(ctx: SetupContext) -> TaskState:
     tree_root = _tree_root(ctx)
     if tree_root is None:
         if not os.access(projects_dir, os.W_OK):
-            return TaskState(status="todo", detail="not yet probed -- click Do it")
+            return TaskState(status="todo", detail="not yet probed: click Do it")
         return TaskState(status="ok", detail=f"{_ASSETS_NOT_VISIBLE}{free_str}")
     missing = [rel for rel in _shared_asset_rels(ctx) if not (tree_root / rel).is_dir()]
     if missing:
-        return TaskState(status="todo", detail="not yet probed -- click Do it")
+        return TaskState(status="todo", detail="not yet probed: click Do it")
     return TaskState(status="ok", detail=f"writable{free_str}")
 
 
@@ -738,7 +750,7 @@ def _run_storage(ctx: SetupContext) -> TaskState:
     if not projects_dir or not Path(projects_dir).is_dir():
         return TaskState(
             status="fail",
-            detail="DASH_PROJECTS_DIR is not mounted -- add the volume and redeploy",
+            detail="DASH_PROJECTS_DIR is not mounted: add the volume and redeploy",
         )
     root = Path(projects_dir)
     probe = root / PROBE_FILENAME
@@ -851,8 +863,8 @@ def _run_secrets(ctx: SetupContext) -> TaskState:
     if generated:
         state = TaskState(
             status=state.status,
-            detail=state.detail + f"; generated {len(generated)} just now -- "
-                                   "restart the container to load them",
+            detail=state.detail + f"; generated {len(generated)} just now. "
+                                   "Restart the container to load them",
         )
     return state
 

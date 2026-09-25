@@ -268,7 +268,8 @@ class TestDailyCap:
         # The wording the tray really uses (bug-hunt-2026-09-03 comp-ui-2):
         # there is no Copy diagnostics item in the right-click menu, it is a
         # button inside Settings.
-        assert "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN" in caplog.text
+        # ui-copy-5 (2026-09-25): the route names the HELP section now.
+        assert "Tray > Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN" in caplog.text
 
     def test_the_next_day_is_a_new_allowance(self):
         clock = [1_750_000_000.0]

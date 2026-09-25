@@ -163,6 +163,76 @@ def newest_published(channel: dict, kind: str, platform: str) -> str:
     return max(versions, key=version_tuple, default="")
 
 
+def current_published(channel: dict, kind: str, platform: str) -> str:
+    """The version the channel's signed `current` pointer names, or ""."""
+    return str((channel.get("current") or {}).get(f"{kind}/{platform}") or "")
+
+
+def published_sha256(channel: dict, kind: str, platform: str, version: str) -> str:
+    for p in channel.get("packages", []):
+        if (p.get("kind"), p.get("platform"), p.get("version")) == (kind, platform, version):
+            return str(p.get("sha256") or "")
+    return ""
+
+
+def kind_extras_signed() -> bool:
+    """Whether publish_feed -> sign_release will sign requires_dashboard/arch
+    into the record. sign_release decides it from --emit-kind-extras or this
+    variable, and publish_feed passes no such flag, so the variable is the
+    whole answer (logic-release-5, 2026-09-25)."""
+    return os.environ.get("CCSYNC_EMIT_KIND_EXTRAS", "").strip() == "1"
+
+
+def recall_argv(kind: str, platform: str, version: str, previous: str,
+                made_current: bool, others: bool) -> list[str]:
+    """The publish_feed.py argv that withdraws what this run just published.
+
+    bug-ops-3 (2026-09-25): the line printed here used --kind/--platform/
+    --version flags --retract does not take, and left out --feed-dir and
+    --github-repo, so the command in front of the operator at the moment a
+    build turned out bad died in argparse. Built as argv, from the same
+    constants publish() uses, and parsed by the tests.
+
+    logic-release-2 (2026-09-25): withdrawing the CURRENT build must say what
+    replaces it, or publish_feed refuses; the build that was current before
+    this run is the rollback the operator means.
+    """
+    argv = ["--retract", f"{kind}/{platform}/{version}"]
+    if made_current and previous and previous != version:
+        argv += ["--set-current", f"{kind}/{platform}/{previous}"]
+    elif made_current and others:
+        argv += ["--allow-no-current"]
+    argv += ["--reason", "<why, in one sentence an admin will read>",
+             "--feed-dir", FEED_DIR.name, "--github-repo", FEED_REPO, "--github-upload"]
+    return argv
+
+
+def move_pointer(kind: str, platform: str, version: str, dry_run: bool,
+                 allow_key_rotation: bool = False) -> None:
+    """Point the feed's `current` at a record it already carries, no upload of
+    bytes (logic-release-6, 2026-09-25): publish_feed.py --set-current."""
+    cmd = [sys.executable, str(REPO_ROOT / "tools" / "publish_feed.py"),
+           "--set-current", f"{kind}/{platform}/{version}",
+           "--feed-dir", str(FEED_DIR), "--github-repo", FEED_REPO]
+    # logic-release-6 review (2026-09-25): --set-current runs the REL-7 key
+    # check against the build current before the run and tells the operator
+    # to pass --allow-key-rotation. Built without it, this argv dropped the
+    # flag publish_latest was given, so the refusal repeated forever and the
+    # only way out was running publish_feed by hand.
+    if allow_key_rotation:
+        cmd.append("--allow-key-rotation")
+    if dry_run:
+        step("DRY RUN -- publish_feed.py would run as:")
+        print("   ", " ".join(cmd + ["--github-upload"]))
+        return
+    cmd.append("--github-upload")
+    rc, out, err = run(cmd, cwd=str(REPO_ROOT))
+    sys.stdout.write(out)
+    sys.stderr.write(err)
+    if rc != 0:
+        fail(f"publish_feed.py --set-current exited {rc}")
+
+
 def latest_green_run(workflow: str) -> dict | None:
     # --branch: a green run of THIS workflow on a feature branch is a build,
     # not a release (release-pipeline-7).
@@ -277,8 +347,11 @@ def publish(meta: dict, artifact: Path, manifest_path: Path, kind: str,
         return
     rc, out, err = run(cmd, cwd=str(REPO_ROOT))
     sys.stdout.write(out)
+    # logic-release-5 (2026-09-25): stderr on success too. sign_release's
+    # "requires_dashboard/arch NOT signed into this record" NOTE goes there,
+    # and it was the one line saying the ordering rule existed only here.
+    sys.stderr.write(err)
     if rc != 0:
-        sys.stderr.write(err)
         fail(f"publish_feed.py exited {rc}")
 
 
@@ -299,9 +372,12 @@ def main() -> int:
                          "(otherwise the record is STAGED and customers keep being "
                          "offered what they are offered now)")
     ap.add_argument("--allow-older", action="store_true",
-                    help="publish a version LOWER than the newest already on the "
-                         "channel for that kind/platform. A deliberate rollback; "
-                         "refused by default (release-pipeline-7)")
+                    help="publish a CI build whose version is LOWER than the newest "
+                         "already on the channel for that kind/platform (refused by "
+                         "default, release-pipeline-7). NOT a rollback: this only ever "
+                         "takes the newest green run. To roll the feed back to a build it "
+                         "already carries: publish_feed.py --set-current "
+                         "KIND/PLATFORM/VERSION (docs/RELEASE.md)")
     ap.add_argument("--min-version", default=None,
                     help="downgrade floor to stamp into the record")
     # APP-16 (usability sweep 2026-09-04): the "what changed" line the
@@ -317,7 +393,8 @@ def main() -> int:
                     help="publish a companion whose `requires_dashboard` is ABOVE the "
                          "newest dashboard bundle on the channel. Every customer would "
                          "stage it and never offer it (SYS-2), and their fleet would "
-                         "look up to date while it stopped updating")
+                         "look up to date while it stopped updating. Only checked when "
+                         "CCSYNC_EMIT_KIND_EXTRAS=1 signs the field into the record")
     ap.add_argument("--allow-key-rotation", action="store_true",
                     help="publish even though the signing key is not baked into the build "
                          "that is CURRENT for that platform. Every machine on the current "
@@ -354,6 +431,7 @@ def main() -> int:
         fail("no source matches that --kind/--platform combination")
 
     published, skipped = [], []
+    recalls: list[list[str]] = []
     with tempfile.TemporaryDirectory(prefix="ccsync-publish-") as tmp:
         downloaded: dict[str, Path] = {}
         for src in wanted:
@@ -427,7 +505,20 @@ def main() -> int:
             # so rather than refusing.
             needs_dash = str(meta.get("requires_dashboard") or "").strip()
             newest_dash = newest_published(channel, "dashboard", "linux")
-            if needs_dash and not newest_dash:
+            if needs_dash and not kind_extras_signed():
+                # logic-release-5 (2026-09-25): sign_release drops the field
+                # unless kind extras are on (the REL-4/REL-16 overlap policy),
+                # so no customer dashboard ever sees it. Refusing on it sent
+                # the operator to publish a dashboard bundle for an order no
+                # customer enforces, and passing on it read as a protection
+                # that did not exist.
+                step(f"NOTE: this build says it needs dashboard {needs_dash}, but "
+                     f"requires_dashboard is NOT signed into the record (kind extras are "
+                     f"off: CCSYNC_EMIT_KIND_EXTRAS is not 1), so customers get NO ordering "
+                     f"check: a dashboard older than {needs_dash} will offer this build "
+                     f"too. Newest dashboard bundle on the channel: "
+                     f"{newest_dash or 'none'}.")
+            elif needs_dash and not newest_dash:
                 step(f"NOTE: this build needs dashboard {needs_dash} and the channel "
                      f"carries no dashboard bundle at all, so nothing here can check "
                      f"the order. A customer whose dashboard is older will stage it "
@@ -444,9 +535,72 @@ def main() -> int:
                      f"already newer.")
 
             if (kind, plat, version) in already and not args.force:
-                step(f"v{version} is already on the published channel -- nothing to do "
-                     "(--force to republish)")
-                skipped.append(f"{kind}/{plat}: v{version} already published")
+                # logic-release-6 (2026-09-25): the STAGED summary below says
+                # "re-run with --make-current", and this skip used to answer
+                # that re-run with "nothing to do" and never touch the
+                # pointer, so the build stayed staged while the operator took
+                # it for live. A pointer-only move needs no bytes at all.
+                cur = current_published(channel, kind, plat)
+                if not args.make_current or cur == version:
+                    step(f"v{version} is already on the published channel"
+                         + (" and CURRENT" if cur == version else "")
+                         + " -- nothing to do (--force to republish)")
+                    skipped.append(f"{kind}/{plat}: v{version} already published"
+                                   + (" and current" if cur == version else
+                                      ", still STAGED (current is "
+                                      f"{cur or 'unset'})"))
+                    continue
+                if cur and version_tuple(version) < version_tuple(cur):
+                    # A newest green run that is OLDER than what is current
+                    # would turn "make it current" into a silent rollback of
+                    # the whole fleet. That stays a deliberate, named act.
+                    step(f"v{version} is older than v{cur}, which is CURRENT -- not moving "
+                         "the pointer back from here. A rollback is "
+                         f"publish_feed.py --set-current {kind}/{plat}/{version} "
+                         "(docs/RELEASE.md).")
+                    skipped.append(f"{kind}/{plat}: v{version} already published, older "
+                                   f"than current v{cur}, pointer NOT moved")
+                    continue
+                on_feed = published_sha256(channel, kind, plat, version)
+                if on_feed and on_feed != meta.get("sha256"):
+                    # The newest green run rebuilt this version with other
+                    # bytes. The staged record is still a whole, signed build,
+                    # but which of the two the operator means is theirs to say.
+                    step(f"v{version} is on the channel STAGED with different bytes from "
+                         f"this run (feed sha256 {on_feed[:16]}..., this run "
+                         f"{str(meta.get('sha256'))[:16]}...). NOT made current. To make "
+                         f"the STAGED record current as it is:")
+                    print("    python tools\\publish_feed.py "
+                          + subprocess.list2cmdline([
+                              "--set-current", f"{kind}/{plat}/{version}",
+                              "--feed-dir", FEED_DIR.name, "--github-repo", FEED_REPO,
+                              "--github-upload"]
+                            + (["--allow-key-rotation"] if args.allow_key_rotation
+                               else [])))
+                    step("  or bump the version and publish this run's build instead.")
+                    skipped.append(f"{kind}/{plat}: v{version} already published, still "
+                                   "STAGED (different bytes, see above)")
+                    continue
+                step(f"v{version} is already on the channel, STAGED (current is "
+                     f"{cur or 'unset'}) -- moving the pointer to it")
+                # logic-release-6 review (2026-09-25): a pointer move rewrites
+                # no record, so the record's min_version and notes are
+                # the ones it was published with. Say so rather than drop the
+                # flags without a word.
+                ignored = [f for f, on in (("--min-version", args.min_version),
+                                           ("--notes", args.notes.strip())) if on]
+                if ignored:
+                    step(f"  NOTE: {' and '.join(ignored)} NOT applied: the staged "
+                         "record keeps the values it was published with (a pointer move "
+                         "rewrites no record). Bump the version to publish new ones.")
+                move_pointer(kind, plat, version, args.dry_run,
+                             bool(args.allow_key_rotation))
+                published.append(f"{kind}/{plat} v{version} (made current; was "
+                                 f"{cur or 'unset'})")
+                recalls.append(recall_argv(
+                    kind, plat, version, cur, True,
+                    any(k == kind and pl_ == plat and v != version
+                        for (k, pl_, v) in already)))
                 continue
 
             # A LOWER version than the channel already carries is a rollback,
@@ -456,11 +610,18 @@ def main() -> int:
             newest = newest_published(channel, kind, plat)
             if newest and version_tuple(version) < version_tuple(newest) and not args.allow_older:
                 fail(f"{kind}/{plat} v{version} is OLDER than v{newest}, which is already "
-                     "on the channel -- refusing. Pass --allow-older for a deliberate "
-                     "rollback (and --make-current, or nobody is offered it).")
+                     "on the channel -- refusing. Pass --allow-older if publishing this "
+                     "lower-numbered CI build is really meant (and --make-current, or "
+                     "nobody is offered it). To roll the feed BACK to a build it already "
+                     "carries, this tool is the wrong one: publish_feed.py --set-current "
+                     f"{kind}/{plat}/<version> (docs/RELEASE.md).")
 
+            cur = current_published(channel, kind, plat)
             publish(meta, artifact, manifest_path, kind, args.dry_run, extra)
             published.append(f"{kind}/{plat} v{version}")
+            recalls.append(recall_argv(
+                kind, plat, version, cur, args.make_current,
+                any(k == kind and pl_ == plat and v != version for (k, pl_, v) in already)))
 
     print()
     step("summary")
@@ -491,10 +652,12 @@ def main() -> int:
         else:
             step("published and STAGED: the channel's `current` pointer was NOT moved, "
                  "so nobody is offered this yet, on any policy. Re-run with "
-                 "--make-current when you are ready.")
-        step(r"  Recall it: python tools\publish_feed.py --retract --kind <kind> "
-             "--platform <platform> --version <version> --reason \"...\" "
-             "--github-upload")
+                 "--make-current when you are ready (it moves the pointer to what is "
+                 "already on the channel; nothing is re-uploaded).")
+        # bug-ops-3 (2026-09-25): one runnable line per record, filled in.
+        for argv in recalls:
+            step(r"  Recall it: python tools\publish_feed.py "
+                 + subprocess.list2cmdline(argv))
     return 0
 
 

@@ -12,8 +12,12 @@
    back, not even as a value= on a blanked input. #}
 <div id="admin-alerts">
 
-  {% if error %}<div class="banner">▲ {{ error }}</div>{% endif %}
-  {% if notice %}<div class="muted" style="margin:0.4rem 0">{{ notice }}</div>{% endif %}
+  {# ui-dash-admin-5 (2026-09-25): error-banner / result-banner are what
+     static/htmx_errors.js moves next to the button that posted. This panel
+     swaps outerHTML with scroll kept, so a result painted here at the top
+     landed a screen or more above a button far down the panel. #}
+  {% if error %}<div class="banner error-banner">▲ {{ error }}</div>{% endif %}
+  {% if notice %}<div class="muted result-banner" style="margin:0.4rem 0">{{ notice }}</div>{% endif %}
 
   <div class="side-head">[ CURRENTLY OPEN ]
     <span class="muted">What this server believes is wrong right now.
@@ -163,7 +167,8 @@
         <div class="muted">No check has run yet.</div>
       {% endif %}
       {% if triage.last_poll %}
-        <div class="muted">Replies last read {{ triage.last_poll.at }}: {{ triage.last_poll.detail }}</div>
+        {# ui-dash-admin-12 (2026-09-25): "3h ago", with the stored UTC stamp in the title, like every other page; a raw +00:00 string is a sum a UTC+8 owner does in their head. #}
+        <div class="muted">Replies last read <span title="{{ triage.last_poll.at }}">{{ triage.last_poll.at | ago }}</span>: {{ triage.last_poll.detail }}</div>
       {% endif %}
       <form class="inline-form" style="margin-top:0.4rem" hx-post="/partials/admin/alerts/triage/run"
             hx-target="#admin-alerts" hx-swap="outerHTML">
@@ -176,14 +181,22 @@
      <data>/secrets/, 0600, never in the database and never in a response. #}
   <form class="inline-form" style="display:block; margin-top:0.8rem"
         hx-post="/partials/admin/alerts/password" hx-target="#admin-alerts" hx-swap="outerHTML">
+    {# ui-dash-admin-9 (2026-09-25): the environment password WINS
+       (alerts.read_password), so [ SET PASSWORD ] and [ CLEAR ] beside the
+       sentence saying so answered "password stored." / "password cleared."
+       while mail kept going out with the environment's value: an admin
+       rotating a Google app password here believed it was done. With the
+       environment in charge the controls are not offered. #}
+    {% if alerts_settings.password_source == "env" %}
+      <div>SMTP PASSWORD <span class="muted">in use: {{ alerts_settings.password_mask }}</span></div>
+      <div class="muted">This password comes from the deployment's own environment, so
+        it cannot be changed here: change it where this server is deployed.</div>
+    {% else %}
     <label>SMTP PASSWORD<br>
       <input type="password" name="password" value="" autocomplete="new-password"
              placeholder="{{ 'stored: ' ~ alerts_settings.password_mask if alerts_settings.password_set else 'not set' }}"></label>
     <button class="btn tap" type="submit">[ SET PASSWORD ]</button>
     <button class="btn tap" type="submit" name="clear" value="1">[ CLEAR ]</button>
-    {% if alerts_settings.password_source == "env" %}
-      <div class="muted">This password comes from the deployment's own environment, so
-        it cannot be changed here.</div>
     {% endif %}
   </form>
 
@@ -211,11 +224,11 @@
     {% for group in alerts_log_groups %}
       {% if group.count > 1 %}
         <tr><td colspan="5" class="muted mono-sm" style="padding-top:0.5rem">
-          {{ group.at }} - one message, {{ group.count }} finding(s)</td></tr>
+          <span title="{{ group.at }}">{{ group.at | ago }}</span> - one message, {{ group.count }} finding{{ "s" if group.count != 1 }}</td></tr>
       {% endif %}
       {% for row in group.rows %}
       <tr class="editor-row">
-        <td class="mono-sm muted" data-label="WHEN">{{ row.at }}</td>
+        <td class="mono-sm muted" data-label="WHEN" title="{{ row.at }}">{{ row.at | ago }}</td>
         <td class="mono-sm" data-label="KIND">{{ row.kind }}</td>
         <td data-label="SUBJECT">{{ row.subject }}</td>
         <td class="mono-sm muted" data-label="TO">{{ row.sent_to or "-" }}</td>

@@ -138,6 +138,22 @@ def is_running() -> bool:
     return _RUNNING.is_set()
 
 
+# bug-dash-cards-jobs-3 (2026-09-25): the running drain's last pass found no
+# engine to hand work to. Any engine runs any pinned job, and the pool builds
+# one only while somebody has an episode open, so after the last episode
+# closes (or a container restart, which starts the pool empty) a pinned row
+# waits for the next open with nothing saying so: `explain` answered "pinned
+# to the dashboard's own worker" as though it were being worked on. A
+# module-level fact for the reason `_RUNNING` is one: `explain` runs with a
+# connection and no app object.
+_NO_ENGINE = threading.Event()
+
+
+def waiting_for_an_engine() -> bool:
+    """Is the drain running, and was it idle last pass for want of an engine?"""
+    return _RUNNING.is_set() and _NO_ENGINE.is_set()
+
+
 class PinnedExecutor:
     """The thread that drains `pinned`. Never raises out of tick()."""
 
@@ -241,6 +257,7 @@ class PinnedExecutor:
         # times out; `join(timeout)` cannot be asked whether it worked.
         self._stop.set()
         _note_running(False)
+        _NO_ENGINE.clear()
         thread = self._thread
         if thread is None:
             return
@@ -281,7 +298,9 @@ class PinnedExecutor:
     def tick(self, conn: Any) -> list[int]:
         """One pass. -> the ids that ended (done or abandoned)."""
         if not self.available():
+            _NO_ENGINE.set()
             return []
+        _NO_ENGINE.clear()
         ended: list[int] = []
         for job in db.pinned_jobs(conn):
             if self._stop.is_set():
@@ -382,8 +401,32 @@ class PinnedExecutor:
                 "(out_root + out_rel)")
         out_dir = resolve(self.roots, out_root, out_rel)
         stem = str(inputs.get("out_stem") or "").strip() or _stem(source)
-        return source, out_dir, stem, out_root, out_rel
+        return source, out_dir, _plain_stem(stem), out_root, out_rel
 
 
 def _stem(path: Path) -> str:
     return os.path.splitext(path.name)[0]
+
+
+def _plain_stem(stem: str) -> str:
+    """The output name, or ExecutorError if it is not a plain file name.
+
+    bug-comp-media-3 (2026-09-25, owed from c-media): the stem is appended
+    after `resolve` has guarded out_rel, so `..` climbed out of the output
+    directory, `/etc/x` replaced it, and `Interview 1/2` wrote into a folder
+    nobody made. The same four rules as the companion's
+    `job_paths.safe_stem(stem, windows=False)`, copied rather than imported
+    because the container carries no companion package. Refused, never
+    rewritten: the page looks for exactly this name. Deliberately NOT ':' or
+    a backslash: this engine runs on Linux, where both are plain name characters,
+    and it is the one place a name Windows refuses (`Q&A: Ruskin`) still
+    gets made - refusing them here would leave such a job made nowhere.
+    """
+    value = str(stem or "")
+    if (not value.strip() or value.strip() in (".", "..") or "/" in value
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)):
+        raise ExecutorError(
+            f"the output name {stem!r} is not a plain file name (no slashes, "
+            f"control characters or dot names), so this job cannot be "
+            f"written here or anywhere")
+    return value

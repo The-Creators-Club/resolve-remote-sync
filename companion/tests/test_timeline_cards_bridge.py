@@ -213,7 +213,7 @@ def test_a_failed_edit_says_so(bridge, caplog):
 
 def test_sweep_items_comes_from_the_library(monkeypatch):
     monkeypatch.setattr(
-        resolve_bridge, "get_timeline_items",
+        resolve_bridge, "library_timeline_items",
         lambda allow_cached=False: {"ok": True, "timeline_uid": "TL1", "items": [
             {"media_pool_uid": "m1", "source": "library"}]})
     items = bridge_mod.CardsBridge({}).sweep_items("TL1")
@@ -229,7 +229,7 @@ def test_another_timelines_items_are_refused(monkeypatch):
     transcript from somebody else's cut, and nothing about the result would
     look wrong."""
     monkeypatch.setattr(
-        resolve_bridge, "get_timeline_items",
+        resolve_bridge, "library_timeline_items",
         lambda allow_cached=False: {"ok": True, "timeline_uid": "TL2", "items": [
             {"media_pool_uid": "m1", "source": "library"}]})
     assert bridge_mod.CardsBridge({}).sweep_items("TL1") is None
@@ -240,7 +240,7 @@ def test_an_answer_that_cannot_say_which_timeline_is_refused(monkeypatch):
     not know which cut this is" and "this is your cut" must not be the same
     answer to a caller that is about to index into it."""
     monkeypatch.setattr(
-        resolve_bridge, "get_timeline_items",
+        resolve_bridge, "library_timeline_items",
         lambda allow_cached=False: {"ok": True, "items": [
             {"media_pool_uid": "m1", "source": "library"}]})
     assert bridge_mod.CardsBridge({}).sweep_items("TL1") is None
@@ -251,7 +251,7 @@ def test_an_engine_that_names_no_timeline_still_gets_an_answer(monkeypatch):
     with, and refusing it would be refusing every caller that has not read a
     uid yet."""
     monkeypatch.setattr(
-        resolve_bridge, "get_timeline_items",
+        resolve_bridge, "library_timeline_items",
         lambda allow_cached=False: {"ok": True, "timeline_uid": "TL9", "items": [
             {"media_pool_uid": "m1", "source": "library"}]})
     assert bridge_mod.CardsBridge({}).sweep_items("") == [
@@ -274,21 +274,21 @@ def test_an_api_walk_is_refused_rather_than_returned(monkeypatch):
     the 11-95 s per-clip property crawl on the sweep's hot path -- slower than
     the engine's own, and holding the lock for all of it."""
     monkeypatch.setattr(
-        resolve_bridge, "get_timeline_items",
+        resolve_bridge, "library_timeline_items",
         lambda allow_cached=False: {"ok": True, "items": [
             {"media_pool_uid": "m1", "source": "api"}]})
     assert bridge_mod.CardsBridge({}).sweep_items("TL1") is None
 
 
 def test_a_failed_walk_is_none_not_a_traceback(monkeypatch):
-    monkeypatch.setattr(resolve_bridge, "get_timeline_items",
+    monkeypatch.setattr(resolve_bridge, "library_timeline_items",
                         lambda allow_cached=False: 1 / 0)
     assert bridge_mod.CardsBridge({}).sweep_items("TL1") is None
 
 
 def test_no_project_is_none(monkeypatch):
     monkeypatch.setattr(
-        resolve_bridge, "get_timeline_items",
+        resolve_bridge, "library_timeline_items",
         lambda allow_cached=False: {"ok": False, "message": "no project open"})
     assert bridge_mod.CardsBridge({}).sweep_items("TL1") is None
 
@@ -303,7 +303,7 @@ def test_the_sweep_does_not_hold_the_api_lock(monkeypatch):
             resolve_bridge._API_LOCK.release()
         return {"ok": True, "items": []}
 
-    monkeypatch.setattr(resolve_bridge, "get_timeline_items", walk)
+    monkeypatch.setattr(resolve_bridge, "library_timeline_items", walk)
     bridge_mod.CardsBridge({}).sweep_items("TL1")
     assert held["locked"] is False
 

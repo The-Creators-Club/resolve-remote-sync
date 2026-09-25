@@ -254,12 +254,12 @@ def validate_key(raw: str) -> str:
     if len(value) > MAX_KEY_CHARS:
         raise ProviderError(f"that key is longer than {MAX_KEY_CHARS} characters")
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
-        raise ProviderError("the key contains control characters -- paste it again")
+        raise ProviderError("the key contains control characters: paste it again")
     if any(ch.isspace() for ch in value):
         # Catches the two common paste accidents ("Bearer sk-..." and a
         # trailing line from a wrapped terminal) at the moment they happen,
         # rather than as an unexplained 401 on the next search job.
-        raise ProviderError("the key contains a space -- paste the key alone, "
+        raise ProviderError("the key contains a space: paste the key alone, "
                             "with no 'Bearer' prefix")
     return value
 
@@ -268,7 +268,7 @@ def set_key(settings: Any, name: str, raw: str) -> str:
     """Store a key 0600 and return its MASK. Raises ProviderError."""
     provider = spec(name)
     if provider.kind != "api":
-        raise ProviderError(f"{provider.label} does not take an API key -- it is a CLI")
+        raise ProviderError(f"{provider.label} does not take an API key: it is a CLI")
     value = validate_key(raw)
     path = _key_path(settings, name)
     try:
@@ -639,7 +639,7 @@ def resolve_provider(availability: Mapping[str, bool], preference: str = AUTO) -
         return ProviderChoice(
             "", "",
             f"{PROVIDERS[pref].label} is pinned but not available. Nothing else "
-            f"will be used in its place -- clear the pin to fall back to the "
+            f"will be used in its place: clear the pin to fall back to the "
             f"chain.", True)
     for name in PROVIDER_ORDER:
         if availability.get(name):
@@ -982,13 +982,13 @@ async def api_set_ai_key(
     settings = request.app.state.settings
     if provider.kind != "api":
         raise HTTPException(status_code=400,
-                            detail=f"{provider.label} is a CLI -- it has no API key. "
+                            detail=f"{provider.label} is a CLI: it has no API key. "
                                    f"Sign it in on the dashboard host instead.")
     if read_key(settings, name)[1] == "env":
         raise HTTPException(
             status_code=409,
             detail=(f"{provider.env_var} is set in this container's environment "
-                    f"and always wins. Change it there (or unset it) -- a key "
+                    f"and always wins. Change it there (or unset it): a key "
                     f"saved here would never be used."))
     try:
         set_key(settings, name, payload.key)
@@ -1008,7 +1008,7 @@ async def api_clear_ai_key(
     settings = request.app.state.settings
     if provider.kind != "api":
         raise HTTPException(status_code=400,
-                            detail=f"{provider.label} is a CLI -- it has no API key")
+                            detail=f"{provider.label} is a CLI: it has no API key")
     try:
         clear_key(settings, name)
     except ProviderError as exc:
@@ -1056,7 +1056,7 @@ async def api_set_ai_cli_path(
     settings = request.app.state.settings
     if provider.kind != "cli":
         raise HTTPException(status_code=400,
-                            detail=f"{provider.label} is an API provider -- it has "
+                            detail=f"{provider.label} is an API provider: it has "
                                    f"no executable path")
     value = str(payload.path or "").strip()
     if any(ord(ch) < 32 for ch in value):

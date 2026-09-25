@@ -31027,6 +31027,96 @@ blocked for good, with a note telling the editor to move "that other folder"
 (their own fresh downloads). A project whose local copy was deleted (both
 paths missing) is now blocked where HEAD healed it. No data loss.
 
+## The 2026-09-24 hunt's mediums and lows, wave 2 (companion 0.9.79 / dashboard 0.7.59 / installer 1.0.45) - FIXED in repo, unshipped
+
+The eleventh hunt's remaining 252 findings (every medium and low, after the
+highs wave CR-322..CR-333) were fixed on 2026-09-25 by Opus builders in 19
+file-owned groups (33 chunks), each chunk reviewed by an adversarial Opus
+reviewer and reworked where it found a problem (23 of 252), then three owed
+rounds for work one group left in another's files, then three Fable
+reviewers over the whole wave (companion+installers, dashboard+server,
+webapps+tools), whose three problems were fixed before this commit.
+
+Outcome: **201 FIXED, 43 PARTIAL whose remainder was routed and closed in
+the owed rounds, 5 ALREADY_FIXED (by the highs wave or the Cards picker), 3
+DEFERRED for the owner.** Every fix names its finding id at the code, its
+regression test fails on the previous code, and the per-finding record is in
+`docs/bug-hunt-2026-09-24/ledger2/<group>.md` (with `wave2_results.json` and
+the three `fable-review-wave2-*.md`).
+
+Deploy: dashboard first, as always; the new wire keys are optional both ways
+(Fable checked every one). No schema migration in this wave.
+
+**Two policy changes ride in as fixes (Fable asked for them to be named):**
+- The drive reminder (CR-92) no longer recurs for an episode where only
+  downloads are owed; the first warning still fires, and anything owed UP
+  keeps the half-hourly reminder.
+- The setup wizard's wired / remote radio now decides the computer's role
+  (CR-88's "wired or remote is the computer's own setting"), with the
+  destructive branch still guarded by `p_mapping_is_ours` / `$PIsForeign` /
+  `validate_local_root`.
+
+**Fable's three findings, fixed here:** the music ingest `release` route now
+refuses a stale computer's cancel of a batch another computer took over (410
+other_machine, the bug-broll-4 guard mirrored; before, it deleted the new
+holder's track mid-upload); a computer with NOTHING TICKED that goes quiet
+leads with a neutral "Nothing ticked for this computer" line instead of the
+amber "Not heard from" headline (the owner's standing rule; its status dot is
+still amber, predating this wave, and is an open owner call); and
+`api._owed_files_by_machine` is cached per database for up to 15 s, keyed on
+the small tables every writer of its inputs touches (the grid render was
+~14 ms -> ~91 ms on a 48-pair fleet without it).
+
+**DEFERRED for the owner (no code changed):**
+- bug-broll-3: b-roll preview stills are keyed by an id a fleet-ingested
+  clip and a drained one can share, so a clip can show another's poster.
+  Choose (a) key stills by content hash / identity digest, or (b) a
+  disjoint fleet id range plus a rename in `server/broll_drain.py`.
+- bug-comp-resolve-7: the Resolve item cache's `is` test on the project
+  object (slower after a reopen) vs `GetUniqueId()` (faster, a possible
+  0xc0000005 on dead pointers). Recommended: keep the `is` test.
+- bug-comp-ui-4: does the tray's monitor window count as "a CCSync window is
+  open" (blocking other dialogs while it is up)?
+
+**Other owner decisions surfaced by the wave:** the EULA's licensor entity,
+company number, address and governing law (docs/legal is still DRAFT FOR
+COUNSEL); moving Resolve's factory LUT copies out of `P:\Assets\Luts` (to a
+dated folder, snapshot first, nothing deleted); whether a borrower's files
+in a shared folder are reported to the dashboard.
+
+## CR-334 - every clean build in the Packages page's vendor feed wore "(+dirty)" - FIXED in repo, unshipped (dashboard 0.7.59: ui.py)
+
+Owner, 2026-09-25: "why are all these builds stamped dirty". The vendor
+feed records `git_dirty` as the STRING "0"/"1", and `ui._vendor_rows` read it
+with `bool(...)`: `bool("0")` is True. CR-267b fixed the same reading where a
+package is STORED (`release_feed._feed_flag`) and missed this reader, which
+draws the feed's own rows. Now it uses `_feed_flag`. Every build in the
+screenshot is clean (`git_dirty: "0"`, CI logs `"git_dirty": false`).
+Tests: `dashboard/tests/test_cr334_vendor_feed_dirty_chip.py`.
+
+## CR-335 - MAKE CURRENT gave no feedback, refused out of sight, and the lists were oldest first - FIXED in repo, unshipped (dashboard 0.7.59: ui.py, api.py, release_feed.py, package_store.py, templates/partials/admin_packages.html)
+
+Owner, 2026-09-25: "clicking make current, there is a long delay before it
+happens, and no visual feedback ... I had to click it multiple times. In
+this page, latest builds should be at the top." The live fleet_audit showed
+what really happened: the macOS 0.9.77 clicks were REFUSED by the soak gate
+every time, the refusal was drawn at the top of the panel (or carried by
+htmx_errors.js to the OTHER identical form for the same build), and Windows
+0.9.77 became current a couple of minutes later through the feed poller's
+`current` policy, with no audit entry. Now: every MAKE CURRENT form has a
+busy label and disables itself; a refusal is drawn on the row that was
+clicked (`error_for`), not in the moved top banner; a vendor row the soak
+gate holds offers MAKE CURRENT ANYWAY with the typed version; every list is
+newest first (`_version_sort_key`); an unattended promotion writes a
+`package.make_current` audit row (actor `release-feed`, or the publisher);
+and, with CR-325, both push doors refuse the build a machine fled.
+Tests: `dashboard/tests/test_cr335_packages_page.py`.
+
+The same day the vendor feed itself was pruned to the newest build per
+kind/platform on the owner's instruction (94 old release assets deleted,
+every one kept in this rig's `feed/`, the channel re-signed and verified
+live).
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

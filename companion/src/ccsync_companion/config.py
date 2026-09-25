@@ -152,7 +152,7 @@ log = logging.getLogger("ccsync.config")
 # and this loop claims it BY ID through a closed idle gate, and a whisper pass
 # finally reports progress -- its stdout is read on a drain thread instead of
 # being buffered until exit, so the fleet chip moves while the GPU works.
-VERSION = "0.9.78"
+VERSION = "0.9.79"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
@@ -636,6 +636,13 @@ DEFAULTS: dict[str, Any] = {
     # Windows, /Library/Application Support/... on macOS). Only needed for a
     # non-standard Resolve install.
     "resolve_lut_dir": "",
+    # logic-resolve-3 (2026-09-25): extra top-level folder or file names in
+    # Resolve's LUT directory to treat as FACTORY content, comma-separated
+    # and case-insensitive, on top of luts.RESOLVE_FACTORY_LUT_NAMES. A
+    # factory folder is never offered by Share LUTs; a Resolve build that
+    # ships a vendor folder the list does not know would otherwise be offered
+    # to every editor, forever. Blank = the built-in list only.
+    "resolve_factory_luts_extra": "",
     # The exact string written into Resolve's LUT Locations list. Blank =
     # the canonical P:\Assets\Luts on Windows (identical on every editor's
     # machine, which is what keeps a LUT reference portable) and the real
@@ -1342,6 +1349,9 @@ lut_sync_enabled = true
 # Resolve's OWN LUT folder, where the tray looks for LUTs this machine has and
 # the library does not. Blank = the standard location for this platform.
 resolve_lut_dir = ""
+# Extra names in that folder that are Resolve's own factory LUTs (comma-
+# separated), so Share LUTs never offers them. Blank = the built-in list.
+resolve_factory_luts_extra = ""
 # Blank = the canonical P:\\Assets\\Luts on Windows, the real local path on Mac.
 lut_location_override = ""
 lut_check_interval = 900

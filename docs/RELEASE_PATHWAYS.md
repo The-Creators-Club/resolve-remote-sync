@@ -54,13 +54,13 @@ files, installer = **4**).
    2026-08-31): without it the records land STAGED, and a dashboard on
    `policy = "current"` offers only what the channel's signed `current`
    pointer names — staged records are simply not offered while a pointer
-   exists. And the flag cannot be added after the fact through
-   `publish_latest --force`, because a newer green run has usually
-   rebuilt the same version with different bytes, which the feed rightly
-   refuses; the recovery is a SAME-BYTES republish per record (download
-   each record's original run artifact, `publish_feed.py --manifest …
-   --make-current`), one at a time — sequential, the channel is
-   read-modify-upload.
+   exists. Since 2026-09-25 (logic-release-6) the recovery no longer needs
+   the original bytes: `publish_latest.py --make-current` on a version
+   already staged with the same bytes moves the pointer alone, and when a
+   newer green run has rebuilt that version with different bytes it prints
+   the `publish_feed.py --set-current KIND/PLATFORM/VERSION ...` line that
+   makes the STAGED record current. `publish_latest --force` is still the
+   wrong tool: the feed rightly refuses different bytes under one version.
 5. **The dashboard does the rest.** This site's `site.toml` has `[releases]
    policy = "current"`: the feed poller picks the release up and publishes +
    makes it current with no click. Editors' companions then self-upgrade.

@@ -321,6 +321,13 @@ What it does, per invocation:
     `--allow-shrink`;
   - the local `feed/` dir is still written and signed even when the upload
     is refused, exactly as before.
+- `--set-current KIND/PLATFORM/VERSION` (2026-09-25, logic-release-6/-7):
+  moves the `current` pointer ALONE, at a record the channel already carries;
+  no artifact, nothing re-uploaded but the re-signed channel. Refused for a
+  version the channel does not carry (a pointer at nothing makes every
+  `policy = current` dashboard offer nothing), for a recalled one, and (REL-7)
+  for a record signed with a key the build current today does not trust. It is
+  how a staged record becomes current later and how the feed is rolled back.
 - `--retract KIND/PLATFORM/VERSION --reason "..."`: removes one record and any
   `current` pointer at it, and (since 2026-08-28, REL-3) adds an entry to the
   channel's signed `retracted` list — `{kind, platform, version, reason, at}`.
@@ -334,6 +341,10 @@ What it does, per invocation:
   bytes it verified. A merge never drops a recall entry (a publish from a
   fresh clone must not re-offer the build the vendor pulled), and publishing a
   recalled version again is refused unless the same run retracts it.
+  Retracting the build `current` points at is refused unless the same run
+  says what replaces it (`--set-current`, or `--allow-no-current` for
+  highest-wins), because with no pointer a newer STAGED record becomes what
+  every `policy = current` site takes (logic-release-2, 2026-09-25).
 - **A record already on the feed is protected twice** (2026-08-21, CR-59
   item 8). Both refusals happen before anything is signed or uploaded, and
   both name the flag that overrides them:

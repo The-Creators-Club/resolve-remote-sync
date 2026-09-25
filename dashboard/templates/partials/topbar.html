@@ -147,8 +147,11 @@
          the token has to travel as a field. app.py's csrf_gate reads either. #}
       <form method="post" action="/logout" class="inline-form">
         <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
-        <button class="btn" type="submit">[ LOGOUT ]</button></form>
-      {# LOGOUT ALL lives here rather than in the bar (2026-08-18): it is the
+        <button class="btn" type="submit">[ SIGN OUT ]</button></form>
+      {# ui-copy-7 (2026-09-25): SIGN IN / SIGN OUT / SIGN OUT EVERYWHERE, the
+         words the login page, the tray, the SPAs and this form's own confirm
+         already use; the buttons were the one place that said LOGIN/LOGOUT.
+         SIGN OUT EVERYWHERE lives here rather than in the bar (2026-08-18): it is the
          rare action -- "a machine was lost" -- and the bar is deliberately
          three items wide now. It stays one click from every page for every
          account, admin or not.
@@ -157,11 +160,11 @@
          matching mechanism for a form that submits itself. #}
       <form method="post" action="/logout-everywhere" class="inline-form"
             title="revoke this account's sessions on every device. Use it if a computer was lost"
-            onsubmit="return window.confirm('Sign yourself out of every browser, including this one? You will need to log in again to finish what you are doing.');">
+            onsubmit="return window.confirm('Sign yourself out of every browser, including this one? You will need to sign in again to finish what you are doing.');">
         <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
-        <button class="btn" type="submit">[ LOGOUT ALL ]</button></form>
+        <button class="btn" type="submit">[ SIGN OUT EVERYWHERE ]</button></form>
     {% else %}
-      <a class="btn" href="/login">[ LOGIN ]</a>
+      <a class="btn" href="/login">[ SIGN IN ]</a>
     {% endif %}
     {# The phone's copy of the [ X ] (2026-08-30): the head is at the top of a
        844px panel and the thumb holding the phone is at the bottom. A second
@@ -233,9 +236,9 @@
        the token has to travel as a field. app.py's csrf_gate reads either. #}
     <form method="post" action="/logout" class="inline-form">
       <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
-      <button class="btn" type="submit">[ LOGOUT ]</button></form>
+      <button class="btn" type="submit">[ SIGN OUT ]</button></form>
   {% else %}
-    <a class="btn" href="/login">[ LOGIN ]</a>
+    <a class="btn" href="/login">[ SIGN IN ]</a>
   {% endif %}
 </span>
 </span>

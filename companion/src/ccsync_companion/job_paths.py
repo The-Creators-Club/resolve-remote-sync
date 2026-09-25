@@ -42,7 +42,21 @@ ROOT_KEYS = {VAULT: "jobs_vault_root", MEDIA: "jobs_media_root"}
 class JobPathError(ValueError):
     """A job's inputs cannot be placed on this machine. The runner turns this
     into a job FAILURE with the sentence in it, never into a traceback: the
-    admin who submitted it has to be able to read why."""
+    admin who submitted it has to be able to read why.
+
+    `retryable` (bug-comp-media-3/-8, 2026-09-25): True, the default, is "not
+    HERE" (a root this machine lacks, which another machine may have); False
+    is a fault in the job itself (a NUL byte, an out_stem that names a
+    directory), which every machine in the fleet would refuse the same way,
+    so handing it on only buys each of them a cooldown."""
+
+    def __init__(self, message: str, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = bool(retryable)
+
+
+def _has_control(value: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
 
 
 def _configured(cfg: dict[str, Any], key: str) -> Optional[Path]:
@@ -100,6 +114,16 @@ def resolve(cfg: dict[str, Any], root: str, rel_path: str) -> Path:
     raw = str(rel_path or "").strip().replace("\\", "/")
     if not raw:
         raise JobPathError("the job named no path inside the root")
+    # bug-comp-media-8 (2026-09-25): a NUL made Path.resolve raise a plain
+    # ValueError ("embedded null character"), which the runner's handlers did
+    # not catch -- so the job was claimed, dropped with no result, re-offered
+    # when its lease ran out, and dropped by the next machine, each one
+    # earning the lease-expiry cooldown. Refused HERE, in words, and not
+    # retryable: the same bytes are unplaceable on every machine.
+    if _has_control(raw):
+        raise JobPathError(
+            f"{rel_path!r} has a control character in it, which no file "
+            f"system here can open", retryable=False)
     # The RAW value decides, before any stripping: `/vault/2026/...` is how
     # the Timeline Cards container spells the vault, and silently reading it
     # as relative would put the work in the wrong place on every machine that
@@ -109,11 +133,74 @@ def resolve(cfg: dict[str, Any], root: str, rel_path: str) -> Path:
             f"a job's path must be RELATIVE to its root, and {rel_path!r} is "
             f"absolute (docs/TIMELINE-CARDS-INTO-CCSYNC.md section 4.1)")
     rel = raw.strip("/")
-    base = have[name].resolve()
-    target = (base / rel).resolve()
+    try:
+        base = have[name].resolve()
+        target = (base / rel).resolve()
+    except (OSError, ValueError) as exc:
+        # bug-comp-media-8: whatever else the platform's resolve refuses
+        # becomes the sentence the admin reads, never an escape past the
+        # runner. An OSError may be this machine's share having a bad moment,
+        # so it stays retryable; a ValueError is the path's own shape.
+        raise JobPathError(
+            f"{rel_path!r} cannot be placed under the {name} root ({exc})",
+            retryable=isinstance(exc, OSError)) from exc
     try:
         target.relative_to(base)
     except ValueError as exc:
         raise JobPathError(
             f"{rel_path!r} climbs out of the {name} root") from exc
     return target
+
+
+# Characters that make a NAME into something else. Only the forward slash
+# does that on EVERY machine: it is a separator on Windows, macOS and the
+# dashboard's Linux engine alike, so a stem holding one is refused for the
+# whole fleet.
+#
+# review round (2026-09-25): the first cut refused ':' and '\' fleet-wide
+# too, and that turned a name the fleet COULD make into a permanent failure.
+# Both are Windows-only hazards: '\' is a separator and a drive colon makes
+# `out_dir / stem` throw out_dir away (any other colon is an NTFS alternate
+# data stream). Resolve allows ':' in a clip name, Cards sends the multicam
+# name as the stem unsanitised, and on HEAD a stem like 'Q&A: Ruskin' failed
+# RETRYABLY on Windows, a Mac could write it, and once the budget ran out
+# the job pinned onto the dashboard's Linux engine, which writes it fine.
+# db.fail_job turns retryable=False straight into FAILED (no Mac turn, no
+# pin), so those two are "not HERE" on Windows and nothing at all elsewhere.
+_STEM_FORBIDDEN_EVERYWHERE = ("/",)
+_STEM_FORBIDDEN_ON_WINDOWS = ("\\", ":")
+
+
+def safe_stem(stem: str, windows: Optional[bool] = None) -> str:
+    """A job's `out_stem` -> the same string, or JobPathError.
+
+    bug-comp-media-3 (2026-09-25): `resolve` refuses an absolute or climbing
+    `rel_path`/`out_rel`, and the stem was then appended after it with no
+    check at all -- `C:/Windows/Temp/x` replaced the output directory, `..`
+    climbed out of it, and a multicam called `Interview 1/2` put its proxy in
+    a folder nobody made (a RETRYABLE failure that toured the fleet). The
+    stem is a file NAME, and the page looks for exactly that name, so it is
+    refused rather than rewritten: a sanitised name is a file the page will
+    never find, and the refusal names the clip.
+
+    Empty or dot names, a '/' and a control character are wrong on every
+    machine (retryable=False). A '\' or ':' is wrong only on Windows
+    (`windows` defaults to this machine), where it is retryable so a Mac or
+    the dashboard's pinned engine can still write the file.
+    """
+    value = str(stem or "")
+    if (not value.strip() or value.strip() in (".", "..")
+            or any(ch in value for ch in _STEM_FORBIDDEN_EVERYWHERE)
+            or _has_control(value)):
+        raise JobPathError(
+            f"the output name {stem!r} is not a plain file name (no "
+            f"slashes, control characters or dot names), so this job "
+            f"cannot be written on any machine", retryable=False)
+    if windows is None:
+        windows = os.name == "nt"
+    if windows and any(ch in value for ch in _STEM_FORBIDDEN_ON_WINDOWS):
+        raise JobPathError(
+            f"the output name {stem!r} has a backslash or a colon in it, "
+            f"which Windows cannot use in a file name; a Mac or the "
+            f"server can still make it", retryable=True)
+    return value

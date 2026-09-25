@@ -246,7 +246,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
 BROLL_SHARE = "broll"
 BROLL_ARCHIVE_REL = ("Assets", "B-roll Archive")
 
-README_SNIPPET = """B-roll Send-to-Resolve config: {config_path}
+# ui-copy owed round 3 (2026-09-25): an editor opens this file beside their
+# config, so it speaks the product's words ("upload and proxy download", not
+# "the sync lanes") and carries no typewriter dash; the vocabulary scan in
+# test_sweep_2026_09_04_copy reads it, plurals included.
+README_SNIPPET ="""B-roll Send-to-Resolve config: {config_path}
 
 Read by the CC Sync companion (the tray app), which is what "Send to Resolve"
 in the b-roll web UI talks to. The separate BRoll Companion this file was
@@ -271,18 +275,19 @@ This file has no comments (it's plain JSON), so here's what each field means:
 
       With the default in effect, a clip that isn't on this computer yet is
       fetched from the NAS automatically when "Send to Resolve" asks for it
-      (over the same rclone remote the sync lanes use). Writing an explicit
-      "broll" entry here switches that off: an explicit mount is somewhere
-      you chose, and nothing will download into it behind your back.
+      (over the same rclone remote that upload and proxy download use).
+      Writing an explicit "broll" entry here switches that off: an explicit
+      mount is somewhere you chose, and nothing will download into it
+      behind your back.
 
       The "music" share is read from this same table (the music library's
       "Send to Resolve" buttons talk to the same companion, on the same
       port) and needs no entry either: it defaults to
       <local_root>/Assets/Music.
 
-      The "projects" share is read from it too -- it is what the YouTube
-      downloader page's download history opens a folder from -- and defaults
-      to <local_root>/Projects.
+      The "projects" share is read from it too: it is what the YouTube
+      downloader page's download history opens a folder from, and it
+      defaults to <local_root>/Projects.
 
       On macOS, a share with no entry here is also probed for at
       /Volumes/<share>, /Volumes/<share>-1, /Volumes/<share>-2 (Finder's
@@ -1174,7 +1179,16 @@ def build_insert_response(
                         "back to the original", plan["insert_rel"], share)
             action, fetch_rel, insert_path = PLAN_FETCH_ORIGINAL, None, local_path
 
-    if not insert_path.is_file():
+    if insert_path.is_file():
+        # bug-comp-broll-3 (2026-09-25): rclone renames the file into place
+        # before its job reads DONE, and the re-POST that follows lands HERE,
+        # past the fetch block, so that block's DONE branch - the ledger
+        # rewrite and the pop of the finished job - never ran. Both happen on
+        # the poll that finds the file instead, before the import.
+        if (broll_fetch.reap_finished(str(insert_path)) == broll_fetch.STATE_DONE
+                and standin_here):
+            broll_standins.settle_landed(insert_path)
+    else:
         if not _fetchable_from_nas(share, rel_path, mounts, ccsync_cfg):
             return 200, {
                 "ok": False,
@@ -1975,7 +1989,9 @@ def pick_ingest_sources(kind: str,
     PLACE -- no copy into staging at all -- has to pick it here. The dialog
     runs on the UI thread through ui_dispatch, like every other window in this
     package; a request thread that opened its own Tk root would be the second
-    one in the process (CORE-M3).
+    one in the process (CORE-M3). Since bug-comp-ui-1 (2026-09-25) popup
+    also takes the app's popup lock for as long as the dialog is up, and
+    refuses with PickerBusy rather than opening beside another CCSync window.
     """
     from . import popup  # deferred: importing Tk plumbing costs a server that never picks
 
@@ -1991,6 +2007,14 @@ def pick_ingest_sources(kind: str,
         extra = {"exts": exts} if exts is not None else {}
         files = popup.pick_media_sources(kind, timeout=PICK_TIMEOUT_SECONDS,
                                          **extra)
+    except popup.PickerBusy as exc:
+        # bug-comp-ui-1 (2026-09-25): a refusal, not a failure. The generic
+        # branch below told the editor the picker "could not be opened", which
+        # sent them hunting for a broken dialog when the fix is to close the
+        # CCSync window already on screen. The message is popup's own,
+        # written for the editor (no em dash); the page toasts any message
+        # other than "cancelled", so no page change is needed.
+        return 200, {"ok": False, "message": str(exc)}
     except Exception as exc:  # noqa: BLE001 - a picker is never fatal
         log.warning("broll ingest: the file picker failed (%s)", exc, exc_info=True)
         return 200, {"ok": False, "message": "the file picker could not be opened "

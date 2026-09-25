@@ -251,6 +251,13 @@ const DL = (id, over = {}) => Object.assign({
 // gets going. The last two are asked for on EVERY page load now, so a scenario
 // about anything else must not have to script them.
 function baseline(method, url) {
+  // ui-music-ytdl-web-3 (2026-09-25): an editor who has accepted the terms.
+  // Before the lock was made to hold, an unanswered api/attestation locked
+  // SEARCH and loadProjects unlocked it again straight after, so every
+  // scenario here ran past a lock it never knew about.
+  if (url === 'api/attestation') {
+    return {json: {accepted: true, version: 'v1', title: '', text: ''}};
+  }
   if (url.startsWith('api/health')) {
     return {json: {claude: 'ok', claude_detail: '', yt_dlp: 'ok',
                    worker_alive: true, cookies: false}};
@@ -3834,7 +3841,11 @@ def test_the_poll_stops_on_a_401():
 def test_the_search_button_is_guarded_in_source():
     js = _js()
     body = js[js.index('async function runSearch()'):js.index('async function startDownload()')]
-    assert 'go.disabled = true' in body and 'go.disabled = false' in body
+    # ui-music-ytdl-web-3 (2026-09-25): the in-flight lock is a flag that
+    # syncSubmitButtons turns into `disabled`, so the terms lock and the
+    # no-projects lock survive a finished submit.
+    assert 'state.searching = true' in body and 'state.searching = false' in body
+    assert 'if (go.disabled)' in body
     assert body.index('detach()') > body.index("post('api/jobs'"), \
         'YTDL-8: detach() must come AFTER the POST is accepted'
     assert 'e.info.job_id' in body
@@ -3846,7 +3857,8 @@ def test_the_links_button_is_guarded_in_source():
     server accepts (YTDL-8), and a 409 carries the job to re-attach to."""
     js = _js()
     body = js[js.index('async function runUrls()'):js.index('async function startDownload()')]
-    assert 'btn.disabled = true' in body and 'btn.disabled = false' in body
+    assert 'state.linking = true' in body and 'state.linking = false' in body
+    assert 'if (btn.disabled)' in body
     assert body.index('detach()') > body.index("post('api/jobs/urls'")
     assert 'e.info.job_id' in body
 

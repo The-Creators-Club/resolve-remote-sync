@@ -147,5 +147,5 @@ def accept(editor: Optional[str], path: Optional[Path] = None) -> tuple[bool, st
         return False, f"couldn't save that ({exc})"
     log.info("ytdl: %s accepted the download terms (%s) on this machine",
              name, TEXT_VERSION)
-    return True, ("Recorded. YouTube downloads can now run on this machine, "
+    return True, ("Recorded. YouTube downloads can now run on this computer, "
                   "for you.")

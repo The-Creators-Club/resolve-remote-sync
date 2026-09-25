@@ -183,7 +183,7 @@ def _redirect_target(url: str, headers) -> str:
     if headers is not None:
         location = str(headers.get("Location") or headers.get("location") or "").strip()
     if not location:
-        raise FeedError(f"{url} answered with a redirect but no Location -- refused")
+        raise FeedError(f"{url} answered with a redirect but no Location: refused")
     # Relative Locations are legal (RFC 7231 §7.1.2) and resolve against the
     # hop we are on, so a relative target on an https base stays https --
     # which the explicit check below still confirms rather than assumes.
@@ -247,7 +247,7 @@ def _open_following_https_redirects(url: str, *, timeout: float):
             current = _redirect_target(current, headers)
             continue
         return resp
-    raise FeedError(f"{url} redirected more than {_MAX_REDIRECTS} times -- refused")
+    raise FeedError(f"{url} redirected more than {_MAX_REDIRECTS} times: refused")
 
 
 def open_https_stream(url: str, *, timeout: float):
@@ -280,7 +280,7 @@ def _fetch_bytes(url: str, *, cap: int, timeout: float = FEED_FETCH_TIMEOUT) -> 
                     break
                 data += chunk
                 if len(data) > cap:
-                    raise FeedError(f"{url} exceeded the {cap}-byte cap -- refused")
+                    raise FeedError(f"{url} exceeded the {cap}-byte cap: refused")
             return bytes(data)
     # _open_following_https_redirects has already turned every transport
     # failure it saw into a FeedError; these two cover the read half.
@@ -324,7 +324,7 @@ def fetch_artifact_to(url: str, part: Path, *, expected_sha256: str,
                     break
                 size += len(chunk)
                 if size > max_bytes:
-                    raise FeedError(f"artifact exceeded the {max_bytes}-byte cap -- refused")
+                    raise FeedError(f"artifact exceeded the {max_bytes}-byte cap: refused")
                 fh.write(chunk)
                 digest.update(chunk)
     except (FeedError, HTTPError, URLError, OSError, TimeoutError) as exc:
@@ -336,7 +336,7 @@ def fetch_artifact_to(url: str, part: Path, *, expected_sha256: str,
     if size == 0 or sha != str(expected_sha256 or "").lower():
         part.unlink(missing_ok=True)
         raise FeedHashMismatch(
-            "the downloaded artefact's sha256 does not match the signed record -- refused")
+            "the downloaded artefact's sha256 does not match the signed record: refused")
     return sha, size
 
 
@@ -382,7 +382,7 @@ def _presigned_hint(url: str) -> str:
         return ""
     if not keys & set(_PRESIGNED_QUERY_KEYS):
         return ""
-    return (" -- this feed URL is PRE-SIGNED, and a pre-signed signature covers the "
+    return (": this feed URL is PRE-SIGNED, and a pre-signed signature covers the "
             "object key, so the same credentials cannot fetch channel.json.sig. Host "
             "the channel at a plain URL (a query TOKEN is fine) or publish the two "
             "files where one URL can be derived from the other")
@@ -695,6 +695,37 @@ def verified_records(app_state) -> list[dict[str, Any]]:
     return list(_cache(app_state).get("valid_records") or [])
 
 
+def offered_dashboard_version(app_state) -> tuple[str, bool]:
+    """(the dashboard version the vendor's channel currently OFFERS, whether
+    the channel carries a pointer for it).
+
+    logic-release-3 / logic-release-4 (2026-09-25). `publish_feed.py` keeps
+    `current["dashboard/linux"]` in the signed channel exactly as it does for
+    the companion, and a record published without --make-current is STAGED:
+    offered to nobody. Nothing on this side read that pointer, so the highest
+    dashboard record was both "what the vendor offers" on the Packages page
+    and what `policy = current` applied, restarting every customer's
+    container onto a build the vendor was still trying on the studio.
+    Same rule as the companion's `select_offered_records`: the pointer names
+    it, a pointer naming a version this feed does not carry names nothing,
+    and with no pointer the highest version stands in. ("", False) until a
+    check has run.
+    """
+    cache = _cache(app_state)
+    channel = cache.get("channel") or {}
+    records = dashboard_records(list(cache.get("valid_records") or []))
+    chosen = select_offered_records(records, channel)
+    pointed = any(k[0] == DASHBOARD_KIND for k in channel_current(channel))
+    if not chosen:
+        return "", pointed
+    # The container is Linux; any other platform is a feed that has never
+    # existed, taken only when it is what is on offer.
+    key = (DASHBOARD_KIND, "linux")
+    if key not in chosen:
+        key = sorted(chosen)[0]
+    return _record_key(chosen[key])[2], pointed
+
+
 # --------------------------------------------------------------- app-state cache
 # The verified channel is cheap to refetch but must never be re-verified on
 # every GET of the admin page (a check is a network call to a host outside
@@ -728,7 +759,7 @@ def set_policy(conn, policy: str) -> str:
 def _safe_filename(name: str) -> str:
     name = str(name or "").strip()
     if not name or "/" in name or "\\" in name or name in (".", ".."):
-        raise package_store.PackageStoreError(400, f"feed record has an unsafe filename {name!r} -- refused")
+        raise package_store.PackageStoreError(400, f"feed record has an unsafe filename {name!r}: refused")
     return name
 
 
@@ -863,7 +894,8 @@ def check_now(conn, settings, app_state) -> dict[str, Any]:
         conn.commit()
     except Exception:                                                 # noqa: BLE001
         log.warning("could not record the feed's runtime-mismatch state", exc_info=True)
-    refused = record_offer_state(conn, valid_records, now)
+    refused = record_offer_state(conn, valid_records, now,
+                                 channel=_cache(app_state).get("channel") or {})
     # SYS-2 / SYS-7 (usability sweep 2026-09-04): LAST, and after the packages
     # on purpose. A dashboard that is about to re-exec must not do it in the
     # middle of publishing a companion build, and the companion records are
@@ -881,7 +913,8 @@ def check_now(conn, settings, app_state) -> dict[str, Any]:
             "refused": refused, "dashboard_applied": dashboard_applied}
 
 
-def record_offer_state(conn, valid_records: list[dict[str, Any]], now: str) -> list[str]:
+def record_offer_state(conn, valid_records: list[dict[str, Any]], now: str,
+                       channel: Any = None) -> list[str]:
     """What the vendor is offering, and what of it this dashboard cannot hand
     out yet (SYS-2, 2026-09-04). Returns the refused "kind/platform version"
     strings.
@@ -906,13 +939,33 @@ def record_offer_state(conn, valid_records: list[dict[str, Any]], now: str) -> l
     refused: list[str] = []
     subjects: list[str] = []
     try:
-        for record in package_records(valid_records):
+        # logic-release-3 (2026-09-25): measured against the ONE record per
+        # pair the signed `current` pointer names (the highest when there is
+        # none), which is what `_apply_policy` acts on. Walking every record
+        # made a STAGED build (publish_latest without --make-current) and a
+        # build withdrawn by moving the pointer back read as "offered", and
+        # invariant 11, the versions-behind alert and the HEALTH box then told
+        # every customer their server was behind the vendor when it was right.
+        # The builds BELOW the offered one stay in the list: they are fixes a
+        # machine on an older build is missing, which is what SYS-2's
+        # "releases behind" count is for. A refusal is only news for the build
+        # that would be taken.
+        packages = package_records(valid_records)
+        selected = select_offered_records(packages, channel or {})
+        for record in packages:
+            kind, platform, version = _record_key(record)
+            chosen = selected.get((kind, platform))
+            if kind != "companion" or not version or chosen is None:
+                continue
+            if _version_sort_key(version) <= _version_sort_key(_record_key(chosen)[2]):
+                offered.setdefault(str(record.get("platform") or ""), []).append(
+                    str(record.get("version") or ""))
+        for _key, record in sorted(selected.items()):
             kind = str(record.get("kind") or "")
             platform = str(record.get("platform") or "")
             version = str(record.get("version") or "")
             if kind != "companion" or not platform or not version:
                 continue
-            offered.setdefault(platform, []).append(version)
             if package_store.blocks_on_dashboard_version(
                     kind, record.get("requires_dashboard")):
                 refused.append(f"{kind}/{platform} {version}")
@@ -999,6 +1052,13 @@ def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]]
                                 "current -- %s %s", kind, platform, version,
                                 package_store.STAGED_SENTENCE, exc.detail)
                     continue
+                # CR-335 (2026-09-25): an unattended promotion leaves the same
+                # trail a click does. The owner clicked MAKE CURRENT on one
+                # platform, saw the OTHER platform become current two minutes
+                # later, and the ledger had no entry to say it was the poller.
+                db.audit(conn, "release-feed", "package.make_current", version,
+                         {"kind": kind, "platform": platform, "version": version,
+                          "by": "the feed's current policy"})
                 conn.commit()
                 log.info("release feed (current policy) made %s/%s %s current again",
                          kind, platform, version)
@@ -1097,6 +1157,24 @@ def _dashboard_auto_apply_reason(conn, settings, app_state, now: str) -> tuple[s
         return "", "an update to this dashboard is already running"
     runtime = state.get("runtime_updates") or []
     updates = state.get("code_updates") or []
+    # logic-release-4 (2026-09-25): only the bundle the channel's signed
+    # `current["dashboard/linux"]` names is taken unattended. A bundle
+    # published without --make-current is STAGED (RELEASE_FEED.md 2.1): the
+    # vendor is trying it on the studio first, and before this it restarted
+    # every `policy = current` customer onto it once the soak passed. The
+    # other versions stay [ APPLY ] rows on the Packages page. No pointer at
+    # all (an older feed) keeps the old rule, highest first.
+    offered, pointed = offered_dashboard_version(app_state)
+    if pointed:
+        staged = [e for e in updates if str(e.get("version") or "") != offered]
+        updates = [e for e in updates if str(e.get("version") or "") == offered]
+        runtime = [e for e in runtime if str(e.get("version") or "") == offered]
+        if not updates and not runtime and staged:
+            return "", (
+                f"dashboard {staged[0].get('version')} is on the vendor's channel "
+                f"but is not the version the vendor currently offers "
+                f"({offered or 'none named'}), so it is not taken automatically. "
+                f"[ APPLY ] on the Packages page takes it by hand")
     if not updates:
         if runtime:
             return "", (
@@ -1234,7 +1312,7 @@ def publish_from_feed(
     )
     if record is None:
         raise package_store.PackageStoreError(
-            404, f"no verified feed record for {kind}/{platform}/{version} -- run Check now first")
+            404, f"no verified feed record for {kind}/{platform}/{version}: run Check now first")
     existing = db.get_package(conn, platform, version, kind)
     if existing is not None:
         # Name the DISAGREEMENT when there is one (release-pipeline-6,
@@ -1257,7 +1335,7 @@ def publish_from_feed(
     filename = _safe_filename(str(record.get("filename", "")))
     url = str(record.get("url", ""))
     if not url.lower().startswith("https://"):
-        raise package_store.PackageStoreError(400, "feed record's url is not https -- refused")
+        raise package_store.PackageStoreError(400, "feed record's url is not https: refused")
     sha_expected = str(record.get("sha256", "")).lower()
 
     # REL-7 (usability sweep 2026-09-04): BEFORE a byte moves, against the
@@ -1297,7 +1375,7 @@ def publish_from_feed(
             max_bytes=ARTIFACT_MAX_BYTES, timeout=ARTIFACT_FETCH_TIMEOUT)
     except FeedHashMismatch as exc:
         raise package_store.PackageStoreError(
-            400, "downloaded artefact's sha256 does not match the feed record -- refused") from exc
+            400, "downloaded artefact's sha256 does not match the feed record: refused") from exc
     except FeedError as exc:
         raise package_store.PackageStoreError(502, f"could not download the feed artefact: {exc}") from exc
 

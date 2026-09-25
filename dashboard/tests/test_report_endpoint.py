@@ -113,8 +113,9 @@ def test_report_transfers_list_is_capped(app_env):
     bad["lanes"][0]["transfers"] = [
         {"name": f"f{i}.braw", "direction": "up"} for i in range(257)
     ]
+    # bug-wire-3 (2026-09-25): sliced to the cap, never a 422 of the report.
     resp = client.post("/api/v1/report", json=bad, headers=report_headers())
-    assert resp.status_code == 422
+    assert resp.status_code == 200, resp.text[:300]
 
 
 def test_report_upserts_and_transition_history(app_env):

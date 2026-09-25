@@ -9,7 +9,13 @@
      lists use the same one and the same four column roles, so a version
      lines up with a version wherever the eye goes. #}
 
-  {% if error %}
+  {# CR-335 (2026-09-25): a MAKE CURRENT refusal is drawn on its own row
+     (error_for) instead, because this banner is moved by htmx_errors.js to the
+     FIRST form with the same path and fields, and the same build has two
+     identical MAKE CURRENT forms on this page (the vendor list and the list
+     of builds held here): the refusal landed on the one the admin had not
+     clicked, a screen away. #}
+  {% if error and not error_for %}
     {# DUI-6: `error-banner` is what static/htmx_errors.js moves next to the button
        that caused it. This panel swaps outerHTML, which preserves scroll, so a
        refusal used to render a screen or two above the click that earned it. An
@@ -49,6 +55,15 @@
   {% endif %}
 
 {# ------------------------------------------------------------- macros #}
+{# logic-admin-6 (2026-09-25): tools\ship.cmd is the studio's own publish
+   path (docs/RELEASE_PATHWAYS.md, pathway A). A customer's appliance has no
+   repo, no wired computer and no ship.cmd; its builds come from the vendor
+   feed, and the button that fetches them is [ CHECK NOW ] below. Every
+   "where do builds come from" sentence on this panel therefore leads with the
+   feed when one is configured, and keeps ship.cmd only as the aside for a
+   site that builds its own. `feed` is the render context's (macros read it
+   too). #}
+{% set via_feed = feed is defined and feed and feed.configured %}
 {# The chips a published row carries. They are the answer on this page, which
    is why they live in the VERSION cell rather than in columns of their own
    (that was nine columns and a row that wrapped four times). #}
@@ -68,7 +83,7 @@
      release signing exists carries no signature, and every companion
      that verifies will refuse it -- so the fleet silently stops
      upgrading. Say it here, where MAKE CURRENT is clicked. #}
-  {% if not p.signature %}<span class="chip red" title="published without a release signature: companions that verify will REFUSE this build; republish through tools\ship.cmd">[ UNSIGNED ]</span>{% endif %}
+  {% if not p.signature %}<span class="chip red" title="published without a release signature: companions that verify will REFUSE this build; {% if feed is defined and feed and feed.configured %}publish the signed build from AVAILABLE FROM THE VENDOR instead{% else %}republish through tools\ship.cmd{% endif %}">[ UNSIGNED ]</span>{% endif %}
   {% if p.signature and not p.signed_binary %}<span class="chip amber" title="the record is signed, but the binary itself carries no Authenticode/Developer ID signature: fresh installs meet SmartScreen/Gatekeeper">[ NO CODE SIG ]</span>{% endif %}
 {% endmacro %}
 
@@ -119,12 +134,14 @@
           </form>
         {% endif %}
         {% if not p.retracted %}
+        {# CR-335 (2026-09-25): the button dims, says what it is doing and
+           cannot be pressed twice while the request is in flight. #}
         <form class="inline-form" hx-post="/partials/admin/packages/current"
-              hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+              hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
           <input type="hidden" name="kind" value="{{ p.kind }}">
           <input type="hidden" name="platform" value="{{ p.platform }}">
           <input type="hidden" name="version" value="{{ p.version }}">
-          <button class="btn tap" type="submit">[ MAKE CURRENT ]</button>
+          <button class="btn tap" type="submit"><span class="idle-label">[ MAKE CURRENT ]</span><span class="busy-label">[ MAKING IT CURRENT... ]</span></button>
         </form>
         {# The typed override, for the soak gate and (UX-9, 2026-08-28)
            for an UNSIGNED build: one mechanism, not two. Making an
@@ -132,9 +149,9 @@
            silently, because they verify the record signature. #}
         {% if (p.soak and not p.soak.ok) or not p.signature %}
         <form class="inline-form" hx-post="/partials/admin/packages/current"
-              hx-target="closest .admin-packages-box" hx-swap="outerHTML"
+              hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this"
               {% if not p.signature %}
-              hx-confirm="This build has no release signature. Companions verify signatures, so making it current stops EVERY computer in the fleet from updating, silently. Republish it through tools\ship.cmd instead. Make it current anyway?"
+              hx-confirm="This build has no release signature. Companions verify signatures, so making it current stops EVERY computer in the fleet from updating, silently. {% if feed is defined and feed and feed.configured %}Publish the signed build from AVAILABLE FROM THE VENDOR instead.{% else %}Republish it through tools\ship.cmd instead.{% endif %} Make it current anyway?"
               {% endif %}>
           <input type="hidden" name="kind" value="{{ p.kind }}">
           <input type="hidden" name="platform" value="{{ p.platform }}">
@@ -142,7 +159,7 @@
           <input type="hidden" name="force" value="1">
           <input type="text" name="confirm" placeholder="type {{ p.version }}" size="12">
           <button class="btn tap" type="submit"
-                  title="{% if not p.signature %}hand this UNSIGNED build to the whole fleet, which stops every computer updating{% else %}hand this build to the whole fleet without waiting for the soak{% endif %}">[ MAKE CURRENT ANYWAY ]</button>
+                  title="{% if not p.signature %}hand this UNSIGNED build to the whole fleet, which stops every computer updating{% else %}hand this build to the whole fleet without waiting for the soak{% endif %}"><span class="idle-label">[ MAKE CURRENT ANYWAY ]</span><span class="busy-label">[ MAKING IT CURRENT... ]</span></button>
         </form>
         {% endif %}
         {% endif %}
@@ -160,6 +177,10 @@
           <button class="btn" type="submit">[ DELETE ]</button>
         </form>
       {% endif %}
+    {% if error and error_for == (p.kind ~ "/" ~ p.platform ~ "/" ~ p.version) %}
+      {# CR-335: the refusal, on the row that was clicked. #}
+      <div class="banner alarm row-refusal" role="alert">&#9650; {{ error }}</div>
+    {% endif %}
     </td>
   </tr>
 {% endmacro %}
@@ -191,13 +212,34 @@
         {# Already downloaded here, waiting for a human: the action is the
            same MAKE CURRENT the section below it carries, offered where the
            admin is looking rather than only there. #}
+        {# CR-335 (2026-09-25): the button dims, says what it is doing and
+           cannot be pressed twice while the request is in flight. #}
         <form class="inline-form" hx-post="/partials/admin/packages/current"
-              hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+              hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
           <input type="hidden" name="kind" value="{{ p.kind }}">
           <input type="hidden" name="platform" value="{{ p.platform }}">
           <input type="hidden" name="version" value="{{ p.version }}">
-          <button class="btn tap" type="submit">[ MAKE CURRENT ]</button>
+          <button class="btn tap" type="submit"><span class="idle-label">[ MAKE CURRENT ]</span><span class="busy-label">[ MAKING IT CURRENT... ]</span></button>
         </form>
+        {# CR-335: the soak gate (or a missing signature) refuses the plain
+           MAKE CURRENT above until a computer has run this build; the typed
+           override used to exist only in the list further down, so from this
+           row a refused click had no way forward. #}
+        {% if p.needs_override %}
+        <form class="inline-form" hx-post="/partials/admin/packages/current"
+              hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this"
+              {% if not p.signed %}
+              hx-confirm="This build has no release signature. Companions verify signatures, so making it current stops EVERY computer in the fleet from updating, silently. Make it current anyway?"
+              {% endif %}>
+          <input type="hidden" name="kind" value="{{ p.kind }}">
+          <input type="hidden" name="platform" value="{{ p.platform }}">
+          <input type="hidden" name="version" value="{{ p.version }}">
+          <input type="hidden" name="force" value="1">
+          <input type="text" name="confirm" placeholder="type {{ p.version }}" size="12">
+          <button class="btn tap" type="submit"
+                  title="hand this build to the whole fleet without waiting for a computer to run it first"><span class="idle-label">[ MAKE CURRENT ANYWAY ]</span><span class="busy-label">[ MAKING IT CURRENT... ]</span></button>
+        </form>
+        {% endif %}
       {% else %}
         <form class="inline-form" hx-post="/partials/admin/feed/publish"
               hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
@@ -219,6 +261,10 @@
           <button class="btn tap" type="submit"><span class="idle-label">[ PUBLISH + MAKE CURRENT ]</span><span class="busy-label">[ DOWNLOADING THE BUILD... ]</span></button>
         </form>
       {% endif %}
+    {% if error and error_for == (p.kind ~ "/" ~ p.platform ~ "/" ~ p.version) %}
+      {# CR-335: the refusal, on the row that was clicked. #}
+      <div class="banner alarm row-refusal" role="alert">&#9650; {{ error }}</div>
+    {% endif %}
     </td>
   </tr>
 {% endmacro %}
@@ -257,8 +303,13 @@
   {% if served_groups %}
     {{ group_table(served_groups, package_row) }}
   {% else %}
+    {% if via_feed %}
+    <div class="muted">nothing is being served yet: your supplier's builds are under
+      [ AVAILABLE FROM THE VENDOR ] below. Press [ CHECK NOW ] there to fetch them.</div>
+    {% else %}
     <div class="muted">nothing is being served yet: publish a build below, or from your wired
       computer with <span class="mono-sm publish-cmd">tools\ship.cmd</span></div>
+    {% endif %}
   {% endif %}
 
   {# REL-3 (resilience sweep 2026-08-28): a build the vendor has RECALLED. It
@@ -456,7 +507,11 @@
   {# Collapsed by default (owner, 2026-09-11): these are real and they are
      kept on purpose, but they are not the answer to "what is my fleet
      running" and they were the top of the page. #}
-  <details class="pkg-other" style="margin-top:1.6rem">
+  {# data-key (ui-dash-admin-4, 2026-09-25): base.html's keeper and
+     tab_memory.js only remember a <details> with a data-key or an id, and
+     this one sits inside the 30 s Packages poll, so it snapped shut under an
+     admin choosing the build to roll back to. #}
+  <details class="pkg-other" data-key="pkg-other" style="margin-top:1.6rem">
     <summary class="side-head tap">[ OTHER VERSIONS HELD ON THIS SERVER ]
       <span class="muted">{{ held_count }} build{{ "s" if held_count != 1 }}</span></summary>
     <div class="muted" style="margin-top:0.4rem">
@@ -564,6 +619,15 @@
      companion reached the whole fleet with its suite never executed (OPS-1).
      Nothing on a page a customer's admin reads should name a script flag that
      is a known footgun; there is one command, and it is ship.cmd. #}
+  {% if via_feed %}
+  <div class="muted" style="margin-top:0.8rem">
+    New builds come from your supplier's release channel: [ AVAILABLE FROM THE
+    VENDOR ] above lists them, and [ CHECK NOW ] fetches any the next scheduled
+    check has not. Each computer's tray then offers the update. (A site that
+    builds its own companion publishes with
+    <span class="mono-sm publish-cmd">tools\ship.cmd</span> from its wired computer.)
+  </div>
+  {% else %}
   <div class="muted" style="margin-top:0.8rem">
     Publish new builds from your wired computer with one command:
     <span class="mono-sm publish-cmd">tools\ship.cmd</span>
@@ -571,4 +635,5 @@
     soak-gated flip. See docs/RELEASE.md. Each computer's tray then offers the
     update.
   </div>
+  {% endif %}
 </div>

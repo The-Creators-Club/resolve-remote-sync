@@ -19,7 +19,8 @@ the whole story. Two things fall through that:
 
 WHAT IS OPT-IN AND WHAT IS NOT
 
-  ALWAYS   ${DASH_CRASH_DIR:-<DASH_DB_PATH's dir>/crashes}/<ts>-<thread>.json,
+  ALWAYS   ${DASH_CRASH_DIR:-<DASH_DB_PATH's dir>/crashes}/<ts>-<thread>.json
+           (then ~01, ~02 ... for more in one second),
            owner-only, at most MAX_CRASH_FILES kept, sent nowhere.
   OPT-IN   DASH_SENTRY_DSN -- unset means no sender is constructed at all, and
            `sentry_sdk` is not in deploy/requirements.txt, so a site that wants
@@ -35,6 +36,7 @@ outranks knowing why it fell over.
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import logging.handlers
@@ -63,7 +65,18 @@ LOG_BACKUPS = 3
 # written here, but exception MESSAGES routinely quote a URL or a header, and a
 # crash file is a thing an operator emails.
 _REDACTIONS = (
-    (re.compile(r"(?i)\b(token|password|passwd|secret|api[_-]?key|dsn|pw)\b\s*[:=]\s*\S+"),
+    # bug-dash-ops-4 (2026-09-25): `\b` is no boundary after `_`, so the very
+    # names above (TRUENAS_PW=, DASH_SESSION_SECRET=, SYNCTHING_API_KEY:) went
+    # through untouched, and so did a JSON or dict-repr key, whose closing
+    # quote sits between the name and the `:`. The boundary is now "not a
+    # letter or digit" on both sides, a key may carry `_SUFFIX` parts
+    # (SECRET_PREVIOUS, PW_FILE), and a quoted value is taken whole so a
+    # passphrase with a space in it does not leave its second word behind.
+    # Over-redacting a `token_count=5` is the cheap direction.
+    (re.compile(r"(?i)(?<![a-z0-9])"
+                r"((?:token|password|passwd|secret|api[_-]?key|dsn|pw)(?:_[a-z0-9]+)*)"
+                r"(?![a-z0-9])[\"']?\s*[:=]\s*"
+                r"(?:\"[^\"]*\"?|'[^']*'?|\S+)"),
      r"\1=<redacted>"),
     (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@]+:[^\s/@]+@"), r"\1<redacted>@"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+"), "Bearer <redacted>"),
@@ -132,11 +145,37 @@ def write_report(report: dict[str, Any], settings: Any = None) -> Optional[Path]
         directory.mkdir(parents=True, exist_ok=True)
         stamp = str(report.get("when", "")).replace(":", "").replace("-", "")
         thread = re.sub(r"[^A-Za-z0-9_.-]", "_", str(report.get("thread", "?")))[:40]
-        path = directory / f"{stamp or 'unknown'}-{thread}.json"
+        base = f"{stamp or 'unknown'}-{thread}"
         # run.sh sets umask 077 already; this states it rather than inheriting
         # it, because a crash file is written by whatever thread crashes and
         # umask is process state anyone can change.
-        handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        #
+        # bug-dash-ops-9 (2026-09-25): O_EXCL and a counter, not O_TRUNC. The
+        # name is only second-resolution plus a thread name that repeats
+        # (ThreadPoolExecutor-0_0, a restart loop), so a burst of two crashes
+        # kept only the second - and the first of a burst is usually the cause.
+        #
+        # Owed round 2 (2026-09-25, the companion's review-round fix ported):
+        # numbered past the HIGHEST slot on disk, not into the first free one,
+        # and with `~NN`, not `-N`. `-` and a digit sort before the `.` of the
+        # bare `<base>.json`, so `<base>-1.json` was named as OLDER than the
+        # crash before it and _prune deleted the later crash of a burst first
+        # (and `-10` sorted before `-2`); and once a prune freed the bare name,
+        # a first-free search handed it, the OLDEST by the sort, to the newest
+        # crash, which the next prune then deleted.
+        taken = [_age_key(p) for p in directory.glob(f"{glob.escape(base)}*.json")]
+        start = max((n + 1 for b, n in taken if b == base), default=0)
+        handle = None
+        path = directory / _crash_name(base, start)
+        for n in range(start, 100):
+            path = directory / _crash_name(base, n)
+            try:
+                handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                break
+            except FileExistsError:
+                continue
+        if handle is None:
+            return None
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2, ensure_ascii=False)
         _prune(directory)
@@ -145,10 +184,32 @@ def write_report(report: dict[str, Any], settings: Any = None) -> Optional[Path]
         return None
 
 
+# `~` because the prune sorts by NAME-derived age and the name starts with the
+# UTC stamp: `~` (0x7e) sorts after the `.` of the bare `<base>.json`, the pad
+# keeps 01..99 in order, and `~` can never come from `base` (the thread name
+# is reduced to [A-Za-z0-9_.-]), so a thread called "Thread-1" is not mistaken
+# for a counter. Same spelling as the companion's crash_report.
+_COUNTER_SEP = "~"
+
+
+def _crash_name(base: str, n: int) -> str:
+    return f"{base}.json" if n == 0 else f"{base}{_COUNTER_SEP}{n:02d}.json"
+
+
+def _age_key(path: Path) -> tuple[str, int]:
+    """Oldest first. Spelled out rather than a plain name sort so the order
+    does not rest on ASCII."""
+    stem = path.name[:-len(".json")] if path.name.endswith(".json") else path.name
+    base, sep, counter = stem.rpartition(_COUNTER_SEP)
+    if sep and counter.isdigit():
+        return base, int(counter)
+    return stem, 0
+
+
 def _prune(directory: Path, keep: Optional[int] = None) -> None:
     keep = MAX_CRASH_FILES if keep is None else keep
     try:
-        files = sorted(directory.glob("*.json"), key=lambda p: p.name)
+        files = sorted(directory.glob("*.json"), key=_age_key)
         for stale in files[:-keep] if len(files) > keep else []:
             stale.unlink(missing_ok=True)
     except Exception:  # noqa: BLE001

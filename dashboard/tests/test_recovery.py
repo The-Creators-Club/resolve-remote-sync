@@ -97,8 +97,11 @@ def test_a_restore_writes_only_into_the_quarantine_folder(site):
              if p.is_file() and recovery.QUARANTINE_PREFIX not in str(p)}
     assert after == before, "a restore changed a file that was already there"
     quarantine = Path(result["directory"])
-    assert quarantine.name.startswith(recovery.QUARANTINE_PREFIX)
-    assert quarantine.parent == site["projects"] / "2026" / "One"
+    # bug-dash-diag-3 (2026-09-25): at the top of the tree under the
+    # project's own path, never inside the project's Syncthing folder.
+    assert quarantine.parent.parent.name.startswith(recovery.QUARANTINE_PREFIX)
+    assert quarantine.parent.parent.parent == site["projects"]
+    assert quarantine.relative_to(quarantine.parent.parent).as_posix() == "2026/One"
     assert (quarantine / "Subs" / "ep4.srt").read_text() == "the one that was deleted"
     # ...and the file that exists but differs is NOT brought back by default:
     # that one is a judgement, and the default is the safe direction.
@@ -354,13 +357,16 @@ def test_the_snapshot_fix_points_at_the_wizard_rather_than_a_script(site):
 
 
 def test_the_rollback_plan_says_what_an_admin_can_do_and_who_to_ask(site):
-    """The step after a rollback used to be a repo script. What is left is a
-    button to the page that re-creates a project, and one sentence naming the
-    person to ask for the part no page here can do."""
+    """The step after a rollback used to be a repo script. What is left is
+    the page that re-creates a project (PROJECT SETUP, keyed by the Resolve
+    project name: its old href "/projects" was a 404, d-diag owed round 2
+    2026-09-25), and one sentence naming the person to ask for the part no
+    page here can do."""
     facts = _facts(site, tasks=[{"dataset": "tank", "enabled": True, "recursive": True}],
                    env={**site["env"], protection.ENV_TREE_DATASET: "tank/media"})
     steps = recovery.plan("whole_tree", facts)["steps"]
-    assert any(step["href"] == "/projects" for step in steps)
+    assert not any(step["href"] == "/projects" for step in steps)
+    assert any("/project-setup?resolve_project=" in step["body"] for step in steps)
     assert any("ask whoever installed" in step["body"] for step in steps)
 
 

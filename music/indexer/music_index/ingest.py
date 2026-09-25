@@ -138,9 +138,16 @@ def ingest_one(upload_name, src, clap, con, known=None):
             result['duplicate'] = True
             return result
 
-        dest = unique_dest(staged.name)
         config.share_root().mkdir(parents=True, exist_ok=True)
-        shutil.move(str(staged), str(dest))
+        # bug-music-ytdl-2 (2026-09-25): the same claim the queued half makes,
+        # so a name a fleet batch has promised (its audio not uploaded yet) is
+        # never handed to a dropped file the upload would then overwrite.
+        dest = db.claim_dest(con, staged.name)
+        try:
+            shutil.move(str(staged), str(dest))
+        except BaseException:
+            db.release_dest(dest)
+            raise
         if known is not None:
             known[h] = dest.name
 

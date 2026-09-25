@@ -11,7 +11,10 @@ Two access rules, not one:
   steps (Welcome/EULA, then creating that very admin account), so these
   routes are in `app.py`'s open list and gate themselves via
   `require_setup_access`, which allows either an authenticated admin OR an
-  anonymous caller during the narrow "no local account exists yet" window.
+  anonymous caller during the narrow "no local account exists yet" window,
+  and then only on the routes steps 1 and 2 use (the checklist read and the
+  EULA; bug-dash-auth-1, 2026-09-25 -- every other route needs the session
+  step 2 mints).
   That window is reported by agent C's identity module (WP C), which does
   not exist in this worktree -- `setup_engine.probe_admin_status` returns
   `None` here. An unknown status is treated as CLOSED, so on `smb` and
@@ -84,10 +87,22 @@ def first_run_open(request: Request, conn: sqlite3.Connection) -> bool:
     return not bool(status.get("users_exist"))
 
 
-def require_setup_access(request: Request, conn: sqlite3.Connection) -> str | None:
+def require_setup_access(request: Request, conn: sqlite3.Connection,
+                         *, first_run_ok: bool = False) -> str | None:
     """The admin username, or None for an anonymous first-run caller.
     Raises 401/403 otherwise. Every route below calls this FIRST, before
-    touching setup_tasks or site_settings."""
+    touching setup_tasks or site_settings.
+
+    bug-dash-auth-1 (2026-09-25): `first_run_ok` is True ONLY on the routes
+    steps 1 and 2 need before any account exists (the checklist read and the
+    EULA). The anonymous window used to open every route that called this --
+    task run/check/skip, the alert destination and its test send -- so a
+    local-auth dashboard reachable before its first account could have its
+    alert mail pointed elsewhere, or its bundled Tailscale node's sign-in link
+    read and used by whoever asked first. docs/APPLIANCE_INSTALL.md and this
+    module's docstring have always promised steps 1 and 2 only; the wizard
+    itself holds a session from step 2 on (setup_api.setup_admin signs the
+    browser in), so nothing it does later needs the window."""
     settings = request.app.state.settings
     user = auth.get_session_user(request)
     if user is not None:
@@ -95,7 +110,11 @@ def require_setup_access(request: Request, conn: sqlite3.Connection) -> str | No
             raise HTTPException(status_code=403, detail="admins only")
         return user
     if first_run_open(request, conn):
-        return None
+        if first_run_ok:
+            return None
+        raise HTTPException(
+            status_code=401,
+            detail="create the admin account first (step 2), then this step opens")
     raise HTTPException(status_code=401, detail="log in first")
 
 
@@ -103,7 +122,7 @@ def require_setup_access(request: Request, conn: sqlite3.Connection) -> str | No
 
 @router.get("/setup/tasks")
 def api_setup_tasks(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-    require_setup_access(request, conn)
+    require_setup_access(request, conn, first_run_ok=True)
     states = setup_engine.list_states(conn)
     return {
         "tasks": [
@@ -169,7 +188,7 @@ async def api_setup_task_run(
     if task.run is None:
         raise HTTPException(
             status_code=400,
-            detail=f"{task_id!r} has no automatic action -- see its description",
+            detail=f"{task_id!r} has no automatic action: see its description",
         )
     ctx = _ctx(request, conn)
     state = await run_in_threadpool(setup_engine.run_do_it, ctx, task_id)
@@ -193,7 +212,7 @@ def api_setup_task_skip(
 
 @router.get("/setup/eula")
 def api_setup_eula_get(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-    require_setup_access(request, conn)
+    require_setup_access(request, conn, first_run_ok=True)
     path = setup_engine.eula_path()   # dash-core-6: re-resolved, not import-time
     if not path.is_file():
         return {"text": "", "version": None}
@@ -206,7 +225,7 @@ def api_setup_eula_get(request: Request, conn: sqlite3.Connection = Depends(get_
 
 @router.post("/setup/eula")
 def api_setup_eula_accept(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-    require_setup_access(request, conn)
+    require_setup_access(request, conn, first_run_ok=True)
     ctx = _ctx(request, conn)
     state = setup_engine.run_do_it(ctx, "eula")
     return state.as_dict()
@@ -381,7 +400,7 @@ def api_admin_site_import(
     site_store.set_many(conn, normalized, updated_by=admin)
     if changes:
         # A re-paste of the running config changes nothing, so it leaves no
-        # history entry -- [ UNDO LAST IMPORT ] never offers a no-op.
+        # history entry -- [ UNDO LAST CHANGE ] never offers a no-op.
         db.record_site_change(conn, admin, "import", before, after)
     db.audit(conn, admin, "site.settings_import", "site",   # keys only, see above
              {"keys": sorted(parsed)})
@@ -396,7 +415,7 @@ def api_admin_site_import(
 @router.get("/admin/site/history")
 def api_admin_site_history(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
     """UX-21 (resilience sweep 2026-08-28): who changed the site manifest,
-    when and how, for the [ UNDO LAST IMPORT ] button's own display. Never
+    when and how, for the [ UNDO LAST CHANGE ] button's own display. Never
     the actual before/after values -- those stay inside site_history's raw
     storage (needed for a correct undo, see db.record_site_change) and are
     not put on the wire here."""
@@ -415,11 +434,20 @@ def api_admin_site_history(request: Request, conn: sqlite3.Connection = Depends(
     }
 
 
+class SiteUndoIn(BaseModel):
+    # ui-dash-static-3 (2026-09-25): the history entry the admin confirmed.
+    # Optional in both directions: a page older than this route sends no
+    # body, and the JSON door and test_site_history post nothing, so absent
+    # or empty means "no check", today's behaviour.
+    expected_at: str | None = Field(default=None, max_length=64)
+
+
 @router.post("/admin/site/undo-last-change")
 def api_admin_site_undo_last_change(
-    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+    request: Request, conn: sqlite3.Connection = Depends(get_conn),
+    payload: SiteUndoIn | None = None,
 ) -> dict:
-    """[ UNDO LAST IMPORT ] (UX-21, resilience sweep 2026-08-28): reapplies
+    """[ UNDO LAST CHANGE ] (UX-21, resilience sweep 2026-08-28): reapplies
     the newest site_history entry's BEFORE values through the SAME
     validate/set_many path a save or an import uses, so validation and every
     side effect (the manifest cache drop, the audit row) run identically --
@@ -432,6 +460,17 @@ def api_admin_site_undo_last_change(
     if not entries:
         raise HTTPException(status_code=404, detail="no site setting change is recorded to undo")
     latest = entries[0]
+    expected = (payload.expected_at or "") if payload is not None else ""
+    if expected and expected != str(latest.get("at") or ""):
+        # ui-dash-static-3 (2026-09-25): the confirm named one entry and
+        # entries[0] is now another (a second admin or a second tab saved
+        # since the page loaded its history). Reverting it would undo a
+        # change nobody agreed to lose, so refuse and change nothing.
+        raise HTTPException(
+            status_code=409,
+            detail="the newest change is no longer the one you confirmed "
+                   "(someone saved since): reload the page",
+        )
     restore = {str(k): str(v) for k, v in (latest.get("before") or {}).items()}
     if not restore:
         raise HTTPException(status_code=409, detail="that change recorded no values to restore")

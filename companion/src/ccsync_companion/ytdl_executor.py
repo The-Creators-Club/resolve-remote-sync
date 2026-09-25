@@ -261,7 +261,7 @@ _ACCOUNT_FLAG_MARKERS = ("the page needs to be reloaded",)
 # means rather than naming a knob (the server's BOTH_PATHS_NOTE names
 # YTDL_COOKIES_FILE because an admin reads that one).
 BOTH_BLOCKED_ERROR = (
-    "both download paths are blocked on this machine: YouTube is asking the "
+    "both download paths are blocked on this computer: YouTube is asking the "
     "anonymous one to confirm it is not a bot, and it is refusing the "
     "signed-in session as well. Export a fresh cookies.txt from a different "
     "signed-in YouTube session, or let the server download this job.")
@@ -346,13 +346,13 @@ NOMINAL_JOB_BYTES = 5 * 1024 * 1024 * 1024
 # companion log says when an editor asks why their machine is not downloading.
 REASON_DISABLED = ("the YouTube downloader is off for this site, or switched "
                    "off in config")
-REASON_NO_DASHBOARD = "this machine has no dashboard URL or token configured"
-REASON_NO_EDITOR = "nobody is signed in on this machine"
+REASON_NO_DASHBOARD = "this computer has no dashboard URL or token configured"
+REASON_NO_EDITOR = "nobody is signed in on this computer"
 # H5 (2026-08-17): the fleet routes verify a SIGNED identity, so a machine
 # with a name but no live token cannot claim anything. Distinct from
 # REASON_NO_EDITOR because the fix is different -- that one is "sign in", this
 # one is "sign in AGAIN" (a 30-day token that has run out).
-REASON_NO_IDENTITY = ("this machine has no valid sign-in token -- sign in "
+REASON_NO_IDENTITY = ("this computer has no valid sign-in token: sign in "
                       "again from the tray")
 # COMMERCIAL_READINESS.md item 2 (2026-08-17). The editor has not accepted the
 # rights/ToS attestation ON THIS MACHINE. Server-side acceptance is recorded
@@ -372,7 +372,7 @@ REASON_NOT_ATTESTED = ("the YouTube terms have not been accepted on this "
 # 100% of its clips, burned the editor's IP on the metadata calls anyway and
 # left a history of red rows, which is the opposite of §6's promise that
 # "editors never see a broken local downloader -- they see the old behaviour".
-REASON_NO_FFMPEG = ("ffmpeg is not installed on this machine, so downloaded "
+REASON_NO_FFMPEG = ("ffmpeg is not installed on this computer, so downloaded "
                     "video and audio cannot be merged")
 # comp-ytdl-1 (2026-08-21). Every lane, the youtube importer, the proxy
 # generator and the on-demand b-roll fetch ask the root guard before they
@@ -382,7 +382,18 @@ REASON_NO_FFMPEG = ("ffmpeg is not installed on this machine, so downloaded "
 # the real drive at "/Volumes/<Name> 1" -- the ROOT_MISPLACED outage
 # root_guard.py opens by describing. Same gap COMMERCIAL_READINESS item 5
 # closed for broll_fetch.fetch_refusal.
-REASON_TREE_ABSENT = ("this machine's tree isn't mounted right now, so there "
+# The heartbeat answers that end a job although they are not 410
+# (bug-comp-ytdl-3, CredentialLost): 401/403 from the dashboard's fleet gate
+# or routes_fleet.require_fleet_caller, 404 when the job row is gone.
+HEARTBEAT_REFUSALS = frozenset({401, 403, 404})
+
+# logic-ytdl-jobs-3 review round (2026-09-25): the claim refusals that mean
+# "the dashboard does not accept this computer's sign-in". "" is a bare 401/403
+# (require_fleet_token's string detail, the dashboard's own gate); the other two
+# are routes_fleet.require_identity / require_fleet_caller's reason codes.
+_SIGN_IN_REASONS = frozenset({"", "identity", "identity_mismatch"})
+
+REASON_TREE_ABSENT = ("this computer's project tree isn't mounted right now, so there "
                       "is nowhere to download into")
 
 
@@ -391,6 +402,21 @@ class LeaseLost(Exception):
 
     Its own exception because every caller does the same thing with it and
     nothing else: stop. See the module docstring's second rule.
+    """
+
+
+class CredentialLost(LeaseLost):
+    """The dashboard refused the HEARTBEAT itself (401/403/404).
+
+    bug-comp-ytdl-3 (2026-09-25): routes_fleet checks the caller's token and
+    signed identity BEFORE the lease, so an executor whose editor signed out,
+    whose 30-day identity token ran out, or whose user was deleted is answered
+    403 on every call and never hears the 410 it stops on. The refused
+    heartbeat means the lease is not being renewed either, so the server takes
+    the job back within LEASE_SECONDS whatever this side does; carrying on
+    only downloaded the rest of the job a second time, unrecorded. A LeaseLost
+    because the ending is the same one, stop quietly; its own class so the
+    hand-back sentence can say why.
     """
 
 
@@ -949,7 +975,7 @@ def capabilities(deps: Deps) -> dict:
         result["reason"] = REASON_NOT_ATTESTED
         return result
     if not status.get("ok"):
-        result["reason"] = str(status.get("message") or "yt-dlp is not ready on this machine")
+        result["reason"] = str(status.get("message") or "yt-dlp is not ready on this computer")
         return result
     # CYT-7 (usability sweep 2026-09-03): a yt-dlp past its shelf life that
     # could not update itself is published with ok=True -- it can still very
@@ -1042,6 +1068,11 @@ class FleetClient:
         self.should_stop = should_stop or (lambda: False)
         self._sleep = sleep or time.sleep
         self._clock = clock or time.monotonic
+        # logic-ytdl-jobs-3 (2026-09-25): the claim's refusal, kept so the job
+        # can say it to the page (claim_refusal_sentence). None until a claim
+        # is ANSWERED with something other than 200; a transport failure
+        # leaves it None on purpose.
+        self.refusal: Optional[tuple] = None
 
     def _url(self, suffix: str) -> str:
         return f"{self.deps.dashboard_url}{API_PREFIX}{suffix}"
@@ -1181,9 +1212,84 @@ class FleetClient:
         log.info("ytdl: job %s was not given to this machine (HTTP %s: %s) -- "
                  "the server downloads it", job_id, status,
                  _detail_of(parsed) or "no detail")
+        self.refusal = (status, parsed, ytdlp_version)
         if status == 403:
             _warn_on_a_version_floor_we_rank_differently(parsed, ytdlp_version)
         return None
+
+    def claim_refusal_sentence(self) -> Optional[str]:
+        """The editor's sentence for the last refused claim, or None to stay
+        quiet. Never raises.
+
+        logic-ytdl-jobs-3 (2026-09-25): claim()'s rule that no refusal "is an
+        error the editor should see" left the refusals that are about THIS
+        COMPUTER in the companion log only, so an editor who pressed DOWNLOAD
+        watched the server do it with no reason given (the page's hand-back
+        watcher, ytdl app.js announceHandBack, reads `handed_back_reason`).
+        The rule still holds for the rest: the job being over, cancelled,
+        pinned or created for the server, a lost race, a 5xx, an unreachable
+        dashboard, and a lease ANOTHER editor legitimately holds are ordinary
+        outcomes and stay quiet. Branches on routes_fleet's `reason` code and
+        writes its own words: the server's `detail` is log English ("that
+        computer does not run") and is only quoted for the 409, whose sentence
+        routes_fleet._already_downloading writes for an editor.
+        """
+        try:
+            if not self.refusal:
+                return None
+            status, parsed, ours = self.refusal
+            detail = _detail_dict(parsed)
+            reason = str(detail.get("reason") or "")
+            tail = " The server is downloading these clips."
+            if status == 403 and reason == "attestation":
+                return ("The dashboard has no record of you accepting the "
+                        "YouTube download terms, so this computer did not "
+                        "download. Read the notice at the top of this page "
+                        "and press Accept." + tail)
+            if status == 403 and reason == "ytdlp_version":
+                floor = str(detail.get("min_ytdlp_version") or "").strip()
+                return (f"This computer's yt-dlp ({ours or 'version unknown'}) "
+                        f"is older than the {floor or 'minimum'} the server "
+                        f"asks for, so it did not download." + tail)
+            if status in (401, 403) and reason in _SIGN_IN_REASONS:
+                # The fleet credential or the signed identity being refused,
+                # the same verdict the heartbeat turns into CredentialLost
+                # (bug-comp-ytdl-3). Review round 2026-09-25: routes_fleet's
+                # own identity refusals CARRY a reason - 'identity' (the
+                # 30-day token ran out, a retired key, a deleted user) and
+                # 'identity_mismatch' (the report token is another editor's)
+                # - so "no reason" alone missed the commonest one.
+                # 'identity_unconfigured' is the server missing its secret:
+                # nothing this computer or its editor can do, so it stays
+                # quiet, as does any reason code we do not know.
+                return ("The dashboard does not accept this computer's "
+                        "sign-in, so it did not download." + tail)
+            if status == 409:
+                # Only the editor's OWN other computer. Another editor's live
+                # lease is a download that is legitimately theirs.
+                holder = str(detail.get("claimed_by") or "")
+                said = _detail_of(parsed).strip().rstrip(".")
+                if holder and holder == self.editor and said:
+                    return (f"{said[:1].upper()}{said[1:]}, so this computer "
+                            f"left it alone.")
+                return None
+            if status == 410 and reason == "template_version":
+                return ("This computer names downloaded clips differently "
+                        "from the server, so it did not download." + tail
+                        + " Updating the companion fixes it.")
+            if status == 410 and reason == "sidecar_version":
+                return ("This computer writes clip credits in a different "
+                        "format from the server, so it did not download."
+                        + tail + " Updating the companion fixes it.")
+            if status == 410 and reason == "out_of_scope":
+                quality = str(detail.get("quality") or "").strip()
+                what = f"{quality} clips" if quality else "clips at this quality"
+                return (f"This computer does not download {what}, so it did "
+                        f"not download." + tail)
+            return None
+        except Exception:
+            log.debug("ytdl: no sentence for the claim refusal", exc_info=True)
+            return None
 
     def heartbeat(self, job_id: int) -> None:
         # ytdl-web-3 (2026-09-11): the lease is keyed (editor, machine_id) at
@@ -1195,8 +1301,15 @@ class FleetClient:
         # carrying both up. The id is OPTIONAL on the wire (absent means
         # today's per-editor answer), so an older server ignores it and a
         # newer server does not 410 an older companion.
-        self._call("POST", f"/jobs/{job_id}/heartbeat",
-                   self._with_machine({"editor": self.editor}))
+        status, parsed = self._call("POST", f"/jobs/{job_id}/heartbeat",
+                                    self._with_machine({"editor": self.editor}))
+        # bug-comp-ytdl-3 (2026-09-25): only these three are verdicts. A 5xx
+        # or a 502 from a restarting dashboard is a blip the next beat retries
+        # (six of them fit in one lease), and a 2xx is the lease renewed.
+        if status in HEARTBEAT_REFUSALS:
+            raise CredentialLost(
+                f"the dashboard refused this computer's heartbeat (HTTP "
+                f"{status}: {_detail_of(parsed) or 'no detail'})")
 
     def _with_machine(self, body: dict) -> dict:
         """`body` plus this computer's id, when it has one (ytdl-web-3)."""
@@ -1664,8 +1777,11 @@ def converted_name(final: str) -> str:
     return stem + CONVERTED_SUFFIX + ext
 
 
-def swap_in(tmp: Path, final: Path, original: Path) -> tuple[str, Optional[str]]:
+def swap_in(tmp: Path, final: Path, original: Path) -> tuple[Optional[str], Optional[str]]:
     """_swap_in, verbatim in effect: -> (name delivered, note or None).
+
+    The name is None when every rename was refused (bug-comp-ytdl-5): the
+    note is then the reason, and the clip is a failure, not a delivery.
 
     Windows refuses to overwrite or delete a file another process holds open
     -- a clip already in an open Resolve project fails os.replace() with
@@ -1705,8 +1821,14 @@ def swap_in(tmp: Path, final: Path, original: Path) -> tuple[str, Optional[str]]
     try:
         os.replace(tmp, keep)
     except OSError:
-        return tmp.name, (f"converted, but could not replace {original.name}: "
-                          f"saved as {tmp.name}")
+        # bug-comp-ytdl-5 (2026-09-25): this rung used to DELIVER `tmp.name`,
+        # and that name is `<stem>.editready.mp4`, which is litter to every
+        # reader since YT-6: the next clear_partials for this id deleted it,
+        # the importer never filed it and the dedupe scan could not see it,
+        # while the ledger said `done` at that path. Nothing is delivered; the
+        # caller fails the clip and the server downloads it again.
+        return None, (f"converted, but neither {original.name} nor its "
+                      f"converted copy could be renamed into place")
     return keep.name, (f"converted, but {original.name} was in use: "
                        f"saved as {keep.name}")
 
@@ -2101,6 +2223,13 @@ class DownloadJob:
                 return
             try:
                 self.client.heartbeat(self.job_id)
+            except CredentialLost as exc:
+                self.hand_back("The dashboard no longer accepts this "
+                               "computer's sign-in, so it stopped downloading. "
+                               "The server is downloading the rest of these "
+                               "clips.")
+                self.lose_lease(str(exc))
+                return
             except LeaseLost as exc:
                 self.lose_lease(str(exc))
                 return
@@ -2160,6 +2289,12 @@ class DownloadJob:
                                   sleep=self._stop.wait)
         lease = self.client.claim(self.job_id, cap["ytdlp_version"], free)
         if lease is None:
+            # logic-ytdl-jobs-3 (2026-09-25): a refusal about this computer is
+            # said to the page like every other hand-back on this path; the
+            # ordinary ones return None and stay quiet (the method says which).
+            why = self.client.claim_refusal_sentence()
+            if why:
+                self.hand_back(why)
             return
 
         heartbeat = _positive_number(lease.get("heartbeat_seconds"),
@@ -2399,7 +2534,7 @@ class DownloadJob:
                         self.job_id, video_id, url)
             self.client.clip_status(self.job_id, video_id, "failed",
                                     error="the download URL was not a YouTube "
-                                          "URL, so this machine refused it")
+                                          "URL, so this computer refused it")
             self._set(failed=self.failed + 1)
             return
 
@@ -2593,6 +2728,20 @@ class DownloadJob:
             if self._should_stop():
                 # Left staged: _download_one's _cleanup_current sweeps it, and
                 # a download that needed converting is never a finished clip.
+                if staged == src:
+                    # bug-comp-ytdl-2 (2026-09-25): the in-place fallback
+                    # left the convert-needed original under its deliverable
+                    # name on a stop, which is the finding's whole shape
+                    # (the importer files it, lane A uploads it). The scanner
+                    # that refused the first rename has usually let go by
+                    # now; if it still has not, the warning is all we have.
+                    try:
+                        os.replace(src, Path(outdir) / staged_source_name(name))
+                    except OSError as exc:
+                        log.warning("ytdl: job %s clip %s: stopped mid-"
+                                    "conversion and the unconverted download "
+                                    "could not be moved aside (%s)",
+                                    self.job_id, video_id, exc)
                 return name, None, None
             # Back under its own name either way: kept as downloaded, or
             # disowned by _fail_clip (which skips a sweepable name, and would
@@ -2608,12 +2757,25 @@ class DownloadJob:
         final = Path(outdir) / (str(Path(name).with_suffix("")) + ".mp4")
         if staged == src:
             delivered, note = swap_in(tmp, final, src)
+            if delivered is None:
+                # bug-comp-ytdl-5 (2026-09-25): nothing could be renamed into
+                # place, so this is a failed clip: _fail_clip disowns what is
+                # left under the landed name and sweeps the `.editready` copy.
+                return name, None, f"Edit-ready conversion failed: {note}"
             return delivered, note, None
         # The staged original is nobody's clip and nothing has it open, so it
         # is simply removed; swap_in keeps its locked-file handling for
         # whatever may already sit at `final` (an earlier copy Resolve holds).
-        held = self._remove_staged(staged, video_id)
+        # bug-comp-ytdl-5 (2026-09-25): removed only AFTER the swap took, so
+        # a swap that could place nothing still has the original to put back
+        # (and _fail_clip then keeps it as `.failed`, YTDL-3's evidence) rather
+        # than the swept `.editready` copy being the last of the clip.
         delivered, note = swap_in(tmp, final, final)
+        if delivered is None:
+            restore_error = self._unstage(staged, src, video_id)
+            return name, None, (f"Edit-ready conversion failed: {note}"
+                                + (f"; {restore_error}" if restore_error else ""))
+        held = self._remove_staged(staged, video_id)
         if held is not None:
             # bug-comp-ytdl-1 round 2 (2026-09-25): a clip that succeeded has
             # no next attempt on this machine, and clear_partials runs only
@@ -3349,7 +3511,7 @@ def start(job_id: Any, deps: Deps) -> tuple[int, dict]:
     with _GUARD:
         if _CURRENT is not None and _CURRENT.running:
             return 409, {"ok": False, "job_id": _CURRENT.job_id,
-                         "message": f"this machine is already downloading job "
+                         "message": f"this computer is already downloading job "
                                     f"{_CURRENT.job_id}"}
 
     cap = capabilities(deps)
@@ -3362,7 +3524,7 @@ def start(job_id: Any, deps: Deps) -> tuple[int, dict]:
             # does a syscall, and two tabs a millisecond apart both passing the
             # check above is exactly the race the lease exists for.
             return 409, {"ok": False, "job_id": _CURRENT.job_id,
-                         "message": f"this machine is already downloading job "
+                         "message": f"this computer is already downloading job "
                                     f"{_CURRENT.job_id}"}
         job = DownloadJob(job_id, deps)
         _CURRENT = job

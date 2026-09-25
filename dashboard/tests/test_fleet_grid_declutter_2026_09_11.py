@@ -116,7 +116,10 @@ def test_a_lane_in_error_is_the_headline_when_nothing_outranks_it():
 
 
 def test_a_row_with_nothing_wrong_says_so_quietly():
-    assert health.fleet_headline(_row())["text"] == "Idle, nothing owed"
+    # logic-sync-truth-5 (2026-09-25): "nothing owed" is said only from a
+    # counted backlog; a row nobody counted is plain "Idle".
+    assert health.fleet_headline(_row())["text"] == "Idle"
+    assert health.fleet_headline(_row(owed_files=0))["text"] == "Idle, nothing owed"
     assert health.fleet_headline(_row())["level"] == health.HEADLINE_MUTED
     busy = _row(lanes=[{"lane": "lane_a_video_up", "state": "syncing",
                         "chip": "amber"}])

@@ -51,8 +51,9 @@
       <tr class="editor-row">
         <td data-label="EDITOR">{{ t.editor_username }}</td>
         <td class="muted" data-label="LABEL">{{ t.label or "-" }}</td>
-        <td class="mono-sm muted" data-label="CREATED">{{ t.created_at }}</td>
-        <td class="mono-sm muted" data-label="LAST USED">{{ t.last_used_at or "never" }}</td>
+        {# ui-dash-admin-12 (2026-09-25): "3h ago", with the stored UTC stamp in the title, like every other page; a raw +00:00 string is a sum a UTC+8 owner does in their head. #}
+        <td class="mono-sm muted" data-label="CREATED" title="{{ t.created_at }}">{{ t.created_at | ago }}</td>
+        <td class="mono-sm muted" data-label="LAST USED" title="{{ t.last_used_at or '' }}">{{ t.last_used_at | ago }}</td>
         <td data-label="ACTIONS">
           {# C-8 (UX.md, 2026-08-28): one click takes an editor's companion off
              the fleet, and the token cannot be shown again. #}

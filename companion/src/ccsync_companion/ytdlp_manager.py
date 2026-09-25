@@ -138,6 +138,16 @@ CHECK_INTERVAL_SECONDS = 24 * 3600.0
 # created at all when the flag was off, so flipping it needed every editor to
 # restart their tray -- and nothing said so.
 DISABLED_RECHECK_SECONDS = 900.0
+# After a pass that FAILED to install or update something (bug-comp-ytdl-4,
+# 2026-09-25). The loop is the only thing that retries: the executor's
+# once-per-job poke is unreachable, because capabilities() refuses a machine
+# whose yt-dlp pass published ok=False before any job is claimed. So one
+# failed first install (a tray that started before Wi-Fi or a captive portal
+# let it reach GitHub) or one GitHub blip on the `-U` that meets a raised
+# floor turned local downloads off until the same time tomorrow. Doubling
+# from five minutes, capped at the ordinary cadence, so a machine that can
+# never reach GitHub settles back to one attempt a day within a day.
+FAILED_RETRY_FIRST_SECONDS = 300.0
 
 # ensure()'s `action`, i.e. what it DID. Small and closed on purpose: the
 # capability endpoint (later wave) and the tray log both read this.
@@ -861,7 +871,7 @@ class YtDlpManager:
             return self._publish(
                 True, current, ACTION_STALE,
                 f"yt-dlp {current} is {age} days old and it could not update "
-                f"itself -- YouTube downloads on this machine may start failing",
+                f"itself -- YouTube downloads on this computer may start failing",
             )
         # -U goes to the latest stable only, so it cannot roll backwards; the
         # guard is for the day it does something else. Keeping the OLD string
@@ -1124,7 +1134,7 @@ class YtDlpManager:
                 if not self.install():
                     return self._publish(
                         False, None, ACTION_FAILED,
-                        "no yt-dlp on this machine and it could not be installed "
+                        "no yt-dlp on this computer and it could not be installed "
                         "-- YouTube downloads stay on the server",
                     )
                 current = version(cfg=self.cfg, run_fn=self._run)
@@ -1211,13 +1221,19 @@ class YtDlpManager:
     def _loop(self) -> None:
         if self._stop_event.wait(INITIAL_DELAY_SECONDS):
             return
+        failed_passes = 0
         while not self._stop_event.is_set():
             # Re-read per pass, never cached: this is what lets an operator
             # turn the feature on for a fleet without touching a machine
             # (comp-ytdl-3, 2026-08-21).
             enabled = self.enabled
+            # bug-comp-ytdl-4 (2026-09-25): either half failing (or raising)
+            # earns the short retry below, since both leave this machine
+            # unable to download locally.
+            failed = False
             try:
                 status = self.ensure()
+                failed = _ytdlp_pass_failed(status, enabled)
                 # INFO, once a day, and never a dialog: a machine without the
                 # capability is not broken, it is a machine that downloads on
                 # the server like every machine did before this existed. DEBUG
@@ -1226,6 +1242,7 @@ class YtDlpManager:
                 log.log(logging.INFO if enabled else logging.DEBUG,
                         "ytdlp: %s", status.get("message"))
             except Exception:
+                failed = True
                 log.exception("ytdlp: the daily check failed")
             try:
                 # ffmpeg + deno on the same thread and cadence (sidecar_tools,
@@ -1258,14 +1275,46 @@ class YtDlpManager:
                 # Mac that cannot verify GitHub's certificate retried once a
                 # day for ever with nothing at the shipped log level.
                 failed_pass = str(status.get("action") or "") == ACTION_FAILED
+                failed = failed or failed_pass
                 log.log(logging.WARNING if failed_pass
                         else logging.INFO if enabled else logging.DEBUG,
                         "sidecar: %s", status.get("message"))
             except Exception:
+                failed = True
                 log.exception("sidecar: the daily check failed")
             wait = CHECK_INTERVAL_SECONDS if enabled else DISABLED_RECHECK_SECONDS
+            if failed:
+                failed_passes += 1
+                wait = min(wait, FAILED_RETRY_FIRST_SECONDS
+                           * (2 ** min(failed_passes - 1, 16)))
+            else:
+                failed_passes = 0
             if self._stop_event.wait(wait):
                 return
+
+
+def _ytdlp_pass_failed(status: dict[str, Any], enabled: bool) -> bool:
+    """Whether a yt-dlp pass earns the short retry (bug-comp-ytdl-4).
+
+    ACTION_FAILED is not the only pass that leaves local downloads off:
+    capabilities() refuses every job while `ok` is False, and an install
+    that succeeded but whose `--version` came back None (a fresh binary
+    being AV-scanned during a cold PyInstaller start is exactly what
+    VERSION_TIMEOUT_SECONDS exists for), or an update still unreadable or
+    below the floor, publishes ACTION_INSTALLED / ACTION_UPDATED with
+    ok=False. The next pass usually reads it fine, so waiting a day for it
+    was the finding's shape again (review round, 2026-09-25).
+
+    Not a failure: a disabled pass (ok=False by definition, and the loop
+    rechecks every 15 minutes anyway), and ACTION_CHECKED, the hand-managed
+    override, which nothing here installs or updates: retrying sooner
+    cannot fix it, only the editor can."""
+    action = str(status.get("action") or "")
+    if action == ACTION_FAILED:
+        return True
+    if not enabled or action in (ACTION_CHECKED, ACTION_DISABLED):
+        return False
+    return not status.get("ok")
 
 
 def _unlink_quietly(path: Path) -> None:

@@ -18,8 +18,10 @@ Verified against a real (local) Syncthing instance before writing this:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import os
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -198,15 +200,36 @@ def missing_ignore_lines(fetched: Any) -> list[str]:
 _GLOB_SPECIALS = "\\*?[]{}"
 
 
-def escape_ignore_glob(rel: str) -> str:
-    """A posix rel path escaped for literal use in a .stignore pattern."""
+# bug-comp-syncthing-5 (2026-09-25): on Windows Syncthing does not honour `\`
+# as an escape (it is the path separator there, and the pattern is read with
+# it as one), so `!/Interviews \[raw\]` became `Interviews /[raw/]`, matched
+# nothing, and the trailing `**` kept the whole borrowed subtree out with the
+# list reading back "confirmed". `[` and `{` are legal in a Windows file name
+# and are the two that open a glob construct there, so each goes inside a
+# one-character class, which needs no escape character at all; `}` goes in one
+# too, which is literal whether or not the matcher reads a stray `}` as text.
+# `]` outside a class is plain text, and `*` `?` `\` cannot appear in a
+# Windows name. Correct under any escape character, so a Syncthing that does
+# honour `\` reads it the same way.
+_WINDOWS_GLOB_CLASSES = {"[": "[[]", "{": "[{]", "}": "[}]"}
+
+
+def escape_ignore_glob(rel: str, windows: Optional[bool] = None) -> str:
+    """A posix rel path escaped for literal use in a .stignore pattern.
+
+    `windows` is the platform of the Syncthing that reads the file, which is
+    this machine's (.stignore is device-local); None means this process's."""
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        return "".join(_WINDOWS_GLOB_CLASSES.get(ch, ch) for ch in str(rel))
     out = str(rel)
     for ch in _GLOB_SPECIALS:
         out = out.replace(ch, "\\" + ch)
     return out
 
 
-def restricted_ignore_lines(subs: list[str]) -> list[str]:
+def restricted_ignore_lines(subs: list[str], windows: Optional[bool] = None) -> list[str]:
     """The device-local .stignore that turns a LENDER's whole Syncthing
     folder into just its borrowed subtrees on this machine.
 
@@ -233,7 +256,7 @@ def restricted_ignore_lines(subs: list[str]) -> list[str]:
     """
     lines = list(STIGNORE_LINES)
     for sub in subs:
-        esc = escape_ignore_glob(str(sub).strip().strip("/"))
+        esc = escape_ignore_glob(str(sub).strip().strip("/"), windows=windows)
         if not esc:
             continue
         lines += [f"!/{esc}", f"!/{esc}/**"]
@@ -293,6 +316,20 @@ def http_request(
     with _opener().open(req, timeout=timeout) as resp:
         resp_data = resp.read()
     return json.loads(resp_data.decode("utf-8")) if resp_data else {}
+
+
+def release_guard(admin: Any, halted: Callable[[], bool]) -> dict[str, Any]:
+    """`release_ok=` for accept_folder, when this admin takes it
+    (bug-comp-syncthing-4, 2026-09-25): the halt is asked again just before
+    the folder's final unpause, not only before the accept began. Empty for
+    an admin (a test double, an older build) whose accept_folder predates it."""
+    try:
+        params = inspect.signature(admin.accept_folder).parameters
+    except (AttributeError, TypeError, ValueError):
+        return {}
+    if "release_ok" not in params:
+        return {}
+    return {"release_ok": lambda: not halted()}
 
 
 class SyncthingAdmin:
@@ -521,6 +558,7 @@ class SyncthingAdmin:
         local_path: str,
         offered_by_device_id: str,
         ignore_lines: Optional[list[str]] = None,
+        release_ok: Optional[Callable[[], bool]] = None,
     ) -> Any:
         """Accept a pending Syncthing folder offer with the video/Proxy
         ignores already in place before it can pull anything.
@@ -576,6 +614,21 @@ class SyncthingAdmin:
         }
         result = self._write_request("POST", "/rest/config/folders", folder_config)
         self.set_ignores(folder_id, lines)
+        # bug-comp-syncthing-4 (2026-09-25): asked AFTER the two writes, which
+        # can take 30 s each on a Syncthing slow enough to be the reason for a
+        # halt. The caller's halt check ran before them, and a halt engaged in
+        # between had already paused every folder -- this unpause then put the
+        # new one online through the halt. Left paused, the folder has its
+        # ignores confirmed and the next turn after the halt releases it.
+        if release_ok is not None:
+            try:
+                allowed = bool(release_ok())
+            except Exception:
+                allowed = False
+            if not allowed:
+                log.info("accepted folder %s but left it paused: syncing is stopped "
+                         "on this machine", folder_id)
+                return result
         self.set_folder_paused(folder_id, False)
         return result
 

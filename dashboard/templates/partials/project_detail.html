@@ -87,16 +87,30 @@
     {# The upload-only tick (docs/UPLOAD_ONLY_TICK.md): originals go up,
        nothing comes down. A SET, not a toggle: pressing it on a full tick
        switches the mode, and the button flips to offer the way back. #}
+    {# logic-plans-2 (2026-09-25): both mode buttons are the PERSON (every
+       computer they use, docs/UPLOAD_ONLY_TICK.md section 2), so they also
+       tick the project onto a computer that did not have it and flatten a
+       plan that was upload-only on one computer and full on another. The
+       switch to FULL starts proxy downloads on each of those computers, and
+       it carried neither the UX-1 capacity sentence nor the names that
+       [ TICK ] has. It asks now, naming them; so does the switch to upload
+       only when it changes an existing tick. #}
+    {%- set mode_machines = toggle_editor_machines if toggle_editor_machines is defined and toggle_editor_machines else [] -%}
+    {%- set mode_where = (tick_for ~ "'s " ~ (mode_machines | length) ~ " computer" ~ ("s" if mode_machines | length != 1 else "") ~ " (" ~ (mode_machines | join(", ")) ~ ")") if mode_machines else (tick_for ~ "'s computers") -%}
     {% if modes.get(tick_for) == "upload_only" %}
     <button class="btn tap {{ 'acting' if tick_for != session_user }}"
             title="download this project's proxies and shared files as well: the normal sync"
             hx-post="/partials/selection/{{ tick_for }}/{{ project.slug }}/toggle?view=project&mode=full&slug_page={{ project.slug }}{{ as_qs if as_qs is defined }}"
+            hx-confirm="This syncs {{ project.label }} in full on every one of {{ mode_where }}, including any that do not have it ticked yet: its proxies and shared files come down on each.{{ (' ' ~ tick_warning) if tick_warning is defined and tick_warning }} Switch to full sync?"
             hx-target="#project-detail" hx-swap="innerHTML">
       [ SWITCH TO FULL SYNC ]</button>
     {% else %}
     <button class="btn tap {{ 'acting' if tick_for != session_user }}"
             title="for footage you already have on this computer: send the video originals to the server and download nothing (no proxies, no shared project files)"
             hx-post="/partials/selection/{{ tick_for }}/{{ project.slug }}/toggle?view=project&mode=upload_only&slug_page={{ project.slug }}{{ as_qs if as_qs is defined }}"
+            {% if tick_for in pickers %}
+            hx-confirm="This sets {{ project.label }} to upload only on every one of {{ mode_where }}: nothing more comes down on any of them, and a computer that has a full sync of it now stops downloading. Their copies stay on disk. Switch to upload only?"
+            {% endif %}
             hx-target="#project-detail" hx-swap="innerHTML">
       [ {{ "SWITCH TO UPLOAD ONLY" if tick_for in pickers else "UPLOAD ONLY FOR " ~ whom }} ]</button>
     {% endif %}

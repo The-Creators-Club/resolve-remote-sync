@@ -194,9 +194,25 @@ if (-not $bashExe) {
     $results += @{ Name = "installer/macos"; Outcome = "SKIP (no bash)" }
 }
 else {
-    $global:LASTEXITCODE = 9999
-    & $bashExe -lc "cd '$($repo -replace '\\','/')' && bash installer/tests/test_macos_site_values.sh"
-    $results += @{ Name = "installer/macos"; Outcome = $(if ($LASTEXITCODE -eq 0) { "PASS" } else { "FAIL (exit $LASTEXITCODE)" }) }
+    # bug-ops-4 / ui-onboarding-11 (2026-09-25): EVERY installer\tests\test_*.sh,
+    # enumerated like the .ps1 row above. This row named one file, so
+    # test_macos_uninstall_profile.sh and test_macos_first_steps.sh were
+    # written, passed once on their author's machine, and gated nothing. All
+    # run even after a failure (the first non-zero exit is the one reported),
+    # and none found is a FAIL: a renamed directory must not read as green.
+    $shTests = @(Get-ChildItem -Path (Join-Path $repo "installer\tests") -Filter "test_*.sh" -File -ErrorAction SilentlyContinue | Sort-Object Name)
+    $macosExit = 0
+    if ($shTests.Count -eq 0) {
+        Write-Host "  FAIL: no installer\tests\test_*.sh found" -ForegroundColor Red
+        $macosExit = 1
+    }
+    foreach ($shTest in $shTests) {
+        Write-Host "  -- $($shTest.Name)"
+        $global:LASTEXITCODE = 9999
+        & $bashExe -lc "cd '$($repo -replace '\\','/')' && bash 'installer/tests/$($shTest.Name)'"
+        if ($LASTEXITCODE -ne 0 -and $macosExit -eq 0) { $macosExit = $LASTEXITCODE }
+    }
+    $results += @{ Name = "installer/macos"; Outcome = $(if ($macosExit -eq 0) { "PASS" } else { "FAIL (exit $macosExit)" }) }
 }
 
 Write-Host ""

@@ -45,6 +45,7 @@ import shutil
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path, PurePosixPath
@@ -402,12 +403,30 @@ class FleetClient:
         return f"{self.deps.dashboard_url}{self.prefix}{suffix}"
 
     def _headers(self) -> dict:
-        return {
+        headers = {
             "Content-Type": "application/json",
             "X-CCSync-Token": self.deps.token,
             "X-CCSync-Identity": self.deps.identity_token(),
-            "X-CCSync-Machine": self.deps.machine,
         }
+        machine = str(self.deps.machine or "")
+        try:
+            machine.encode("latin-1")
+        except UnicodeEncodeError:
+            # bug-wire-7 (2026-09-25): http.client encodes a header value as
+            # Latin-1, so a computer named `剪輯-PC` raised inside urllib
+            # before a socket opened, on EVERY fleet call, the claim
+            # included: no b-roll or music ingest could start on it, while
+            # the same name travels fine in the JSON body of every other
+            # route. The server skips the one machine check when the header
+            # is absent (routes_fleet's docstring: an older companion
+            # degrades to the pre-2026-08-18 guarantee, and the editor,
+            # lease and cancel checks still run), so the name goes in an
+            # ASCII-safe percent-encoded twin instead, which a server that
+            # does not read it ignores.
+            headers["X-CCSync-Machine-Pct"] = urllib.parse.quote(machine, safe="")
+        else:
+            headers["X-CCSync-Machine"] = machine
+        return headers
 
     def _call(self, method: str, suffix: str,
               body: Optional[dict] = None) -> tuple[int, Any]:
@@ -626,6 +645,44 @@ def _accepts_child_sink(runner: Any) -> bool:
         return "child_sink" in inspect.signature(runner).parameters
     except (TypeError, ValueError):
         return False
+
+
+def _accepts_keyword(runner: Any, name: str) -> bool:
+    """Whether this media runner takes the keyword `name`."""
+    try:
+        import inspect  # noqa: PLC0415 - once per ffmpeg call, and only here
+
+        return name in inspect.signature(runner).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def encode_timeout_seconds(duration_s: Any) -> float:
+    """The ceiling for one proxy ENCODE of a source this long.
+
+    bug-comp-broll-5 (2026-09-25): every ingest encode ran under
+    `run_ffmpeg`'s flat 900 s, a number its own comment sizes for "a still or
+    a sprite". The editing proxy is `own_proxy_cmd`, and on a machine with no
+    NVENC (a Mac, an AMD box) that is libx265 10-bit, well under real time:
+    a clip of ten minutes or so was killed at 15, recorded as "the editing
+    proxy did not decode", and a slow enough source lost its preview and so
+    the whole item. proxy_gen runs the SAME recipe under
+    max(STUCK_FLOOR_SECONDS, duration x STUCK_DURATION_FACTOR); this is that
+    rule, read from proxy_gen so the two cannot drift, never below the old
+    ceiling.
+    """
+    try:
+        from . import proxy_gen  # noqa: PLC0415 - the only reader here
+
+        floor = float(proxy_gen.STUCK_FLOOR_SECONDS)
+        factor = float(proxy_gen.STUCK_DURATION_FACTOR)
+    except Exception:  # noqa: BLE001 - the numbers, not the module, matter
+        floor, factor = 1800.0, 60.0
+    try:
+        duration = max(0.0, float(duration_s or 0))
+    except (TypeError, ValueError):
+        duration = 0.0
+    return max(float(MEDIA_TIMEOUT_SECONDS), floor, duration * factor)
 
 
 def _dir_bytes(directory: Any, max_files: int = 200_000) -> int:
@@ -1846,6 +1903,14 @@ class BrollIngestor:
             self._upload_paused = bool(
                 (parsed.get("batch") or {}).get("upload_paused"))
             self._eta = popup.EmaEta()
+            live_queue = self._uploader
+        if live_queue is not None:
+            # bug-comp-broll-6 (2026-09-25): a queue that is still up (the
+            # constructor's, or one a future path forgets to put down) takes
+            # the claimed flag NOW. The heartbeat only acts on a CHANGE from
+            # `_upload_paused`, which was just set to this very value, so a
+            # queue left paused by the last batch would never be resumed.
+            self.pause_upload(self._upload_paused)
         self._cancel.clear()
         self._save()
         self._start_heartbeat()
@@ -2534,8 +2599,10 @@ class BrollIngestor:
         """
         partial = Path(str(dest) + ".partial")
         why = f"the {what} did not decode -- this clip was skipped"
+        timeout = encode_timeout_seconds((probe or {}).get("duration_s"))
         for nvenc in ([True, False] if self._nvenc() else [False]):
-            code, stderr = self._run_media(build_cmd(partial, nvenc))
+            code, stderr = self._run_media(build_cmd(partial, nvenc),
+                                           timeout=timeout)
             if code == 0 and partial.is_file() and partial.stat().st_size > 0:
                 if self._verify_proxy(partial, probe):
                     short = self._frames_missing(source, partial, what)
@@ -3074,6 +3141,8 @@ class BrollIngestor:
                 item["stage"] = self._final_state(item)
                 item["error"] = "" if item["stage"] == ITEM_LIVE else item.get("error", "")
                 item["original_uploaded"] = original_uploaded
+                if original_uploaded:
+                    self._original_landed(batch, item)
                 self._mirror_locally(item)
                 self.log.info("%s finished as %s", item.get("name"), item["stage"])
             elif status == 409:
@@ -3315,6 +3384,16 @@ class BrollIngestor:
         # staged.
         self._note_staging_ended(batch)
         self._forget_batch_scratch(batch)
+        # bug-comp-broll-6 (2026-09-25): the queue is per BATCH
+        # (`_new_queue`), but only cancel and lease-lost put it down. After an
+        # ordinary finish the next run inherited it: the previous run's
+        # done/failed ledger (a RETRY FAILED of this same batch re-sends the
+        # same rel strings and read the old failure as a new one), and a
+        # paused queue that `run()` never resumed, because the heartbeat
+        # compares the server's flag with `_upload_paused`, which run() had
+        # already set to match. Every item is finished here, so nothing in it
+        # is still wanted.
+        self._stop_uploads()
         with self._lock:
             self._batch = None
             self._current = {}
@@ -3383,7 +3462,7 @@ class BrollIngestor:
     def _client(self) -> FleetClient:
         return FleetClient(self.deps, prefix=self.kind.api_prefix)
 
-    def _run_media(self, cmd: list) -> tuple:
+    def _run_media(self, cmd: list, timeout: Optional[float] = None) -> tuple:
         runner = self._run_media_fn or self.media.run_ffmpeg
         try:
             # MEDIA-2 (resilience sweep 2026-08-28): the child_sink is what
@@ -3391,9 +3470,14 @@ class BrollIngestor:
             # `run_media_fn` is a test seam and every existing double takes
             # one argument -- a signature probe, not a bare TypeError catch,
             # so a genuine TypeError inside the runner still surfaces.
+            kwargs: dict[str, Any] = {}
             if _accepts_child_sink(runner):
-                return runner(cmd, child_sink=self._publish_child)
-            return runner(cmd)
+                kwargs["child_sink"] = self._publish_child
+            # bug-comp-broll-5 (2026-09-25): offered the same way, for the
+            # same reason; a runner that cannot take it keeps its own ceiling.
+            if timeout is not None and _accepts_keyword(runner, "timeout"):
+                kwargs["timeout"] = int(timeout)
+            return runner(cmd, **kwargs)
         except self.media.UnreadableMediaError as exc:
             self.log.warning("ffmpeg refused (%s)", exc)
             return 1, str(exc)
@@ -3551,6 +3635,39 @@ class BrollIngestor:
                                str(item.get("name") or ""))
         self._save()
 
+    def _original_landed(self, batch: Optional[dict], item: dict) -> None:
+        """The archive has this clip's original now: stop holding it.
+
+        bug-comp-broll-4 (2026-09-25): `held_for_base_rig` was append-only.
+        `_note_original_failed` holds the drop so the only copy of an original
+        the archive lacks is not pruned, and nothing released it when RETRY
+        FAILED later uploaded that original, so a 150 GB drop with one clip
+        that failed once stayed in the archive's `.ingest` for ever - skipped
+        by the retention sweep AND by CLEAR FINISHED STAGING. A name is kept
+        while another clip of the same name in this batch still owes its
+        original: the list is by name, and two cards both hold `C0001.MP4`.
+        """
+        item.pop("original_failed", None)
+        name = str(item.get("name") or "")
+        items = (batch or {}).get("items") or []
+        if not name or any(i is not item and i.get("original_failed")
+                           and str(i.get("name") or "") == name for i in items):
+            return
+        staging_id = str((batch or {}).get("staging_id") or "")
+        if not staging_id:
+            return
+        with self._lock:
+            entry = self._staging.get(staging_id)
+            if not isinstance(entry, dict):
+                return
+            held = [n for n in (entry.get("held_for_base_rig") or []) if n != name]
+            if held == list(entry.get("held_for_base_rig") or []):
+                return
+            entry["held_for_base_rig"] = held
+        self.log.info("%s: its original reached the archive, so its staged "
+                      "drop is no longer held for it", name)
+        self._save()
+
     def _space_refusal(self, directory: Path,
                        wanted_bytes: int = 0) -> Optional[str]:
         """Editor-facing text, or None. A disk we cannot measure is NOT a
@@ -3606,6 +3723,15 @@ class BrollIngestor:
                             f"{days:.0f} days")
         else:
             message += ". Free some space and it will continue"
+        held = int(report.get("held_bytes") or 0)
+        if held:
+            # bug-comp-broll-4 (2026-09-25): named on its own, because no
+            # button frees it: those files are the only copy of something the
+            # archive does not have yet, and they go when it does.
+            message += (f". {held / 1_000_000_000:.1f} GB more is "
+                        f"{self.kind.label} staging kept on this computer "
+                        "because the archive does not have those files yet; "
+                        "it is released once they reach it")
         return message
 
     # -- staging retention (MEDIA-3, resilience sweep 2026-08-28) ----------
@@ -3654,11 +3780,20 @@ class BrollIngestor:
                 if i.get("stage") == ITEM_QUEUED]
         with self._lock:
             entry = self._staging.get(staging_id)
-            if not isinstance(entry, dict) or entry.get("ended_at"):
+            if not isinstance(entry, dict):
                 return
+            # bug-comp-broll-4 (2026-09-25): a RERUN of the same drop (RETRY
+            # FAILED) ends here too, and used to return untouched when
+            # `ended_at` was already set, so its clock stayed the first run's
+            # and a name it newly holds was never written. The list is also
+            # MERGED rather than overwritten: `_note_original_failed` may
+            # already have held a name during this run. `_original_landed`
+            # does the releasing; this only adds and re-stamps.
             entry["ended_at"] = _iso_now()
-            if held:
-                entry["held_for_base_rig"] = held[:200]
+            merged = list(entry.get("held_for_base_rig") or [])
+            merged += [n for n in held if n and n not in merged]
+            if merged:
+                entry["held_for_base_rig"] = merged[:200]
 
     def _hold_staging(self, staging_id: str, name: str) -> None:
         """Mark a staging drop as holding a file only the base rig can finish.
@@ -3690,7 +3825,7 @@ class BrollIngestor:
         """`sync_guard.ingest_staging` for this kind: bytes, batches,
         oldest_at. Never raises; an unreadable directory counts as zero."""
         total, count = 0, 0
-        finished_bytes, unrun_bytes = 0, 0
+        finished_bytes, unrun_bytes, held_bytes = 0, 0, 0
         oldest: Optional[str] = None
         for _sid, entry in self._staging_entries():
             directory = str(entry.get("dir") or "")
@@ -3703,7 +3838,15 @@ class BrollIngestor:
             # bytes and only the first has a button. `_space_refusal` used to
             # blame the whole total on CLEAR FINISHED STAGING, which then
             # answered "There is no finished staging to clear on this computer".
-            if entry.get("ended_at"):
+            #
+            # bug-comp-broll-4 (2026-09-25): and a HELD drop is neither. It
+            # has `ended_at`, so it was counted as finished, but prune_staging
+            # skips it at every age, CLEAR FINISHED STAGING included - the
+            # disk-full message sent the editor to a button that freed none
+            # of it.
+            if [n for n in (entry.get("held_for_base_rig") or []) if n]:
+                held_bytes += size
+            elif entry.get("ended_at"):
                 finished_bytes += size
             else:
                 unrun_bytes += size
@@ -3711,7 +3854,8 @@ class BrollIngestor:
             if at and (oldest is None or at < oldest):
                 oldest = at
         return {"bytes": total, "batches": count, "oldest_at": oldest,
-                "finished_bytes": finished_bytes, "unrun_bytes": unrun_bytes}
+                "finished_bytes": finished_bytes, "unrun_bytes": unrun_bytes,
+                "held_bytes": held_bytes}
 
     def prune_staging(self, max_age_days: Optional[float] = None) -> dict[str, Any]:
         """Delete finished staging older than the retention, and forget it.
@@ -3955,14 +4099,16 @@ def match_manifest_rows(entries: list, staged: Any) -> list:
     bug-comp-broll-1 (2026-09-24). The claim manifest names a clip by
     (orig_name, rel_dir, size_bytes, hash) and nothing else -- no local_id --
     and one drop can hold two different clips with the same name and rel_dir
-    (two camera cards, `PRIVATE/M4ROOT/CLIP/C0001.MP4` on both). Three passes
+    (two camera cards, `PRIVATE/M4ROOT/CLIP/C0001.MP4` on both). Five passes
     over the WHOLE manifest, strongest evidence first, so a weak match can
     never take a file a later row would have claimed by its bytes:
 
       1. the content hash, when both sides have one (the page's hash IS this
          machine's hash of that staged file, relayed; equal means same bytes);
       2. name + rel_dir + size, when both sides know the size;
-      3. name + rel_dir -- the old key, now consuming.
+      3. name + rel_dir -- the old key, now consuming;
+      4. name + size, any rel_dir, and 5. name alone, any rel_dir -- the
+         server rewrites rel_dir (bug-comp-broll-2, 2026-09-25).
 
     A candidate whose hash is known and DIFFERS from a row's known hash is
     never paired with that row at any tier: it is provably another file, and
@@ -4006,9 +4152,32 @@ def match_manifest_rows(entries: list, staged: Any) -> list:
         b = _int_or_none(candidate.get("size"))
         return a is not None and b is not None and a == b and same_place(entry, candidate)
 
+    # bug-comp-broll-2 (2026-09-25): the server's rel_dir is NOT this
+    # machine's. `create_batch` blanks it when "keep sub-folders" is unticked
+    # and otherwise runs every component through `safe_name` (forbidden
+    # characters replaced, trailing ". " stripped, capped), while staging
+    # keeps the page's raw folder. With no hash on one side (a drop run
+    # before its hashes arrived, a hash that failed), tiers 2 and 3 found
+    # nothing and every clip from a sub-folder failed with "the source file
+    # is not on this computer any more" - retry-failed identically. So two
+    # last tiers ignore the folder: name + size, then name alone. They run
+    # only after every exact-folder match has consumed its file, still never
+    # pair a provably different hash, and keep the ord order, so two
+    # `C0001.MP4` from two folders pair in the order the page sent them.
+    def same_name_size(entry, candidate) -> bool:
+        a = _int_or_none(entry.get("size_bytes"))
+        b = _int_or_none(candidate.get("size"))
+        return (a is not None and b is not None and a == b
+                and candidate.get("name") == entry.get("orig_name"))
+
+    def same_name(entry, candidate) -> bool:
+        return candidate.get("name") == entry.get("orig_name")
+
     place(same_hash)
     place(same_size)
     place(same_place)
+    place(same_name_size)
+    place(same_name)
     return result
 
 

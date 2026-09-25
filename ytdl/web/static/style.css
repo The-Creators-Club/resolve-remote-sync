@@ -22,7 +22,9 @@
   --green: #2bff88;
   --amber: #ffb02e;
   --text: #e8e8ea;
-  --muted: #6f6f7a;
+  /* ui-dash-static-5 parity (2026-09-25): #6f6f7a was 3.63:1 on --field,
+     below AA for the explanatory text it colours; the dashboard's token. */
+  --muted: #8a8a96;
   --border: #2a2a31;
 
   --mono: Consolas, Menlo, "DejaVu Sans Mono", monospace;
@@ -322,7 +324,10 @@ a.brand:hover { color: var(--red-hot); }
   letter-spacing: 0.08em;
 }
 .drawer-head .dim { color: var(--red-dim); }
-.drawer-close { color: var(--red-dim); font-size: 11px; }
+/* ui-dash-static owed round 2 (2026-09-25): --red-dim on the drawer's --panel
+   is 1.78:1, so the only way out of the drawer besides Esc was nearly
+   invisible; --red, as broll and the dashboard now use. */
+.drawer-close { color: var(--red); font-size: 11px; }
 .drawer-close:hover { color: var(--red-hot); }
 .drawer-nav { display: flex; flex-direction: column; padding: 0.6rem 0; }
 .drawer-item {
@@ -394,6 +399,12 @@ a.brand:hover { color: var(--red-hot); }
 
 .search-bar {
   display: flex;
+  /* ui-music-ytdl-web-1 (2026-09-25): wraps. Six controls that cannot shrink
+     below their content (the project picker alone is up to 320 px) made an
+     847 px row, so on a phone the quality, the switch, the date filter and
+     the candidate cap sat past the right edge and the page scrolled sideways,
+     dragging the rows above and the review grid wider with it. */
+  flex-wrap: wrap;
   gap: 8px;
   flex: 1 1 auto;
   min-width: 0;
@@ -1045,6 +1056,21 @@ h2 {
   line-height: 1.5;
 }
 .legal div + div { margin-top: 0.4rem; }
+
+/* ui-music-ytdl-web-1 (2026-09-25): the page had no narrow layout at all
+   (music has had one at 900 px since 2026-08). On a phone the topic box and
+   the links box take a line of their own and the pickers share the next ones,
+   so nothing sits past the right edge. Nothing here changes a desktop or a
+   half-screen window, where the row already fitted. */
+@media (max-width: 600px) {
+  .header-controls { padding-left: 10px; padding-right: 10px; }
+  .ctrl-row > .search-bar { flex-basis: 100%; }
+  .search-bar > #q, .search-bar > #urls { flex: 1 1 100%; }
+  .search-bar > select, .search-bar > .switch { flex: 1 1 auto; max-width: 100%; }
+  #urlfolder { flex: 1 1 auto; width: auto; min-width: 0; }
+  .daterange { flex-wrap: wrap; }
+  .daterange input[type="date"] { max-width: 100%; }
+}
 
 /* ==== theme-common BEGIN (byte-identical in all four stylesheets) ==========
    The dashboard, b-roll, music and ytdl are four separate static trees behind

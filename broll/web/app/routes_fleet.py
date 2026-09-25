@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import urllib.parse
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
@@ -93,6 +94,30 @@ def _batch_or_404(conn: sqlite3.Connection, uid: str) -> sqlite3.Row:
     if batch is None:
         raise HTTPException(404, "no such batch")
     return batch
+
+
+def _declared_machine(
+        x_ccsync_machine: str | None = Header(default=None),
+        x_ccsync_machine_pct: str | None = Header(default=None)) -> str | None:
+    """The machine the calling companion declares, from either header.
+
+    bug-wire-7 (2026-09-25): http.client encodes header values as Latin-1, so
+    a computer named `剪輯-PC` cannot send `X-CCSync-Machine` at all; since
+    companion 0.9.79 it sends the name percent-encoded in
+    `X-CCSync-Machine-Pct` instead. Reading only the plain header left such a
+    machine with no machine check (the documented older-companion degrade).
+    The plain header wins when both are present, so an older companion and a
+    Latin-1 name behave exactly as before; a companion that sends neither
+    still gets None and the editor/lease/cancel checks.
+    """
+    if x_ccsync_machine:
+        return x_ccsync_machine
+    if x_ccsync_machine_pct:
+        # A malformed escape decodes with U+FFFD and so names no real holder:
+        # a 410, never a 500 and never a skipped check.
+        name = urllib.parse.unquote(x_ccsync_machine_pct)
+        return name or None
+    return None
 
 
 def _leaseholder_or_410(conn: sqlite3.Connection, uid: str, editor: str,
@@ -163,7 +188,7 @@ def claim(uid: str, body: ClaimIn,
 @router.post("/batches/{uid}/heartbeat")
 def heartbeat(uid: str, body: HeartbeatIn,
               editor: str = Depends(require_fleet_caller),
-              x_ccsync_machine: str | None = Header(default=None),
+              x_ccsync_machine: str | None = Depends(_declared_machine),
               conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """Keep the lease alive, and learn whether to stop.
 
@@ -179,7 +204,7 @@ def heartbeat(uid: str, body: HeartbeatIn,
 @router.post("/batches/{uid}/items/{item_uid}/status")
 def item_status(uid: str, item_uid: str, body: ItemStatusIn,
                 editor: str = Depends(require_fleet_caller),
-                x_ccsync_machine: str | None = Header(default=None),
+                x_ccsync_machine: str | None = Depends(_declared_machine),
                 conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """One checkpoint. 400 on an illegal transition, 410 on a lost lease.
 
@@ -196,7 +221,7 @@ def item_status(uid: str, item_uid: str, body: ItemStatusIn,
 @router.post("/batches/{uid}/items/{item_uid}/result")
 def item_result(uid: str, item_uid: str, body: ItemResultIn,
                 editor: str = Depends(require_fleet_caller),
-                x_ccsync_machine: str | None = Header(default=None),
+                x_ccsync_machine: str | None = Depends(_declared_machine),
                 conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """What the local model saw. The server writes it AND computes search_norm.
 
@@ -214,7 +239,7 @@ def item_result(uid: str, item_uid: str, body: ItemResultIn,
 @router.post("/batches/{uid}/items/{item_uid}/uploaded")
 def item_uploaded(uid: str, item_uid: str, body: ItemUploadedIn,
                   editor: str = Depends(require_fleet_caller),
-                  x_ccsync_machine: str | None = Header(default=None),
+                  x_ccsync_machine: str | None = Depends(_declared_machine),
                   conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """Go live -- once the server has stat'ed the files itself.
 
@@ -242,7 +267,7 @@ def item_uploaded(uid: str, item_uid: str, body: ItemUploadedIn,
 @router.post("/batches/{uid}/release")
 def release(uid: str, body: ReleaseIn,
             editor: str = Depends(require_fleet_caller),
-            x_ccsync_machine: str | None = Header(default=None),
+            x_ccsync_machine: str | None = Depends(_declared_machine),
             conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """Finish the batch and drop the lease.
 
@@ -259,6 +284,20 @@ def release(uid: str, body: ReleaseIn,
                                       "batch_uid": uid, "reason": "other_editor"})
         if batch["state"] in ingest_batches.BATCH_TERMINAL:
             return {"ok": True, "state": batch["state"], "already_finished": True}
+        # bug-broll-4 (2026-09-25): "this editor's batch" was the whole check,
+        # so a machine whose lease had expired and been TAKEN OVER by another
+        # of the same editor's machines could still cancel it: release()
+        # then cancelled the holder's items and deleted the `ingesting` rows
+        # it was mid-upload into. The relaxation exists for a lease the
+        # dashboard expired, not one somebody else now holds. A caller that
+        # names no machine keeps the old behaviour; the companion's release
+        # treats this 410 as "the server already took it back".
+        if (x_ccsync_machine and batch["machine"]
+                and batch["machine"] != x_ccsync_machine
+                and ingest_batches.lease_live(batch)):
+            raise HTTPException(410, {"detail": f"{batch['machine']} holds this batch now",
+                                      "batch_uid": uid, "reason": "other_machine",
+                                      "machine": batch["machine"]})
     else:
         batch = _leaseholder_or_410(conn, uid, editor, x_ccsync_machine)
     return ingest_batches.release(conn, batch, state=body.state, summary=body.summary)

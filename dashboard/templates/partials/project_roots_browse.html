@@ -1,4 +1,7 @@
-<div class="roots-browse">
+{# data-poll-hold (ui-dash-main-6, 2026-09-25): this picker is drawn INTO
+   fleet.html's 30 s PROJECT ROOTS poll, which used to empty it mid-walk.
+   htmx_errors.js skips the beat while it is open (bounded there). #}
+<div class="roots-browse" data-poll-hold>
   <div class="mono-sm" style="margin:0.4rem 0 0.2rem">
     FILES INTO for <span class="who">{{ browse.resolve_project }}</span>:
     <a class="btn" hx-get="/partials/project-roots/browse?rel=&resolve_project={{ browse.resolve_project | urlencode }}"

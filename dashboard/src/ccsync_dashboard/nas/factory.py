@@ -66,5 +66,5 @@ def make_nas_client(settings) -> NasBackend:
             client.base_url = settings.nas_base_url
         return client
     raise NasError(
-        f"unknown DASH_NAS_KIND {kind!r} -- allowed values: {', '.join(NAS_KINDS)}"
+        f"unknown DASH_NAS_KIND {kind!r}: allowed values: {', '.join(NAS_KINDS)}"
     )

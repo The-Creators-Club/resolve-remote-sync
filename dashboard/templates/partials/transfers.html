@@ -44,7 +44,11 @@
 
 <div class="side-head" style="margin-top:1.4rem">[ QUEUED ]
   <span class="muted">
-    {% if transfers.queues %}{{ transfers.queued_files }} file(s) · {{ transfers.queued_bytes | human_bytes }} waiting behind the transfers above, from the last reported disk manifests (may lag a few minutes)
+    {# bug-dash-db-2 owed round 2 (2026-09-25): a capped computer's queue row
+       counts nothing (db keeps it `uncertain` at n_files 0), so a panel whose
+       only rows are those said "0 files · 0 B waiting", which reads as done. #}
+    {% if transfers.queues and transfers.queued_files %}{{ transfers.queued_files }} file{{ "s" if transfers.queued_files != 1 }} · {{ transfers.queued_bytes | human_bytes }} waiting behind the transfers above, from the last reported disk manifests (may lag a few minutes)
+    {% elif transfers.queues %}nothing counted yet, but the rows below are not finished: see each one
     {% else %}everything that should be somewhere is there{% endif %}
   </span>
 </div>
@@ -60,9 +64,24 @@
       {% elif q.pending %}
         <span class="chip amber">[ GETTING READY ]</span>
         <span class="muted">just ticked; sharing and first file lists are being set up, syncing starts within a minute or two</span>
+      {% elif q.direction == "up" and q.uncertain and not q.n_files %}
+      {# bug-dash-db-2 owed round 2 (2026-09-25): this row exists only because
+         the computer's ORIGINALS list was capped (db.fetch_sync_backlog), so
+         its zero is "cannot tell", never "0 files · 0 B" to upload. #}
+      <span class="mono">⇡</span>
+      <span class="chip amber">[ CANNOT TELL ]</span>
+      {# d-ui owed round 3 (2026-09-25): api.build_transfers_view sets
+         `held` (CR-311) on this row too. A held machine is not uploading at
+         all, so "leave it running" is the wrong advice: show the hold and its
+         reason instead. #}
+      <span class="muted queue-note">this computer's file list was capped: it holds more video originals than it can list to the dashboard, so the dashboard cannot tell whether it still owes uploads.{% if not q.held %} Leave it running and check its tray.{% endif %}</span>
+      {% if q.held %}
+        <span class="chip red">[ ON HOLD ]</span>
+        <span class="muted">{{ q.held.sentence }}{% if q.held.since %} (since {{ q.held.since | ago }}){% endif %}</span>
+      {% endif %}
       {% else %}
       <span class="mono">{{ "⇡" if q.direction == "up" else "⇣" }}</span>
-      <span class="{{ 'amber-text' if q.n_files else 'muted' }}">{{ q.n_files }} file(s) · {{ q.bytes | human_bytes }}</span>
+      <span class="{{ 'amber-text' if q.n_files else 'muted' }}">{{ q.n_files }} file{{ "s" if q.n_files != 1 }} · {{ q.bytes | human_bytes }}</span>
       <span class="chip">{{ "folder sync" if q.lane == "c" else ("upload" if q.direction == "up" else "proxy download") }}</span>
       {% if q.held %}
         <span class="chip red">[ ON HOLD ]</span>
@@ -74,8 +93,18 @@
       {% for f in q.files %}
         <li><span class="clip-name" title="{{ f.name }}">{{ f.name }}</span><span class="muted mono-sm">{{ f.size | human_bytes if f.size is not none else "" }}</span></li>
       {% endfor %}
-      {% if q.truncated %}<li class="muted">… and {{ q.n_files - (q.files | length) }} more</li>{% endif %}
-      {% if q.manifest_truncated %}<li class="muted">(this computer's manifest was capped; totals may undercount)</li>{% endif %}
+      {% if q.truncated and q.files %}<li class="muted">… and {{ q.n_files - (q.files | length) }} more</li>{% endif %}
+      {# logic-sync-truth-2 / bug-dash-db-2 (2026-09-25): one "manifest was
+         capped; totals may undercount" line served both directions and was
+         wrong for both. UP: the ORIGINALS list was capped when the row is
+         `uncertain` (db.fetch_sync_backlog), and then the count really is a
+         floor; a row from before that key existed keeps the old caveat.
+         DOWN: a capped PROXY list makes db count from the manifest's totals
+         and show no names (files == []); a down row that still has names
+         was capped on the originals side only, and its count is exact. #}
+      {% if q.direction == "up" %}
+        {% if (q.uncertain and q.n_files) or (q.uncertain is not defined and q.manifest_truncated) %}<li class="muted">(this computer has more video originals than it can list to the dashboard, so the upload count may be low)</li>{% endif %}
+      {% elif q.manifest_truncated and not q.files %}<li class="muted">(this computer's proxy list was capped, so the count is worked out from its totals and no file names are shown)</li>{% endif %}
     </ul>
   </details>
 {% endfor %}

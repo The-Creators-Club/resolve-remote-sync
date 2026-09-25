@@ -91,6 +91,33 @@ RELAYED_DETAIL = "relayed, slow path"
 DEVICE_ID_REFRESH_SECONDS = 300.0
 
 
+# logic-sync-truth-3 (2026-09-25): lane C's detail when files are owed and no
+# peer is connected. Visible text (lane detail, fleet grid): no em dash.
+NO_PEER_DETAIL = "waiting: not connected to the server"
+
+
+def connection_bytes_total(payload: Any) -> Optional[int]:
+    """Syncthing's running in+out byte total from /rest/system/connections,
+    or None when the answer does not carry one. Never raises.
+
+    `total` is the whole-process figure; when an older Syncthing leaves it
+    out, the per-connection totals are summed instead."""
+    if not isinstance(payload, dict):
+        return None
+    try:
+        total = payload.get("total")
+        if isinstance(total, dict) and (
+                "inBytesTotal" in total or "outBytesTotal" in total):
+            return int(total.get("inBytesTotal") or 0) + int(total.get("outBytesTotal") or 0)
+        conns = payload.get("connections")
+        if not isinstance(conns, dict):
+            return None
+        return sum(int((c or {}).get("inBytesTotal") or 0) + int((c or {}).get("outBytesTotal") or 0)
+                   for c in conns.values() if isinstance(c, dict))
+    except (TypeError, ValueError):
+        return None
+
+
 def summarize_connections(payload: Any) -> dict[str, Any]:
     """Reduce /rest/system/connections to {"devices": {id: type},
     "relayed": [ids], "direct": [ids]} over CONNECTED devices only.
@@ -289,6 +316,11 @@ class SyncthingLane(LaneAdapter):
         # connection_path_summary() so the reporter payload -- owned
         # elsewhere -- can send it to the dashboard without re-polling.
         self._connection_summary: dict[str, Any] = {}
+        # logic-sync-truth-3 (2026-09-25): Syncthing's own running total of
+        # bytes in and out over every connection (`total` in the same
+        # answer), or None when it could not be read. Kept apart from the
+        # summary above, which the reporter sends as it stands.
+        self._connection_bytes: Optional[int] = None
         self._lock = threading.Lock()
         # One event per thread generation -- see RcloneLane.__init__ for why
         # a single re-cleared event could not be right for both start() and
@@ -473,13 +505,33 @@ class SyncthingLane(LaneAdapter):
         """Poll connections; never fails the lane over it (an older
         Syncthing, or one mid-restart, is not a lane C error)."""
         try:
-            summary = summarize_connections(self._get("/rest/system/connections"))
+            payload = self._get("/rest/system/connections")
+            summary = summarize_connections(payload)
         except Exception:
             log.debug("connections check failed", exc_info=True)
+            with self._lock:
+                self._connection_bytes = None
             return {}
         with self._lock:
             self._connection_summary = summary
+            self._connection_bytes = connection_bytes_total(payload)
         return summary
+
+    def _progress_token(self) -> Optional[str]:
+        """Lane C's `progress_token` (SYS-1), or None for "cannot tell".
+
+        logic-sync-truth-3 (2026-09-25): lane C never set one, so the
+        dashboard's stall rule could never reach it, and a lane reporting
+        "syncing, 40 owed" with no peer connected stayed amber for hours.
+        Bytes over the wire, which is what the contract asks for: any
+        transfer, and even the keep-alives of a connected peer, move it, so a
+        slow-but-connected lane is never called stalled, while a lane with
+        nobody to talk to holds still and is."""
+        with self._lock:
+            total = self._connection_bytes
+        if total is None:
+            return None
+        return f"c:{total}"
 
     @staticmethod
     def _path_detail(summary: dict[str, Any]) -> str:
@@ -681,7 +733,12 @@ class SyncthingLane(LaneAdapter):
         # Path diagnostics BEFORE the folder verdict, so every branch below
         # can carry "relayed, slow path" (AUDIT_2 C-6). A relayed lane C and
         # a slow lane C look identical without this.
-        path_detail = self._path_detail(self._refresh_connection_summary())
+        connections = self._refresh_connection_summary()
+        path_detail = self._path_detail(connections)
+        # logic-sync-truth-3 (2026-09-25): an answer that lists no connected
+        # device is "nobody to sync with". An unreadable one ({}) is "cannot
+        # tell" and says nothing.
+        no_peer = bool(connections) and not connections.get("devices")
 
         # comp-sync-2 (2026-09-18): the heal is about EVERY configured folder,
         # which is the shape its docstring names -- an editor between projects
@@ -841,17 +898,38 @@ class SyncthingLane(LaneAdapter):
                 last_error=" | ".join(reasons),
                 detail=path_detail,
             )
-        elif queued > 0:
-            status = LaneStatus(
-                name=self.name, state=STATE_SYNCING, queued=queued, detail=path_detail,
-            )
-        elif outgoing_items > 0:
-            status = LaneStatus(
-                name=self.name, state=STATE_SYNCING, queued=outgoing_items,
-                detail=self._with_path_detail(
+        elif queued > 0 or outgoing_items > 0:
+            owed = queued if queued > 0 else outgoing_items
+            # logic-sync-truth-6 (2026-09-25): the direction as a field, so
+            # the tray need not parse "sending N file(s)" / NO_PEER_DETAIL.
+            # With no peer nothing moves either way, whatever is owed. Both
+            # at once is "both", not "down": the upload half is a non-video
+            # file (a recorder WAV, a project file) whose only copy may be on
+            # this drive, and the drive reminder recurs on it (review round).
+            if no_peer:
+                direction = ""
+            elif queued > 0 and outgoing_items > 0:
+                direction = "both"
+            else:
+                direction = "down" if queued > 0 else "up"
+            if no_peer:
+                # logic-sync-truth-3 (2026-09-25): still `syncing` (the files
+                # ARE owed, and the sequencer's turn logic reads this state),
+                # but the words no longer claim movement, and the token lets
+                # the dashboard red it once nothing has moved for its stall
+                # window. The tray reading this detail is c-ui's half.
+                detail = self._with_path_detail(
+                    f"{NO_PEER_DETAIL} ({owed} file(s) owed)", path_detail)
+            elif queued > 0:
+                detail = path_detail
+            else:
+                detail = self._with_path_detail(
                     f"sending {outgoing_items} file(s) ({self._human_size(outgoing_bytes)}) to the server",
                     path_detail,
-                ),
+                )
+            status = LaneStatus(
+                name=self.name, state=STATE_SYNCING, queued=owed, detail=detail,
+                progress_token=self._progress_token(), direction=direction,
             )
         elif len(paused_folders) == len(expected):
             # Every folder paused: the sequencer pauses all but the current

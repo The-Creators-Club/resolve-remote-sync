@@ -26,7 +26,8 @@
       ⛔ SYNCING IS STOPPED ON EVERY COMPUTER
       <div class="mono-sm" style="margin-top:0.4rem">{{ halt.reason }}</div>
       <div class="mono-sm" style="margin-top:0.4rem">
-        set by {{ halt.set_by }} at {{ halt.set_at }}
+        {# ui-dash-admin-12 (2026-09-25): "3h ago", with the stored UTC stamp in the title, like every other page; a raw +00:00 string is a sum a UTC+8 owner does in their head. #}
+        set by {{ halt.set_by }} <span title="{{ halt.set_at }}">{{ halt.set_at | ago }}</span>
         ({{ halt_hours }} hour{{ "s" if halt_hours != 1 }} so far,
         {{ halt_machines }} computer{{ "s" if halt_machines != 1 }} in the fleet)
       </div>
@@ -35,7 +36,7 @@
          keeping it on is a decision somebody makes. #}
       {% if halt.expires_at %}
       <div class="mono-sm" style="margin-top:0.4rem">
-        releases itself {{ halt.expires_at | ago }} unless you keep it stopped{% if halt.extended %}
+        releases itself {{ halt.expires_at | until }} unless you keep it stopped{% if halt.extended %}
         (kept on {{ halt.extended }} time{{ "s" if halt.extended != 1 }}){% endif %}
       </div>
       {% endif %}
@@ -63,6 +64,26 @@
     {% if halt.expired %}
     <div class="banner">▲ the last stop EXPIRED and syncing started again everywhere
       {{ halt.expires_at | ago }}. It was set by {{ halt.set_by }} {{ halt.set_at | ago }}{% if halt.reason %}: {{ halt.reason }}{% endif %}.</div>
+    {# logic-admin-3 (2026-09-25): the expired notice stood on every page,
+       for every signed-in user, until the halt was cleared, and the only
+       button here was [ STOP ALL SYNCING ]: taking the notice away meant
+       stopping the whole fleet again and then starting it. This clears the
+       stored stop without stopping anything. `ack_expired` makes the route
+       refuse if a NEW stop was set since this panel was drawn, so a stale
+       tab can never release a live halt with this button. #}
+    {# Its own line: inline beside the reason box below, it read as the
+       button that sends that reason. #}
+    <div style="margin-top:0.6rem">
+    <form class="inline-form"
+          hx-post="/partials/admin/fleet-halt"
+          hx-target="#admin-fleet-halt" hx-swap="outerHTML">
+      <input type="hidden" name="active" value="0">
+      <input type="hidden" name="ack_expired" value="1">
+      <input type="hidden" name="reason" value="the expired stop was acknowledged">
+      <button class="btn" type="submit"
+              title="takes the expired-stop notice off every page. Syncing is already running everywhere, and this changes nothing on any computer.">[ OK, IT CAN STAY OFF ]</button>
+    </form>
+    </div>
     {% endif %}
     <form class="inline-form" style="margin-top:0.6rem"
           hx-post="/partials/admin/fleet-halt"
@@ -86,7 +107,10 @@
   {# The last 20, from `meta` (UX-8): "who stopped the fleet last month and
      why" is a question an owner asks, and nothing could answer it. #}
   {% if halt_history %}
-  <details class="proj-group" style="margin-top:0.8rem">
+  {# data-key (ui-dash-admin-4, 2026-09-25): PREVIOUS STOPS closed on every
+     60 s poll of this panel, because the open/closed keeper only knows a
+     <details> by its data-key or id. #}
+  <details class="proj-group" data-key="halt-history" style="margin-top:0.8rem">
     <summary><span class="marker">▸</span> PREVIOUS STOPS
       <span class="muted mono-sm">{{ halt_history | length }}</span></summary>
     <table class="editors">

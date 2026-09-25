@@ -46,6 +46,45 @@ class HttpBackend(Storage):
         self.session = session or requests.Session()
         self.session.headers.update({"X-Ingest-Token": token})
         self._local = SqliteBackend(local_state_path, schema_path=schema_path)
+        # bug-broll-2 (2026-09-25): local shadow id -> the canonical id the
+        # web app answered /ingest/video with. The two are independent id
+        # spaces (see the module docstring), and write_index_result and
+        # record_moved used to post the LOCAL one, which in the canonical
+        # database names some other clip. A table in the shadow file rather
+        # than a dict, because the scan that learns the id and the index run
+        # that needs it are usually different processes.
+        self._local.conn.execute(
+            "CREATE TABLE IF NOT EXISTS http_remote_ids ("
+            "local_id INTEGER PRIMARY KEY, remote_id INTEGER NOT NULL)")
+        self._local.conn.commit()
+
+    def _remember_remote_id(self, local_id: int, resp: Any) -> None:
+        try:
+            remote = resp.json().get("id")
+        except Exception:  # noqa: BLE001 - a body we cannot read teaches us nothing
+            return
+        if isinstance(remote, int) and not isinstance(remote, bool):
+            self._local.conn.execute(
+                "INSERT INTO http_remote_ids (local_id, remote_id) VALUES (?, ?) "
+                "ON CONFLICT(local_id) DO UPDATE SET remote_id = excluded.remote_id",
+                (local_id, remote))
+            self._local.conn.commit()
+
+    def _remote_ref(self, local_id: int) -> dict[str, Any]:
+        """What names this clip to the web app: its canonical id, plus the
+        (share, rel_path) a current server resolves by instead (bug-broll-2).
+
+        With no recorded canonical id the id sent is 0, which no row carries:
+        an older server that reads only the id then answers 404, loudly,
+        rather than writing onto whichever canonical clip shares the LOCAL
+        number. A current server resolves by the path and never reads it.
+        """
+        row = self._local.conn.execute(
+            "SELECT remote_id FROM http_remote_ids WHERE local_id = ?",
+            (local_id,)).fetchone()
+        video = self._local.get_video(local_id) or {}
+        return {"video_id": int(row[0]) if row is not None else 0,
+                "share": video.get("share"), "rel_path": video.get("rel_path")}
 
     def close(self) -> None:
         self._local.close()
@@ -57,6 +96,7 @@ class HttpBackend(Storage):
         payload = {"share": share, "rel_path": rel_path, **fields}
         resp = self.session.post(f"{self.base_url}/ingest/video", json=payload, timeout=30)
         resp.raise_for_status()
+        self._remember_remote_id(video_id, resp)
         return video_id
 
     def get_video(self, video_id: int) -> dict[str, Any] | None:
@@ -94,6 +134,7 @@ class HttpBackend(Storage):
         payload = {"share": video["share"], "rel_path": video["rel_path"], **fields}
         resp = self.session.post(f"{self.base_url}/ingest/video", json=payload, timeout=30)
         resp.raise_for_status()
+        self._remember_remote_id(video_id, resp)
 
     def set_error(self, video_id: int, message: str) -> None:
         self.update_video(video_id, status="error", error=message)
@@ -117,7 +158,7 @@ class HttpBackend(Storage):
             model=model,
         )
         payload = {
-            "video_id": video_id,
+            **self._remote_ref(video_id),
             "themes": themes,
             "quality_flags": quality_flags,
             "category_hint": category_hint,
@@ -182,10 +223,13 @@ class HttpBackend(Storage):
         )
 
     def record_moved(self, video_id: int, new_rel_path: str) -> None:
+        # The reference is taken BEFORE the local rename: the web app finds
+        # the clip by where it is moving FROM (bug-broll-2).
+        ref = self._remote_ref(video_id)
         self._local.record_moved(video_id, new_rel_path)
         resp = self.session.post(
             f"{self.base_url}/ingest/moved",
-            json={"video_id": video_id, "new_rel_path": new_rel_path},
+            json={**ref, "new_rel_path": new_rel_path},
             timeout=30,
         )
         resp.raise_for_status()

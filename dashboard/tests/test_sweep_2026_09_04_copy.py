@@ -298,8 +298,12 @@ def test_the_page_scrolls_to_a_fragment_that_arrives_late() -> None:
 
 def test_the_diagnostics_path_is_one_constant() -> None:
     path = health.COMPANION_DIAGNOSTICS_PATH
-    assert "Settings" in path and "Copy diagnostics" in path
-    assert "tray" not in path.lower(), (
+    # ui-copy-5 (2026-09-25): the route is now the companion's own words,
+    # "Tray > Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN". CR-88's rule
+    # still holds: it must not put the button ON the tray menu, i.e. the
+    # route goes through Settings and its HELP section.
+    assert "Settings > HELP > COPY DIAGNOSTICS" in path
+    assert not path.lower().startswith("tray > copy"), (
         "CR-88: the tray's right-click menu is ten items and this is not one "
         "of them")
     assert ui.templates.env.globals["COMPANION_DIAGNOSTICS_PATH"] == path
@@ -393,7 +397,6 @@ VOCABULARY_ALLOWED: tuple[tuple[str, str, str], ...] = (
      "templates and is renamed there or nowhere"),
     ("notices.py", "[ MOVE ON THE SERVER AND ON EVERY MACHINE ]",
      "the same button label"),
-    ("alerts.py", "[ RELEASE THE HALT ]", "the same: a button label, quoted"),
     ("ui.py", "{lane} on this computer made no progress",
      "the PLACEHOLDER is called lane; what is substituted into it is "
      "ui.lane_word(...), so the sentence a person reads begins "

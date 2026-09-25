@@ -16,6 +16,7 @@ import logging
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -678,7 +679,11 @@ def build_transfers_view(
             q["files"] = kept
             q["n_files"] = max(0, q["n_files"] - removed)
             q["bytes"] = max(0, (q["bytes"] or 0) - removed_bytes)
-    queues = [q for q in queues if q["n_files"] > 0]
+    # d-ui-owed / d-db capped-originals (2026-09-25): a zero-file row that
+    # fetch_sync_backlog flags `uncertain` is a machine whose originals list
+    # was capped, so zero means "cannot tell", not "nothing owed". Dropping it
+    # here made the queue panel say "Safe to close" over an unknown backlog.
+    queues = [q for q in queues if q["n_files"] > 0 or q.get("uncertain")]
 
     # A JUST-ticked project has no completion row and no manifest yet, so
     # every source above is silent for its first minute or two while the
@@ -778,7 +783,7 @@ def build_transfers_view(
     for r in conn.execute(incoming_q):
         rows.append({
             "editor": "", "machine": "", "lane": "lane_c_syncthing",
-            "name": f"{r['label']} -- {r['need_items']} file(s) arriving at the server",
+            "name": f"{r['label']}: {r['need_items']} file(s) arriving at the server",
             "direction": "up",
             "bytes_done": None, "bytes_total": r["need_bytes"], "percentage": None,
             "speed_bps": None, "eta_seconds": None, "granularity": "project",
@@ -858,6 +863,101 @@ def _volunteering_chip(capabilities: dict[str, Any], now: str) -> dict[str, Any]
     except (TypeError, ValueError):                            # pragma: no cover
         clock = ""
     return {"active": True, "until": clock, "at": until}
+
+
+# logic-sync-truth-5, Fable round M1 (2026-09-25): the file-level diff below
+# cost 77 ms on a 48-pair fleet (build_editors_view 14 ms -> 91 ms), and the
+# view is built every 15 s per open admin tab, by /api/v1/editors and by every
+# alerts cycle, over inputs that change every few MINUTES (a heavy report's
+# manifest, a NAS walk, a tick). So the answer is kept against a FINGERPRINT
+# of those inputs, read from the small tables every writer of the big ones
+# stamps in the same call: replace_editor_media is always paired with
+# upsert_editor_media_project (reported_at), replace_nas_media and its
+# refusal/failure paths write nas_inventory_state (walked_at, tree_sig), a
+# prune or purge deletes rows there too, and the tick/mode/project half is
+# read whole. The TTL is a backstop for a writer this list does not know
+# about, so no change can hide for longer than one grid refresh.
+_OWED_CACHE_TTL_SECONDS = 15.0
+_OWED_CACHE_LOCK = threading.Lock()
+_OWED_CACHE: dict[Any, tuple[float, Any, dict[tuple[str, str], int]]] = {}
+
+
+def _owed_inputs_fingerprint(conn: sqlite3.Connection) -> tuple[Any, ...]:
+    return tuple(
+        tuple(tuple(r) for r in conn.execute(q))
+        for q in (
+            "SELECT * FROM editor_media_project"
+            " ORDER BY editor_username, machine, project_slug",
+            "SELECT * FROM nas_inventory_state ORDER BY project_id",
+            "SELECT * FROM selections ORDER BY editor_username, machine, project_slug",
+            "SELECT id, slug, active FROM projects ORDER BY id",
+        ))
+
+
+def _owed_cache_db_key(conn: sqlite3.Connection) -> Any:
+    """The database file, so two databases (tests, a restore) never share an
+    answer; a connection with no file (:memory:) is its own database."""
+    try:
+        for row in conn.execute("PRAGMA database_list"):
+            if row[1] == "main" and row[2]:
+                return str(row[2])
+    except sqlite3.Error:
+        pass
+    return ("conn", id(conn))
+
+
+def _owed_files_by_machine(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str], int] | None:
+    """The cached face of _count_owed_files (see _OWED_CACHE_TTL_SECONDS)."""
+    try:
+        fingerprint = _owed_inputs_fingerprint(conn)
+    except Exception:
+        log.exception("editors view: could not read the owed-files inputs")
+        return None
+    db_key = _owed_cache_db_key(conn)
+    now = time.monotonic()
+    with _OWED_CACHE_LOCK:
+        hit = _OWED_CACHE.get(db_key)
+        if (hit is not None and hit[1] == fingerprint
+                and 0 <= now - hit[0] < _OWED_CACHE_TTL_SECONDS):
+            return dict(hit[2])
+    owed = _count_owed_files(conn)
+    if owed is not None:
+        with _OWED_CACHE_LOCK:
+            _OWED_CACHE[db_key] = (now, fingerprint, dict(owed))
+    return owed
+
+
+def _count_owed_files(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str], int] | None:
+    """(editor, machine) -> files lanes A and B still owe, from the same
+    file-level backlog the transfers page lists (logic-sync-truth-5). ONE
+    fetch for the whole view, with no file names (only the counts are read).
+
+    A machine is left OUT (no claim either way) when it has never sent a
+    per-file manifest, since "no backlog rows" then means "no data" rather
+    than "nothing owed", and when its only answer is an `uncertain` zero
+    (logic-sync-truth-2: a capped originals list cannot prove nothing is
+    owed). None when the read fails: the grid must still draw."""
+    try:
+        counted = {(r[0], r[1]) for r in conn.execute(
+            "SELECT DISTINCT editor_username, machine FROM editor_media_project")}
+        owed: dict[tuple[str, str], int] = {k: 0 for k in counted}
+        uncertain: set[tuple[str, str]] = set()
+        for group in db.fetch_sync_backlog(conn, files_per_group=0):
+            k = (group["editor"], group["machine"])
+            owed[k] = owed.get(k, 0) + int(group.get("n_files") or 0)
+            if group.get("uncertain"):
+                uncertain.add(k)
+        for k in uncertain:
+            if not owed.get(k):
+                owed.pop(k, None)
+        return owed
+    except Exception:
+        log.exception("editors view: could not count the owed files")
+        return None
 
 
 def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict[str, Any]:
@@ -956,6 +1056,7 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     diag_stamps = db.diagnostics_stamp_map(conn)
     machine_role = db.machine_modes(conn)
     plans = db.plan_summary_map(conn, machines.keys())
+    owed_files = _owed_files_by_machine(conn)
     # DCORE-4 (2026-09-04): a suspended person's computers are being turned
     # away and unshared, which on this page looks exactly like a machine
     # somebody switched off. The chip is what tells the two apart, and it
@@ -1119,6 +1220,12 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         # headline can be and it is not known until this point. The template
         # renders what it is given and ranks nothing.
         entry["lane_strip"] = health.lane_strip(entry["lanes"])
+        # logic-sync-truth-5 (2026-09-25): "Idle, nothing owed" is only
+        # claimed from a count. Unset (the headline says just "Idle") for a
+        # base-mode machine, which the backlog excludes because it IS the
+        # tree, and whenever nobody could count (see _owed_files_by_machine).
+        if owed_files is not None and entry["mode"] != "base" and key in owed_files:
+            entry["owed_files"] = owed_files[key]
         entry["headline"] = health.fleet_headline(entry)
         result.append(entry)
     result.sort(key=lambda e: (e["editor_username"], e["machine"]))
@@ -2048,7 +2155,7 @@ def api_login(payload: LoginIn, request: Request, response: Response) -> dict[st
     try:
         verified = verifier(settings, username, payload.password)
     except auth.CredentialProbeBusy as exc:
-        raise HTTPException(status_code=503, detail=f"login busy: {exc} -- try again") from exc
+        raise HTTPException(status_code=503, detail=f"login busy: {exc}; try again") from exc
     if not verified:
         auth.record_login_failure(request, username)
         raise HTTPException(status_code=401, detail="bad username or password")
@@ -2082,6 +2189,19 @@ class VerifyIn(LoginIn):
     # the report reply (see _upgrade_info).
     companion_version: str | None = None
     platform: str | None = None
+    # bug-wire-4 (2026-09-25): the machine's processor, the report's `arch`
+    # (REL-16). Undeclared here, /verify's offer read no arch at all, and
+    # "no arch" is offered everything -- an Intel Mac signing in was offered
+    # the arm64 bundle REL-16 exists to withhold, until its first report
+    # replaced the offer. Optional: a companion that does not send it is
+    # answered exactly as before.
+    arch: str | None = None
+
+    @field_validator("arch", mode="before")
+    @classmethod
+    def _arch_bounded(cls, value):
+        # Truncate, never 422: a sign-in must not fail on a telemetry field.
+        return value[:32] if isinstance(value, str) else None
 
 
 def _require_fleet_member(settings, username: str,
@@ -2155,13 +2275,13 @@ def _require_fleet_member(settings, username: str,
         log.warning("fleet-membership check for %r failed: %s", username, exc)
         raise HTTPException(
             status_code=503,
-            detail="cannot confirm fleet membership right now -- try again shortly",
+            detail="cannot confirm fleet membership right now: try again shortly",
         ) from exc
     if not allowed:
         raise HTTPException(
             status_code=403,
-            detail=f"{username!r} is not in the '{EDITORS_GROUP}' group on the NAS -- "
-                   "ask an admin to add the account in Admin > Users",
+            detail=f"{username!r} is not in the '{EDITORS_GROUP}' group on the NAS. "
+                   "Ask an admin to add the account in Admin > Users",
         )
 
 
@@ -2189,7 +2309,7 @@ def api_verify(
     try:
         verified = verifier(settings, username, payload.password)
     except auth.CredentialProbeBusy as exc:
-        raise HTTPException(status_code=503, detail=f"verify busy: {exc} -- try again") from exc
+        raise HTTPException(status_code=503, detail=f"verify busy: {exc}; try again") from exc
     if not verified:
         auth.record_login_failure(request, username)
         raise HTTPException(status_code=401, detail="bad username or password")
@@ -2219,20 +2339,31 @@ def api_verify(
         # "base" (direct-NAS-access machine, e.g. the admin's own rig) vs
         # "editor" (normal remote sync lanes) -- same DASH_ADMIN_USERS list
         # that gates dashboard admin actions, reused here by design (see
-        # docs/SERVER.md's "Admin: Users section"). The companion uses this
-        # to flip its sync behavior on sign-in instead of trusting a
-        # hand-edited local config.toml `mode` value -- see
-        # companion/src/ccsync_companion/identity.py.
+        # docs/SERVER.md's "Admin: Users section").
+        # logic-onboarding-1 (2026-09-25): this is about the PERSON, and
+        # nothing obeys it any more. Wired or remote is the COMPUTER's own
+        # setting since CR-88 (companion `effective_mode()` reads config
+        # `mode` only), and the wizard's radio decides the install role since
+        # logic-onboarding-1. The key stays for diagnostics and for older
+        # companions/wizards that still read it; never make it gate sync.
         "role": "base" if auth.is_admin(settings, username) else "editor",
     }
     # REL-16 (resilience sweep 2026-08-28): getattr, because `arch` is an
     # optional report field a companion older than this wave never sends and
     # a ReportIn/VerifyIn that has not declared it yet does not carry -- and
     # "no arch reported" is offered everything, exactly as before.
+    # bug-wire-4 (2026-09-25): the same `withheld` sink the report reply
+    # passes (comp-app-3). Without it a sign-in answered "no upgrade key and
+    # no reason", which a companion reads as "nothing to offer" and clears
+    # the refusal it is standing on. No editor/machine here on purpose: a
+    # build pushed to ONE computer is named only on the report reply.
+    withheld: list[str] = []
     upgrade = _upgrade_info(conn, payload.platform, payload.companion_version,
-                            getattr(payload, "arch", None))
+                            getattr(payload, "arch", None), withheld=withheld)
     if upgrade is not None:
         result["upgrade"] = upgrade
+    elif withheld:
+        result["upgrade_none_reason"] = withheld[0]
     return result
 
 
@@ -2285,12 +2416,32 @@ def _expand_includes(
     own dedupe drops anything under a selected rel -- the double-dedupe the
     plan requires anyway), but the tray's removal gate needs the
     relationship to warn that removing the LENDER strands a selected
-    borrower's shared folder."""
-    selected = {r["slug"] for r in rows}
+    borrower's shared folder.
+
+    Only FULL ticks borrow or cover (CLAUDE.md: a reader that decides what
+    comes DOWN asks for full ticks). bug-comp-syncthing-2 (2026-09-25): an
+    UPLOAD-ONLY borrower gets no includes. Its turn is lane A alone, the
+    collector shares a lender only for full borrower ticks, and a companion
+    up to 0.9.78 built the lender anyway and reported it `not-offered` for
+    ever; worse, its include used to CLAIM the subpath here, so a later full
+    borrower of the same subtree lost it to the longest-prefix dedupe.
+    bug-comp-syncthing-3 (2026-09-25): an UPLOAD-ONLY lender covers nothing.
+    Its turn brings nothing down, so `covered: true` told a full borrower's
+    companion the subtree would arrive through a lender run that never
+    happens. The entry is still sent (covered false, and it now claims), so
+    the removal gate keeps seeing the relationship. A companion up to 0.9.78
+    still drops it (its selected rels count the upload-only lender), exactly
+    as before; 0.9.79 runs it either way."""
+    def _full(r) -> bool:
+        return (r["sync_mode"] or db.SYNC_MODE_FULL) == db.SYNC_MODE_FULL
+
+    selected = {r["slug"] for r in rows if _full(r)}
     links_by_borrower = db.fetch_links_for_borrowers(conn, selected)
     out: dict[str, list[dict[str, Any]]] = {}
     claimed: list[str] = []
     for r in rows:                                   # position order
+        if not _full(r):
+            continue
         entries = []
         for link in links_by_borrower.get(r["slug"], []):
             if link["status"] != "ok" or not link["lender_slug"] or not link["sub_rel"]:
@@ -2402,7 +2553,7 @@ def _require_selection_read(request: Request, editor: str,
         raise HTTPException(
             status_code=401,
             detail="X-CCSync-Identity required (and must match the editor) alongside "
-                   "X-CCSync-Token -- sign in from the companion tray, or its "
+                   "X-CCSync-Token. Sign in from the companion tray, or its "
                    "signing key was retired",
         )
     if auth.can_manage(settings, auth.get_session_user(request), editor):
@@ -2465,7 +2616,7 @@ def _require_selection_untick(request: Request, editor: str,
         raise HTTPException(
             status_code=401,
             detail="X-CCSync-Identity required (and must match the editor) alongside "
-                   "X-CCSync-Token -- sign in from the companion tray, or its "
+                   "X-CCSync-Token. Sign in from the companion tray, or its "
                    "signing key was retired",
         )
     return _require_selection_write(request, editor)
@@ -2650,6 +2801,22 @@ def api_tick(
     return view
 
 
+def _untick_missed_a_standing_tick(conn: sqlite3.Connection, editor: str,
+                                   slug: str, machine: str) -> bool:
+    """True when `machine`'s own view does not list `slug` but the person
+    still has it ticked somewhere (logic-plans-5). Any read failure answers
+    False: this guard only ever turns a 200 into a refusal, and an untick
+    must not start failing because a read did."""
+    try:
+        view_slugs = {r["slug"] for r in db.fetch_selections(conn, editor, machine=machine)}
+        if slug in view_slugs:
+            return False
+        return bool(db.selection_placements(conn, editor, slug, machine=None))
+    except Exception:
+        log.exception("untick %s/%s: could not read the standing ticks", editor, slug)
+        return False
+
+
 @router.delete("/selection/{editor}/{slug}")
 def api_untick(
     editor: str, slug: str, request: Request, machine: str | None = None,
@@ -2667,6 +2834,28 @@ def api_untick(
     # of the person's computers.
     before = db.selection_placements(conn, editor, slug, machine=target)
     removed = db.remove_selection(conn, editor, slug, machine=target)
+    if (not removed and target and actor.startswith("companion:")
+            and _untick_missed_a_standing_tick(conn, editor, slug, target)):
+        # logic-plans-5 (2026-09-25): the tray's untick-before-delete named
+        # this computer, removed nothing, and the tick it synced by still
+        # stands under another key (a renamed PC in SYS-18a's deferred
+        # adoption window: its new name IS registered, so no unknown-machine
+        # 404 can see it). A companion up to 0.9.78 read the 200 as
+        # "unticked" and deleted the local copy, and the old hostname's row
+        # brought the project back. 0.9.79 asks the person's union itself and
+        # refuses; this is the same refusal for the builds in the field. NOT a
+        # 404: that makes those builds widen the untick to the whole person.
+        # Ticked nowhere stays 200 (a stale tray plan: nothing can bring it
+        # back, so freeing the disk is safe), and the signed-in UI's untick
+        # is never refused here: it is idempotent by design.
+        raise HTTPException(
+            status_code=409,
+            detail=(f"There is no tick for {slug} under this computer's name "
+                    f"({target}), but it is still ticked for another of your "
+                    f"computers. Nothing was removed. If this computer was "
+                    f"renamed, wait until the dashboard shows the new name, "
+                    f"or untick it on the dashboard."),
+        )
     audit_plan_change(conn, actor, db.AUDIT_UNTICK, editor,
                       slug, target, before,
                       db.selection_placements(conn, editor, slug, machine=target))
@@ -2767,6 +2956,22 @@ def _active_project_label(conn: sqlite3.Connection, slug: str) -> str:
     return str(row["label"])
 
 
+def _proxy_stem_key(stem: str) -> str:
+    """A stem folded for COMPARISON only (bug-dash-api-2, 2026-09-25): NFC
+    then lower-case, the companion's file_moves._stem_key. A clip named on a
+    Mac arrives NFD (CR-90), and an exact compare missed its proxy."""
+    import unicodedata
+
+    return unicodedata.normalize("NFC", str(stem)).lower()
+
+
+def _same_proxy_file(a: Path, b: Path) -> bool:
+    try:
+        return a.samefile(b)
+    except OSError:
+        return False
+
+
 def _move_proxy_siblings(src: Path, dest: Path) -> tuple[int, list[str]]:
     """A file's proxies live beside it in `Proxy/<stem>.*` (the BPG/Resolve
     convention every lane is built on). They go where the original goes, or
@@ -2788,14 +2993,41 @@ def _move_proxy_siblings(src: Path, dest: Path) -> tuple[int, list[str]]:
         return 0, [f"{proxy_dir.name} (could not be read: {exc})"]
     moved = 0
     failed: list[str] = []
+    want = _proxy_stem_key(src.stem)
     for candidate in candidates:
         try:
-            if not candidate.is_file() or candidate.stem.lower() != src.stem.lower():
+            if not candidate.is_file() or _proxy_stem_key(candidate.stem) != want:
                 continue
             target_dir = dest.parent / "Proxy"
             target_dir.mkdir(parents=True, exist_ok=True)
-            target = target_dir / candidate.name
+            # bug-dash-api-2 (2026-09-25): the proxy takes the ORIGINAL'S NEW
+            # stem, not its own old name. A move may rename (`to_path` is a
+            # folder or a full path, and undo depends on that), and Resolve
+            # pairs `Proxy/<stem>.*` with the clip by stem: keeping the old
+            # name left a renamed clip with no proxy on every machine, and a
+            # same-folder rename aimed the proxy at ITSELF, which read as
+            # "something is already at the destination" and stored a PARTIAL
+            # move whose reason was false.
+            target = target_dir / (dest.stem + candidate.suffix)
+            # Compared as TEXT: a WindowsPath compares case-folded, and a
+            # case-only rename is exactly two spellings of one path.
+            if str(target) == str(candidate):
+                continue
             if target.exists():
+                if _same_proxy_file(target, candidate):
+                    # A case-only rename on a filesystem that folds case
+                    # (a test host; the NAS does not): the target IS the
+                    # candidate, so go through a third name, the way the
+                    # companion's _rename_case_only does.
+                    staging = candidate.with_name(f".ccsync-move-{candidate.name}")
+                    candidate.rename(staging)
+                    try:
+                        staging.rename(target)
+                    except OSError:
+                        staging.rename(candidate)
+                        raise
+                    moved += 1
+                    continue
                 failed.append(f"{candidate.name} (something is already at the destination)")
                 continue
             candidate.rename(target)
@@ -3395,7 +3627,7 @@ def api_set_project_root(
                 conn.commit()
                 raise HTTPException(
                     status_code=409,
-                    detail="already mapped -- ask an admin to change it",
+                    detail="already mapped. Ask an admin to change it.",
                 )
     conn.commit()
     return {"ok": True, "project_roots": _project_roots_view(conn)}
@@ -3504,7 +3736,7 @@ def _raise_if_container_of_projects(target: Path, rel: str) -> None:
     first = f"{rel}/{below[0]}"
     more = f" (+{len(below) - 1} more)" if len(below) > 1 else ""
     raise ProjectSetupError(
-        f"that folder already contains a project ({first}{more}) -- pick that instead"
+        f"that folder already contains a project ({first}{more}). Pick that one instead"
     )
 
 
@@ -3525,6 +3757,26 @@ def may_first_claim(
     return db.editor_reported_resolve_project(conn, user, resolve_project)
 
 
+def _refuse_archived_project(conn: sqlite3.Connection, slug: str, rel: str) -> None:
+    """bug-dash-api-3 (2026-09-25): creating or linking a project whose row
+    is ARCHIVED answered ok and changed nothing anyone could see.
+
+    Archiving keeps the folder and its marker (DCORE-5), so NEW PROJECT with
+    the same name takes the "marker already carries this slug" branch and USE
+    THIS FOLDER adopts the marker; both reach db.upsert_project, which keeps
+    an archived row at active=0 on purpose. The editor was told the project
+    was created, it appeared on no tick list, ticking it 404'd, and a
+    supplied Resolve project was mapped for good onto a slug nobody could
+    see. Refused here, before any folder, marker or mapping is written."""
+    row = conn.execute(
+        "SELECT archived_at FROM projects WHERE slug=?", (slug,)).fetchone()
+    if row is not None and row["archived_at"]:
+        raise ProjectSetupError(
+            f"{rel} is an archived project. An admin can put it back with "
+            "[ UNARCHIVE ] under ARCHIVED PROJECTS on the SYNC PLANS page, and "
+            "it keeps its folder, its files and its ticks")
+
+
 def _register_project(
     settings, conn: sqlite3.Connection, rel: str, slug: str,
     resolve_project: str, user: str,
@@ -3532,6 +3784,7 @@ def _register_project(
     """Shared tail of create/adopt: eager projects row (active immediately;
     the provision cycle adds the Syncthing folder within ~5 min and the
     deactivation grace covers the gap) + sticky Resolve mapping."""
+    _refuse_archived_project(conn, slug, rel)
     now = db.utcnow_iso()
     resolve_project = (resolve_project or "").strip()
     if resolve_project and not may_first_claim(settings, conn, user, resolve_project):
@@ -3607,8 +3860,9 @@ def create_tree_project(
     try:
         slug = provision.slugify(rel)
     except ValueError:
-        raise ProjectSetupError("that name produces an empty identifier -- use letters/numbers")
+        raise ProjectSetupError("that name produces an empty identifier. Use letters or numbers")
 
+    _refuse_archived_project(conn, slug, rel)
     target = parent_path / name
     exists = target.is_dir()
     existing_marker = provision.read_marker(target) if exists else None
@@ -3622,14 +3876,14 @@ def create_tree_project(
         # already there" stops being "type another name" (the double-nesting
         # bug).
         raise FolderExistsError(
-            f"Projects/{rel} already exists -- use [ USE THIS FOLDER ] to point the project "
+            f"Projects/{rel} already exists. Use [ USE THIS FOLDER ] to point the project "
             "at it instead of creating another folder inside it",
             rel,
         )
     row = conn.execute("SELECT label FROM projects WHERE slug=?", (slug,)).fetchone()
     if row is not None and row["label"] != rel:
         raise ProjectSetupError(
-            f"a different project already uses this identifier: {row['label']} -- pick another name"
+            f"a different project already uses this identifier: {row['label']}. Pick another name"
         )
 
     try:
@@ -3650,7 +3904,7 @@ def create_tree_project(
         # §C L "error detail leaks", 2026-08-17).
         log.warning("could not create project folders for %r: %s", rel, exc)
         raise ProjectSetupError(
-            "could not create the folders on the NAS -- ask an admin to check the "
+            "could not create the folders on the NAS. Ask an admin to check the "
             "dashboard log")
 
     return _register_project(settings, conn, rel, slug, resolve_project, user)
@@ -3674,7 +3928,7 @@ def adopt_folder(
     projects_dir = _projects_dir_or_error(settings)
     target, rel = _safe_rel(settings, rel)
     if not rel:
-        raise ProjectSetupError("pick a folder -- the Projects root itself cannot be a project")
+        raise ProjectSetupError("pick a folder: the Projects root itself cannot be a project")
     if not target.is_dir():
         raise ProjectSetupError(f"folder does not exist: {rel}")
 
@@ -3693,6 +3947,7 @@ def adopt_folder(
             slug = provision.slugify(rel)
         except ValueError:
             raise ProjectSetupError("that folder name produces an empty identifier")
+        _refuse_archived_project(conn, slug, rel)
         row = conn.execute("SELECT label FROM projects WHERE slug=?", (slug,)).fetchone()
         if row is not None and row["label"] != rel:
             raise ProjectSetupError(
@@ -3711,8 +3966,8 @@ def adopt_folder(
             other = projects_dir / Path(*row["label"].split("/"))
             if other.is_dir():
                 raise ProjectSetupError(
-                    f"this folder claims the identity of {row['label']}, which still exists -- "
-                    "resolve the duplicate on the NAS first"
+                    f"this folder claims the identity of {row['label']}, which still exists. "
+                    "Resolve the duplicate on the NAS first"
                 )
 
     return _register_project(settings, conn, rel, slug, resolve_project, user)
@@ -4174,7 +4429,7 @@ def normalize_device_id(device_id: str) -> str:
         raise ValueError(
             f"{device_id!r} is not a Syncthing device ID. Expected 8 groups of 7 "
             f"characters (A-Z, 2-7) separated by dashes, e.g. P56IOI7-MZJNU2Y-"
-            f"IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2 -- copy it whole, it "
+            f"IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2. Copy it whole: it "
             f"is 63 characters. Adding a malformed ID creates a device entry that "
             f"can never connect."
         )
@@ -4276,7 +4531,18 @@ def api_admin_create_user(
     # is treated as an editor rather than as an unmapped machine (B16).
     db.record_known_editor(conn, username, "admin")
     conn.commit()
-    return {"ok": True, "result": result, "view": build_admin_users_view(settings, conn)}
+    response = {"ok": True, "result": result}
+    if payload.password:
+        # bug-dash-api-4 owed round 3 (2026-09-25): create is create-or-update,
+        # so a password here on an EXISTING account is a reset by another
+        # door, and it left the leaked password's sessions signed in. The page
+        # twin (ui.partial_admin_create_user) revokes the same way. After the
+        # commit, as revoke_sessions_after_password_reset requires; a new
+        # account has no sessions and answers 0.
+        response["sessions_revoked"] = revoke_sessions_after_password_reset(
+            request, username, admin=admin)
+    response["view"] = build_admin_users_view(settings, conn)
+    return response
 
 
 @router.post("/admin/users/{username}/password")
@@ -4291,7 +4557,7 @@ def api_admin_set_password(
     not a NAS round-trip that changes a system account's password. The
     refusals that actually matter -- uid < 1000, not in the editors group --
     live in each backend's set_known_password so every caller gets them."""
-    _require_admin(request)
+    admin = _require_admin(request)
     username = username.strip().lower()
     settings = request.app.state.settings
 
@@ -4301,7 +4567,9 @@ def api_admin_set_password(
         except local_users.LocalUserError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         conn.commit()
-        return {"ok": True}
+        return {"ok": True,
+                "sessions_revoked": revoke_sessions_after_password_reset(
+                    request, username, admin=admin)}
 
     if not is_valid_username(username):
         raise HTTPException(
@@ -4314,7 +4582,47 @@ def api_admin_set_password(
         nas.set_known_password(username, payload.password)
     except NasError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {"ok": True}
+    return {"ok": True,
+            "sessions_revoked": revoke_sessions_after_password_reset(
+                request, username, admin=admin)}
+
+
+def revoke_sessions_after_password_reset(request: Request, username: str, *,
+                                         admin: str) -> int:
+    """Sign `username` out everywhere once an admin has reset their password.
+
+    bug-dash-api-4 (2026-09-25): a reset changed the hash and nothing else.
+    Sessions are server-side rows validated without reference to the
+    password (sessions.py), so whoever had signed in with a leaked password
+    kept a working session for up to seven days after the reset meant to
+    shut them out. DISABLE and DELETE revoke through _purge_user_credentials;
+    this is the sessions half only, because a report token authenticates a
+    MACHINE, and a password change says nothing about the editor's computers.
+
+    The admin's OWN tab survives when they reset their own password: signing
+    the person who pressed the button out of the page they pressed it on is
+    not what a reset asks for. Call AFTER the commit: the session store
+    writes through its own connection (see _purge_user_credentials).
+    Never raises: the password HAS changed by here, and a revocation that
+    could not run is logged rather than turned into a failed reset."""
+    store = auth.session_store(request)
+    if store is None:
+        return 0
+    keep = None
+    if (admin or "").strip().lower() == username:
+        auth.get_session_user(request)
+        cached = getattr(request.state, "ccsync_session", None)
+        keep = cached[1] if cached else None
+    try:
+        revoked = store.revoke_user(username, by=f"admin:{admin} (password reset)",
+                                    except_sid=keep)
+    except Exception:  # noqa: BLE001 - the reset itself has already happened
+        log.exception("password reset for %r: could not revoke their sessions", username)
+        return 0
+    if revoked:
+        log.warning("admin %r reset %r's password and signed out %d session(s)",
+                    admin, username, revoked)
+    return revoked
 
 
 def _require_local_mode(request: Request) -> None:
@@ -4529,6 +4837,66 @@ class PendingKeyIn(BaseModel):
     fingerprint: str = Field(min_length=1, max_length=128)
 
 
+def _key_identity(line: str) -> tuple[str, str] | None:
+    """(type, base64 body) of one authorized_keys line, the part that IS the
+    key: the comment and any options are not, and the same key re-offered
+    under a new comment must not be installed twice."""
+    parts = line.strip().split()
+    for i, part in enumerate(parts):
+        if looks_like_ssh_pubkey(part) and i + 1 < len(parts):
+            return part, parts[i + 1]
+    return None
+
+
+def _install_nas_key_keeping_others(nas: NasBackend, username: str, key_text: str) -> None:
+    """Install an approved key WITHOUT taking the account's other keys away.
+
+    bug-dash-api-1 (2026-09-25): both backends' create_or_update_editor WRITE
+    the key they are handed (TrueNAS PUTs `sshpubkey`, DSM rewrites
+    authorized_keys), and every computer's wizard offers its OWN key
+    (onboard._offer_ssh_key). Approving an editor's second computer replaced
+    the first computer's key, and that computer's lanes A and B started
+    failing SFTP auth with nothing on the approve row saying a key would go.
+    An editor may own two computers (MULTI_MACHINE_PLAN.md), so an approve
+    ADDS.
+
+    A backend that can append does it itself (`add_editor_ssh_key`, owed to
+    nas/* by this fix). Otherwise, where the account row carries the key TEXT
+    (TrueNAS's `sshpubkey`, which is written out as authorized_keys whole,
+    one key per line) the merge is made here. A backend that can only say
+    "a key is installed" (DSM's `(installed)` marker, or nothing at all from
+    find_user) cannot be merged against from here; it keeps today's
+    behaviour and says so in the log rather than guessing."""
+    add = getattr(nas, "add_editor_ssh_key", None)
+    if callable(add):
+        add(username, key_text)
+        return
+    existing = nas.find_user(username)
+    current = str((existing or {}).get("sshpubkey") or "")
+    # Review round (2026-09-25): every existing key line is kept VERBATIM.
+    # Filtering on _key_identity dropped any type SSH_KEY_PREFIXES does not
+    # list (sk-ssh-ed25519@openssh.com hardware keys, *-cert-v01@openssh.com
+    # certificates, a type OpenSSH adds next year): the same erase, narrower.
+    # _key_identity is used for the duplicate check only. A line with a
+    # single field cannot be an authorized_keys key (type and body are both
+    # required), which is how DSM's "(installed)" marker is told from a key.
+    lines = [ln.strip() for ln in current.splitlines()
+             if ln.strip() and not ln.strip().startswith("#")
+             and len(ln.split()) >= 2]
+    if existing is not None and not lines:
+        # No key text to merge with: either the account has none, or the
+        # backend cannot show it (DSM's find_user never does). Either way the
+        # write below is the whole key list from now on.
+        log.info("approving %r's key: the NAS showed no current key text for that "
+                 "account, so the approved key is its only key", username)
+    new_id = _key_identity(key_text)
+    if new_id is not None and any(_key_identity(ln) == new_id for ln in lines):
+        merged = "\n".join(lines)
+    else:
+        merged = "\n".join(lines + [key_text.strip()])
+    nas.create_or_update_editor(username, merged, None)
+
+
 def approve_pending_ssh_key(
     request: Request, conn: sqlite3.Connection, username: str, fingerprint: str, *,
     admin: str,
@@ -4558,7 +4926,7 @@ def approve_pending_ssh_key(
     else:
         nas = _nas_client_or_503(request)
         try:
-            nas.create_or_update_editor(username, key_text, None)
+            _install_nas_key_keeping_others(nas, username, key_text)
         except NasError as exc:
             raise HTTPException(
                 status_code=502,
@@ -6318,8 +6686,8 @@ async def api_publish_package(
             status_code=503,
             detail="this dashboard has no release public key configured, so it cannot "
                    "verify a build and will not publish one. Set DASH_RELEASE_PUBKEYS "
-                   "to the vendor's key (tools/release_key.py pubkey) and redeploy -- "
-                   "see docs/RELEASE.md.",
+                   "to the vendor's key (tools/release_key.py pubkey) and redeploy. "
+                   "See docs/RELEASE.md.",
         )
     if not signature:
         raise HTTPException(
@@ -6327,12 +6695,12 @@ async def api_publish_package(
             detail="unsigned publish REFUSED: no signature. Builds are signed offline "
                    "by tools/sign_release.py and published with its &signature=... "
                    "query suffix. Publish tooling older than 2026-08-17 cannot "
-                   "publish to this dashboard -- update it (docs/RELEASE.md).",
+                   "publish to this dashboard: update it (docs/RELEASE.md).",
         )
     if not release_trust.valid_min_version(min_version):
         raise HTTPException(
             status_code=422,
-            detail="min_version must be dotted-numeric (e.g. 0.7.11) -- it is the "
+            detail="min_version must be dotted-numeric (e.g. 0.7.11). It is the "
                    "downgrade floor every companion will remember",
         )
     if not published_at:
@@ -6349,7 +6717,7 @@ async def api_publish_package(
         )
         raise HTTPException(
             status_code=409,
-            detail=f"{kind} version {version} is already published for {platform} -- "
+            detail=f"{kind} version {version} is already published for {platform}: "
                    f"{bump} and rebuild",
         )
 
@@ -6415,7 +6783,7 @@ async def api_publish_package(
         part.unlink(missing_ok=True)
         raise HTTPException(
             status_code=400,
-            detail="sha256 mismatch (or empty body) -- upload corrupted, nothing was published",
+            detail="sha256 mismatch (or empty body): the upload was corrupted, and nothing was published",
         )
     # The staging name above was chosen before any bytes arrived; the real
     # extension (macos onboard: wizard zip vs bootstrap script) needs the
@@ -6577,7 +6945,7 @@ def roll_fleet_back(
     if _row_str(target, "retracted_at"):
         raise HTTPException(
             status_code=409,
-            detail=f"{to_version} was recalled too -- pick a build that was not")
+            detail=f"{to_version} was recalled too. Pick a build that was not.")
     # THE CHANNEL MOVES WITH THE FLEET (dash-api-3, bug hunt 2026-09-11).
     # Rolling machines off a build that is still CURRENT is a fan-out the
     # channel then argues with: each machine takes the older build, reports
@@ -6707,7 +7075,7 @@ def api_delete_package(
     if row["is_current"]:
         raise HTTPException(
             status_code=409,
-            detail="cannot delete the current version -- make another version current first",
+            detail="cannot delete the current version. Make another version current first",
         )
     # UX-9: bytes first, row second. A move that fails keeps the row, and says
     # so, rather than leaving a record-less file nobody can find again.
@@ -6893,6 +7261,13 @@ class CompletedIn(BaseModel):
     lane: str = Field(default="", max_length=64)
     at: str = Field(default="", max_length=64)
 
+    # bug-wire-3 (2026-09-25): truncate, never 422 the whole report (see
+    # LaneReportIn).
+    @model_validator(mode="before")
+    @classmethod
+    def _bound_rather_than_reject(cls, data):
+        return _bound_to_field_caps(cls, data)
+
 
 class TransferIn(BaseModel):
     name: str = Field(max_length=512)
@@ -6903,6 +7278,13 @@ class TransferIn(BaseModel):
     speed_bps: float | None = None
     eta_seconds: float | None = None
     project_slug: str | None = Field(default=None, max_length=128)
+
+    # bug-wire-3 (2026-09-25): truncate, never 422 the whole report (see
+    # LaneReportIn).
+    @model_validator(mode="before")
+    @classmethod
+    def _bound_rather_than_reject(cls, data):
+        return _bound_to_field_caps(cls, data)
 
 
 class LaneReportIn(BaseModel):
@@ -6933,6 +7315,18 @@ class LaneReportIn(BaseModel):
     # live transfers per lane, never anywhere near this many.
     transfers: list[TransferIn] = Field(default_factory=list, max_length=256)
 
+    # bug-wire-3 (2026-09-25): B6 / SYS-3 turned every other report ceiling
+    # into truncation and missed this model, which is not a tolerant section:
+    # lane C's `last_error` is one joined sentence per errored folder, so a
+    # pulled sync drive with ~15 folders passed 2000 characters and every
+    # report 422'd -- the machine left the fleet grid, and the halt, pushed
+    # updates and file-move commands stopped reaching it, exactly when an
+    # admin most needed to see it.
+    @model_validator(mode="before")
+    @classmethod
+    def _bound_rather_than_reject(cls, data):
+        return _bound_to_field_caps(cls, data)
+
 
 class ManifestProjectIn(BaseModel):
     n_originals: int = Field(default=0, ge=0, le=10_000_000)
@@ -6953,6 +7347,13 @@ class MediaClipIn(BaseModel):
     file_path: str | None = Field(default=None, max_length=1024)
     kind: str | None = Field(default=None, max_length=32)
     present: bool = False
+
+    # bug-wire-3 (2026-09-25): truncate, never 422 the whole report (see
+    # LaneReportIn).
+    @model_validator(mode="before")
+    @classmethod
+    def _bound_rather_than_reject(cls, data):
+        return _bound_to_field_caps(cls, data)
 
 
 class SyncthingTransportIn(BaseModel):
@@ -9588,6 +9989,11 @@ def api_report(
         # de-dupe is a read rather than state in this process (which a
         # container restart would lose). Terminal answers cannot repeat:
         # mark_file_move_applied only matches `applied_at IS NULL`.
+        # bug-wire-1 (2026-09-25): with ONE exception. RES-10's "Resolve
+        # relinked after all" answer (ok, no relink_pending, no state) lands on
+        # a row that is already applied with relink_pending=1; db clears the
+        # flag and replaces the detail once, so it returns True and is logged
+        # once, and any repeat of it is a no-op that returns False.
         #
         # dash-db-1 (2026-09-18b): the ANSWER half of res-fleet-4. The row
         # may be filed under this computer's FORMER hostname (the offer looks
@@ -10023,9 +10429,13 @@ def api_report(
     # is sent for the same reason, so the two shapes cannot be confused. Best
     # effort - a stand-in hint is not worth failing a report over.
     try:
-        known = db.standins_known(conn)
-        if known:
-            result["standins_known"] = {"rels": known}
+        # bug-wire-5 (2026-09-25): sent EMPTY too, as the comment above says.
+        # It was sent only when non-empty, and the companion keeps its last
+        # set on an absent key, so once the fleet's last stand-in was upgraded
+        # every running companion went on answering "born from a stand-in"
+        # for rels the dashboard no longer listed. An empty list is read as
+        # "no" (fleet_says_standin -> False), which falls through to the probe.
+        result["standins_known"] = {"rels": db.standins_known(conn)}
     except Exception:  # noqa: BLE001 - a hint, never the report
         log.exception("could not read the fleet's stand-in set")
     pending_undos = db.pending_resolve_undos(
@@ -10210,7 +10620,7 @@ def api_diagnostics(
         if not identity or id_user is None:
             raise HTTPException(
                 status_code=401,
-                detail="X-CCSync-Identity required -- sign in from the companion "
+                detail="X-CCSync-Identity required. Sign in from the companion "
                        "tray, or its signing key was retired",
             )
         if id_user != editor:
@@ -10461,9 +10871,11 @@ def api_recovery_preview(request: Request, slug: str, snapshot: str,
 def api_recovery_restore(request: Request, slug: str, snapshot: str,
                          include_changed: bool = False,
                          conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
-    """Restore into `<project>/.restored-<ts>/`, never over the live path.
+    """Restore into `<tree>/.restored-<ts>/<project>/`, never over the live path.
 
-    There is no "and overwrite" flag on this route and there is not going to
+    Outside the project on purpose (bug-dash-diag-3, 2026-09-25, recovery.py):
+    a quarantine inside the project folder would be synced to every machine
+    that has it ticked. There is no "and overwrite" flag on this route and there is not going to
     be one: quarantine-instead-of-overwrite is what makes the snapshot choice
     safe to get wrong, which is the whole of SYS-15(a)."""
     admin = _require_admin(request)
@@ -10771,6 +11183,12 @@ def api_create_job(
 ) -> dict[str, Any]:
     """Queue a job. Admin only: a job is work on somebody else's computer."""
     admin = _require_admin(request)
+    # bug-comp-media-3 (2026-09-25): a stem no machine can write is refused
+    # before it is queued, so the admin (or Timeline Cards, which then makes
+    # the clip itself) hears it now rather than after a claim fails.
+    stem_problem = jobs_mod.out_stem_problem(payload.kind, payload.inputs)
+    if stem_problem:
+        raise HTTPException(422, stem_problem)
     # A blank `requires` on a kind this dashboard has an opinion about gets
     # the standard one (jobs.default_requires): the media recipes need ffmpeg,
     # ffprobe and both of the roots the job names, on every clip, and a

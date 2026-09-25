@@ -57,6 +57,20 @@ MACHINE_FILENAME = "machine.json"
 # Unknown keys are ignored on read, so either half may add one.
 _SCHEMA_VERSION = 1
 
+# bug-comp-core-6 (2026-09-25): bumped every time remint() hands back an id.
+# The reporter caches this module's answer for the life of the process, the
+# EMPTY answer included (an unreadable file is not re-read, and re-warned,
+# every report), so a repair a human pressed in Settings never reached the
+# dashboard until the tray restarted - while the toast said "from the next
+# check in". A counter rather than a callback: the reporter compares it on
+# each report, which costs nothing and needs no wiring through app.py.
+_REMINT_GENERATION = 0
+
+
+def remint_generation() -> int:
+    """How many times remint() has answered an id in this process."""
+    return _REMINT_GENERATION
+
 
 def machine_path(state_dir: Optional[Path] = None) -> Path:
     """~/.ccsync/machine.json — beside identity.json, NOT under state/.
@@ -166,6 +180,9 @@ def remint(path: Optional[Path] = None) -> str:
     target = path or machine_path()
     existing = machine_id(target, create=False)
     if existing:
+        # The file became readable between the advisory and the click: the
+        # reporter may still hold the "" it cached while it was not.
+        _note_remint(existing)
         return existing
     try:
         if target.exists():
@@ -176,7 +193,15 @@ def remint(path: Optional[Path] = None) -> str:
         log.warning("could not set the unreadable %s aside -- not re-minting "
                     "over it", target)
         return ""
-    return machine_id(target)
+    minted = machine_id(target)
+    _note_remint(minted)
+    return minted
+
+
+def _note_remint(value: str) -> None:
+    global _REMINT_GENERATION
+    if value:
+        _REMINT_GENERATION += 1
 
 
 def _now_epoch() -> float:

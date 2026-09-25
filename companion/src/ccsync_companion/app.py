@@ -18,6 +18,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -446,6 +447,99 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
+def _ps_command(pid: int) -> Optional[str]:
+    """`ps -p <pid> -o command=`, or None when ps cannot answer. A seam for
+    tests; posix only."""
+    try:
+        proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+            ["ps", "-p", str(int(pid)), "-o", "command="],
+            check=False, timeout=5, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
+        )
+    except Exception:
+        log.debug("single-instance: ps could not describe pid %s", pid, exc_info=True)
+        return None
+    return (proc.stdout or "").strip() or None
+
+
+def _own_executables() -> list[str]:
+    """The paths this process runs as, for matching another pid's ps line.
+
+    Review round (2026-09-25): "ccsync" in the command line is not enough.
+    installer/macos_bootstrap.sh takes `--companion-path <path>`, and an
+    owner-chosen path like /Applications/Sync/companion carries no "ccsync",
+    so a live companion read as "not a companion" and a second one started
+    beside it. The LaunchAgent and the self-upgrade relaunch exec the same
+    binary we are, so our own executable is the reliable name. Frozen only:
+    from source sys.executable is a bare python, which would match every
+    python on the machine (and `-m ccsync_companion` carries the token)."""
+    if not getattr(sys, "frozen", False):
+        return []
+    out: list[str] = []
+    for raw in (sys.executable, sys.argv[0] if sys.argv else ""):
+        if not raw:
+            continue
+        for candidate in (raw, os.path.realpath(raw)):
+            if candidate and candidate not in out:
+                out.append(candidate)
+    return out
+
+
+def _command_runs(command: str, executable: str) -> bool:
+    """Does a ps `command=` line start a process from `executable`? Matches
+    the full path, or the basename as a whole path component followed by the
+    end or an argument (so `companion` does not match `companiond`, and a
+    directory with spaces in it still matches)."""
+    if not command or not executable:
+        return False
+    if command == executable or command.startswith(executable + " "):
+        return True
+    base = os.path.basename(executable.rstrip("/"))
+    if not base:
+        return False
+    return re.match(r"^(?:\S.*/)?" + re.escape(base) + r"(?:\s|$)", command) is not None
+
+
+def _pid_looks_like_companion(
+    pid: int,
+    platform: Optional[str] = None,
+    ps_fn: Optional[Callable[[int], Optional[str]]] = None,
+    own_executables: Optional[list[str]] = None,
+) -> bool:
+    """bug-comp-app-7 (2026-09-25): is the live pid in companion.pid really a
+    companion? The pid file is never removed, and after a reboot or a logout
+    the recorded pid can belong to anything: pids restart low after boot,
+    which is exactly when the LaunchAgent starts us, so a system daemon that
+    happened to get the old number had the companion answer "already
+    running" and exit, leaving the Mac with no sync and no tray until someone
+    noticed. (The Windows mutex has no such file; there the lock file is only
+    the fallback and is left as it was.)
+
+    False only when ps positively names a process that is not ours. Anything
+    it cannot tell is True - fail safe, as _pid_is_alive is: starting a second
+    companion over a live one is the outcome the guard exists to prevent."""
+    plat = platform if platform is not None else sys.platform
+    if plat == "win32":
+        return True
+    command = (ps_fn if ps_fn is not None else _ps_command)(pid)
+    if not command:
+        return True
+    # Our own binary, wherever the installer put it (review round: an
+    # owner-chosen --companion-path need not say "ccsync").
+    owns = own_executables if own_executables is not None else _own_executables()
+    if any(_command_runs(command, exe) for exe in owns):
+        return True
+    # The default frozen executable is `ccsync-companion` (build.spec); from
+    # source it is `python -m ccsync_companion`. Both carry "ccsync".
+    return "ccsync" in command.lower()
+
+
+def _pid_holds_the_slot(pid: int) -> bool:
+    """The default liveness test for the pid file: alive AND a companion.
+    Resolves both by name so tests can monkeypatch either module global."""
+    return _pid_is_alive(pid) and _pid_looks_like_companion(pid)
+
+
 def _replaced_pid() -> Optional[int]:
     """The pid this process was spawned to replace, or None. READS AND
     REMOVES the variable: it describes exactly one hand-off, and leaving it
@@ -520,8 +614,9 @@ def _acquire_lock_file(
         replaces_pid = _replaced_pid()
     # Resolved by NAME, not bound as a default: tests monkeypatch the module
     # global, and a default argument would have captured the real one at
-    # import time.
-    is_alive = alive_fn if alive_fn is not None else _pid_is_alive
+    # import time. bug-comp-app-7: alive is not enough on posix, the pid must
+    # still be a companion (_pid_looks_like_companion).
+    is_alive = alive_fn if alive_fn is not None else _pid_holds_the_slot
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -821,7 +916,9 @@ def _proxy_state_note(state: str) -> str:
         proxy_gen_mod.STATE_USER_ACTIVE: "waiting until you're away from the keyboard",
         proxy_gen_mod.STATE_RESOLVE_OPEN: "waiting: DaVinci Resolve is open",
         proxy_gen_mod.STATE_PAUSED: "paused",
-        proxy_gen_mod.STATE_NO_FFMPEG: "waiting: ffmpeg is not installed here",
+        # bug-comp-media-5 (2026-09-25): proxy_gen's gate now also stops on
+        # a missing ffprobe (every clip is probed first), under the same state.
+        proxy_gen_mod.STATE_NO_FFMPEG: "waiting: ffmpeg or ffprobe is not installed here",
         proxy_gen_mod.STATE_DRIVE_ABSENT: "waiting: the sync drive is not connected",
         proxy_gen_mod.STATE_MISCONFIGURED: "waiting: this computer's sync config needs fixing",
     }.get(state, "")
@@ -1403,6 +1500,68 @@ def _file_move_answers_lock(app: Any) -> threading.Lock:
     return lock
 
 
+def _report_response_lock(app: Any) -> threading.RLock:
+    """bug-comp-app-5 (2026-09-25): serialises the report-reply fan-out
+    between the reporter thread and an off-cycle report's thread."""
+    lock = getattr(app, "_report_response_rlock", None)
+    if lock is None:
+        lock = threading.RLock()
+        app._report_response_rlock = lock
+    return lock
+
+
+def _diagnostics_lock(app: Any) -> threading.Lock:
+    """bug-comp-app-3 (2026-09-25): diagnostics_sent.json is now written from
+    two threads (the reporter's lane-error stamps, the upload thread's
+    answered-ask stamp), each a read-modify-write of the whole file, and the
+    in-flight admin ask is shared between them too."""
+    lock = getattr(app, "_diagnostics_state_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        app._diagnostics_state_lock = lock
+    return lock
+
+
+# bug-comp-app-3 (2026-09-25): how long a failed answer to an admin's
+# diagnostics ask waits before the standing command is allowed to retry it.
+# The dashboard redelivers on every reply (about every 30 s), and the machine
+# whose upload failed is the flaky one: a 256 KB bundle every reply would be
+# its own problem.
+DIAGNOSTICS_REQUEST_RETRY_SECONDS = 300.0
+
+# bug-comp-core-3 (2026-09-25): how often a running companion re-reads the
+# site manifest, and how soon it tries again after a failed fetch (a laptop
+# whose companion started before its tailnet was up).
+SITE_REFRESH_SECONDS = 900.0
+SITE_REFRESH_RETRY_SECONDS = 120.0
+
+
+_LICENCE_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_LICENCE_HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+", re.MULTILINE)
+_LICENCE_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+
+
+def _licence_display_text(document: str) -> str:
+    """The licence as a person reads it in the dialog's plain Text widget.
+
+    ui-comp-windows-3 (2026-09-25): the dialog inserted assets/EULA.md
+    verbatim, so the first thing an editor saw above ACCEPT was the authoring
+    comment written for counsel ("NOT YET EXECUTABLE ... TODO(legal)"), then
+    the version marker and raw `#` / `**` markup. DISPLAY ONLY: the bytes the
+    acceptance hash and the version marker are read from are
+    eula.bundled_text()'s, untouched. Also the owner's no-em-dash rule for
+    visible text (2026-08-18): the document's dashes become spaced hyphens
+    here and nowhere else. What the document SAYS (a draft for counsel, its
+    placeholder licensor) is its content, not this function's to change."""
+    text = _LICENCE_COMMENT_RE.sub("", str(document or ""))
+    text = _LICENCE_HEADING_RE.sub("", text)
+    text = _LICENCE_BOLD_RE.sub(lambda m: m.group(1), text)
+    dash = chr(0x2014)  # the em dash, spelled so this file carries none
+    text = text.replace(f" {dash} ", " - ").replace(dash, " - ")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip() + "\n"
+
+
 def _moved_destination_is_there(entry: dict[str, Any]) -> bool:
     """Is the move this ledger row describes actually ON DISK here?
     (comp-sync-b-2, 2026-09-11b, owed here by comp-sync.)
@@ -1498,6 +1657,13 @@ class CompanionApp:
         # popup and the user-initiated "Scan whole project" tray action
         # both trying to open a Tk root at once.
         self._popup_active_lock = threading.Lock()
+        # bug-comp-ui-1 (2026-09-25, owed here by c-ui): the ingest picker is
+        # opened by the loopback server, which has no app to ask, so the lock
+        # is registered with popup once. Without it the picker's Tk root sat
+        # beside the fixer popup / Settings / an update dialog, and
+        # apply_upgrade's stand-down (which tests this lock) could restart
+        # the process under an open file dialog.
+        popup.set_picker_popup_lock(self._popup_active_lock)
         # The one live work-progress window (popup.WorkProgressWindow), as
         # (key, window). One at a time: two Tk roots in this process is
         # CORE-M3's wedged interpreter.
@@ -2272,7 +2438,22 @@ class CompanionApp:
     def _on_report_response(self, resp: Any) -> None:
         """Fan the report response out to every consumer, isolating each --
         the upgrade channel and the new-project prompter both piggyback on
-        the same reply."""
+        the same reply.
+
+        bug-comp-app-5 (2026-09-25): ONE reply at a time. _report_off_cycle
+        posts from a thread of its own while the reporter thread is still in
+        here (resume_lane_b is reached from _apply_resume_lane_b below), and
+        its reply fanned out concurrently: the diagnostics ask, the file
+        moves and the Resolve undo answers are each check-then-act on state
+        nothing else locks, so one redelivered move could be applied by both
+        threads. Re-entrant because a consumer that ends up posting inline on
+        this same thread must not deadlock itself; the off-cycle thread just
+        waits its turn, which costs nothing - it exists to carry sync_guard
+        up, and that half is already done when it gets here."""
+        with _report_response_lock(self):
+            self._on_report_response_locked(resp)
+
+    def _on_report_response_locked(self, resp: Any) -> None:
         # FIRST, and unconditionally: getting here at all means the dashboard
         # accepted a report from this build (APP-5 / REL-2). That is the
         # health signal the rollback copy waits on, and it is also what
@@ -2381,6 +2562,8 @@ class CompanionApp:
         # res-companion-5: the reporter thread drains this list while the
         # watcher thread and the report-reply path queue into it.
         self._file_move_answers_lock = threading.Lock()
+        self._report_response_rlock = threading.RLock()
+        self._diagnostics_state_lock = threading.Lock()
         # comp-app-2: move id -> when this machine last said "waiting for the
         # sync drive" about it, so an outage is not one WARNING per move per
         # report on the dashboard for as long as the drive is in the bag.
@@ -3258,7 +3441,14 @@ class CompanionApp:
         # The refused clips stay in _canon_relink_pending: dropping them
         # would strand every clip the watcher does not happen to re-offer
         # (RES-19's cooldown is 15 minutes, and it needs Resolve open).
-        project = resolve_bridge.current_project_name()
+        # bug-comp-resolve-2 (2026-09-25, owed here by c-resolve): read the
+        # name FRESH. current_project_name() caches for 20 s with no
+        # invalidation, so the first unprompted burst after the editor
+        # switched from A to B was charged to A's daily allowance (and B's
+        # first burst ran unmetered). One GetCurrentProject+GetName per burst,
+        # beside the ReplaceClips it gates; the bridge's own save point and
+        # journal already read it fresh.
+        project = resolve_bridge.current_project_name(max_age=0.0)
         if not user_initiated and not resolve_journal.allow_automatic(project, "canon-relink"):
             with self._canon_relink_lock:
                 self._canon_relink_busy = False
@@ -3420,7 +3610,11 @@ class CompanionApp:
             # the bridge's own fallback: a journal that names no project (the
             # pre-2026-08-21 shape) is still replayable, and this summary is
             # only ever shown when something was undone.
-            project = resolve_bridge.current_project_name()
+            # bug-comp-resolve-2 (2026-09-25): fresh, because
+            # undo_last_relink below chooses the journal of the project open
+            # NOW; a 20 s-old name just after a switch described the other
+            # project's pass in the "undone" notice.
+            project = resolve_bridge.current_project_name(max_age=0.0)
             summary = resolve_journal.describe_latest(project) if project else ""
             if not summary:
                 summary = resolve_journal.describe_latest()
@@ -3833,6 +4027,27 @@ class CompanionApp:
                 f"CCSync can't copy media in. Plug it back in and try again.",
                 site_mod.notify_title())
             return
+        # bug-comp-app-2 (2026-09-25): the four gates above are the ones this
+        # entry point grew on its own; the halt and the licence live only in
+        # _lanes_refusal(), the one predicate sync_now and _start_lanes share,
+        # and this door never asked it. _consolidate_upload_phase calls the
+        # lanes' run_once() directly, and a lane that was never started (every
+        # lane after a restart under a persisted halt, a parked licence or no
+        # sign-in) has no stop event set, so one click uploaded originals and
+        # ran a delete-capable `rclone sync` down through an admin's halt.
+        refusal = self._lanes_refusal()
+        if refusal is not None:
+            log.warning("consolidate refused: %s", refusal[0])
+            self._notify_tray(
+                f"Nothing was copied in or uploaded. {refusal[1]}",
+                site_mod.notify_title())
+            return
+        if self._login_gate_blocks_sync():
+            log.warning("consolidate refused: nobody is signed in")
+            self._notify_tray(
+                "Nothing was copied in or uploaded. Sign in from the tray first.",
+                site_mod.notify_title())
+            return
         if not self._consolidate_lock.acquire(blocking=False):
             self._notify_tray("Already copying a project's media in. Let it finish.",
                               site_mod.notify_title())
@@ -3913,6 +4128,7 @@ class CompanionApp:
             return
 
         results: list[dict[str, Any]] = []
+        upload_refused: list[Optional[str]] = []
         if not self._popup_active_lock.acquire(blocking=False):
             self._notify_tray("A popup is already open. Close it first.", site_mod.notify_title())
             return
@@ -3995,8 +4211,8 @@ class CompanionApp:
                     log.info("consolidate: nothing was actually copied in -- "
                              "skipping the upload phase")
                     return
-                self._consolidate_upload_phase(
-                    subpath, reconcile, consolidate, publish, should_stop)
+                upload_refused.append(self._consolidate_upload_phase(
+                    subpath, reconcile, consolidate, publish, should_stop))
 
             window.run(_work)
         finally:
@@ -4053,6 +4269,15 @@ class CompanionApp:
         # consolidate, said "Copy & upload finished." with no number to
         # compare against the 40 they expected, while the rehearsal and
         # failure branches both print one.
+        refused = next((r for r in upload_refused if r), None)
+        if refused:
+            # bug-comp-app-2 (2026-09-25): the copy happened, the upload did
+            # not (or stopped part way) because a gate closed meanwhile.
+            self._notify_tray(
+                f"Copied in ({copied} copied in{skipped_part}), but the upload "
+                f"did not run or did not finish. {refused}",
+                site_mod.notify_title("consolidate"))
+            return
         self._notify_tray(
             f"Copy & upload finished ({copied} copied in{skipped_part}).",
             site_mod.notify_title("consolidate"))
@@ -4075,10 +4300,14 @@ class CompanionApp:
             log.debug("containment check failed for %r", subpath, exc_info=True)
             return False
 
-    def _consolidate_upload_phase(self, subpath, reconcile, consolidate, publish, should_stop):
+    def _consolidate_upload_phase(self, subpath, reconcile, consolidate, publish,
+                                  should_stop) -> Optional[str]:
         """Lane A upload + optional lane B pull, rendering the same progress
         line from LaneStatus (UX-10). Runs on the ProgressWindow's worker
-        thread, so it may only call `publish`."""
+        thread, so it may only call `publish`.
+
+        Returns None, or the sentence saying why the upload did not run (or
+        did not finish): a lane gate that closed while the copy ran."""
         stop_poll = threading.Event()
 
         def _poll_lane_a():
@@ -4102,6 +4331,16 @@ class CompanionApp:
                     "total": 0,
                 })
 
+        # bug-comp-app-2 (2026-09-25): consolidate_project refuses up front,
+        # but the copy before this can take hours and a halt or a licence park
+        # can land during it. run_once() has no halt check of its own, and on
+        # a lane the halt DID stop it returns early in silence, so the toast
+        # said "Copy & upload finished" for an upload that never ran. Asked
+        # before each lane; the answer is returned so the toast can say so.
+        refusal = self._lanes_refusal()
+        if refusal is not None:
+            log.warning("consolidate: skipping the upload phase (%s)", refusal[0])
+            return refusal[1]
         publish({"headline": "Uploading originals to the server…", "name": "",
                  "index": 0, "total": 0})
         poller = threading.Thread(target=_poll_lane_a, name="ccsync-consolidate-poll",
@@ -4114,6 +4353,11 @@ class CompanionApp:
         finally:
             stop_poll.set()
             poller.join(timeout=3.0)
+        refusal = self._lanes_refusal()
+        if refusal is not None:
+            log.warning("consolidate: upload stopped part way (%s); "
+                        "skipping the proxy pull", refusal[0])
+            return refusal[1]
         if self._lane_b_enabled and not consolidate.lane_b_allowed(reconcile):
             # The dry run saw deletions: `rclone sync` down would delete local
             # proxy files the NAS doesn't have (D-1) -- the report already
@@ -4126,6 +4370,7 @@ class CompanionApp:
                 self._lane_b.run_once(subpath)
             except Exception:
                 log.exception("consolidate: lane B proxy pull failed")
+        return None
 
     # -- sequencer hand-off (managed mode) -----------------------------------------------
     def _on_tree_change(self, rel: str) -> None:
@@ -4653,7 +4898,10 @@ class CompanionApp:
             # are already remembered per proxy file, so the steady state is
             # zero ops; this bounds the case where they are NOT remembered --
             # a mis-set local_root that makes every clip look repointable.
-            project = resolve_bridge.current_project_name()
+            # bug-comp-resolve-2 (2026-09-25): fresh, not the 20 s cache, for
+            # the reason given at the canon-relink limiter: a pass just after
+            # a project switch must spend the NEW project's allowance.
+            project = resolve_bridge.current_project_name(max_age=0.0)
             if not resolve_journal.allow_automatic(project, "auto-proxy-relink"):
                 log.info("proxy relink: rate-limited for this project -- %d op(s) "
                          "left for the next pass", len(ops))
@@ -6199,6 +6447,32 @@ class CompanionApp:
             if self._stop_event.wait(interval):
                 return
 
+    def _site_refresh_loop(self, dashboard_url: str) -> None:
+        """Keep the site manifest cache current for the life of the process.
+        Never raises (its own thread).
+
+        bug-comp-core-3 (2026-09-25): it was fetched ONCE, at start, and
+        feature_enabled() reads only that cache. A companion that started at
+        logon before Tailscale was up never fetched it at all, and a flag the
+        owner flipped later - youtube_download off (the legal off switch),
+        auto_update on - reached no running tray until each editor restarted
+        theirs, for days. Every reader of a flag asks the cache per call, so
+        refreshing the file is what makes the flip land. Keys config.py
+        merges at load (smb_unc, the SFTP tuning) still take effect at the
+        next start, which is that module's own contract (it reads the cache,
+        never the network, on the path that must work offline)."""
+        while True:
+            interval = SITE_REFRESH_RETRY_SECONDS
+            try:
+                site = site_mod.fetch_site(dashboard_url)
+                if site is not None:
+                    site_mod.save_site(site)
+                    interval = SITE_REFRESH_SECONDS
+            except Exception:
+                log.debug("site manifest refresh failed", exc_info=True)
+            if self._stop_event.wait(interval):
+                return
+
     def _show_licence_dialog(self) -> None:
         """The dialog, under the popup lock like every other Tk root here."""
         document = eula_mod.bundled_text()
@@ -6240,7 +6514,7 @@ class CompanionApp:
                  f"{eula_mod.EULA_VERSION}).\n\n"
                  f"Read it below. Accepting records your agreement on this "
                  f"computer only, and syncing starts straight away."),
-                document,
+                _licence_display_text(document),
             )
         except Exception:
             # Left UNSETTLED on purpose: a Tk root that cannot be built at
@@ -6510,7 +6784,20 @@ class CompanionApp:
             # The verify response may have carried the upgrade advertisement
             # -- adopt it now instead of waiting a full report interval.
             # (An absent/None value correctly CLEARS any stale offer.)
-            self.upgrade.note_report_response({"upgrade": self.identity.last_upgrade_info})
+            #
+            # bug-comp-core-4 / bug-wire-4 (2026-09-25): hand over the reply's
+            # upgrade keys as the dashboard sent them, not a rebuilt
+            # {"upgrade": ...}. That dict could never carry
+            # `upgrade_none_reason`, and note_report_response reads a reply
+            # with neither key as "nothing to take" and clears a standing
+            # refusal (comp-app-3's case): a sign-in against a dashboard that
+            # is WITHHOLDING a build this machine refuses wiped the
+            # `[ REFUSING ...]` state for good, since a withheld build is
+            # never re-offered to restore it. A dashboard older than 0.7.58
+            # sends no reason on /verify, so there the old behaviour stands.
+            reply = (getattr(self.identity, "last_upgrade_reply", None)
+                     or {"upgrade": self.identity.last_upgrade_info})
+            self.upgrade.note_report_response(reply)
             try:
                 self.on_signed_in()
             except Exception:
@@ -7535,16 +7822,19 @@ class CompanionApp:
             # window AND the dashboard's machine row. rclone's verbatim tail
             # is exactly what classify_lane_error exists to keep off screen;
             # it stays in the log and in Copy diagnostics.
+            # ui-copy owed round 3 (2026-09-25): "both sync lanes" was the
+            # internal word on all three of those surfaces; the two rclone
+            # lanes are, in the product's words, upload and proxy download.
             last = errors[-1].last_error
             if not last:
-                return ("This computer cannot reach the server: both sync lanes "
-                        "are failing", None)
+                return ("This computer cannot reach the server: upload and "
+                        "proxy download are both failing", None)
             try:
                 from . import tray as tray_mod
                 said = tray_mod.classify_lane_error(last)
             except Exception:
                 log.debug("could not classify the transport error", exc_info=True)
-                said = "both sync lanes are failing"
+                said = "upload and proxy download are both failing"
             return ("This computer cannot reach the server: " + said, None)
         return None
 
@@ -8430,9 +8720,6 @@ class CompanionApp:
         # either lost the answer being queued or assigned answers that had
         # just been reported back into the list, which re-publishes a verdict
         # the dashboard has already acted on.
-        with _file_move_answers_lock(self):
-            self._file_move_answers = [a for a in self._file_move_answers
-                                       if a["id"] != move_id]
         answer: dict[str, Any] = {"id": int(move_id), "ok": bool(ok),
                                   "detail": str(detail or "")[:512]}
         # RES-1 / RES-10: the extra fields a dashboard below the same sweep
@@ -8445,7 +8732,16 @@ class CompanionApp:
             answer["attempts"] = int(attempts)
         if relink_pending:
             answer["relink_pending"] = True
-        self._file_move_answers.append(answer)
+        # bug-comp-app-6 / bug-wire-6 (2026-09-25): the filter AND the append
+        # under one hold. res-companion-5 locked only the filter-assign, so a
+        # swap landing before the append put the answer into the list the
+        # reporter had already copied (lost for good: the relink-done answer's
+        # ledger row is cleared first), and two queuers for one id could both
+        # filter and then both append it.
+        with _file_move_answers_lock(self):
+            self._file_move_answers = [a for a in self._file_move_answers
+                                       if a["id"] != move_id]
+            self._file_move_answers.append(answer)
 
     def _file_move_results(self) -> list[dict[str, Any]]:
         """Drained by the reporter: the answers queued since the last report."""
@@ -8783,6 +9079,14 @@ class CompanionApp:
             log.debug("could not write %s", path, exc_info=True)
 
     def _upload_diagnostics(self, trigger: str) -> bool:
+        """Build the bundle and post it, and settle an admin's ask with the
+        answer. Never raises."""
+        ok = self._upload_diagnostics_once(trigger)
+        if trigger == "admin_request":
+            self._settle_diagnostics_request(ok)
+        return ok
+
+    def _upload_diagnostics_once(self, trigger: str) -> bool:
         """Build the bundle and post it. Never raises.
 
         NEVER WITHOUT A VERIFIED IDENTITY: a bundle names this machine's
@@ -8837,6 +9141,19 @@ class CompanionApp:
         except Exception:
             log.debug("could not read lane states for diagnostics", exc_info=True)
             return
+        # bug-comp-app-3 (2026-09-25): the whole read-modify-write under the
+        # lock the upload thread's answered-ask stamp takes, or either writer
+        # can put the other's field back to what it read.
+        with _diagnostics_lock(self):
+            fire = self._note_lane_error_states(statuses)
+        for name in fire:
+            log.info("lane %s entered error -- uploading diagnostics", name)
+            self._upload_diagnostics_async("lane_error")
+
+    def _note_lane_error_states(self, statuses) -> list[str]:
+        """The lanes that just fell into error and are outside the rate
+        limit, with the state file updated to say so. Caller holds
+        _diagnostics_lock."""
         state = self._read_diagnostics_state()
         lanes = state.get("lanes")
         if not isinstance(lanes, dict):
@@ -8876,9 +9193,7 @@ class CompanionApp:
             # missed bundle, whereas the other order costs an upload per
             # restart from the machine least able to afford it.
             self._write_diagnostics_state(state)
-        for name in fire:
-            log.info("lane %s entered error -- uploading diagnostics", name)
-            self._upload_diagnostics_async("lane_error")
+        return fire
 
     def _apply_diagnostics_request(self, resp: Any) -> None:
         """An admin clicked [ ASK THIS MACHINE WHY ] (v33, SYS-7).
@@ -8905,14 +9220,58 @@ class CompanionApp:
             state = self._read_diagnostics_state()
             if request_id and str(state.get("applied_request") or "") == request_id:
                 return
+            # bug-comp-app-3 (2026-09-25): the stamp used to be written HERE,
+            # before the upload, and the upload's answer was thrown away. The
+            # dashboard keeps the command standing until the bundle lands so
+            # that a redelivery IS the retry, and the stamp refused every
+            # redelivery: one timed-out POST from the flaky machine this button
+            # exists for, and the ask stood unanswered until an admin clicked
+            # again. Now the stamp is written only once the bundle is posted
+            # (_settle_diagnostics_request); in memory, one ask in flight at a
+            # time and a floor between retries of a failed one.
+            now = time.time()
+            with _diagnostics_lock(self):
+                if getattr(self, "_diagnostics_request_inflight", None) is not None:
+                    return
+                retry = getattr(self, "_diagnostics_request_retry", None)
+                if not isinstance(retry, dict):
+                    retry = {}
+                    self._diagnostics_request_retry = retry
+                if now < float(retry.get(request_id, 0.0)):
+                    return
+                self._diagnostics_request_inflight = request_id
             by = str(command.get("requested_by") or "your administrator").strip()
-            state["applied_request"] = request_id
-            self._write_diagnostics_state(state)
             log.warning("%s asked this computer for its diagnostics from the "
                         "dashboard", by)
             self._upload_diagnostics_async("admin_request")
         except Exception:
             log.exception("could not apply the dashboard's diagnostics request")
+
+    def _settle_diagnostics_request(self, ok: bool) -> None:
+        """The admin ask in flight is answered (stamp it, so a redelivery
+        before the dashboard drops the command is not a second upload) or it
+        failed (let a redelivery retry it after the floor). Never raises."""
+        try:
+            with _diagnostics_lock(self):
+                request_id = getattr(self, "_diagnostics_request_inflight", None)
+                self._diagnostics_request_inflight = None
+                if request_id is None:
+                    return
+                if ok:
+                    state = self._read_diagnostics_state()
+                    state["applied_request"] = request_id
+                    self._write_diagnostics_state(state)
+                    return
+                retry = getattr(self, "_diagnostics_request_retry", None)
+                if not isinstance(retry, dict):
+                    retry = {}
+                    self._diagnostics_request_retry = retry
+                retry[request_id] = time.time() + DIAGNOSTICS_REQUEST_RETRY_SECONDS
+            log.warning("the diagnostics the dashboard asked for did not upload; "
+                        "trying again in %.0f s if the ask still stands",
+                        DIAGNOSTICS_REQUEST_RETRY_SECONDS)
+        except Exception:
+            log.exception("could not record the diagnostics request's answer")
 
     def _resolve_health_text(self) -> str:
         """One diagnostics line for what Resolve can see (APP-2 (c) / UX-4).
@@ -9532,17 +9891,18 @@ class CompanionApp:
             self._identity_thread.start()
         except Exception:
             log.exception("failed to start identity expiry watcher")
-        # Refresh the site manifest (~/.ccsync/state/site.json) once per start,
-        # off the main thread: the installer wrote it on install day, and it
-        # goes stale when the admin re-provisions (SMB UNC, NAS Syncthing ID,
-        # rclone SFTP tuning). refresh_site() falls back to the cache on any
-        # failure, so a dashboard that predates /api/v1/site or is unreachable
-        # costs one debug line (2026-08-17, SYNOLOGY_PORT_PLAN WP0/WP5).
+        # Refresh the site manifest (~/.ccsync/state/site.json) off the main
+        # thread: the installer wrote it on install day, and it goes stale
+        # when the admin re-provisions (SMB UNC, NAS Syncthing ID, rclone SFTP
+        # tuning). A failed fetch keeps the cache, so a dashboard that
+        # predates /api/v1/site or is unreachable costs one debug line
+        # (2026-08-17, SYNOLOGY_PORT_PLAN WP0/WP5). bug-comp-core-3
+        # (2026-09-25): not once per start any more - see _site_refresh_loop.
         dashboard_url = str(self.config.get("dashboard_url", "") or "").strip()
         if dashboard_url:
             try:
                 threading.Thread(
-                    target=site_mod.refresh_site, args=(dashboard_url,),
+                    target=self._site_refresh_loop, args=(dashboard_url,),
                     name="ccsync-site-refresh", daemon=True,
                 ).start()
             except Exception:

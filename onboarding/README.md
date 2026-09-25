@@ -61,18 +61,28 @@ theme.py) and invokes `installer/windows_bootstrap.ps1` (or
    deployment-specific (NAS Syncthing device ID, rclone remote name, SSH
    port, NAS tree root) is fetched from `GET {dashboard_url}/api/v1/site`
    right after sign-in. Also sets the local-root default and which pages
-   follow.
+   follow. **The radio decides the install** (logic-onboarding-1,
+   2026-09-25): it starts on this computer's own `config.toml` `mode` on a
+   re-run, and the account's role from `/verify` (derived from the admin
+   list, i.e. the person) no longer overrides it. A real NAS mapping on the
+   tree drive is protected by the cleanup's and the bootstrap's own
+   is-it-ours checks, not by the account's role.
 3. **Tailscale** *(editor only)* — checks whether Tailscale is installed;
    offers a winget install (Windows) or the download page. "Check
    connection" runs `tailscale status` parsing (on macOS falling back to
    the CLI inside `/Applications/Tailscale.app`, which is never on PATH)
    + a live `GET /api/v1/health` against the dashboard. **Next is
    disabled until both succeed.**
-4. **Sign in** — TrueNAS username + password. POSTs to
+4. **Sign in** — the account's username + password (not "TrueNAS": a
+   Synology or local-auth site has no NAS login, logic-onboarding-4). POSTs to
    `{dashboard_url}/api/v1/verify`. **This is the gate**: on failure the
    wizard shows the error and does not advance. On success it holds the
-   verified username, identity token, role, and shared report token in
-   memory. On macOS a `base`-verified account is refused here.
+   verified username, identity token, role (diagnostics only), the shared
+   report token and `report_token_kind`. When the dashboard has retired the
+   shared token (`report_token_kind = "editor"`) and this computer holds no
+   per-editor `cce1.` token, the install page asks for one and writes it as
+   `config.toml` `report_token`; left blank, both finish pages say NOT READY
+   (logic-onboarding-2).
 5. **Install** — first the **clean-slate phase**. Windows: kills
    companion/syncthing processes, removes all four historical autostart
    Run values, the `CCSync-SubstP` task, old exe copies + `.old`/`.new`

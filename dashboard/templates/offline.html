@@ -4,14 +4,21 @@
    server (MOBILE_PLAN.md 4 M4, 2026-08-30). It is PRECACHED, so it must say
    nothing that could be stale: no counts, no fleet state, no name. The retry
    is a plain link rather than a script so it works from the cache with
-   nothing else loaded. #}
+   nothing else loaded (see ui-dash-static-6 below for where it points). #}
 {% block layout %}
   <main class="main login-main">
     <div class="login-box">
       <div class="side-head">[ OFFLINE ]</div>
       <div class="muted">This phone cannot reach the dashboard right now. Nothing
         here is live: check the network, then try again.</div>
-      <a class="btn login-btn tap" href="/">[ RETRY ]</a>
+      {# ui-dash-static-6 (2026-09-25): sw.js answers a failed navigation
+         with this cached document AT THE URL THAT FAILED, so the retry is
+         that URL (an empty href), not "/": an editor who followed a project
+         link out of a notice mail came back online to the fleet page with
+         the link gone. Still a plain link. The one exception is /offline
+         itself, which would only render this page again. #}
+      <a class="btn login-btn tap" href=""
+         onclick="if (location.pathname === '/offline') { location.href = '/'; return false; }">[ RETRY ]</a>
     </div>
   </main>
 {% endblock %}

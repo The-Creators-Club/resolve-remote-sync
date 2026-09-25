@@ -151,11 +151,42 @@ function timecode(seconds, fps) {
   return `${pad(hh)}:${pad(mm)}:${pad(ss)}:${pad(ff)}`;
 }
 
+// ui-broll-web-17 (2026-09-25): every toast lived exactly 5 s, so the
+// ~330-character "Couldn't reach the CC Sync tray ... open
+// http://127.0.0.1:8899/status" error, the only instruction that tells "tray
+// down" from "browser blocked", was gone before it could be read or copied.
+// An ERROR now stays until dismissed; anything else stays long enough to read
+// (about 60 ms a character, 5 to 15 s). Repeats replace their earlier copy and
+// at most TOAST_MAX_STICKY errors are kept, so a burst of failures (a folder of
+// uploads) cannot fill the screen.
+const TOAST_MAX_STICKY = 4;
+
+function toastLifetimeMs(message) {
+  return Math.min(15000, Math.max(5000, String(message).length * 60));
+}
+
 function toast(message, kind) {
   const container = $("#toast-container");
-  const node = el("div", { className: `toast${kind ? " " + kind : ""}`, text: message });
+  const key = `${kind || ""}\n${message}`;
+  for (const old of Array.from(container.children)) {
+    if (old._toastKey === key) old.remove();
+  }
+  const node = el("div", { className: `toast${kind ? " " + kind : ""}` });
+  node._toastKey = key;
+  node.appendChild(el("span", { className: "toast-text", text: message }));
+  const close = el("button", {
+    className: "toast-close", text: "×",
+    attrs: { type: "button", title: "dismiss", "aria-label": "dismiss" },
+  });
+  close.addEventListener("click", () => node.remove());
+  node.appendChild(close);
   container.appendChild(node);
-  setTimeout(() => node.remove(), 5000);
+  if (kind === "error") {
+    const sticky = Array.from(container.children).filter((n) => n.classList.contains("error"));
+    for (const extra of sticky.slice(0, Math.max(0, sticky.length - TOAST_MAX_STICKY))) extra.remove();
+    return;
+  }
+  setTimeout(() => node.remove(), toastLifetimeMs(message));
 }
 
 async function fetchJson(url, opts) {
@@ -211,6 +242,7 @@ function debounce(fn, ms) {
 document.addEventListener("DOMContentLoaded", init);
 
 function init() {
+  trackHeaderHeight();
   loadDashboardTopbar();
   buildFlagToggles();
   wireHeader();
@@ -226,6 +258,29 @@ function init() {
   // view if the URL carries one), so the page is deep-linkable and reloads
   // land where they were.
   applyHistoryState();
+}
+
+/* ui-broll-web-4 (2026-09-25): the folder rail is sticky at
+ * `top: var(--header-h)`, and --header-h was a constant 88px nothing ever
+ * updated. The header is the injected dashboard topbar (chips, session, a nav
+ * that wraps by whole items) plus the controls row, measured at 98 px on a
+ * 1920 window, 132 at 1366 and 233 at 500, so the rail's BROWSE / clear head
+ * and first folder parked underneath it while the results scrolled. The
+ * height changes when the topbar is injected and whenever the rows re-wrap,
+ * so it is observed, not read once. */
+function trackHeaderHeight() {
+  const header = document.getElementById("app-header");
+  if (!header) return;
+  const apply = () => {
+    const h = Math.ceil(header.getBoundingClientRect().height);
+    if (h > 0) document.documentElement.style.setProperty("--header-h", `${h}px`);
+  };
+  apply();
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(apply).observe(header);
+  } else {
+    window.addEventListener("resize", apply);
+  }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -714,7 +769,13 @@ function applyModeAvailability() {
     for (const btn of container.querySelectorAll(".mode-btn")) {
       btn.classList.toggle("active", btn.dataset.mode === state.mode);
     }
-    toast(`${current.reason} Searching by keyword instead.`, "warn");
+    // ui-broll-web-16 (2026-09-25): the toast said "by keyword" while the
+    // Hybrid button lit up. Name the mode the page switched to, and say that
+    // it is keyword-only when the server reports hybrid lost its meaning half
+    // (semantic.NOTE_HYBRID_DEGRADED), which is the usual reason for the hop.
+    const hybrid = modes.hybrid || {};
+    toast(`${current.reason} Switched to Hybrid` +
+          (hybrid.reason ? ", which is searching by keyword only for now." : "."), "warn");
     return true;
   }
   return false;
@@ -1157,6 +1218,7 @@ async function openDetail(videoId, seekToSeconds, hits) {
   $("#tc-in").textContent = "--:--:--:--";
   $("#tc-out").textContent = "--:--:--:--";
   $("#tc-rate").textContent = "1x";
+  renderSendButtons();
 
   // The seek itself is applied by applyPendingSeek off the ONE permanent
   // loadedmetadata handler, from state.detailSeekTo set above -- see there.
@@ -1191,6 +1253,7 @@ function closeDetail() {
   resetShuttle();
   $("#detail-view").classList.add("hidden");
   $("#browse-layout").classList.remove("hidden");
+  renderSendButtons();
   // Back to the row of results the clip was opened from, not to the top of a
   // freshly re-shown grid.
   window.scrollTo(0, state.gridScrollY || 0);
@@ -1530,6 +1593,19 @@ function onKeydown(e) {
   // Don't hijack typing in the search box etc.
   const tag = (e.target && e.target.tagName) || "";
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+  // ui-broll-web-3 (2026-09-25): the transport keys belong to the clip, not
+  // to whatever sits over it. With the client-folder, ingest or settings
+  // drawer open (or focus inside one, or in the card popover) every key is
+  // the drawer's: Enter used to preventDefault a focused "Save details" /
+  // "Copy" / "Run" and append the clip to the live Resolve timeline instead.
+  if (hotkeysYieldToOverlay(e.target)) return;
+  // And a focused control in the detail view itself keeps Enter: it presses
+  // the button (or follows the link) as it does everywhere else on the page.
+  // Space deliberately stays play/pause: focus sits on whatever button the
+  // editor last CLICKED (send, set in), and Space re-pressing that one would
+  // be a second append to the timeline where they meant "play".
+  // Shift+Enter stays "insert at playhead": no control here uses it.
+  if (e.key === "Enter" && !e.shiftKey && isActivatable(e.target)) return;
 
   const player = $("#player");
   const fps = state.detail.video.fps || 24;
@@ -1584,6 +1660,27 @@ function onKeydown(e) {
     default:
       break;
   }
+}
+
+// The drawers that open over the detail view, and the card popover. A drawer
+// is open when it lacks `hidden` (cfOpen / ingestOpen / openSettings all
+// toggle that class), and a target inside any of them is the drawer's.
+const HOTKEY_OVERLAYS = ["#cf-panel", "#ingest-panel", "#settings-panel", "#cf-popover"];
+
+function hotkeysYieldToOverlay(target) {
+  for (const sel of HOTKEY_OVERLAYS) {
+    const node = document.querySelector(sel);
+    if (!node) continue;
+    if (!node.classList.contains("hidden")) return true;
+    if (target && typeof target.closest === "function" && target.closest(sel)) return true;
+  }
+  return false;
+}
+
+function isActivatable(target) {
+  if (!target || typeof target.closest !== "function") return false;
+  if (target.isContentEditable) return true;
+  return !!target.closest("button, a[href], summary, [role=button], [role=menuitem], [role=menuitemcheckbox]");
 }
 
 function togglePlayPause() {
@@ -1656,6 +1753,57 @@ function resetShuttle() {
  * handler and the Enter shortcut land here. */
 let sendInFlight = false;
 
+/* ui-broll-web-6 (2026-09-25): the send loop can run for minutes (a sync
+ * down, then a queue wait) and the transport buttons are shared by every
+ * clip, so the loop used to paint "SYNCING 40%" onto whichever clip the
+ * editor had opened since, hold its buttons dead with no reason given, and
+ * finish with a bare "Sent to Resolve" while clip B was on screen although
+ * clip A went into the timeline. The loop still runs to the end (the
+ * companion joins a download, and abandoning the poll would leave the insert
+ * unannounced); what changes is that the buttons and the toasts say WHICH
+ * clip is in flight. sendClip is that clip, or null. */
+let sendClip = null;
+let sendOriginalLabels = null;
+
+function sendShowingInFlightClip() {
+  return !!(sendClip && state.detail && state.detail.video && state.detail.video.id === sendClip.id);
+}
+
+/** A toast about the send, named when the editor is no longer looking at it. */
+function sendClipMessage(message) {
+  if (!sendClip || sendShowingInFlightClip()) return message;
+  return `"${sendClip.name}": ${message}`;
+}
+
+function renderSendButtons() {
+  const send = $("#send-resolve-btn");
+  const place = $("#place-resolve-btn");
+  if (!send || !place) return;
+  if (!sendOriginalLabels) sendOriginalLabels = { send: send.innerHTML, place: place.innerHTML };
+  send.innerHTML = sendOriginalLabels.send;
+  place.innerHTML = sendOriginalLabels.place;
+  if (!sendClip) {
+    send.disabled = false;
+    place.disabled = false;
+    send.removeAttribute("title");
+    place.removeAttribute("title");
+    return;
+  }
+  // "One send in flight" is per companion, not per button or per clip.
+  send.disabled = true;
+  place.disabled = true;
+  if (sendShowingInFlightClip()) {
+    const active = sendClip.mode === "playhead" ? place : send;
+    if (sendClip.label) active.textContent = sendClip.label;
+    send.removeAttribute("title");
+    place.removeAttribute("title");
+  } else {
+    const why = `Still sending "${sendClip.name}" to Resolve. This clip can go when that one has finished.`;
+    send.title = why;
+    place.title = why;
+  }
+}
+
 function syncProgressLabel(progress) {
   if (progress && typeof progress.percent === "number") {
     return `SYNCING ${progress.percent}%`;
@@ -1664,7 +1812,13 @@ function syncProgressLabel(progress) {
 }
 
 async function sendToResolve(mode = "append") {
-  if (!state.detail || sendInFlight) return;
+  if (!state.detail) return;
+  if (sendInFlight) {
+    if (sendClip && !sendShowingInFlightClip()) {
+      toast(`Still sending "${sendClip.name}" to Resolve. Send this clip when that one has finished.`, "warn");
+    }
+    return;
+  }
   const { video } = state.detail;
   const fps = video.fps || 24;
 
@@ -1705,12 +1859,9 @@ async function sendToResolve(mode = "append") {
 
   // The active button carries the SYNCING label; both are disabled, because
   // "one send in flight" is per companion, not per button.
-  const btn = $(mode === "playhead" ? "#place-resolve-btn" : "#send-resolve-btn");
-  const otherBtn = $(mode === "playhead" ? "#send-resolve-btn" : "#place-resolve-btn");
-  const originalLabel = btn ? btn.innerHTML : null;
   sendInFlight = true;
-  if (btn) btn.disabled = true;
-  if (otherBtn) otherBtn.disabled = true;
+  sendClip = { id: video.id, name: basename(video.rel_path), mode, label: null };
+  renderSendButtons();
   let announcedSync = false;
   let announcedBusy = false;
   // A cap on the QUEUE wait only (CMEDIA-7): waiting for another download's
@@ -1732,12 +1883,12 @@ async function sendToResolve(mode = "append") {
         // from reaching 127.0.0.1 with the identical error (seen live
         // 2026-08-12 -- the companion was healthy the whole time). Opening
         // /status directly in a tab is never gated, so it disambiguates.
-        toast(
+        toast(sendClipMessage(
           "Couldn't reach the CC Sync tray. It may not be running, or your " +
           "browser blocked the connection (look for a “local network” " +
           "permission prompt, or allow it in site settings). Self-test: open " +
           "http://127.0.0.1:8899/status - if that shows ok:true, it's the " +
-          "browser, not the CC Sync tray. Downloads are in Settings.",
+          "browser, not the CC Sync tray. Downloads are in Settings."),
           "error"
         );
         return;
@@ -1753,9 +1904,10 @@ async function sendToResolve(mode = "append") {
       if (res.ok && body && body.state === "downloading") {
         if (!announcedSync) {
           announcedSync = true;
-          toast("Clip isn't on this computer yet: syncing it down, then inserting.", "");
+          toast(sendClipMessage("Clip isn't on this computer yet: syncing it down, then inserting."), "");
         }
-        if (btn) btn.textContent = syncProgressLabel(body.progress);
+        sendClip.label = syncProgressLabel(body.progress);
+        renderSendButtons();
         await new Promise((r) => setTimeout(r, 1500));
         continue;
       }
@@ -1773,15 +1925,16 @@ async function sendToResolve(mode = "append") {
                          /already downloading/i.test(body.message));
       if (busyNow || busyOld) {
         if (Date.now() > busyUntil) {
-          toast("This computer has been busy with other downloads for a while. " +
-                "Try again when they have finished.", "warn");
+          toast(sendClipMessage("This computer has been busy with other downloads for a while. " +
+                "Try again when they have finished."), "warn");
           return;
         }
         if (!announcedBusy) {
           announcedBusy = true;
-          toast("Waiting for this computer's other downloads to finish.", "");
+          toast(sendClipMessage("Waiting for this computer's other downloads to finish."), "");
         }
-        if (btn) btn.textContent = "WAITING…";
+        sendClip.label = "WAITING…";
+        renderSendButtons();
         const wait = Math.max(1, Number(body && body.retry_after) || 1.5);
         await new Promise((r) => setTimeout(r, wait * 1000));
         continue;
@@ -1798,20 +1951,17 @@ async function sendToResolve(mode = "append") {
             "This CC Sync tray build predates Place at Playhead. Take the " +
             "update your tray offers, or use Append.";
         }
-        toast(message, "error");
+        toast(sendClipMessage(message), "error");
         return;
       }
 
-      toast(body.message || "Sent to Resolve.", "success");
+      toast(sendClipMessage(body.message || "Sent to Resolve."), "success");
       return;
     }
   } finally {
     sendInFlight = false;
-    if (btn) {
-      btn.disabled = false;
-      if (originalLabel != null) btn.innerHTML = originalLabel;
-    }
-    if (otherBtn) otherBtn.disabled = false;
+    sendClip = null;
+    renderSendButtons();
   }
 }
 

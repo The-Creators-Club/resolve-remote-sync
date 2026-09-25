@@ -144,18 +144,46 @@ def local_engine(request: Request, editor: str = "") -> Any:
     if pool is not None and editor:
         engine = pool.engine_for(editor)
         if engine is not None:
-            # security-1 (2026-09-18b mediums): an agent call is a LIVENESS
-            # signal for its editor, and it is the only one that survives the
-            # browser going offline. Without it, fifteen quiet minutes made
-            # their episode look empty and any other signed-in session could
-            # close the engine this agent is driving Resolve against. Best
-            # effort by contract: never let a seat stamp fail an agent call.
-            try:
-                pool.note_agent(editor)
-            except Exception:  # noqa: BLE001 - a seat is not worth a 500
-                pass
             return engine
     return getattr(request.app.state, "cards_engine", None)
+
+
+def _seat(request: Request, editor: str, engine: Any) -> None:
+    """Stamp this editor's seat in the episode `engine` belongs to.
+
+    security-1 (2026-09-18b mediums): an agent call is a LIVENESS signal for
+    its editor, and it is the only one that survives the browser going
+    offline. Without it, fifteen quiet minutes made their episode look empty
+    and any other signed-in session could close the engine this agent is
+    driving Resolve against.
+
+    logic-cards-2 (2026-09-25): called for WORK only - a swept timeline, a
+    playhead that moved, a result - and no longer from `local_engine` on every
+    call. The Cards role long-polls `/pending` and heartbeats `/state` from
+    sign-in to shutdown, so stamping those kept its editor "in" the last
+    episode they visited for as long as their tray ran: the idle release never
+    fired and the landing page named someone who left hours ago. Best effort
+    by contract: never let a seat stamp fail an agent call.
+    """
+    pool = getattr(request.app.state, "cards_pool", None)
+    if pool is None or not editor or engine is None:
+        return
+    try:
+        pool.note_agent(editor, engine)
+    except Exception:  # noqa: BLE001 - a seat is not worth a 500
+        pass
+
+
+def _playhead_moved(engine: Any, body: dict[str, Any]) -> bool:
+    """Is this `state: null` ping somebody moving the playhead in Resolve,
+    rather than the agent's idle heartbeat (`AGENT_PING_S`), which re-sends
+    the playhead the engine already holds? Read before the engine takes it."""
+    try:
+        return ((body.get("playhead"), body.get("ph_uid"))
+                != (getattr(engine, "playhead", None),
+                    getattr(engine, "ph_uid", None)))
+    except Exception:  # noqa: BLE001 - a seat is never worth a 500
+        return False
 
 
 def _no_engine(editor: str) -> dict:
@@ -165,9 +193,17 @@ def _no_engine(editor: str) -> dict:
     agent routes (see `_local`): the companion's five-retry loop must not be
     made to repeat a request that cannot succeed until a person opens a page.
     """
+    # logic-cards-9 (2026-09-25, owed from c-resolve): `attached: False` is
+    # what lets the companion's Cards role tell "no engine for this editor"
+    # from an ATTACHED engine's own refusal (`_local`'s `{"error": ...}`, a
+    # stale result), which it used to report as "the dashboard is discarding
+    # this computer's pushes". Older companions ignore the key; newer ones
+    # fall back to matching "is not in a Timeline Cards episode", so keep
+    # that phrase. ui-copy-6 (2026-09-25): a colon, not " -- ".
     return {"error": f"{editor or 'this machine'} is not in a Timeline Cards "
-                     f"episode on this dashboard -- open one at /cards/ and "
-                     f"this agent attaches to it"}
+                     f"episode on this dashboard: open one at /cards/ and "
+                     f"this agent attaches to it",
+            "attached": False}
 
 
 def _routed(request: Request, editor: str) -> tuple[Any, Any]:
@@ -248,16 +284,37 @@ def _upstream(request: Request) -> tuple[str, str]:
     base = str(getattr(settings, "cards_server_url", "") or "").strip().rstrip("/")
     token = str(getattr(settings, "cards_token", "") or "").strip()
     if not base:
-        raise HTTPException(
-            status_code=503,
-            detail="no Timeline Cards server is configured here "
-                   "(set DASH_CARDS_SERVER_URL on the dashboard)")
+        raise HTTPException(status_code=503, detail=_no_server_sentence(request))
     if not token:
         raise HTTPException(
             status_code=503,
             detail="no Timeline Cards token is configured here "
                    "(set DASH_CARDS_TOKEN on the dashboard)")
     return base, token
+
+
+def _no_server_sentence(request: Request) -> str:
+    """Why there is nothing to talk to, with the mount's own reason FIRST.
+
+    logic-cards-6 (2026-09-25): the separate cards server (phase 2) has been
+    the fallback since the page was mounted in-process, and the pool exists
+    only when `mount_cards` came up MOUNTED. So on a dashboard whose mount
+    came up ABSENT (the vault bind late after a reboot, a missing checkout)
+    every agent was told to "set DASH_CARDS_SERVER_URL", and the role showed
+    that on the fleet grid: it sends the owner after a setting that fixes
+    nothing, while `cards_detail` already held the real reason. The variable
+    is still named, last, because a site that really does run a separate
+    server needs it (test_cards_tunnel pins that half).
+    """
+    state = getattr(request.app, "state", None)
+    status = str(getattr(state, "cards_status", "") or "")
+    detail = str(getattr(state, "cards_detail", "") or "").strip()
+    if status and detail and status != "mounted":
+        return (f"Timeline Cards is not running on this dashboard: {detail}. "
+                f"No separate Timeline Cards server is configured either "
+                f"(DASH_CARDS_SERVER_URL on the dashboard).")
+    return ("no Timeline Cards server is configured here "
+            "(set DASH_CARDS_SERVER_URL on the dashboard)")
 
 
 def _machine_chars(value: Any) -> str:
@@ -389,6 +446,8 @@ def cards_agent_state(
     if answer is not None:
         return answer
     if engine is not None:
+        if body.get("state") is not None or _playhead_moved(engine, body):
+            _seat(request, editor, engine)
         return _clean(_local(engine, "agent_state", body))
     return _clean(_forward(request, "POST", "/agent/state", body))
 
@@ -431,7 +490,8 @@ def cards_agent_pending(
         engine, answer, seconds = _wait_for_an_engine(
             request, editor, seconds, answer)
         if engine is None and answer is not None:
-            return {"note": answer.get("error", "")}
+            # logic-cards-9 (2026-09-25): see `_no_engine`.
+            return {"note": answer.get("error", ""), "attached": False}
     if engine is not None:
         # `agent_pending` takes the RAW query value and parses it itself
         # (handler.py hands it `parse_qs(...)["wait"][0]`), so it is handed a
@@ -451,6 +511,17 @@ def cards_agent_pending(
             if callable(unhand):
                 unhand(out)
             raise
+        if isinstance(out, dict) and out.get("id") is not None:
+            # bug-dash-cards-jobs-2 (2026-09-25): remember which engine handed
+            # this edit out, so its result goes back to it and not to wherever
+            # this editor's last page request happened to land.
+            pool = getattr(request.app.state, "cards_pool", None)
+            if pool is not None:
+                try:
+                    pool.note_handed(editor, engine, out.get("id"))
+                except Exception:  # noqa: BLE001 - routing memory, never a 500
+                    log.exception("cards tunnel: could not note edit %s",
+                                  out.get("id"))
         return out
     query = urllib.parse.urlencode({"wait": int(seconds)})
     return _clean(_forward(request, "GET", "/agent/pending", query=query,
@@ -466,9 +537,19 @@ def cards_agent_result(
     editor = _require_fleet_caller(request, conn)
     body = dict(payload or {})
     body.pop("token", None)
-    engine, answer = _routed(request, editor)
+    # bug-dash-cards-jobs-2 (2026-09-25): the engine that HANDED this edit out
+    # first. Routed through `_where` like the other two calls, a result could
+    # reach a different episode's engine than the one waiting for it, which
+    # refused it, and the waiting one then published an applied edit as lost.
+    pool = getattr(request.app.state, "cards_pool", None)
+    engine = (pool.handed_engine(editor, body.get("id"))
+              if pool is not None else None)
+    answer = None
+    if engine is None:
+        engine, answer = _routed(request, editor)
     if answer is not None:
         return answer
     if engine is not None:
+        _seat(request, editor, engine)
         return _clean(_local(engine, "agent_result", body))
     return _clean(_forward(request, "POST", "/agent/result", body))

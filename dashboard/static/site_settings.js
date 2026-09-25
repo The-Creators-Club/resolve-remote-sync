@@ -28,12 +28,25 @@
     });
   }
 
-  function showError(message) {
-    var el = document.getElementById("settings-error");
+  // ui-dash-admin-6 (2026-09-25). Each of SAVE, IMPORT and UNDO answers on
+  // the line beside its own button (see admin_settings.html). The page used
+  // one pair of lines above the first field for all three, a screen or more
+  // from any of the buttons, and never cleared its "saved": a refused save
+  // after a good one read "could not save" and "saved" at once, off screen.
+  // Every call REPLACES the line, so an old answer can never sit beside a
+  // new one.
+  function showResult(id, ok, message) {
+    var el = document.getElementById(id);
     if (!el) return;
-    if (!message) { el.style.display = "none"; el.textContent = ""; return; }
-    el.style.display = "";
-    el.textContent = "▲ " + message;
+    el.className = "settings-result" + (message ? (ok ? " ok" : " bad") : "");
+    el.textContent = message ? ((ok ? "" : "▲ ") + message) : "";
+    if (message && el.scrollIntoView) el.scrollIntoView({block: "nearest"});
+  }
+
+  function clock() {
+    var d = new Date();
+    function two(n) { return (n < 10 ? "0" : "") + n; }
+    return two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds());
   }
 
   // ------------------------------------------------------- AI providers
@@ -60,6 +73,20 @@
     return "chip red";
   }
 
+  // ui-dash-admin-12 (2026-09-25): the change history printed the stored UTC
+  // stamp ("at 2026-09-24T03:16:18+00:00") beside pages that all say "3h ago";
+  // the owner is in UTC+8 and did the sum in their head. Same buckets as
+  // ui.ago. A stamp the browser cannot read is shown as it is.
+  function agoText(iso) {
+    var t = Date.parse(iso || "");
+    if (isNaN(t)) return String(iso || "");
+    var s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (s < 60) return s + "s ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+
   function el(tag, cls, text) {
     var node = document.createElement(tag);
     if (cls) node.className = cls;
@@ -74,6 +101,20 @@
       .catch(function (err) {
         showAiError("could not read the AI providers: " + err.message);
       });
+  }
+
+  // ui-dash-static-9 (2026-09-25): the pin select and the CLI checkbox change
+  // on screen before the PUT, and a refused PUT used to leave them showing a
+  // choice that is not in force ("4. OpenAI API" in the select, "will use:
+  // Claude Code" above it). Put the control back at once, then redraw from
+  // the server; the refusal is shown AFTER the redraw, because
+  // renderAiProviders clears the error line.
+  function aiRefused(message) {
+    showAiError(message);
+    api("/api/v1/admin/ai-providers")
+      .then(renderAiProviders)
+      .then(function () { showAiError(message); },
+            function () { showAiError(message); });
   }
 
   function renderAiProviders(data) {
@@ -121,10 +162,16 @@
           method: "PUT",
           body: JSON.stringify({preference: pref.value}),
         }).then(renderAiProviders)
-          .catch(function (err) { showAiError("could not pin: " + err.message); });
+          .catch(function (err) {
+            pref.value = pref.dataset.server || "auto";
+            aiRefused("could not pin: " + err.message);
+          });
       });
     }
-    if (pref) pref.value = data.preference || "auto";
+    if (pref) {
+      pref.value = data.preference || "auto";
+      pref.dataset.server = pref.value;
+    }
 
     var flag = document.getElementById("ai-cli-enabled");
     if (flag) {
@@ -139,8 +186,12 @@
           api("/api/v1/admin/site", {
             method: "PUT", body: JSON.stringify({values: values}),
           }).then(loadAiProviders)
+            // ui-dash-static-3 (2026-09-25): this PUT records a site change
+            // too, so the history (and the undo it arms) moves with it.
+            .then(loadSiteHistory)
             .catch(function (err) {
-              showAiError("could not change the CLI provider setting: " + err.message);
+              flag.checked = !flag.checked;
+              aiRefused("could not change the CLI provider setting: " + err.message);
             });
         });
       }
@@ -312,6 +363,7 @@
       api("/api/v1/admin/site", {method: "PUT", body: JSON.stringify({values: values})})
         .then(function () { return refreshWizard(state); })
         .then(loadAiProviders)
+        .then(loadSiteHistory)
         .catch(function (err) { wizardError(state, err.message); });
     });
     var actions = el("div", null);
@@ -704,8 +756,8 @@
   // UX-21 (resilience sweep 2026-08-28): IMPORT used to overwrite every
   // recognised key with no confirmation and no way back. The confirm below
   // is built from the SAME diff the server would apply (GET/POST
-  // /admin/site/import?dry_run=1), never a guess, and [ UNDO LAST IMPORT ]
-  // replays the newest site_history entry through the same apply path.
+  // /admin/site/import?dry_run=1), never a guess, and [ UNDO LAST CHANGE ]
+  // (named [ UNDO LAST IMPORT ] until ui-dash-admin-14) replays the newest site_history entry through the same apply path.
 
   function importConfirmMessage(changes) {
     var n = changes.length;
@@ -723,7 +775,7 @@
       method: "POST", body: JSON.stringify({text: text}),
     }).then(function (preview) {
       if (!preview.count) {
-        showError("");
+        showResult("settings-import-result", true, "");
         window.alert("Nothing in that text differs from the current settings. Nothing was changed.");
         return;
       }
@@ -734,11 +786,20 @@
     });
   }
 
+  // ui-dash-static-3 (2026-09-25). Called at load AND after every write that
+  // records a site change (SAVE, the CLI-provider flag, the wizard's notice).
+  // It ran only at load, so after an in-page save the list and the undo's
+  // confirm still named the change before it while the server's undo reverts
+  // entries[0], the save just made: the admin agreed to put back yesterday's
+  // change and lost today's. The button is disarmed while a reload is out,
+  // so it can never confirm one entry and send for another, and the undo
+  // names the entry it confirmed (`expected_at`) for the server to check.
   function loadSiteHistory() {
     var list = document.getElementById("site-history-list");
     var undoBtn = document.getElementById("site-undo-btn");
     if (!list) return;
-    api("/api/v1/admin/site/history").then(function (body) {
+    if (undoBtn) { undoBtn.disabled = true; undoBtn.onclick = null; }
+    return api("/api/v1/admin/site/history").then(function (body) {
       var entries = body.entries || [];
       list.textContent = "";
       if (!entries.length) {
@@ -748,21 +809,34 @@
       }
       entries.slice(0, 5).forEach(function (e) {
         var count = e.count || 0;
-        list.appendChild(el("div", "muted",
-          (e.action || "save") + " by " + e.actor + " at " + e.at + " (" +
-            count + " setting" + (count === 1 ? "" : "s") + ")"));
+        var row = el("div", "muted",
+          (e.action || "save") + " by " + e.actor + " " + agoText(e.at) + " (" +
+            count + " setting" + (count === 1 ? "" : "s") + ")");
+        row.title = String(e.at || "");
+        list.appendChild(row);
       });
       if (undoBtn) {
         var latest = entries[0];
         undoBtn.style.display = "";
+        undoBtn.disabled = false;
         undoBtn.onclick = function () {
           var count = latest.count || 0;
           var message = "Put back the " + count + " setting" + (count === 1 ? "" : "s") +
-            " changed by " + latest.actor + " at " + latest.at + "?";
+            " changed by " + latest.actor + " " + agoText(latest.at) +
+            // The exact stamp stays in the question: two saves a minute
+            // apart both read "1m ago", and this is the entry the server
+            // is asked to undo (expected_at, ui-dash-static-3).
+            " (" + latest.at + ")?";
           if (!window.confirm(message)) return;
-          api("/api/v1/admin/site/undo-last-change", {method: "POST"})
+          showResult("site-undo-result", true, "");
+          api("/api/v1/admin/site/undo-last-change", {
+            method: "POST", body: JSON.stringify({expected_at: latest.at}),
+          })
             .then(function () { window.location.reload(); })
-            .catch(function (err) { showError("could not undo: " + err.message); });
+            .catch(function (err) {
+              showResult("site-undo-result", false, "could not undo: " + err.message);
+              loadSiteHistory();
+            });
         };
       }
     }).catch(function (err) {
@@ -791,12 +865,15 @@
             values[el.name] = el.value;
           }
         });
+        showResult("settings-save-result", true, "saving...");
         api("/api/v1/admin/site", {method: "PUT", body: JSON.stringify({values: values})})
           .then(function () {
-            document.getElementById("settings-saved").textContent = "saved";
-            showError("");
+            showResult("settings-save-result", true, "saved at " + clock());
+            return loadSiteHistory();
           })
-          .catch(function (err) { showError("could not save: " + err.message); });
+          .catch(function (err) {
+            showResult("settings-save-result", false, "could not save: " + err.message);
+          });
       });
     }
 
@@ -808,7 +885,9 @@
       importForm.addEventListener("submit", function (evt) {
         evt.preventDefault();
         runImport(importForm.text.value)
-          .catch(function (err) { showError("could not import: " + err.message); });
+          .catch(function (err) {
+            showResult("settings-import-result", false, "could not import: " + err.message);
+          });
       });
     }
   });

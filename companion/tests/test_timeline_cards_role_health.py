@@ -327,7 +327,7 @@ def test_the_refusal_names_the_process_and_what_to_close(tmp_path):
     assert "python.exe (pid 4312)" in detail
     assert detail.index("python.exe (pid 4312)") < detail.index("Close")
     assert "Close the standalone Timeline Cards agent" in detail
-    assert "CR-68" in detail
+    assert "CR-68" not in detail  # ui-copy-4 (2026-09-25)
 
 
 def test_cannot_tell_is_not_rendered_as_a_sighting(tmp_path):

@@ -14,7 +14,8 @@ Four things live here.
 
 **(a) Snapshot browse-and-restore, into a quarantine directory.** THE WHOLE
 POINT IS THAT NOTHING IS OVERWRITTEN. A restore writes only into
-`<project>/.restored-<ts>/`, so the destructive judgement ("is everything
+`<tree>/.restored-<ts>/<project>/` (bug-dash-diag-3: outside the project's
+Syncthing folder), so the destructive judgement ("is everything
 since this snapshot expendable?") disappears: a wrong snapshot costs disk
 space and nothing else, and the two copies can be compared afterwards by a
 person looking at files rather than at a shell. Nothing in this module
@@ -92,6 +93,16 @@ ENV_CONTAINER_NAME = "DASH_CONTAINER_NAME"
 # cannot be discovered as a SECOND project claiming the same slug. That is the
 # `duplicate_slug_dirs` notice, and a recovery tool that raised it would be
 # creating a new incident during an existing one.
+#
+# bug-dash-diag-3 (2026-09-25): and it lives at the top of the Projects tree,
+# `<tree>/.restored-<ts>/<project label>/`, NOT inside the project. A project
+# folder is a sendreceive Syncthing root, and Syncthing does not skip
+# dot-directories (the project .stignore ignores video, partials, ytdl
+# fragments and Proxy, nothing else), so every restored file was pushed to
+# every editor with the project ticked, and stayed there after the owner
+# deleted the folder on the server (ignoreDelete, 2026-08-11). The tree root
+# is no Syncthing folder and no project's scope, so nothing copies it
+# anywhere, and the leading dot still keeps provision's walk out of it.
 QUARANTINE_PREFIX = ".restored-"
 
 # Ceilings. A project tree is millions of files on this fleet; a page and a
@@ -292,6 +303,7 @@ def preview_restore(settings: Any, conn: sqlite3.Connection, slug: str,
     """
     label = _project_label(conn, slug)
     live = _live_project_dir(settings, label)
+    earlier = _earlier_restores(conn, slug, snapshot)
     source = _under(_snapshot_dir(snapshot, env), label)
     if not source.is_dir():
         raise RecoveryError(
@@ -328,6 +340,7 @@ def preview_restore(settings: Any, conn: sqlite3.Connection, slug: str,
             "unchanged_count": 0,
             "added": [], "added_count": 0,
             "truncated": True, "counts_unavailable": True,
+            "earlier_restores": earlier,
             "note": (f"That {which} folder holds more than {MAX_SCAN_FILES} files, "
                      f"more than this server compares in one go, so it cannot say "
                      f"what is missing without guessing. Restore the folder with "
@@ -346,10 +359,45 @@ def preview_restore(settings: Any, conn: sqlite3.Connection, slug: str,
         "truncated": False, "counts_unavailable": False,
         # Said on the page every time, not only in the docs: this is the
         # property that makes the choice above safe to get wrong.
-        "note": ("Nothing here is overwritten. Whatever you restore is copied into a "
-                 "new folder inside the project, and the files that are there now are "
-                 "left exactly as they are."),
+        # bug-dash-diag-3 (2026-09-25): where the copy now goes.
+        "note": (_earlier_restore_sentence(earlier)
+                 + "Nothing here is overwritten. Whatever you restore is copied into a "
+                 "new .restored folder at the top of the Projects folder on the "
+                 "server, under the project's own name, and the files that are there "
+                 "now are left exactly as they are."),
+        "earlier_restores": earlier,
     }
+
+
+def _earlier_restores(conn: sqlite3.Connection, slug: str,
+                      snapshot: str) -> list[dict[str, Any]]:
+    """The recorded restores of this project from this snapshot, newest
+    first (logic-admin-4, 2026-09-25)."""
+    return [r for r in history(conn, RESTORES_META)
+            if str(r.get("slug") or "") == slug
+            and str(r.get("snapshot") or "") == snapshot
+            and int(r.get("files") or 0) > 0]
+
+
+def _earlier_restore_sentence(earlier: list[dict[str, Any]]) -> str:
+    """logic-admin-4 (2026-09-25): a restore copies into a .restored folder
+    and leaves the project alone, so the preview run again afterwards shows
+    the SAME files missing and offers the same restore, and a second click is
+    a second full copy on the pool. Say that it was already done, where the
+    copy is, and why the files still count as missing here."""
+    if not earlier:
+        return ""
+    last = earlier[0]
+    when = str(last.get("at") or "")[:16].replace("T", " ")
+    again = (f" It has been restored {len(earlier)} times from this snapshot."
+             if len(earlier) > 1 else "")
+    return (f"This snapshot was already restored on {when} UTC: "
+            f"{int(last.get('files') or 0)} file(s) went into "
+            f"{last.get('where') or 'a .restored folder'} on the server.{again} "
+            "Those copies are there, not in the project, so the same files still "
+            "count as missing below until someone moves them back; a name that "
+            "starts with a dot may be hidden in Explorer or Finder until hidden "
+            "items are shown. Restoring again makes another full copy. ")
 
 
 def restore_into_quarantine(
@@ -359,7 +407,7 @@ def restore_into_quarantine(
     snapshot_before: Callable[[Any, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Copy what is missing (and optionally what differs) out of a snapshot
-    into `<project>/.restored-<ts>/`.
+    into `<tree>/.restored-<ts>/<project>/`.
 
     NOTHING IS OVERWRITTEN, NOTHING IS DELETED, NOTHING IS CHOWNED. The
     quarantine directory must not already exist; every file lands under it at
@@ -412,6 +460,19 @@ def restore_into_quarantine(
                   if rel not in live_files
                   or (include_changed and live_files[rel][0] != snap_files[rel][0]))
     if not rels:
+        # logic-admin-5 (2026-09-25): with nothing missing and some files
+        # different, the form's defaults (box unticked) arrive here, and the
+        # refusal said "nothing to restore" under a preview that had just
+        # listed one. Name the box that does it.
+        differ = 0 if include_changed else sum(
+            1 for rel in snap_files
+            if rel in live_files and live_files[rel][0] != snap_files[rel][0])
+        if differ:
+            raise RecoveryError(
+                f"nothing in the snapshot {snapshot} is missing from {label} as it is "
+                f"now, but {differ} file(s) are there with different contents. Tick "
+                "'also bring back the ones that are there but different' to copy "
+                "those into a new folder.", 409)
         raise RecoveryError(
             f"nothing in the snapshot {snapshot} is missing from {label} as it is now, "
             "so there is nothing to restore.", 409)
@@ -421,10 +482,15 @@ def restore_into_quarantine(
             f"{MAX_RESTORE_FILES} in one go. Restore the folder with the commands on "
             "the recovery page instead: a restore this large is a transfer, not a "
             "click.", 409)
-    target = live / f"{QUARANTINE_PREFIX}{stamp[:19].replace(':', '').replace('-', '')}"
+    # bug-dash-diag-3 (2026-09-25): beside the projects, never inside one
+    # (see QUARANTINE_PREFIX). The project's own path is kept under it, so
+    # "move it back" is the same relative path one level up.
+    quarantine = Path(str(settings.projects_dir)) / (
+        f"{QUARANTINE_PREFIX}{stamp[:19].replace(':', '').replace('-', '')}")
+    target = _under(quarantine, label)
     if target.exists():
         raise RecoveryError(
-            f"{target.name} already exists in that project. A restore never writes "
+            f"{quarantine.name}/{label} already exists. A restore never writes "
             "into a folder that is already there: rename or delete it first.", 409)
     taken: dict[str, Any] = {"ok": False, "reason": "not attempted"}
     if snapshot_before is None:
@@ -446,7 +512,7 @@ def restore_into_quarantine(
         # read, never a traceback on the page they opened after losing
         # something.
         raise RecoveryError(
-            f"this server could not create {target.name} in {label} "
+            f"this server could not create {quarantine.name}/{label} "
             f"({exc.strerror or exc}). Nothing was changed.", 502)
     for rel in rels:
         src = source.joinpath(*rel.split("/"))
@@ -464,7 +530,7 @@ def restore_into_quarantine(
         "ok": copied > 0,
         "slug": slug, "label": label, "snapshot": snapshot,
         "directory": target.as_posix(),
-        "where": f"{label}/{target.name}",
+        "where": f"{quarantine.name}/{label}",
         "files": copied, "bytes": copied_bytes,
         "failed": failed[:20], "failed_count": len(failed),
         "include_changed": bool(include_changed),
@@ -863,19 +929,27 @@ def _stop_the_fleet_step() -> Step:
     return Step(
         "action",
         "Stop the fleet writing first",
-        body=("Every editor's computer is still syncing. Put the fleet on hold before "
-              "you put anything back, or the machines will push the state you are "
-              "undoing straight back up."),
-        href="/fleet")
+        # ui-copy-1 (2026-09-25): the stop control is on Settings, Users
+        # (partials/fleet_halt.html), never on SYNC STATUS, which is where
+        # this step used to link, mid-restore, with no control on it. Named
+        # with the button's own label instead of a fourth word for it.
+        body=("Every editor's computer is still syncing. Press [ STOP ALL SYNCING ] "
+              "on Settings, Users before you put anything back, or the computers "
+              "will push the state you are undoing straight back up."),
+        href="/admin/users#admin-fleet-halt")
 
 
 def _plan_project(facts: dict[str, Fact], ctx: dict[str, Any]) -> list[Step]:
     steps = [
         Step("action",
-             "Restore it here, into a new folder inside the project",
+             "Restore it here, into a new folder beside the projects",
+             # bug-dash-diag-3 (2026-09-25): no longer inside the project,
+             # where Syncthing sent it to every editor.
              body=("Pick the project and a snapshot, see what is missing, and this "
                    "server copies it back into a new folder called .restored-<date> "
-                   "inside that project. Nothing that is there now is touched or "
+                   "at the top of the Projects folder on the server, under the "
+                   "project's own name. It is not sent to any editor's computer. "
+                   "Nothing that is there now is touched or "
                    "overwritten, so picking the wrong snapshot costs disk space and "
                    "nothing else. Then move what you want back yourself."),
              href="/admin/recovery#restore"),
@@ -951,15 +1025,26 @@ def _plan_whole_tree(facts: dict[str, Fact], ctx: dict[str, Any]) -> list[Step]:
         # container and a browser, no checkout of this repo and no SSH to the
         # NAS, so it named the one thing they cannot do. What they CAN do is
         # here, and who to ask is said out loud rather than implied.
-        Step("action",
+        # d-diag owed round 2 (2026-09-25): this was an "action" linking
+        # "/projects", which this dashboard does not serve (the JSON route is
+        # /api/v1/projects): a 404. The page that makes a project folder is
+        # PROJECT SETUP, and it is keyed by a Resolve project name: a bare
+        # /project-setup 303s to the home page (ui.py page_project_setup),
+        # which is the same dead end the ui-copy-2 review refused for the
+        # Resolve step. The plan does not know the lost project's name, so
+        # the step says how to open that page for one, and carries no [ GO ].
+        # A bare /project-setup that asks for the name is OWED (d-ui); once it
+        # exists this can go back to an action with href="/project-setup".
+        Step("note",
              "Afterwards: put back anything the rollback undid",
              body=("A project that was created after that moment is gone from the "
-                   "server with everything else written since. Create it again from "
-                   "the Projects page here: the folder is made with the right owner "
-                   "and permissions as it goes, which is what editors need to be able "
-                   "to write to it. Folders that existed in the snapshot come back "
-                   "exactly as they were and need nothing."),
-             href="/projects"),
+                   "server with everything else written since. Create it again on "
+                   "the PROJECT SETUP page here, which opens for one Resolve project "
+                   "at a time: open /project-setup?resolve_project= followed by the "
+                   "project's name in Resolve, then [ CREATE & LINK ]. The folder is made with the right owner and "
+                   "permissions as it goes, which is what editors need to be able to "
+                   "write to it. Folders that existed in the snapshot come back "
+                   "exactly as they were and need nothing.")),
         Step("note",
              "Then watch the first pass",
              body=("Let the fleet off hold and watch the first pass on the "
@@ -1003,13 +1088,26 @@ def _plan_search_index(facts: dict[str, Fact], ctx: dict[str, Any]) -> list[Step
 
 def _plan_resolve(facts: dict[str, Fact], ctx: dict[str, Any]) -> list[Step]:
     return [
+        # ui-copy-2 review round (2026-09-25): this step linked /fleet (a 404)
+        # and asked the admin to "pick the computer and the change" on a page
+        # that had no such control, so it became a note sending them to the
+        # companion's own [ UNDO LAST FIX ]. d-diag owed round 2 (same day):
+        # the control exists now, the [ UNDO A CLIP-PATH CHANGE ] panel that
+        # partials/recovery.html draws under this plan with id="resolve-undo"
+        # (only for problem=resolve, which is the only plan with this step),
+        # so the step is an action again and its [ GO ] is an in-page anchor.
+        # The tray button stays named: the panel's undo runs only when that
+        # computer next reports with the project open.
         Step("action",
-             "Undo it from here, on that computer",
-             body=("CC Sync writes down every clip path it changes. Pick the computer "
-                   "and the change, and it is replayed backwards on that machine the "
-                   "next time it reports, whether or not anybody is sitting at it. "
-                   "The editor has the same button in their tray."),
-             href="/fleet"),
+             "Undo it from here",
+             body=("CC Sync writes down every clip path it changes, and each change "
+                   "can be replayed backwards. The UNDO A CLIP-PATH CHANGE panel on "
+                   "this page lists them per computer: [ UNDO THIS CHANGE ] on one and it is "
+                   "undone when that computer next reports, while the project is "
+                   "open in its Resolve. Somebody at that computer can do the same "
+                   "from Settings in the CC Sync tray icon, [ UNDO LAST FIX ] in the "
+                   "RESOLVE section."),
+             href="#resolve-undo"),
         Step("note",
              "If the undo cannot help",
              body=("CC Sync also exports a copy of the whole Resolve project before it "

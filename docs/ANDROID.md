@@ -216,7 +216,7 @@ inside their own app.
 
 The two settings are ordinary site-manifest fields
 (`android.package_name`, `android.sha256_cert_fingerprints`), so Export,
-Import, the change history and `[ UNDO LAST IMPORT ]` all carry them. They are
+Import, the change history and `[ UNDO LAST CHANGE ]` all carry them. They are
 deliberately NOT in `GET /api/v1/site`: no installer, companion or indexer has
 any use for the app's identity, and the one client that does -- Chrome -- reads
 it from the asset-links route in the shape Google defines.

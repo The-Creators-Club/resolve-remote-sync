@@ -57,6 +57,11 @@ SEARCH_DAYS = 2
 # At most this many messages per poll. The search is fenced to one address,
 # so more than this is a flood, and the rest wait for the next poll.
 MAX_MESSAGES_PER_POLL = 20
+# bug-dash-ops-5 (2026-09-25): the cap above counts messages this poll has
+# NOT handled before. Known ones cost a header-only peek and no slot, or 20
+# handled messages in the window would starve an older unhandled reply until
+# it fell out of SEARCH_DAYS. This bounds those peeks, for a flooded address.
+MAX_HEADER_PEEKS_PER_POLL = 500
 MAX_REPLY_CHARS = 4000
 
 # The second, small `claude -p` call that reads a reply in prose. No tools AT
@@ -209,16 +214,57 @@ def _strip_comments(text: str) -> str:
     return text
 
 
-def auth_results_pass(msg: email.message.Message, from_domain: str) -> tuple[bool, str]:
+# bug-dash-ops-7 (2026-09-25): the authserv-id a known receiving service
+# writes into its own Authentication-Results, keyed by the IMAP host the poll
+# reads. Only hosts whose id is certain are listed; any other host keeps the
+# old "topmost header" rule rather than refusing every reply on a guess.
+KNOWN_AUTHSERV_IDS = {"imap.gmail.com": "mx.google.com"}
+
+
+def expected_authserv_id(values: Mapping[str, str]) -> str:
+    """The authserv-id the receiving server writes, or "" when unknown."""
+    return KNOWN_AUTHSERV_IDS.get(imap_host(values).strip().casefold(), "")
+
+
+def _authserv_id(header: str) -> str:
+    # RFC 8601 section 2.2: the authserv-id is the first token, optionally
+    # followed by a version number, before the first ";".
+    head = _strip_comments(str(header)).split(";", 1)[0].split()
+    return head[0].strip().casefold() if head else ""
+
+
+def _receiver_header(msg: email.message.Message, authserv_id: str = "") -> str | None:
+    """The Authentication-Results the RECEIVING server wrote, or None.
+
+    bug-dash-ops-7 (2026-09-25): "the topmost is the receiver's" holds only
+    when the receiver added one, and Google adds none to mail that never
+    leaves the Workspace; the topmost is then whatever the sender wrote. When
+    the receiver's authserv-id is known, a header naming any other id is the
+    sender's and is ignored, never trusted. Residue: a sender who writes the
+    receiver's own id is stopped only if the receiver strips such headers
+    (RFC 8601 section 5 says it SHOULD); the CCT token is still required."""
+    headers = msg.get_all("Authentication-Results") or []
+    if not authserv_id:
+        return str(headers[0]) if headers else None
+    want = authserv_id.strip().casefold()
+    for header in headers:
+        if _authserv_id(header) == want:
+            return str(header)
+    return None
+
+
+def auth_results_pass(msg: email.message.Message, from_domain: str,
+                      authserv_id: str = "") -> tuple[bool, str]:
     """Does the TOPMOST Authentication-Results say dkim=pass or dmarc=pass for
     `from_domain`? The topmost is the one the receiving server prepended; any
-    header below it may have been written by the sender."""
-    headers = msg.get_all("Authentication-Results") or []
+    header below it may have been written by the sender. With `authserv_id`,
+    only a header naming that receiver counts (bug-dash-ops-7)."""
+    header = _receiver_header(msg, authserv_id)
     domain = str(from_domain or "").strip().casefold()
-    if not headers:
+    if header is None:
         return False, ("the receiving mail server added no Authentication-Results "
                        "header, so the sender could not be confirmed")
-    top = _strip_comments(str(headers[0]))
+    top = _strip_comments(header)
     for part in top.split(";"):
         m = re.match(r"\s*(dkim|dmarc)\s*=\s*([A-Za-z]+)(.*)$", part, re.I | re.S)
         if not m or m.group(2).lower() != "pass":
@@ -234,6 +280,25 @@ def auth_results_pass(msg: email.message.Message, from_domain: str) -> tuple[boo
             return True, ""
     return False, (f"the receiving mail server did not report dkim=pass or "
                    f"dmarc=pass for {domain or 'the sender'}")
+
+
+def auth_results_fail(msg: email.message.Message, authserv_id: str = "") -> bool:
+    """Does the TOPMOST Authentication-Results say dkim=fail or dmarc=fail?
+
+    bug-dash-ops-1 (2026-09-25): the Sent-folder proof below exists for the
+    one case where the receiving server wrote NO verdict (Google, mail from a
+    Workspace account to its own +address). A message the receiving server
+    explicitly judged forged is not that case, and no other evidence may
+    overrule that judgement."""
+    header = _receiver_header(msg, authserv_id)
+    if header is None:
+        return False
+    top = _strip_comments(header)
+    for part in top.split(";"):
+        m = re.match(r"\s*(dkim|dmarc)\s*=\s*([A-Za-z]+)", part, re.I)
+        if m and m.group(2).lower() in ("fail", "permerror"):
+            return True
+    return False
 
 
 def find_run(conn: sqlite3.Connection, text: str, now: str) -> tuple[Any, str, str]:
@@ -485,7 +550,8 @@ def handle_message(
         _refuse(conn, mid, now, from_addr, run_id, CHECK_SENDER,
                 "it came from an address this server does not send its alerts to")
         return {"verdict": "refused", "mark_seen": True, "confirmation": None}
-    ok, auth_why = auth_results_pass(msg, sender.rsplit("@", 1)[-1])
+    authserv = expected_authserv_id(values)
+    ok, auth_why = auth_results_pass(msg, sender.rsplit("@", 1)[-1], authserv)
     # 2026-09-24, found on the first live reply: Google adds NO
     # Authentication-Results to mail sent from a Workspace account to its
     # own +address - it never leaves Google - so the owner's reply, the one
@@ -496,7 +562,9 @@ def handle_message(
     # is no new trust), and a forged message from outside lands in the inbox
     # only. So it counts only when the sender IS the mailbox account.
     account = (values.get("alerts_smtp_user") or "").strip().casefold()
-    if not ok and in_own_sent and account and sender == account:
+    # bug-dash-ops-1 (2026-09-25): never over an explicit dkim/dmarc fail.
+    if (not ok and in_own_sent and account and sender == account
+            and not auth_results_fail(msg, authserv)):
         ok, auth_why = True, ""
     if not ok:
         _refuse(conn, mid, now, from_addr, run_id, CHECK_AUTH, auth_why)
@@ -575,13 +643,47 @@ def _raw_of(parts: Any) -> bytes | None:
     return None
 
 
+# bug-dash-ops-1 (2026-09-25): how many Sent-folder hits are fetched and
+# compared. An exact Message-ID is one message; this bounds a forged fragment
+# that matches many, which is exactly the case that must NOT pass.
+SENT_HITS_COMPARED = 5
+
+
+def _same_message(raw: bytes, copy: bytes) -> bool:
+    """Is `copy` (fetched from Sent) the message `raw` (from the inbox)?
+
+    Exact Message-ID, From, Subject and body. The delivered copy may carry
+    extra trace headers the Sent copy lacks, so the bytes are not compared
+    whole; the headers a sender writes and the text they wrote are."""
+    try:
+        a = email.message_from_bytes(raw, policy=email.policy.default)
+        b = email.message_from_bytes(copy, policy=email.policy.default)
+        mid = str(a.get("Message-ID") or "").strip()
+        if not mid or mid != str(b.get("Message-ID") or "").strip():
+            return False
+        if (parseaddr(str(a.get("From") or ""))[1].casefold()
+                != parseaddr(str(b.get("From") or ""))[1].casefold()):
+            return False
+        if str(a.get("Subject") or "").strip() != str(b.get("Subject") or "").strip():
+            return False
+        return body_text(a).strip() == body_text(b).strip()
+    except Exception:                                               # noqa: BLE001
+        return False
+
+
 def _in_sent(client: Any, raw: bytes) -> bool:
-    """Is this message's exact Message-ID in the account's Sent folder?
+    """Is this very message in the account's Sent folder?
 
     The folder is found by its IMAP special-use flag (Sent), never by name
     ("[Gmail]/Sent Mail" is localised). INBOX is re-selected afterwards,
     read-write, because the caller still sets the Seen flag there. Any failure is
-    "not found", which leaves the header test as the only way in."""
+    "not found", which leaves the header test as the only way in.
+
+    bug-dash-ops-1 (2026-09-25): IMAP's HEADER search is a SUBSTRING match
+    (RFC 3501 6.4.4), so a forged reply carrying `Message-ID: mail.gmail.com`
+    matched some message the owner once sent, and a hit alone counted as the
+    owner's authorship. A hit is now only a candidate: it is fetched and has
+    to BE this message (_same_message)."""
     found = False
     try:
         mid = str(email.message_from_bytes(raw).get("Message-ID") or "").strip()
@@ -597,7 +699,13 @@ def _in_sent(client: Any, raw: bytes) -> bool:
         if sent:
             client.select(sent, readonly=True)
             _typ, data = client.search(None, "HEADER", "Message-ID", f'"{mid}"')
-            found = bool(data and data[0] and data[0].split())
+            hits = (data[0] if data and data[0] else b"").split()
+            for num in hits[:SENT_HITS_COMPARED]:
+                _typ, parts = client.fetch(num, "(BODY.PEEK[])")
+                copy = _raw_of(parts)
+                if copy is not None and _same_message(raw, copy):
+                    found = True
+                    break
     except Exception:                                               # noqa: BLE001
         log.debug("triage: could not look in the Sent folder", exc_info=True)
         found = False
@@ -607,6 +715,32 @@ def _in_sent(client: Any, raw: bytes) -> bool:
         except Exception:                                           # noqa: BLE001
             pass
     return found
+
+
+def _unhandled_numbers(conn: sqlite3.Connection, client: Any,
+                       numbers: list[bytes]) -> list[bytes]:
+    """The newest MAX_MESSAGES_PER_POLL search hits not yet in
+    `triage_replies`, oldest first (the order they were sent in).
+
+    bug-dash-ops-5 (2026-09-25): the cap used to be taken BEFORE the "already
+    handled" skip, so the same newest 20 were re-peeked every poll and an
+    older unhandled reply was never read. Walking newest to oldest and
+    counting only unknown messages means each poll reaches further back."""
+    picked: list[bytes] = []
+    for num in list(reversed(numbers))[:MAX_HEADER_PEEKS_PER_POLL]:
+        if len(picked) >= MAX_MESSAGES_PER_POLL:
+            break
+        _typ, head = client.fetch(num, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+        head_raw = _raw_of(head)
+        if head_raw is not None:
+            known_id = str(email.message_from_bytes(head_raw).get("Message-ID") or "").strip()[:400]
+            if known_id and conn.execute(
+                    "SELECT 1 FROM triage_replies WHERE message_id=?",
+                    (known_id,)).fetchone():
+                continue
+        picked.append(num)
+    picked.reverse()
+    return picked
 
 
 def poll(settings: Any, now: str | None = None) -> dict[str, Any]:
@@ -651,16 +785,9 @@ def poll(settings: Any, now: str | None = None) -> dict[str, Any]:
         # (Message-ID UNIQUE) is what makes each one handled once, and a
         # header-only peek keeps the known ones from being downloaded again.
         _typ, data = client.search(None, "TO", f'"{reply_to}"', "SINCE", since)
-        numbers = (data[0] if data and data[0] else b"").split()[-MAX_MESSAGES_PER_POLL:]
+        numbers = _unhandled_numbers(
+            conn, client, (data[0] if data and data[0] else b"").split())
         for num in numbers:
-            _typ, head = client.fetch(num, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
-            head_raw = _raw_of(head)
-            if head_raw is not None:
-                known_id = str(email.message_from_bytes(head_raw).get("Message-ID") or "").strip()[:400]
-                if known_id and conn.execute(
-                        "SELECT 1 FROM triage_replies WHERE message_id=?",
-                        (known_id,)).fetchone():
-                    continue
             _typ, parts = client.fetch(num, "(BODY.PEEK[])")
             raw = _raw_of(parts)
             if raw is None:

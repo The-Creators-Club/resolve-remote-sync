@@ -11,7 +11,10 @@
    The pending diff is computed by the enforce cycle itself, from the same
    desired/actual sets it acts on, and only ever read here. Nothing on this
    page writes a share. #}
-<div class="side-head" style="margin-top:2rem">[ COLLECTOR ]</div>
+{# ui-copy-2 (2026-09-25): the collector notices link to /#fleet-collector
+   (db.py's registry); before this id they pointed at /fleet#fleet-diagnostics,
+   a 404, and #fleet-diagnostics is only ever filled by [ READ THE ANSWER ]. #}
+<div class="side-head" id="fleet-collector" style="margin-top:2rem">[ COLLECTOR ]</div>
 {# A .rule element, not 100 box-drawing characters: the text rule was 100
    glyphs wide whatever the viewport, so a phone scrolled sideways to see
    nothing (MOBILE_PLAN.md §3.2, round 2, 2026-08-30). #}

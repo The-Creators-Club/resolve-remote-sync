@@ -236,9 +236,15 @@ _JOB_MEANING = {
     "provision": ("new and moved project folders are not being set up for syncing",
                   "Look at the other problems listed here first: a stray project marker "
                   "is the usual cause. If there is none, restart the dashboard."),
+    # ui-copy-2 (2026-09-25): these fix strings named "Settings, Diagnostics",
+    # which is not a page (ui.SETTINGS_NAV_GROUPS has no such entry). The
+    # per-cycle outcome they meant is the [ COLLECTOR ] panel inside the fleet
+    # grid, and a server-side notice's own detail is the notice itself.
     "config": ("this server cannot read its own sync engine, so nothing about the fleet "
                "is being updated",
-               "Check that Syncthing is running on the server (Settings, Diagnostics)."),
+               "Check that Syncthing is running on the server; the [ COLLECTOR ] panel "
+               "under the computers table on SYNC STATUS shows each cycle's last run "
+               "and error."),
     "enforce": ("projects ticked or unticked on this dashboard are not reaching the "
                 "editors' computers",
                 "Check that Syncthing is running on the server, then untick and re-tick "
@@ -287,7 +293,9 @@ def _check_collector_jobs(conn, settings, now: str) -> None:
             continue
         meaning, fix = _JOB_MEANING.get(
             kind, ("one of the background jobs that keeps the fleet in step is failing",
-                   "Restart the dashboard, then check Settings, Diagnostics."))
+                   "Restart the dashboard, then read the [ COLLECTOR ] panel under the "
+                   "computers table on SYNC STATUS: it shows each cycle's last run "
+                   "and error."))
         when = str(row.get("finished_at") or row.get("started_at") or "")
         db.notice(
             conn, "collector_cycle_failed", "error", kind,
@@ -312,7 +320,9 @@ def _check_collector_jobs(conn, settings, now: str) -> None:
             conn, "syncthing_unreachable", "error", "server",
             body=("The sync engine (Syncthing) on this server is not answering, so no "
                   "project is being shared, measured or updated for anybody."),
-            fix="Start Syncthing on the server, then check Settings, Diagnostics.",
+            fix=("Start Syncthing on the server, then read the [ COLLECTOR ] panel "
+                 "under the computers table on SYNC STATUS: its cycles turn green "
+                 "once it answers."),
             now=now)
     elif health.get("syncthing_reachable") is True:
         db.clear_notice(conn, "syncthing_unreachable", "server", now=now)
@@ -389,7 +399,13 @@ def _check_collector_alarms(conn, settings, now: str) -> None:
             body=("Editors' computers are sending information this dashboard is too old "
                   f"to store, so it is being thrown away: {names}. The companions are "
                   "ahead of the dashboard."),
-            fix="Update the dashboard (Settings, Packages, [ UPDATE THE DASHBOARD ]).",
+            # ui-copy-3 (2026-09-25): there is no [ UPDATE THE DASHBOARD ]
+            # button (that is a chip); the panel on Packages is [ DASHBOARD ]
+            # and its button [ UPDATE NOW ] (admin_dashboard_update.html), and
+            # it offers only a bundle matching the running image.
+            fix=("Update the dashboard: Settings, Packages, then [ UPDATE NOW ] in "
+                 "the [ DASHBOARD ] panel. If that panel offers no update, this "
+                 "server needs a newer container image."),
             now=now)
     else:
         db.clear_notice(conn, "ignored_report_sections", "report fields", now=now)
@@ -600,9 +616,19 @@ def _check_plan_without_share(
 def _check_machine_space(conn, settings, now: str) -> None:
     open_disks: list[str] = []
     open_trash: list[str] = []
+    # logic-alerts-8 (2026-09-25): which computers proxy download writes to.
+    # None when unreadable, which keeps the sync wording (the old behaviour).
+    try:
+        downloading: set[tuple[str, str]] | None = {
+            (str(pair[0]), str(pair[1]))
+            for pairs in db.fetch_machine_selections(
+                conn, sync_modes=(db.SYNC_MODE_FULL,), for_enforce=True).values()
+            for pair in pairs}
+    except sqlite3.Error:
+        downloading = None
     for row in conn.execute(
         "SELECT editor_username, machine, disk_root_free_bytes AS free, "
-        "disk_root_total_bytes AS total, disk_at, trash_bytes FROM machine_state"
+        "disk_root_total_bytes AS total, disk_at, trash_bytes, mode FROM machine_state"
     ):
         subject = f"{row['editor_username']}/{row['machine']}"
         # bug-hunt-2026-09-03 dash-collector-6: a measurement from a machine
@@ -620,15 +646,37 @@ def _check_machine_space(conn, settings, now: str) -> None:
         free = row["free"]
         if free is not None and int(free) < MACHINE_DISK_FLOOR_BYTES:
             open_disks.append(subject)
-            db.notice(
-                conn, "machine_disk_low", "warn", subject,
-                body=(f"{subject} has {int(free) // (1024 ** 3)} GB free on the drive it "
-                      "keeps footage on. Proxy downloads for one project are typically "
-                      "50 to 300 GB, so this computer is close to filling up, which "
-                      "stops it syncing and makes Resolve unusable on it too."),
-                fix=("Untick a project for that computer on its project page, or ask the "
-                     "editor to clear space on that drive."),
-                now=now)
+            # logic-alerts-8 (2026-09-25): a computer wired to the server, or
+            # with nothing ticked to download (a fine state, owner rule), has
+            # no proxy download to fill the drive and no tick to take off, so
+            # the sync consequence and the untick fix were both impossible.
+            # Its drive is still nearly full, which is said plainly.
+            no_download = (str(row["mode"] or "").strip().lower() == "base" or (
+                downloading is not None
+                and (str(row["editor_username"]), str(row["machine"])) not in downloading))
+            if no_download:
+                # Review round (2026-09-25): no claim about its ticks (an
+                # upload-only tick lands here too, and the admin can see it)
+                # and no "syncing is not at risk": shared asset folders such
+                # as the LUT library still come down with zero ticks (SPEC
+                # "Shared asset libraries"), and Syncthing stops a folder when
+                # the drive runs low.
+                body = (f"{subject} has {int(free) // (1024 ** 3)} GB free on the drive "
+                        "CC Sync works from. No project footage comes down to this "
+                        "computer (nothing it has ticked downloads, or it works "
+                        "straight off the server), so no project download will fill "
+                        "it, but the drive is nearly full, and anything else it syncs, "
+                        "such as the shared LUT library, stops when it runs out.")
+                fix = "Ask whoever uses that computer to clear space on that drive."
+            else:
+                body = (f"{subject} has {int(free) // (1024 ** 3)} GB free on the drive it "
+                        "keeps footage on. Proxy downloads for one project are typically "
+                        "50 to 300 GB, so this computer is close to filling up, which "
+                        "stops it syncing and makes Resolve unusable on it too.")
+                fix = ("Untick a project for that computer on its project page, or ask "
+                       "the editor to clear space on that drive.")
+            db.notice(conn, "machine_disk_low", "warn", subject, body=body, fix=fix,
+                      now=now)
         trash = row["trash_bytes"]
         if trash is not None and int(trash) > MACHINE_TRASH_FLOOR_BYTES:
             open_trash.append(subject)
@@ -731,7 +779,15 @@ def _check_feature_mounts(conn, settings, now: str) -> None:
         except (TypeError, ValueError):
             open_names.append(str(name))
             continue
-        if str(status) == "mounted":
+        # logic-alerts-1 (2026-09-25): `disabled` is the mounts' own word for
+        # "this deployment did not ask for it" (cards.py's tri-state note:
+        # the flag is off, no checkout or vault is configured; ytdl: the site
+        # has not enabled the downloader, which is the vendor build's
+        # default). Nothing is broken and no bind mount or restart can
+        # change it, so a card here stood for the life of every vendor
+        # install. Left out of the keep-list too, so a card from an earlier
+        # boot where the page WAS asked for and missing closes.
+        if str(status) in ("mounted", "disabled"):
             continue
         label = _MOUNT_LABELS.get(str(name), str(name).upper())
         open_names.append(str(name))
@@ -998,8 +1054,11 @@ def _check_server_crashes(conn, settings, now: str) -> None:
               "it started. The details are saved on the server. Whatever that task was "
               "doing (setting projects up, sharing them, measuring them) stopped when "
               "it fell over."),
-        fix=("Send us the crash files: Settings, Diagnostics, "
-             "[ DOWNLOAD CRASH REPORTS ]"),
+        # ui-copy-2 (2026-09-25): the registry gives this notice its own
+        # [ DOWNLOAD CRASH REPORTS ] button (db.NOTICE_KINDS href_label); the
+        # sentence used to send the owner to a Settings page that does not exist.
+        fix=("Send us the crash files: press [ DOWNLOAD CRASH REPORTS ] on this "
+             "notice and attach the zip."),
         now=now)
 
 
@@ -1394,7 +1453,7 @@ def record_db_busy(
         fix=("Something else held the database's write lock for longer than a "
              "request waits. The long writers record themselves as 'slow write' "
              "notices, so look for one from the same minute; if there is none and "
-             "this keeps climbing, send Diagnostics to support."),
+             "this keeps climbing, send the text of this notice to support."),
         now=stamp)
     conn.commit()
 
@@ -1409,17 +1468,20 @@ def record_slow_write(
     subject = str(what)[:120]
     seen = _seen_before(conn, SLOW_WRITE_KIND, subject)
     wait_s = db.BUSY_TIMEOUT_MS / 1000.0
+    # ui-copy-6 (2026-09-25): this body is shown on the home page's PROBLEMS
+    # THE SERVER FOUND panel, so it follows the no-em-dash rule, and " -- " is
+    # the typewriter spelling of one.
     db.notice(
         conn, SLOW_WRITE_KIND, "warn", subject,
         body=(f"{seen} time(s) {subject} held the database's write lock for longer "
               f"than a request waits ({wait_s:.0f} s); the last time took "
-              f"{seconds:.1f} s. Every other writer in that window -- a companion "
-              f"report, the collector, a page -- waited on it, and one that ran out "
+              f"{seconds:.1f} s. Every other writer in that window (a companion "
+              f"report, the collector, a page) waited on it, and one that ran out "
               f"of patience shows as 'database busy'."),
         fix=("A report this slow carries tens of thousands of media rows, or the "
              "pool was slow under it. If it is always the same computer, untick the "
-             "projects it does not need; if it is the collector, send Diagnostics "
-             "to support with the time."),
+             "projects it does not need; if it is the collector, send the text of "
+             "this notice to support."),
         now=stamp)
     conn.commit()
 
@@ -1512,7 +1574,9 @@ def record_server_error(
         body=(f"{seen} time(s) a request to {path} failed with an error "
               f"({type(exc).__name__}). Whoever was using that page saw a failure. "
               f"{error_detail(exc)}"),
-        fix=("Open Settings, Diagnostics and send the detail to support. The error "
+        # ui-copy-2 (2026-09-25): the detail support needs is the body above,
+        # not a page; "Settings, Diagnostics" does not exist.
+        fix=("Copy the text of this notice and send it to support. The error "
              "above is from the most recent time it happened; a container recreate "
              "loses the server log, so this notice is the copy that survives."),
         now=stamp)
@@ -1602,10 +1666,18 @@ def _triage_reply_accepted(conn, row: dict[str, Any], now: str) -> str:
 def _file_move_followed(conn, row: dict[str, Any], now: str) -> str:
     """`file_move_detected`: every computer the move was sent to has moved
     its own copy. The subject is the move's destination, so the newest
-    DETECTED move to that path is the one the card describes. A move with no
-    targets, or one a computer failed or never answered, is not evidenced
-    here (a never-answered one is `file_move_expired`'s business) and waits
-    for the quiet period."""
+    DETECTED move to that path is the one the card describes. A move a
+    computer failed or never answered is not evidenced here (a
+    never-answered one is `file_move_expired`'s business) and waits for the
+    quiet period.
+
+    logic-alerts-7 (2026-09-25): a move with NO targets is complete the
+    moment it is detected - no computer held a copy, which is what the card
+    itself says ("0 computer(s) are following ... Nothing to do") - so it
+    is evidenced too, and closes after `min_hours` like a followed move
+    rather than standing for the 7-day quiet period. The targets are written
+    in the same `record_file_move` call as the move, so an empty set is not
+    a half-written one."""
     subject = str(row.get("subject") or "")
     try:
         move = conn.execute(
@@ -1622,7 +1694,7 @@ def _file_move_followed(conn, row: dict[str, Any], now: str) -> str:
     except sqlite3.Error:
         return ""
     if not targets:
-        return ""
+        return "no computer held a copy to move"
     if all(t["applied_at"] and t["ok"] for t in targets):
         return f"all {len(targets)} computer(s) moved their copy"
     return ""

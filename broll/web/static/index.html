@@ -65,8 +65,12 @@
     <button id="ingest-btn" class="icon-btn" title="Add clips to the archive (or drag clips/folders anywhere on this page)">&#43;</button>
     <!-- Client folders (docs/CLIENT_FOLDERS.md): curate clips for a
          prospective licensee and hand them a link. clientfolders.js. -->
-    <button id="cf-btn" class="icon-btn" title="Client folders: curate clips and get a link to send to a client">&#9776;</button>
-    <button id="settings-btn" class="icon-btn" title="Settings">&#9881;</button>
+    <!-- ui-broll-web-13 (2026-09-25): these two were a hamburger and a gear,
+         and the injected dashboard topbar above carries its own hamburger (the
+         nav drawer) and gear (dashboard Settings). Neither of these is a menu
+         or Settings, so they say what they open instead. -->
+    <button id="cf-btn" class="icon-btn label-btn" title="Client folders: curate clips and get a link to send to a client">client folders</button>
+    <button id="settings-btn" class="icon-btn label-btn" title="Shares and the CC Sync tray on this computer">tray + shares</button>
   </div>
 </header>
 
@@ -311,7 +315,7 @@
 <div id="settings-panel" class="hidden">
   <div class="settings-inner">
     <button id="settings-close" class="text-btn">&times; close</button>
-    <h2>Settings</h2>
+    <h2>Tray and shares</h2>
 
     <h3>Shares</h3>
     <div id="shares-list" class="shares-list"></div>

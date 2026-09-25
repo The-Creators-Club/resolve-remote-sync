@@ -311,6 +311,33 @@ def _geometry_wh(geometry: Any) -> Optional[tuple[int, int]]:
     return (width, height) if width > 0 and height > 0 else None
 
 
+# The browsing preview a stand-in is made of: `ffmpeg_tools.preview_proxy_cmd`
+# (and the indexer's build_proxy), `scale=-2:trunc(min(PROXY_HEIGHT,ih)/2)*2`,
+# always H.264 (h264_nvenc or libx264). Read from ffmpeg_tools where it can
+# be, so the settlement moves if the preview spec ever does.
+PREVIEW_CODEC = "h264"
+
+
+def _preview_height() -> int:
+    try:
+        from . import ffmpeg_tools  # noqa: PLC0415
+
+        return int(ffmpeg_tools.PROXY_HEIGHT)
+    except Exception:  # noqa: BLE001
+        return 1080
+
+
+def _preview_keeps_geometry(original_wh: tuple[int, int]) -> bool:
+    """Whether the preview of an original this size has its exact WxH.
+
+    logic-broll-music-2 (2026-09-25): never upscaled, even height, and the
+    width follows the height with `-2` (even), so an original of at most the
+    preview height with even sides comes out the same size.
+    """
+    width, height = original_wh
+    return height <= _preview_height() and height % 2 == 0 and width % 2 == 0
+
+
 def _default_probe(path: Any) -> Optional[dict]:
     """The file's HEADER, through the companion's configured ffmpeg. Never
     raises and never a full demux: `probe_video` is one open, and the question
@@ -583,7 +610,11 @@ class StandinLedger:
         `routes_api._insert_object`). So:
 
           * the header MATCHES the row's geometry -> this is the real
-            original, and the row is RETIRED with a line saying so;
+            original, and the row is RETIRED with a line saying so -- except
+            for an original no taller than the preview, whose preview has
+            the same geometry: there a codec other than the preview's H.264
+            retires it and anything else asks the job record
+            (logic-broll-music-2, 2026-09-25);
           * the header DIFFERS -> the preview's bytes under the original's
             name, i.e. the stand-in we meant to place, so the row is MEASURED
             and becomes falsifiable by size again;
@@ -663,14 +694,35 @@ class StandinLedger:
         if wanted:
             probe = probe_fn if probe_fn is not None else _default_probe
             try:
-                measured = _geometry_wh(probe(path))
+                header = probe(path)
             except Exception:
-                measured = None
+                header = None
+            measured = _geometry_wh(header)
             if measured:
-                # The original's own geometry at the original's own path is
-                # the original. A stand-in is the preview's bytes and cannot
-                # match it.
-                return measured != wanted
+                if measured != wanted:
+                    # Not the original's geometry: the preview's bytes.
+                    return True
+                if not _preview_keeps_geometry(wanted):
+                    # The original's own geometry at the original's own path
+                    # is the original: the preview of anything taller than
+                    # the preview height is scaled down and cannot match.
+                    return False
+                # logic-broll-music-2 (2026-09-25): but the preview is scaled
+                # to min(1080, ih) and NEVER upscaled, so for an original of
+                # 1080 lines or fewer the stand-in has the original's exact
+                # geometry, and such an original is still "heavy" whenever
+                # its codec is not h264/hevc/prores or its bitrate is over
+                # the cap (DNxHD, 1080p H.264 at 50 Mbps). Equal geometry
+                # retired the row as "the real original arrived" and left
+                # the preview's bytes under the original's name, unmarked:
+                # proxy-tiers-1's outcome, which CR-288B/2 set out to
+                # prevent. Geometry cannot tell the two apart here. The
+                # preview is always H.264, so any other codec IS the
+                # original; H.264 or unknown falls through to the job
+                # record below, and a row nothing can settle stays pending.
+                codec = str((header or {}).get("codec") or "").strip().lower()
+                if codec and codec != PREVIEW_CODEC:
+                    return False
         ask = job_state_fn if job_state_fn is not None else _default_job_state
         try:
             state = ask(str(path or ""))
@@ -681,6 +733,40 @@ class StandinLedger:
         if state == "failed":
             return False
         return None
+
+    def settle_landed(self, local_path: Any) -> bool:
+        """The fetch THIS process ran for an intent row has landed: measure
+        the row now. True when a row changed.
+
+        bug-comp-broll-3 (2026-09-25): the insert's documented "BEFORE the
+        import, always" rewrite runs only on a poll that reads the job as
+        DONE, and that poll never happens (see `broll_fetch.reap_finished`),
+        so the clip was imported while its row was still a sizeless intent.
+        If the dashboard sent no geometry and the companion restarted inside
+        the 120 s `settle_intents` window, nothing could ever settle it:
+        `job_state` answers None after a restart. Called only with the job
+        record's own DONE for this destination, which is the same evidence
+        `settle_intents` accepts; the upgrade state is left to the insert.
+        """
+        key = normalise_key(local_path)
+        if not key:
+            return False
+        with self._lock:
+            self._load_locked()
+            entry = self._entries.get(key)
+            if not isinstance(entry, dict) or not entry.get("pending_fetch"):
+                return False
+            size = _size_of(entry.get("local_path") or local_path)
+            if size is None:
+                return False
+            entry = dict(entry)
+            entry["pending_fetch"] = False
+            entry["size"] = size
+            self._entries[key] = entry
+            self._persist_locked()
+        log.info("b-roll stand-ins: the download for %s landed -- %d bytes, "
+                 "and the entry can be falsified again", local_path, size)
+        return True
 
     def forget(self, local_path: Any) -> bool:
         """Drop the entry for this path. True when there was one."""
@@ -857,6 +943,15 @@ def record(local_path: Any, **kwargs: Any) -> dict[str, Any]:
         log.debug("b-roll stand-ins: could not record %r", local_path,
                   exc_info=True)
         return {}
+
+
+def settle_landed(local_path: Any) -> bool:
+    try:
+        return ledger().settle_landed(local_path)
+    except Exception:
+        log.debug("b-roll stand-ins: could not settle %r", local_path,
+                  exc_info=True)
+        return False
 
 
 def forget(local_path: Any) -> bool:

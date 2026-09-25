@@ -254,13 +254,13 @@ class TrueNASClient:
             uid = existing.get("uid")
             if uid is not None and int(uid) < MIN_EDITOR_UID:
                 raise TrueNASError(
-                    f"{username!r} is a system account (uid {uid}) -- refusing to modify it. "
+                    f"{username!r} is a system account (uid {uid}): refusing to modify it. "
                     "Pick a different username."
                 )
             if not self._in_editors_group(existing, gid):
                 raise TrueNASError(
                     f"{username!r} already exists on the NAS and is not in the {EDITORS_GROUP!r} "
-                    "group -- refusing to take over an account this dashboard didn't create. "
+                    "group: refusing to take over an account this dashboard didn't create. "
                     "Add it to the group by hand first, or pick a different username."
                 )
             body = {
@@ -321,7 +321,7 @@ class TrueNASClient:
             home_ok = self._fix_home_permissions(home, uid, unix_gid)
             if not home_ok:
                 warnings.append(
-                    "home directory permissions could not be confirmed fixed -- "
+                    "home directory permissions could not be confirmed fixed: "
                     "SSH/SFTP (lanes A/B) may fail with a generic auth error until "
                     "server/setup_editor_account.py or check_health.py verifies this"
                 )
@@ -438,12 +438,12 @@ class TrueNASClient:
         uid = user.get("uid")
         if uid is not None and int(uid) < MIN_EDITOR_UID:
             raise TrueNASError(
-                f"{username!r} is a system account (uid {uid}) -- refusing to set its "
+                f"{username!r} is a system account (uid {uid}): refusing to set its "
                 "password. This dashboard only manages editor accounts."
             )
         if not self._in_editors_group(user, gid):
             raise TrueNASError(
-                f"{username!r} is not in the {EDITORS_GROUP!r} group -- refusing to set the "
+                f"{username!r} is not in the {EDITORS_GROUP!r} group: refusing to set the "
                 "password of an account this dashboard didn't create."
             )
         resp = self.put(f"/user/id/{user['id']}", {"password": password})
@@ -476,12 +476,12 @@ class TrueNASClient:
         uid = user.get("uid")
         if uid is not None and int(uid) < MIN_EDITOR_UID:
             raise TrueNASError(
-                f"{username!r} is a system account (uid {uid}) -- refusing to delete it. "
+                f"{username!r} is a system account (uid {uid}): refusing to delete it. "
                 "This dashboard only manages editor accounts."
             )
         if not self._in_editors_group(user, gid):
             raise TrueNASError(
-                f"{username!r} is not in the {EDITORS_GROUP!r} group -- refusing to delete "
+                f"{username!r} is not in the {EDITORS_GROUP!r} group: refusing to delete "
                 "an account this dashboard didn't create. Remove it in the TrueNAS UI."
             )
         resp = self._request("DELETE", f"/user/id/{user['id']}", json_body={"delete_group": False})

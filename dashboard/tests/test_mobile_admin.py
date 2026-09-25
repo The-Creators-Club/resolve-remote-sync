@@ -64,7 +64,7 @@ ADMIN_PARTIALS = (
 # than a hole in the rule; the orchestrator decides whether they shrink.
 ALLOWED_LONG_CONFIRMS = (
     "Sign yourself out of every browser",              # C-9, test_sessions.py
-    "out of every browser? They will need to log in",  # C-9's other-row twin
+    "out of every browser? They will need to sign in",  # C-9's other-row twin (ui-copy-7: was "log in")
     "report token? Their companion stops reporting",   # C-8, test_report_tokens.py
     "This build has no release signature.",            # C-4, test_packages.py
     "These are the bytes a rollback to that version",  # C-5, test_packages.py

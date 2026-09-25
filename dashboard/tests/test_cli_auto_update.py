@@ -474,9 +474,18 @@ def test_the_replaced_version_outlives_the_flip_by_the_grace(settings):
     assert "previous_version" not in cli_tools.read_state(settings, NAME)
 
 
-def test_a_third_install_prunes_everything_but_the_live_and_the_last(settings):
-    for version in ("2.1.200", "2.1.267", "2.1.280"):
-        install_version(settings, version)
+def test_a_third_install_prunes_everything_but_the_live_and_the_last(settings,
+                                                                    monkeypatch):
+    # Changed by bug-dash-ops-8 (2026-09-25): the three installs used to land
+    # in the same instant and the first replaced version was pruned at once,
+    # which was the defect. A version is pruned by a later install only once
+    # its own grace is over, so the clock moves past it here.
+    clock = [1_000_000.0]
+    monkeypatch.setattr(cli_tools.time, "time", lambda: clock[0])
+    install_version(settings, "2.1.200")
+    install_version(settings, "2.1.267")          # 2.1.200 replaced now
+    clock[0] += cli_tools.PRUNE_GRACE_SECONDS + 1
+    install_version(settings, "2.1.280")
     root = cli_tools.tool_root(settings, NAME)
     assert sorted(p.name for p in root.iterdir() if p.is_dir()
                   and p.name[0].isdigit()) == ["2.1.267", "2.1.280"]

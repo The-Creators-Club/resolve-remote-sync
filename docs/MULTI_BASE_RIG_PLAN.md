@@ -65,7 +65,11 @@ wording in §2 is still owed.
   pin `effective_mode() == "editor"` so an admin could see the disagreement -
   see the comment in `companion/tests/test_role.py` for why that lost.
 * **WP5's copy — DONE 2026-08-19** (installer 1.0.35), the wizard question
-  itself. The precedence half of WP5 is not built.
+  itself. **WP5's precedence half - DONE 2026-09-25** (bug hunt 2026-09-24,
+  logic-onboarding-1): the radio wins, seeded on a re-run from the machine's
+  own config.toml `mode` (`steps.initial_install_role`); the account's role is
+  diagnostics only. Not built: seeding it from WP1's detection or a WP3
+  per-machine role.
 * Everything else below is unbuilt.
 
 ---

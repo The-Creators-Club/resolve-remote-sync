@@ -1197,7 +1197,10 @@ the file goes in (for Timeline Cards: `<episode>/Script Docs/remote_audio/
 source` for an extraction or a proxy, `<episode>/Script Docs/remote_audio` for
 peaks). `out_stem` is the name the page knows the clip by -- its multicam
 name, which is not always the media file's own stem; the default is the
-file's stem. Nothing anywhere guesses where a cache belongs in somebody's
+file's stem. An `out_stem` that is a dot name or holds a `/` or a control
+character is refused at submit with a 422 (no machine could write it); a `:`
+or `\` is accepted, and a Windows claimant hands such a job back for a Mac or
+the dashboard's own engine (bug-comp-media-3, 2026-09-25). Nothing anywhere guesses where a cache belongs in somebody's
 vault: a media job with no `out_rel` is refused with a sentence.
 
 `result.files` are relative to `result.out_root`, and `skipped: true` means
@@ -1240,7 +1243,9 @@ exactly like a fleet with nothing to do. Per-machine `reason`s are
 `capability | fleet_halt | machine_halt | upgrading | lane_b_breaker |
 already_holds_a_job | not_idle | no_capabilities_reported | kind_unknown |
 another_machine_is_preferred | cooling_down | kind_not_allowed |
-jobs_disabled | fleet_cap | not_the_target`.
+jobs_disabled | fleet_cap | not_the_target | not_reporting`
+(`not_reporting`: the machine has not reported for 15 min, so its last
+report is not an answer about now; logic-ytdl-jobs-1, 2026-09-25).
 
 **`schedulable` and `reason_code` are two different questions** (phase 4).
 `schedulable` keeps its phase-1 meaning -- "is anything going to take this,
@@ -1261,6 +1266,7 @@ apart, and it is a CODE because a client branches on it:
 | `halted` | a fleet halt, or every machine's sync halted | no |
 | `kind_not_allowed` | every machine's config excludes this kind | no |
 | `kind_unknown` | this dashboard does not know the kind | no |
+| `machines_not_reporting` | every machine that could run it has not reported for 15 min | no |
 | `target_away` | this job named one machine, and that machine is here and not free | yes |
 | `target_unknown` | this job named a machine no report has ever come from | no |
 | `held` / `pinned` / `finished` | somebody has it, or it is over | held and pinned, yes |

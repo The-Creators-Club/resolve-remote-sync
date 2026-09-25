@@ -57,6 +57,16 @@ class LaneStatus:
     # __setattr__ below rather than at each of the ~30 assignment sites,
     # every one of which would otherwise be a place to forget it.
     state_since: Optional[datetime] = None
+    # logic-sync-truth-6 (2026-09-25): which way this lane's owed work moves,
+    # "up", "down", "both", or "" when it is not moving or the lane does not
+    # say. For lane C, which is two-way: its one `queued` count is our need
+    # (a download) when there is one, else the server's need of us (an
+    # upload), and readers had to recover the direction from the words in
+    # `detail`. "both" (review round, 2026-09-25) because a download in
+    # flight used to hide an upload owed at the same time, and the drive
+    # reminder keys off the upload. In-process only: reporter.py builds the
+    # wire dict field by field, so this is never sent.
+    direction: str = ""
 
     def __post_init__(self) -> None:
         # Stamped here, not in __setattr__, for the construction case:

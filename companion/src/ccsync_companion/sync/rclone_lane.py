@@ -2140,15 +2140,23 @@ class RcloneRunTally:
             # Per-file records ("clip.mov: Copied (new)") only — the run-
             # summary stats line ("Transferred: 0 B / ...") must not count
             # as a file, which is why "Transferred" is NOT matched here.
-            self.transferred += 1
             if "Deleted" in msg or _BACKUP_MOVE in msg:
                 # --backup-dir does not delete, it moves aside ("clip.mov:
                 # Moved into backup dir") -- but from the destination's point
                 # of view the file is gone, and counting it as a completion
                 # put it in the dashboard's transfer HISTORY as if it had just
                 # arrived (SYNC-10).
+                #
+                # bug-comp-rclone-5 (2026-09-25): and NOT a transfer either.
+                # `transferred += 1` sat above this test, so a lane B pass
+                # that only trashed 12 superseded proxies said "transferred
+                # 12 file(s)" on the tray and the fleet grid, and
+                # _last_run_moved (transferred + deleted) counted each of them
+                # twice. rclone's own "Transferred:" figure never includes a
+                # deletion either.
                 self.deleted += 1
             else:
+                self.transferred += 1
                 # "object" is the file path relative to the transfer root
                 # ("B-roll/.../clip.mov") in rclone's per-file records.
                 name = str(record.get("object") or "")
@@ -2379,13 +2387,19 @@ def _project_rel_for_path(
             "the periodic pass owns it", path, local_root,
         )
         return None
-    inner = [p.lower() for p in parts[1:]]
+    # bug-comp-rclone-4 (2026-09-25): both sides folded to NFC before the
+    # case fold (CR-90). On a Mac the watchdog path is spelled the way the
+    # disk spells it, NFD, and the known rels come from the dashboard in NFC,
+    # so `Matej Šimalčík` matched nothing and its new clips waited for the
+    # rotation instead of going up express. COMPARISON ONLY: the rel handed
+    # back is the dashboard's own spelling, which is what the NAS holds.
+    inner = [nfc_key(p).lower() for p in parts[1:]]
 
     if known_rels is not None:
         best: Optional[str] = None
         best_len = 0
         for known in known_rels:
-            segs = [s.lower() for s in known.strip("/").split("/") if s]
+            segs = [nfc_key(s).lower() for s in known.strip("/").split("/") if s]
             if len(segs) < len(inner) and inner[: len(segs)] == segs and len(segs) > best_len:
                 best, best_len = known, len(segs)
         if not best:
@@ -2504,6 +2518,9 @@ class RcloneLane(LaneAdapter):
         # no longer in the trash for it to walk.
         self._server_relocated_keys: set[tuple[str, int]] = set()
         self._moved_out_of_trash = 0
+        # bug-comp-rclone-2 (2026-09-25): how many of this pass's trashed
+        # files those keys cover, handed to the breaker on EVERY pass.
+        self._server_relocated_count = 0
         # Last orphan-.partial scan (P8/P15/C-7): REPORTED, never deleted.
         self._orphans: Optional[dict] = None
         # subpath -> marker slug, for the project_slug on each transfer row.
@@ -3399,15 +3416,21 @@ class RcloneLane(LaneAdapter):
         markers = scan_project_markers(self.local_root)
         if markers is None:
             return None
+        # bug-comp-rclone-4 (2026-09-25): NFC on both sides (CR-90). The
+        # marker scan reads directory names off the disk, NFD on a Mac, and
+        # the rels are the dashboard's NFC, so a ticked, syncing project with
+        # an accented name was counted "in no sync plan" on every Mac. The
+        # folded key is compared only; `directory` is still reported as the
+        # disk spells it.
         expected = {
-            os.path.normcase(os.path.normpath(
-                str(Path(self.local_root) / "Projects" / Path(*rel.strip("/").split("/")))))
+            os.path.normcase(nfc_key(os.path.normpath(
+                str(Path(self.local_root) / "Projects" / Path(*rel.strip("/").split("/"))))))
             for rel in rels
         }
         strays: list[dict] = []
         total = 0
         for slug, directory in sorted(markers.items(), key=lambda kv: kv[1]):
-            if os.path.normcase(os.path.normpath(directory)) in expected:
+            if os.path.normcase(nfc_key(os.path.normpath(directory))) in expected:
                 continue
             size = _dir_size_bytes(directory)
             total += size
@@ -4115,6 +4138,7 @@ class RcloneLane(LaneAdapter):
         """
         self._server_relocated_keys = set()
         self._moved_out_of_trash = 0
+        self._server_relocated_count = 0
         if self.direction != DIRECTION_DOWN or self.locator is None:
             return
         backup_dir = self._last_backup_dir
@@ -4172,6 +4196,7 @@ class RcloneLane(LaneAdapter):
             deleted = len(trashed) - len(
                 [1 for name, size, _rel in trashed
                  if (nfc_key(name), int(size)) in self._server_relocated_keys])
+            self._server_relocated_count = len(trashed) - deleted
             log.info(
                 "lane B: the server was asked about %d trashed file(s) (inventory "
                 "as of %s): moved %d, trashed-as-duplicate %d, "
@@ -4490,6 +4515,7 @@ class RcloneLane(LaneAdapter):
             return self.breaker.note_pass(
                 scope, result.deleted, self._backup_dir_bytes(), local_proxies,
                 relocation_probe=lambda: self._count_relocations(subpath),
+                known_relocated=self._server_relocated_count,
             ) is not None
         except Exception:
             log.exception("%s: breaker accounting failed", self.name)
@@ -4514,6 +4540,25 @@ class RcloneLane(LaneAdapter):
         return cleared
 
     # -- .ccsync-trash retention (item 9) ---------------------------------
+    def _prune_free_target(self) -> int:
+        """The free space the disk-pressure prune works towards.
+
+        bug-comp-rclone-3 (2026-09-25): the floor while running, but the
+        CLEAR threshold while parked. The park only releases itself at
+        DISK_FLOOR_CLEAR_MULTIPLE x the floor, and a prune that stopped at 1x
+        left a laptop with 22 GB free and 30 GB of recovery copies parked
+        until somebody pressed RESUME: the automatic remedy could never
+        produce the automatic release. Never raises."""
+        floor = self.disk_floor
+        if floor is None:
+            return 0
+        try:
+            if floor.parked:
+                return int(getattr(floor, "clear_free_bytes", floor.min_free_bytes) or 0)
+            return int(floor.min_free_bytes or 0)
+        except Exception:
+            return 0
+
     def _maybe_prune_trash(self) -> None:
         """Run the retention policy at most once per interval. Lane B only:
         the trash belongs to lane B's --backup-dir and nothing else writes
@@ -4534,8 +4579,7 @@ class RcloneLane(LaneAdapter):
                 # SYNC-16 / SYNC-7: disk pressure is the third trigger, and
                 # the one that matters on the machine whose lane B keeps
                 # failing -- the floor and the prune are the same number.
-                min_free_bytes=(self.disk_floor.min_free_bytes
-                                if self.disk_floor is not None else 0),
+                min_free_bytes=self._prune_free_target(),
                 free_bytes_fn=self._free_bytes_fn,
             )
             trash = scan_trash_dir(self.local_root)

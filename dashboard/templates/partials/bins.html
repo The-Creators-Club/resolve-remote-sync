@@ -1,7 +1,7 @@
 <div class="presence-box">
   {% set nas = presence.nas %}
   <div class="side-head">[ MEDIA PRESENCE ]
-    <span class="muted">NAS has {{ nas.n_originals }} original(s) · {{ nas.n_proxies }} proxy file(s)</span>
+    <span class="muted">NAS has {{ nas.n_originals }} original{{ "s" if nas.n_originals != 1 }} · {{ nas.n_proxies }} proxy file{{ "s" if nas.n_proxies != 1 }}</span>
   </div>
   {% if presence.editors %}
     {% for e in presence.editors %}

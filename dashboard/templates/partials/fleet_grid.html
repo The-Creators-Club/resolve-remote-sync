@@ -75,9 +75,9 @@
    there. Admin-only, because api.py's _scope_editors_view drops the block for
    everyone else. #}
 {% if fleet.collector and fleet.collector.enforce_refusal %}
-<div class="banner alarm">⛔ {{ fleet.collector.enforce_refusal.count }} SHARE REMOVAL(S) REFUSED:
+<div class="banner alarm">⛔ {{ fleet.collector.enforce_refusal.count }} SHARE REMOVAL{{ "S" if fleet.collector.enforce_refusal.count != 1 }} REFUSED:
   shares are FROZEN. No untick is being applied on
-  {{ fleet.collector.enforce_refusal.folders | length }} folder(s),
+  {{ fleet.collector.enforce_refusal.folders | length }} folder{{ "s" if fleet.collector.enforce_refusal.folders | length != 1 }},
   {{ fleet.collector.enforce_refusal.devices | length }} computer{{ "s" if fleet.collector.enforce_refusal.devices | length != 1 }}. Approve the pending
   devices (Settings, then USERS), then this clears itself on the next cycle. To allow a
   removal this large deliberately, ask whoever installed this server to raise the limit
@@ -236,7 +236,7 @@
                  cannot say is HOW LONG and HOW MANY TRIES: the difference
                  between "he rebooted" and "that machine has needed a human
                  since Tuesday". #}
-              {% if e.guard.supervisor_down_since %}{% set engine_extra = (("; " ~ e.guard.supervisor_attempts ~ " automatic restart attempt(s) have failed") if e.guard.supervisor_attempts else "") ~ ("; automatic restarts are switched off or suppressed on this machine, so nothing is trying" if (e.guard.supervisor_supervising is not none and not e.guard.supervisor_supervising) else "") ~ ((". Last error: " ~ e.guard.supervisor_last_error) if e.guard.supervisor_last_error else "") %}<span class="chip red" title="{{ chip_help('sync_engine_down', since=e.guard.supervisor_down_since, extra=engine_extra) }}">[ SYNC ENGINE DOWN {{ e.guard.supervisor_down_since | ago }}{% if e.guard.supervisor_attempts %}, {{ e.guard.supervisor_attempts }} RESTART{{ "S" if e.guard.supervisor_attempts != 1 }} FAILED{% endif %} ]</span>{% endif %}
+              {% if e.guard.supervisor_down_since %}{% set engine_extra = (("; " ~ e.guard.supervisor_attempts ~ (" automatic restart attempt has failed" if e.guard.supervisor_attempts == 1 else " automatic restart attempts have failed")) if e.guard.supervisor_attempts else "") ~ ("; automatic restarts are switched off or suppressed on this machine, so nothing is trying" if (e.guard.supervisor_supervising is not none and not e.guard.supervisor_supervising) else "") ~ ((". Last error: " ~ e.guard.supervisor_last_error) if e.guard.supervisor_last_error else "") %}<span class="chip red" title="{{ chip_help('sync_engine_down', since=e.guard.supervisor_down_since, extra=engine_extra) }}">[ SYNC ENGINE DOWN {{ e.guard.supervisor_down_since | ago }}{% if e.guard.supervisor_attempts %}, {{ e.guard.supervisor_attempts }} RESTART{{ "S" if e.guard.supervisor_attempts != 1 }} FAILED{% endif %} ]</span>{% endif %}
               {# SYS-4 / APP-13: nothing anywhere measured this. A slow clock
                  makes lane B exclude every file on the NAS (rclone --min-age
                  reads their age as negative), transfer nothing, exit 0 and
@@ -273,11 +273,11 @@
                  unprotected. #}
               {% if e.guard.resolve_out_of_tree %}<span class="chip amber" title="{{ chip_help('out_of_tree', n=e.guard.resolve_out_of_tree, bad_prefix=((", " ~ e.guard.resolve_bad_prefix ~ " of them under the wrong drive letter") if e.guard.resolve_bad_prefix else ""), at=e.guard.resolve_last_scan_at | ago) }}">[ {{ e.guard.resolve_out_of_tree }} CLIPS OUTSIDE THE TREE ]</span>{% endif %}
               {% if e.guard.stray_projects_count %}<span class="chip amber" title="{{ chip_help('stray_dirs', n=e.guard.stray_projects_count, bytes=e.guard.stray_projects_bytes | human_bytes) }}">[ {{ e.guard.stray_projects_count }} STRAY PROJECT DIRS ]</span>{% endif %}
-              {% if e.guard.moved_project_dirs_count %}<span class="chip amber" title="{{ e.guard.moved_project_dirs_count }} project folder(s) on this computer are not where the tree expects them. Syncing for those projects looks busy and moves nothing. Move it back, or use MOVE ON THE SERVER AND ON EVERY MACHINE on the project page.">[ PROJECT FOLDER MOVED ]</span>{% endif %}
+              {% if e.guard.moved_project_dirs_count %}<span class="chip amber" title="{{ e.guard.moved_project_dirs_count }} project folder{{ "s" if e.guard.moved_project_dirs_count != 1 }} on this computer {{ "are" if e.guard.moved_project_dirs_count != 1 else "is" }} not where the tree expects them. Syncing for those projects looks busy and moves nothing. Move it back, or use MOVE ON THE SERVER AND ON EVERY MACHINE on the project page.">[ PROJECT FOLDER MOVED ]</span>{% endif %}
               {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ chip_help('skipped_exists', n=e.guard.skipped_exists, scope=skipped_scope(e.guard)) }}">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
               {% if e.transport.orphan_partials %}<span class="chip amber" title="{{ chip_help('orphans', bytes=e.transport.orphan_partial_bytes | human_bytes) }}">[ ORPHANS: {{ e.transport.orphan_partials }} ]</span>{% endif %}
               {% if e.transport.express_last_error %}<span class="chip amber" title="last express upload failure: {{ e.transport.express_last_error }}">[ EXPRESS UPLOAD FAILED ]</span>
-              {% elif e.transport.express_dropped %}<span class="chip amber" title="{{ e.transport.express_dropped }} file(s) dropped by the express upload's batch cap: they still go up on the next periodic pass.">[ EXPRESS DROPPED: {{ e.transport.express_dropped }} ]</span>{% endif %}
+              {% elif e.transport.express_dropped %}<span class="chip amber" title="{{ e.transport.express_dropped }} file{{ "s" if e.transport.express_dropped != 1 }} dropped by the express upload's batch cap: they still go up on the next periodic pass.">[ EXPRESS DROPPED: {{ e.transport.express_dropped }} ]</span>{% endif %}
               {# APP-6: crash_report.py writes these and its own docstring
                  names "the tray stayed up with a dead lane" as the failure to
                  fix. CR-88 route sweep (2026-09-03): Copy diagnostics is not
@@ -474,7 +474,10 @@
   </tbody>
 </table></div>
 {% else %}
-<div class="muted">No computer has reported yet. Each companion is given this dashboard's address when it is installed: if one is running and is not here, ask that editor for Settings, then Help, then Copy diagnostics.</div>
+{# ui-copy-5 (2026-09-25): this hand-wrote a third route to the button
+   ("Settings, then Help, then Copy diagnostics"); the one wording lives in
+   health.COMPANION_DIAGNOSTICS_PATH, which the tray copy matches. #}
+<div class="muted">No computer has reported yet. Each companion is given this dashboard's address when it is installed: if one is running and is not here, ask that editor to open {{ COMPANION_DIAGNOSTICS_PATH }} and send you what it copies.</div>
 {% endif %}
 
 {# DASH-16 (resilience sweep 2026-08-28). A computer must never leave this

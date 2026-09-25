@@ -256,7 +256,7 @@ def test_the_admins_own_row_is_labelled_sign_me_out_everywhere(strict, tmp_path)
         # C-9's own-row copy and the generic other-row copy are both present,
         # and distinct.
         assert ("Sign yourself out of every browser, including this one? "
-                "You will need to log in again to finish what you are doing."
+                "You will need to sign in again to finish what you are doing."
                 ) in panel.text
         assert "Their computer's own sync is not affected." in panel.text
 
@@ -273,7 +273,7 @@ def test_c9_topbar_logout_all_gets_a_matching_confirm(strict, tmp_path):
     assert "onsubmit=" in text
     assert "window.confirm(" in text
     assert ("Sign yourself out of every browser, including this one? "
-            "You will need to log in again to finish what you are doing."
+            "You will need to sign in again to finish what you are doing."
             ) in text
 
     # And it actually round-trips: the endpoint still logs the browser out.

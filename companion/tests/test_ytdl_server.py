@@ -541,7 +541,7 @@ def test_neither_the_file_nor_the_folder_spawns_nothing(tmp_path, spawned):
     )
 
     assert status == 200 and body["ok"] is False
-    assert "is not on this machine" in body["message"]
+    assert "is not on this computer" in body["message"]
     # 2026-08-16: originals no longer sync down, so the message must not
     # promise "has it synced here yet?" -- it says where the clip is instead.
     assert "synced here yet" not in body["message"]

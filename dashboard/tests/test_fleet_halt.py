@@ -433,7 +433,9 @@ def test_extend_on_an_expired_halt_refuses_rather_than_going_blank(env, monkeypa
         "/partials/admin/fleet-halt", data={"active": "1", "extend": "1"})
     assert panel.status_code == 200
     assert "already started again" in panel.text
-    assert prior["expires_at"] in panel.text
+    # ui-dash-admin-12 (2026-09-25): the banner names the moment as a person
+    # reads it (site zone, minutes), no longer the raw ISO expires_at.
+    assert dbmod._halt_when_text(conn, prior["expires_at"]) in panel.text
     # Nothing was silently re-halted with a blank reason.
     assert dbmod.get_fleet_halt(conn)["active"] is False
 

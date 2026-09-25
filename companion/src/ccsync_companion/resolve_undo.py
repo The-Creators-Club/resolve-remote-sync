@@ -72,8 +72,11 @@ RETRY_HINTS = (
     "didn't answer",
     "did not answer",
 )
+# ui-copy-4 (2026-09-25): "Waiting", not "Parked" (a retired word, sweep
+# 2026-09-03 section 4). Nothing parses this sentence: the wire's state is
+# STATE_RETRYING and the dashboard only displays the detail.
 PARKED_DETAIL = (
-    "Parked: there is no project open in Resolve on this computer. CCSync "
+    "Waiting: there is no project open in Resolve on this computer. CCSync "
     "will put the clip paths back on its own the next time that project is "
     "open."
 )
@@ -225,6 +228,21 @@ def apply_undo(command: dict[str, Any], undo_fn=None,
     # closed, another project open, the media pool unreadable. Answering
     # `failed` here is what would let an admin believe a change had been put
     # back when it had not.
+    # bug-comp-resolve-1 (2026-09-25): the bridge's own "no connection"
+    # sentences first, by identity rather than by substring. CR-68 added
+    # STARTING_MESSAGE ("DaVinci Resolve is starting up") after RES-4 wrote
+    # the hint lists below, and it matched none of them, so an undo that
+    # arrived in Resolve's 90-470 s launch window was recorded FAILED and
+    # retired by the dashboard, though nothing was wrong but the timing.
+    # Asking the bridge keeps a fifth such sentence from repeating this.
+    try:
+        from . import resolve_bridge
+
+        disconnected = resolve_bridge.is_disconnection_message(message)
+    except Exception:                                                 # noqa: BLE001
+        disconnected = False
+    if disconnected:
+        return False, message, STATE_RETRYING
     lowered = message.lower()
     if any(hint in lowered for hint in PARK_HINTS):
         return False, PARKED_DETAIL, (STATE_PARKED if allow_parked else STATE_RETRYING)

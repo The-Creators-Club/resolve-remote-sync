@@ -181,6 +181,12 @@ Base: `/api`. JSON. No auth in v1 (Tailscale-only deployment).
     replaces existing segments for that video atomically.
   - `POST /api/ingest/moved` — body `{video_id, new_rel_path}` (category sort).
 
+  Both `/index` and `/moved` also take optional `share` + `rel_path` (for
+  `/moved`, the path the clip is moving FROM), which win over `video_id` when
+  sent (bug-broll-2, 2026-09-25): the indexer's `HttpBackend` keeps a local
+  shadow whose ids are its own, and used to post those. It now records the id
+  `/ingest/video` answers with and sends it alongside the path.
+
   `/api/ingest/index` computes `segments.search_norm` itself since 2026-08-18.
   It used to insert an empty one — the indexer's `HttpBackend` said search_norm
   "is not supported over the ingest API" — so anything indexed over HTTP was

@@ -44,7 +44,7 @@ from .shared_folders import (
     FolderProblems,
     log_persistent_problem,
 )
-from .syncthing_admin import is_restricted, restricted_ignore_lines
+from .syncthing_admin import is_restricted, release_guard, restricted_ignore_lines
 
 log = logging.getLogger("ccsync.sync.borrowed_folders")
 
@@ -380,7 +380,8 @@ class BorrowedFolderManager:
             log.warning("borrowed folder %s: could not create %s: %s", slug, want_path, exc)
             return "error"
         self.admin.accept_folder(slug, rel, want_path, device_id,
-                                 ignore_lines=want_ignores)
+                                 ignore_lines=want_ignores,
+                                 **release_guard(self.admin, self.halted))
         return "accepted"
 
     def _drop_unborrowed(self, live: set[str]) -> None:

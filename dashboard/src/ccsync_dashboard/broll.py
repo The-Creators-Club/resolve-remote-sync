@@ -217,6 +217,48 @@ class BrollGate:
         self._settings = settings
         self._secret = getattr(settings, "session_secret", "") or ""
 
+    def _session_user(self, scope: dict, headers: list) -> str | None:
+        """Who `login_gate` decided this browser is, or None.
+
+        bug-dash-cards-jobs-4 (2026-09-25): this re-decoded the cookie with
+        the CURRENT session secret only, while `login_gate` accepts one signed
+        with any DASH_SESSION_SECRET_PREVIOUS key (DASH-2: a rotation must not
+        sign everybody out mid-incident). So for the whole drain window after
+        a rotation every signed-in editor reached this mount with NO identity
+        header, and the ingest panels and client folders answered 401 "not
+        signed in" on a page that showed them signed in. The answer
+        `login_gate` already resolved is in the request state (the rule
+        `CardsDispatch._note` follows), and it also honours a server-side
+        revocation the signature alone cannot see. When nothing resolved one
+        (a gate driven without the dashboard in front of it), the cookie is
+        read on the same terms `login_gate` reads it: every accepted secret.
+        """
+        state = scope.get("state")
+        if isinstance(state, dict) and "ccsync_session" in state:
+            try:
+                session = state.get("ccsync_session")
+                return (session[0] if session else None) or None
+            except Exception:  # noqa: BLE001 - fail closed: no header at all
+                return None
+        # bug-dash-ops-2 / bug-dash-ops-3 (2026-09-25, owed from d-ops): no
+        # verdict in the state yet, but the dashboard is in the scope. Ask
+        # login_gate's own resolver (and cache it, as it would), so the
+        # server-side revocation check applies here too and this gate agrees
+        # with ytdl.YtdlGate._session_user. Only a gate with no dashboard app
+        # around it falls through to reading the cookie itself.
+        app = scope.get("app")
+        if getattr(getattr(app, "state", None), "settings", None) is not None:
+            try:
+                from starlette.requests import Request
+                return auth.get_session_user(Request(scope)) or None
+            except Exception:  # noqa: BLE001 - fail closed: no header at all
+                return None
+        if not self._secret:
+            return None
+        return auth.read_session_cookie(
+            self._secret, _session_cookie(headers),
+            previous=auth.previous_session_secrets(self._settings))
+
     def _identified_scope(self, scope: dict) -> dict:
         """A copy of `scope` whose headers carry our identity pair and no other.
 
@@ -229,8 +271,7 @@ class BrollGate:
         stamp = self._fleet_stamp(headers)
         if stamp is not None:
             headers.append((FLEET_AUTH_HEADER, stamp))
-        username = (auth.read_session_cookie(self._secret, _session_cookie(headers))
-                    if self._secret else None)
+        username = self._session_user(scope, headers)
         if username:
             encoded = _header_value(username)
             if encoded is None:
@@ -380,15 +421,22 @@ def _session_cookie(headers: list[tuple[bytes, bytes]]) -> str | None:
     is `v2.session.<b64url>.<expires>.<hmac>` and base64url padding is
     stripped, but a cookie parser that loses everything after a second "=" is a
     bug waiting for the day that changes.
+
+    The LAST match wins (bug-dash-ops-3, 2026-09-25), as in Starlette's
+    cookie_parser, which is what login_gate reads through request.cookies: a
+    browser holding two ccsync_session cookies (a narrower Path, or one
+    planted from another port on the same host) must not be one person to
+    the gate and another to the sub-app. music.py imports this helper.
     """
+    found: str | None = None
     for key, value in headers:
         if key.lower() != b"cookie":
             continue
         for part in value.decode("latin-1").split(";"):
             name, sep, raw = part.strip().partition("=")
             if sep and name == auth.COOKIE_NAME:
-                return raw.strip()
-    return None
+                found = raw.strip()
+    return found
 
 
 def sub_paths(scope: dict) -> tuple[str, ...]:

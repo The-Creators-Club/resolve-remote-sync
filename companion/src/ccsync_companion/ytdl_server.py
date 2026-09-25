@@ -300,7 +300,7 @@ def build_reveal_response(
         # likely story and the message must not promise it. The folder is
         # still the useful answer: it is what the editor clicked to look at.
         target, select = str(folder), False
-        message = (f"{path.name} is not on this machine - opened {folder} instead. "
+        message = (f"{path.name} is not on this computer - opened {folder} instead. "
                    f"{NOT_HERE_WHY}")
         absent = True
     else:
@@ -309,7 +309,7 @@ def build_reveal_response(
         return 200, {
             "ok": False,
             "absent": True,
-            "message": f"{path} is not on this machine. {NOT_HERE_WHY}",
+            "message": f"{path} is not on this computer. {NOT_HERE_WHY}",
         }
 
     argv = reveal_command(target, select, platform)
@@ -402,7 +402,7 @@ def build_fetch_response(
         # clip this machine downloaded itself. Not an error, and not a reason
         # to spend an rclone on it.
         return 200, {"ok": True, "state": broll_fetch.STATE_DONE,
-                     "message": f"{Path(local).name} is on this machine"}
+                     "message": f"{Path(local).name} is on this computer"}
 
     cfg = ccsync_cfg or {}
     refusal = broll_fetch.fetch_refusal(cfg, local)
@@ -425,7 +425,7 @@ def build_fetch_response(
         # success and left nothing -- a failure, said plainly.
         if file_check(local):
             return 200, {"ok": True, "state": state,
-                         "message": f"{Path(local).name} is on this machine"}
+                         "message": f"{Path(local).name} is on this computer"}
         return 200, {"ok": False, "state": broll_fetch.STATE_FAILED,
                      "message": "the download finished but the file is not "
                                 "there - try again"}

@@ -949,10 +949,10 @@ def test_tally_captures_completed_file_names():
     tally.feed_record({"level": "error", "msg": "boom"})
     result = tally.result()
     assert result.completed_files == ["B-roll/a.mov"]
-    # A delete still counts as a per-file record ("transferred" is rclone's
-    # own per-file line count, not a byte claim); the completion list is what
-    # the dashboard's history reads, and that must hold arrivals only.
-    assert result.transferred == 2 and result.deleted == 1
+    # bug-comp-rclone-5 (2026-09-25): a delete is a deletion, not a transfer
+    # (this used to pin transferred == 2); the completion list is what the
+    # dashboard's history reads, and that must hold arrivals only.
+    assert result.transferred == 1 and result.deleted == 1
 
 
 def test_a_backup_dir_move_is_one_deletion_and_no_completion():
@@ -971,7 +971,9 @@ def test_a_backup_dir_move_is_one_deletion_and_no_completion():
     result = tally.result()
     assert result.completed_files == []
     assert result.deleted == 1
-    assert result.transferred == 1
+    # bug-comp-rclone-5 (2026-09-25): 0, not 1 -- a trashed file is not a
+    # transfer.
+    assert result.transferred == 0
 
 
 def test_lane_records_and_drains_completions(tmp_path):
@@ -1289,7 +1291,8 @@ def test_stats_ticks_are_not_counted_as_transferred_or_deleted_files():
     tally.feed_record({"level": "info", "msg": "old.mov: Deleted", "object": "old.mov"})
 
     result = tally.result()
-    assert (result.transferred, result.deleted) == (1, 1)
+    # bug-comp-rclone-5 (2026-09-25): the deletion is not a transfer too.
+    assert (result.transferred, result.deleted) == (0, 1)
     assert result.completed_files == []
 
 

@@ -263,7 +263,41 @@ def library_index(library: Path) -> dict[str, int]:
     return index
 
 
-def stray_luts(search_dirs: list[Path], library: Path, max_results: int = 200) -> list[dict]:
+# logic-resolve-3 (2026-09-25): what Resolve itself ships in its LUT folder,
+# top level, casefolded. The stray search reads that folder, and nothing
+# excluded factory content, so the first SHARE copied the whole factory set
+# into the library -- which this module's docstring forbids, because an
+# additional location is searched IN ADDITION to the factory one and every
+# factory LUT then shows twice in the browser. It happened: P:\Assets\Luts
+# holds ACES, Arri, Blackmagic Design, DCI, the loose .ilut/.olut set ...
+# Measured against this rig's Resolve factory folder on 2026-09-25, plus the
+# camera-vendor folders other builds ship. `resolve_factory_luts_extra`
+# (comma-separated names) extends it without a build.
+RESOLVE_FACTORY_LUT_NAMES = frozenset(name.casefold() for name in (
+    "ACES", "Apple", "Arri", "Astrodesign", "Blackmagic Design", "Canon",
+    "DCI", "DCTL", "DJI", "Film Looks", "Fujifilm", "GoPro",
+    "HDR Hybrid Log-Gamma", "HDR ST 2084", "Leica", "Nikon", "Olympus",
+    "Panasonic", "RED", "Samsung", "Sony", "VFX IO", "Z CAM",
+    "Canon Log to Cineon.ilut", "Canon Log to Rec709.ilut",
+    "Canon Log to Video.ilut", "Cintel Negative to Linear.ilut",
+    "Cintel Print to Linear.ilut", "Data To Video with Clip.olut",
+    "Invert Color.ilut", "Invert Color.olut",
+    "Sony SLog2 to Rec709.ilut", "Sony SLog3 to Rec709.ilut",
+))
+
+
+def _is_factory(path: Path, base: Path, factory_names: frozenset[str]) -> bool:
+    """Is `path` (found under the searched folder `base`) part of what Resolve
+    ships? Judged by its TOP-LEVEL entry under `base`."""
+    try:
+        top = path.relative_to(base).parts[0]
+    except (ValueError, IndexError):
+        return False
+    return top.casefold() in factory_names
+
+
+def stray_luts(search_dirs: list[Path], library: Path, max_results: int = 200,
+               factory_names: Optional[frozenset[str]] = None) -> list[dict]:
     """LUTs sitting outside the library that the library does not have.
 
     `search_dirs` are the places an editor actually drops a LUT -- Resolve's
@@ -276,8 +310,11 @@ def stray_luts(search_dirs: list[Path], library: Path, max_results: int = 200) -
     same LUT as the library's "Studio/Studio CC.cube", and prompting to copy
     it in again would be noise forever.
     """
+    if factory_names is None:
+        factory_names = RESOLVE_FACTORY_LUT_NAMES
+    index = library_index(library)
     by_name: dict[str, list[int]] = {}
-    for key, size in library_index(library).items():
+    for key, size in index.items():
         by_name.setdefault(key.rsplit("/", 1)[-1], []).append(size)
 
     found: list[dict] = []
@@ -303,6 +340,17 @@ def stray_luts(search_dirs: list[Path], library: Path, max_results: int = 200) -
                 continue
             if size in by_name.get(path.name.lower(), []):
                 continue
+            if _is_factory(path, base, factory_names):
+                continue
+            dest_rel = _dest_rel(path, base)
+            # logic-resolve-3 (2026-09-25): a name the library already holds
+            # at the exact place this would land is shared, whatever its
+            # size. copy_into_library never overwrites, so offering it again
+            # was an item that answered "Shared 0 LUTs" for ever -- which is
+            # what a Resolve build whose factory files differ in size from
+            # the ones already copied in got on every machine.
+            if dest_rel.lower() in index:
+                continue
             found.append({
                 "path": str(path),
                 "name": path.name,
@@ -310,7 +358,7 @@ def stray_luts(search_dirs: list[Path], library: Path, max_results: int = 200) -
                 # Where it would land: the pack folder it sits in, preserved
                 # one level deep, so "GR FILM LUTS/x.cube" stays grouped and
                 # a loose file lands loose.
-                "dest_rel": _dest_rel(path, base),
+                "dest_rel": dest_rel,
             })
     return found
 
@@ -365,6 +413,7 @@ def copy_into_library(entries: list[dict], library: Path) -> dict:
             log.warning("luts: refusing to copy %s to %s -- outside the library %s",
                         src, dest, library)
             continue
+        tmp: Optional[Path] = None
         try:
             if dest.exists():
                 skipped += 1
@@ -380,6 +429,21 @@ def copy_into_library(entries: list[dict], library: Path) -> dict:
             copied += 1
         except OSError as exc:
             errors.append(f"{src.name}: {exc}")
+            # bug-comp-resolve-9 (2026-09-25): a copy2 that died part way
+            # (disk full, the share dropped) or an os.replace that was refused
+            # (a locked destination) left the partial tmp inside the shared
+            # LUT library for good -- ignored by Syncthing, so no other
+            # machine ever cleans it, and nothing here looked for it again.
+            # The name is ours alone (fixed suffix, written only by this
+            # function), so removing it can never take anyone's data.
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    log.warning("luts: could not remove the partial copy %s -- "
+                                "delete it by hand", tmp)
     return {"copied": copied, "skipped": skipped, "errors": errors}
 
 
@@ -528,7 +592,10 @@ class LutLinkManager:
         if not self.enabled:
             return []
         try:
-            return stray_luts(self.search_dirs(), self.library())
+            extra = str(self.cfg.get("resolve_factory_luts_extra", "") or "")
+            names = RESOLVE_FACTORY_LUT_NAMES | frozenset(
+                part.strip().casefold() for part in extra.split(",") if part.strip())
+            return stray_luts(self.search_dirs(), self.library(), factory_names=names)
         except Exception:
             log.debug("luts: stray scan failed", exc_info=True)
             return []

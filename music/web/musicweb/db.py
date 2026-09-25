@@ -537,6 +537,96 @@ def unique_dest(name, root=None):
     return config.safe_join(root, cand)
 
 
+# bug-music-ytdl-2 (2026-09-25): ONE lock for "pick a library filename and make
+# the pick visible". A fleet `result` makes its name visible by committing the
+# `tracks` row and `ingest_items.dest_name` (ingest_batches.write_item_result);
+# a browser upload makes it visible by creating the file (claim_dest below).
+# Either side checking between the other's pick and its commit would see the
+# name free. The app runs one uvicorn worker, so a process lock is the whole
+# serialisation, and it is held for a stat loop plus one small transaction,
+# never across a copy.
+NAME_LOCK = threading.Lock()
+
+# The item states whose `dest_name` is a promise a companion upload will keep.
+# The same exclusion list as ingest_batches.reserved_names, repeated here
+# because the indexer imports this module on a host where ingest_batches (it
+# needs fastapi) is not importable.
+_UNRESERVED_ITEM_STATES = ('cancelled', 'failed', 'skipped', 'duplicate')
+
+
+def _name_promised(con, name):
+    """Is `name` already a track, or reserved by an unlanded fleet item?"""
+    if con is None:
+        return False
+    spellings = {name, unicodedata.normalize('NFC', name),
+                 unicodedata.normalize('NFD', name)}
+    for spelling in spellings:
+        if con.execute('SELECT 1 FROM tracks WHERE rel_path = ? LIMIT 1',
+                       (spelling,)).fetchone():
+            return True
+    try:
+        marks = ','.join('?' for _ in _UNRESERVED_ITEM_STATES)
+        for spelling in spellings:
+            if con.execute(
+                    'SELECT 1 FROM ingest_items WHERE lower(dest_name) = lower(?) '
+                    f'AND state NOT IN ({marks}) LIMIT 1',
+                    (spelling, *_UNRESERVED_ITEM_STATES)).fetchone():
+                return True
+    except sqlite3.OperationalError:
+        # A pre-004 database has no ledger and so no promises to honour.
+        pass
+    return False
+
+
+def claim_dest(con, name, root=None):
+    """A flat library path nobody has promised, created EMPTY so it stays ours.
+
+    bug-hunt-2026-09-24 bug-music-ytdl-2 (2026-09-25). The browser path used
+    `unique_dest`, which asks only the disk. A fleet `result` promises its name
+    minutes or hours before the companion's rclone lands the audio, so a
+    browser drop of a different `theme.wav` in that window was moved to the
+    promised name and then overwritten by the upload, which `mark_uploaded`
+    accepted because the size matched the fleet item. This asks the same
+    three questions `ingest_batches.allocate_name` asks (disk, `tracks`, the
+    unlanded ledger) and creates the file O_EXCL under NAME_LOCK, so the
+    fleet's disk check sees the name as taken from this instant.
+
+    The caller moves the real bytes over the placeholder, and removes it with
+    `release_dest` if anything fails before that.
+    """
+    root = config.share_root() if root is None else root
+    stem, ext = os.path.splitext(name)
+    cand, i = name, 2
+    with NAME_LOCK:
+        while True:
+            path = config.safe_join(root, cand)
+            on_disk = any(config.safe_join(root, s).exists() for s in
+                          {cand, unicodedata.normalize('NFD', cand)})
+            if not on_disk and not _name_promised(con, cand):
+                try:
+                    fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                                 0o600)
+                except FileExistsError:
+                    pass
+                else:
+                    os.close(fd)
+                    return path
+            cand = f'{stem} ({i}){ext}'
+            i += 1
+            if i > 1002:
+                raise OSError(f'the library already holds 1000 files named like '
+                              f'"{name}"; nothing was written')
+
+
+def release_dest(path):
+    """Remove a claim_dest placeholder the real bytes never replaced."""
+    try:
+        if path.stat().st_size == 0:
+            path.unlink()
+    except OSError:
+        pass
+
+
 def norm_stem(name):
     """The duplicate-defence key for a filename.
 

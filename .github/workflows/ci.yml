@@ -449,9 +449,24 @@ jobs:
       # no Mac required, which is the point of slicing them out of
       # macos_bootstrap.sh; run here so they gate a PR rather than only the
       # developer's own run_all_tests.ps1 (2026-08-17).
-      - name: installer -- macOS bootstrap site values (bash)
+      # bug-ops-4 / ui-onboarding-11 (2026-09-25): every installer/tests/test_*.sh,
+      # not one named file -- test_macos_uninstall_profile.sh and
+      # test_macos_first_steps.sh gated nothing while this step named only the
+      # first. All run even after a failure; none found fails the step.
+      - name: installer -- macOS bootstrap bash tests
         if: ${{ !cancelled() }}
-        run: bash installer/tests/test_macos_site_values.sh
+        shell: bash
+        run: |
+          shopt -s nullglob
+          fail=0
+          n=0
+          for t in installer/tests/test_*.sh; do
+            n=$((n + 1))
+            echo "== $t"
+            bash "$t" || fail=1
+          done
+          if [ "$n" -eq 0 ]; then echo "no installer/tests/test_*.sh found"; exit 1; fi
+          exit "$fail"
 
       # --strict --only dashboard-container --platform linux: every lock this
       # target needs (dashboard, music/web, ytdl/web) has been installed above

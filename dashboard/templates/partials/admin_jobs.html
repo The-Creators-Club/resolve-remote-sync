@@ -30,7 +30,7 @@
 
   <div class="admin-users-box">
     <div class="side-head">[ THE QUEUE ]
-      <span class="muted">{{ depth.queued }} queued, {{ depth.running }} running{% if depth.pinned %}, {{ depth.pinned }} pinned here{% endif %}{% if abandoned %}, {{ abandoned }} abandoned in the last {{ window_hours }} h{% endif %}{% if depth.oldest_age_s is not none %} · the oldest has waited {{ depth.oldest_age_s | round | int }}s{% endif %}</span></div>
+      <span class="muted">{{ depth.queued }} queued, {{ depth.running }} running{% if depth.pinned %}, {{ depth.pinned }} pinned here{% endif %}{% if abandoned %}, {{ abandoned }} abandoned in the last {{ window_hours }} h{% endif %}{% if depth.oldest_age_s is not none %} · the oldest has waited {{ depth.oldest_age_s | eta }}{% endif %}</span></div>
     {# The capacity chips. .mono-sm is `white-space: nowrap` (style.css), and
        six chips on one unbreakable line was 633 px at 390: the class is what
        mobile.css's admin section lets wrap (round 2, 2026-08-30). #}

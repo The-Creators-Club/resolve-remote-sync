@@ -37,6 +37,7 @@ from .syncthing_admin import (
     ASSET_STIGNORE_LINES,
     SHARED_ASSET_FOLDERS,
     missing_asset_ignore_lines,
+    release_guard,
 )
 
 log = logging.getLogger("ccsync.sync.shared_folders")
@@ -53,9 +54,17 @@ log = logging.getLogger("ccsync.sync.shared_folders")
 # deliberately holding the offer. Only the first is "ask your admin". A read
 # failure gets its own sentence, and a halt records no problem at all, which
 # is why `halted` is NOT in this tuple.
-PROBLEM_OUTCOMES = ("not-offered", "unfiltered", "error", "ask-failed")
+PROBLEM_OUTCOMES = ("not-offered", "unfiltered", "error", "ask-failed",
+                    "marker-missing")
 OUTCOME_HALTED = "halted"
 OUTCOME_ASK_FAILED = "ask-failed"
+# bug-comp-syncthing-7 (2026-09-25): a running folder whose directory or
+# `.stfolder` marker is not there. Syncthing refuses to scan it (the marker is
+# its guard against reading an unmounted drive as "everything was deleted"),
+# so it syncs nothing, and a reconcile that answered "ok"/"repaired" for it
+# cleared the only place the editor could have been told.
+OUTCOME_MARKER_MISSING = "marker-missing"
+DEFAULT_MARKER_NAME = ".stfolder"
 # A folder in a problem state is retried on a backoff rather than every
 # pass: `not-offered` on a machine the server has not shared the library
 # with is permanent, and a pending-folders GET per pass forever buys
@@ -173,6 +182,11 @@ def problem_sentence(entry: dict[str, Any]) -> str:
     if outcome == "unfiltered":
         return (f"{name} is not syncing yet: CC Sync could not confirm its filter "
                 f"list, and a folder without one must not go online. It keeps trying.")
+    if outcome == OUTCOME_MARKER_MISSING:
+        return (f"{name} is not syncing on this computer: its folder moved and the "
+                f"sync engine will not start it at the new place on its own. "
+                f"Ask your admin to remove it from this computer's sync engine so "
+                f"it is offered again.")
     reason = str(entry.get("reason") or "").strip()
     tail = f": {reason}" if reason else ""
     return f"{name} could not be set up on this computer{tail}. It keeps trying."
@@ -203,9 +217,15 @@ class SharedFolderManager:
         halted: Optional[Callable[[], bool]] = None,
         root_present_fn: Optional[Callable[[], bool]] = None,
         now: Callable[[], float] = time.monotonic,
+        move_dir: Optional[Callable[[str, str], Any]] = None,
     ) -> None:
         self.admin = admin
         self.local_root = Path(local_root).expanduser()
+        # bug-comp-syncthing-7 (2026-09-25): carries the library's directory
+        # (files AND its .stfolder marker) to a re-pointed path, as the
+        # borrowed manager's _repoint does. Optional: without one the old
+        # directory stays where it is and the marker check says so.
+        self._move_dir = move_dir
         # SYNC-6 (resilience sweep 2026-08-28): "is the tree actually here?"
         # -- the same callback ManifestCache takes (manifest.py). The
         # sequencer runs this reconcile at its loop head, BEFORE any root
@@ -363,14 +383,20 @@ class SharedFolderManager:
             return self._accept(folder_id, rel, label, want_path)
 
         outcome = "ok"
+        # bug-comp-syncthing-7 (2026-09-25): whether the folder is paused
+        # NOW. `folder` was fetched before any re-point, and the re-point
+        # pauses (the borrowed manager's comp-sync-4 lesson).
+        paused_now = bool(folder.get("paused"))
+        repointed = False
 
         # Path first: a folder pointed somewhere else is not this folder, and
         # every check below would be measuring the wrong directory.
-        if str(folder.get("path", "")).rstrip("/\\") != want_path.rstrip("/\\"):
-            log.warning(
-                "shared folder %s is at %r, re-pointing it at %r (local_root moved, or it "
-                "was accepted by hand)", folder_id, folder.get("path"), want_path)
-            self.admin.set_folder_path(folder_id, want_path, label)
+        old_path = str(folder.get("path", "")).rstrip("/\\")
+        if old_path != want_path.rstrip("/\\"):
+            if not self._repoint(folder_id, old_path, want_path, label):
+                return "error"
+            paused_now = True
+            repointed = True
             outcome = "repaired"
 
         # Versioning before ignores: ensure_versioning is a no-op on a folder
@@ -401,18 +427,18 @@ class SharedFolderManager:
         # never pauses this folder (it is not in any selection), but a
         # previous companion's crash, a hand-pause in the GUI, or the
         # accept path below can leave it paused.
-        if folder.get("paused") and self.halted():
+        if paused_now and self.halted():
             # A halt is a deliberate stop, and this reconcile is the one
             # thing that would undo it for these folders -- including a
             # shared folder an admin paused by hand (sync-safety-2).
             log.info(
                 "shared folder %s stays paused: syncing is stopped on this machine",
                 folder_id)
-        elif folder.get("paused") and ignores_ok != "unconfirmed":
+        elif paused_now and ignores_ok != "unconfirmed":
             log.info("shared folder %s was paused -- releasing it", folder_id)
             self.admin.set_folder_paused(folder_id, False)
             outcome = "repaired"
-        elif folder.get("paused"):
+        elif paused_now:
             log.warning(
                 "shared folder %s stays paused: its .stignore could not be confirmed, and "
                 "an unfiltered sendreceive folder must not go online", folder_id)
@@ -420,7 +446,64 @@ class SharedFolderManager:
             # is not syncing, so it is a problem, not an "ok".
             outcome = "unfiltered"
 
+        # bug-comp-syncthing-7 (2026-09-25): a running folder must have its
+        # directory and marker, or it is syncing nothing whatever the outcome
+        # above says. Checked on every pass (one stat), not only right after a
+        # re-point, because the pass after a re-point sees matching paths and
+        # used to answer "ok", clearing the problem. A folder that stays
+        # paused is judged by the branch above. Never created here: a marker
+        # on an empty directory is exactly what lets Syncthing read "every
+        # file was deleted" and send that to the server.
+        if (repointed or not paused_now) and not self._marker_present(folder, want_path):
+            log.warning(
+                "shared folder %s at %s has no %s marker: the sync engine will not "
+                "scan it", folder_id, want_path,
+                str(folder.get("markerName") or DEFAULT_MARKER_NAME))
+            outcome = OUTCOME_MARKER_MISSING
+
         return outcome
+
+    @staticmethod
+    def _marker_present(folder: dict, want_path: str) -> bool:
+        """Is the folder's marker at `want_path`? Never raises; a probe that
+        cannot answer counts as present, so an odd filesystem error can
+        never paint a working library as broken."""
+        marker = str(folder.get("markerName") or DEFAULT_MARKER_NAME)
+        try:
+            return (Path(want_path) / marker).exists()
+        except Exception:
+            return True
+
+    def _repoint(self, folder_id: str, old_path: str, want_path: str, label: str) -> bool:
+        """Re-point the folder at `want_path`, carrying the old directory with
+        it when that is possible. False (nothing changed) when the path may
+        not be created. bug-comp-syncthing-7 (2026-09-25): this was one PATCH
+        with no pause, no SYNC-6 guard, no mkdir and no move, so the library
+        came up at an empty, missing directory while the reconcile said
+        "repaired". Mirrors borrowed_folders._repoint."""
+        if not self._mkdir_allowed(want_path):
+            return False
+        log.warning(
+            "shared folder %s is at %r, re-pointing it at %r (local_root moved, or it "
+            "was accepted by hand)", folder_id, old_path, want_path)
+        try:
+            self.admin.set_folder_paused(folder_id, True)
+        except Exception:
+            log.debug("shared folder %s: pause before re-point failed", folder_id,
+                      exc_info=True)
+        if (self._move_dir is not None and old_path
+                and Path(old_path).is_dir() and not Path(want_path).exists()):
+            try:
+                self._move_dir(old_path, want_path)
+            except Exception:
+                log.warning("shared folder %s: could not move %s -> %s; re-pointing anyway",
+                            folder_id, old_path, want_path, exc_info=True)
+        try:
+            Path(want_path).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("shared folder %s: could not create %s: %s", folder_id, want_path, exc)
+        self.admin.set_folder_path(folder_id, want_path, label)
+        return True
 
     def _ensure_ignores(self, folder_id: str) -> str:
         """"ok" | "repaired" | "unconfirmed". Re-asserts only when a line is
@@ -501,6 +584,7 @@ class SharedFolderManager:
             log.warning("shared folder %s: could not create %s: %s", folder_id, want_path, exc)
             return "error"
         self.admin.accept_folder(
-            folder_id, label, want_path, device_id, ignore_lines=list(ASSET_STIGNORE_LINES)
+            folder_id, label, want_path, device_id, ignore_lines=list(ASSET_STIGNORE_LINES),
+            **release_guard(self.admin, self.halted),
         )
         return "accepted"

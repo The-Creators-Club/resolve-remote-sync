@@ -8,6 +8,7 @@ database is.
 """
 import os
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -274,6 +275,21 @@ def session_secret():
     return secret or None
 
 
+def previous_session_secrets():
+    """DASH_SESSION_SECRET_PREVIOUS, comma-separated, blanks dropped: the
+    dashboard's ACCEPT-ONLY retired keys, parsed exactly as its settings.py
+    parses them.
+
+    bug-wire-2 (2026-09-25): the dashboard keeps accepting a companion identity
+    signed with a retired key for the whole of a rotation drain, while this app
+    verified against the current key alone, so every un-re-signed machine's
+    music ingest claim, heartbeat and result 403'd "sign in again". Read live,
+    for session_secret's reason.
+    """
+    raw = os.environ.get('DASH_SESSION_SECRET_PREVIOUS') or ''
+    return tuple(s.strip() for s in raw.split(',') if s.strip())
+
+
 # How long a claim is good for, and how often the companion must say it is
 # still alive. The ytdl and b-roll fleet routes' 300/30, because the failure
 # they cover is identical: a machine switched off mid-batch has to release its
@@ -511,7 +527,13 @@ def share_root_ready(con=None, share=SHARE):
         # and there is nothing indexed to contradict it, so the caller that
         # creates it (routes_ingest.queue_one) is allowed to. A root whose
         # PARENT is missing too is a misconfigured mount, not a first run.
-        if con is not None and root.parent.is_dir() and not library_has_tracks(con):
+        # bug-music-ytdl-3 review round (2026-09-25): rows whose audio has
+        # not landed are not evidence here either, or item 2 of the first
+        # drop into a library whose root rclone has not made yet is refused.
+        # The one place that CREATES the root (routes_ingest) still asks the
+        # strict question: this lets a name be allocated, never a mkdir.
+        if (con is not None and root.parent.is_dir()
+                and not library_has_tracks(con, count_unlanded=False)):
             return True, ''
         return False, (f'the music library is not mounted here (nothing at '
                        f'{root}). Nothing is written until it is back.')
@@ -536,13 +558,16 @@ def share_root_ready(con=None, share=SHARE):
         # that are not there yet and item 51 of that same drop refused itself
         # with a message blaming the mount. One end going missing is a normal
         # library; both ends is a share that is not mounted.
+        #
+        # bug-music-ytdl-3 (2026-09-25): and neither end may be a row whose
+        # audio is KNOWN not to have landed yet. Sampling both ends still
+        # failed the first drop into an empty library: item 1's row was the
+        # whole table, item 2 found it missing and refused with a 503 blaming
+        # the mount until item 1's upload landed, which with uploads paused is
+        # never. A row the ledger holds as `indexed`/`uploading` is not
+        # evidence either way, so it is left out of the sample.
         half = max(1, _READY_SAMPLE // 2)
-        rows = con.execute(
-            'SELECT rel_path FROM (SELECT rel_path FROM tracks '
-            'WHERE rel_path IS NOT NULL ORDER BY id DESC LIMIT ?) '
-            'UNION ALL SELECT rel_path FROM (SELECT rel_path FROM tracks '
-            'WHERE rel_path IS NOT NULL ORDER BY id ASC LIMIT ?)',
-            (half, half)).fetchall()
+        rows = _sample_landed_rows(con, half)
     except Exception:                                          # noqa: BLE001
         return True, ''
     if not rows:
@@ -560,8 +585,55 @@ def share_root_ready(con=None, share=SHARE):
                    f'Nothing is written until it is back.')
 
 
-def library_has_tracks(con):
+# bug-music-ytdl-3 (2026-09-25): tracks rows a fleet batch wrote before its
+# companion uploaded the audio. Not evidence that the share is mounted (their
+# file is not there yet on a mounted share either) and not evidence that it is
+# not. A database with no `ingest_items` table (pre-004) has none.
+#
+# Review round (2026-09-25): `failed` too, and the three progress states a
+# retried item passes back through. retry_failed keeps an item's track_id and
+# tracks row (so a retry reuses the slot), and an item that failed after its
+# result was written is almost always an upload that never landed: with only
+# `indexed`/`uploading` left out, a first drop whose item 1 upload failed
+# refused every later result, and the next batch, with "not mounted" until
+# somebody pressed retry. A failed item whose file DID land (a size mismatch)
+# only loses its vote; `live` and `cancelled` rows (the cancel path keeps a
+# cancelled row only when its file is there) still count.
+_UNLANDED_STATES = ('pending', 'transcoding', 'embedding', 'indexed',
+                    'uploading', 'failed')
+_UNLANDED = ("id NOT IN (SELECT track_id FROM ingest_items WHERE track_id IS "
+             "NOT NULL AND state IN (%s))"
+             % ', '.join("'%s'" % st for st in _UNLANDED_STATES))
+
+
+def _sample_landed_rows(con, half):
+    sql = ('SELECT rel_path FROM (SELECT rel_path FROM tracks '
+           'WHERE rel_path IS NOT NULL{f} ORDER BY id DESC LIMIT ?) '
+           'UNION ALL SELECT rel_path FROM (SELECT rel_path FROM tracks '
+           'WHERE rel_path IS NOT NULL{f} ORDER BY id ASC LIMIT ?)')
     try:
+        return con.execute(sql.format(f=' AND ' + _UNLANDED),
+                           (half, half)).fetchall()
+    except sqlite3.OperationalError:
+        return con.execute(sql.format(f=''), (half, half)).fetchall()
+
+
+def library_has_tracks(con, count_unlanded=True):
+    """Does the index name any track whose audio should be on the share?
+
+    `count_unlanded=False` leaves out the rows `_UNLANDED` describes. The
+    default is the strict answer, and it is what guards the first-run mkdir
+    (routes_ingest._create_share_root_on_first_run, music-1): creating the
+    library root is a deployment act, so there any row at all says "a library
+    was meant to be here", as it did before bug-music-ytdl-3.
+    """
+    try:
+        if not count_unlanded:
+            try:
+                return con.execute('SELECT 1 FROM tracks WHERE ' + _UNLANDED +
+                                   ' LIMIT 1').fetchone() is not None
+            except sqlite3.OperationalError:
+                pass
         return con.execute('SELECT 1 FROM tracks LIMIT 1').fetchone() is not None
     except Exception:                                          # noqa: BLE001
         # An unreadable schema is not evidence that the library is empty.

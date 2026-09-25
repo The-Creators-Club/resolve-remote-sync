@@ -21,7 +21,10 @@
   --green: #2bff88;
   --amber: #ffb02e;
   --text: #e8e8ea;
-  --muted: #6f6f7a;
+  /* ui-dash-static-5 parity (2026-09-25): #6f6f7a was 3.6-4.0:1 on
+     --bg/--panel/--field, under WCAG AA for the explanatory text it colours;
+     #8a8a96 is the dashboard's own value (5.3-5.8:1). */
+  --muted: #8a8a96;
 
   /* Aliases for the names this app's rules were written against, remapped
      onto the dashboard palette so every old selector still means something.
@@ -38,7 +41,9 @@
   /* Kept only as an alias: there is no sans face in this theme any more. */
   --sans: var(--mono);
 
-  /* Sticky header height - the browse rail parks directly underneath it. */
+  /* Sticky header height - the browse rail parks directly underneath it.
+     A first-paint fallback only: app.js trackHeaderHeight() measures the
+     real header and overwrites it (ui-broll-web-4, 2026-09-25). */
   --header-h: 88px;
 }
 
@@ -339,7 +344,7 @@ a.brand:hover { color: var(--red-hot); }
   letter-spacing: 0.08em;
 }
 .drawer-head .dim { color: var(--red-dim); }
-.drawer-close { color: var(--red-dim); font-size: 11px; }
+.drawer-close { color: var(--red); font-size: 11px; }
 .drawer-close:hover { color: var(--red-hot); }
 .drawer-nav { display: flex; flex-direction: column; padding: 0.6rem 0; }
 .drawer-item {
@@ -499,6 +504,9 @@ a.brand:hover { color: var(--red-hot); }
   color: var(--red-hot);
   text-shadow: 0 0 10px rgba(255, 92, 115, 0.7);
 }
+/* ui-broll-web-13 (2026-09-25): a worded header button, in the icon buttons'
+   frame, sized to sit on the same row as the mode toggles. */
+.icon-btn.label-btn { font-size: 11px; letter-spacing: 0.04em; padding: 4px 8px; white-space: nowrap; }
 
 .text-btn {
   background: none;
@@ -510,6 +518,11 @@ a.brand:hover { color: var(--red-hot); }
   padding: 4px 0;
 }
 .text-btn:hover { color: var(--red-hot); text-shadow: 0 0 10px rgba(255, 92, 115, 0.7); }
+/* ui-broll-web-9 (2026-09-25): a disabled text button (the share page's prev
+   at the first clip, next at the last) kept the bright red and the hover glow,
+   so it looked pressable and did nothing. After :hover so it wins that tie. */
+.text-btn:disabled,
+.text-btn:disabled:hover { color: var(--muted); cursor: default; text-shadow: none; }
 
 /* Still the loudest control on the page, but in theme: red on field with a
    full red border, rather than a filled orange slab. */
@@ -1000,6 +1013,29 @@ a.brand:hover { color: var(--red-hot); }
 .toast.error { border-left-color: var(--danger); }
 .toast.success { border-left-color: var(--green); }
 .toast.warn { border-left-color: var(--amber); }
+/* ui-broll-web-17 (2026-09-25): an error toast stays until dismissed, so it
+   carries a close button, and its text can be selected and copied (the tray
+   self-test URL). max-width keeps a long one a readable block, not a strip. */
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: min(640px, calc(100vw - 32px));
+  user-select: text;
+}
+.toast-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.toast-close {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.toast-close:hover { color: var(--red-hot); }
 
 /* --- folder tree ------------------------------------------------------- */
 
@@ -1574,6 +1610,13 @@ input[type="range"]:disabled {
   z-index: 2;
 }
 .card:hover .cf-card-add { opacity: 1; }
+/* ui-broll-web-11 (2026-09-25): at opacity 0 the "+" hid its own focus ring
+   from a keyboard user, and on a touch screen (no hover) it was an invisible
+   target that could only be found by accident. */
+.cf-card-add:focus-visible { opacity: 1; }
+@media (hover: none) {
+  .cf-card-add { opacity: 1; }
+}
 .cf-card-add:hover { border-color: var(--red); color: var(--red-hot); background: var(--field); }
 
 .cf-add-detail { margin-left: 8px; }
@@ -1682,8 +1725,16 @@ input[type="range"]:disabled {
 }
 .cf-item-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .cf-item-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.cf-item-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ui-broll-web-12 review (2026-09-25): a flex row whose NAME alone shrinks and
+   ellipsizes; the duration and the "saved" mark are flex: none, so a long
+   camera name can never clip them off the line. */
+.cf-item-name { font-size: 12px; display: flex; align-items: baseline; min-width: 0; white-space: nowrap; }
+.cf-item-name-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cf-item-dur { flex: none; white-space: pre; }
 .cf-item-body input { width: 100%; font-size: 11px; }
+/* ui-broll-web-12 (2026-09-25): a caption save said nothing when it worked.
+   Sits in the name line so showing it never moves the row. */
+.cf-note-saved { flex: none; margin-left: 8px; color: var(--green); }
 .cf-item-ctl { display: flex; flex-direction: column; gap: 2px; }
 .cf-item-ctl .text-btn { padding: 0 4px; font-size: 11px; }
 .cf-item-ctl .text-btn:disabled { color: var(--border); cursor: default; text-shadow: none; }
@@ -1701,10 +1752,49 @@ input[type="range"]:disabled {
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
+  /* ui-broll-web-11 (2026-09-25): position: fixed cannot be scrolled to, so
+     a list taller than the room left under its anchor (ten folders under the
+     detail view's 62vh player) put the bottom rows and "manage folders" out
+     of reach. cfPlacePopover() flips it above the anchor when that side has
+     more room and sets the max-height to the room it got; this is the cap
+     before it runs. */
+  max-height: 60vh;
+  overflow-y: auto;
 }
+.cf-popover > * { flex-shrink: 0; }
 .cf-pop-head { color: var(--red); letter-spacing: 0.08em; font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
 .cf-pop-row { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 2px 0; }
 .cf-pop-row:hover { background: var(--field); }
 .cf-pop-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cf-popover .text-btn { text-align: left; }
 .cf-pop-new { margin-top: 4px; }
+
+/* ui-broll-web-18 (2026-09-25): the SPA had no narrow layout at all. At 390 px
+   the unbreakable flag row made the page 718 px wide and the 210 px rail left
+   about 170 px for a 240 px card, so a phone scrolled sideways and could never
+   see the rail and the grid together. Below 700 px: the header rows wrap, the
+   rail becomes a short scrolling shelf ABOVE the grid, and the detail view is
+   one column. The cards stay 240 px on purpose: sprite.js parks the scrub
+   sheet by pixel offsets of a 240 px cell (SPRITE_CELL_WIDTH), so a fluid card
+   would show the wrong frame or a splice of two; one 240 px column fits a
+   phone with room to spare. */
+@media (max-width: 700px) {
+  .header-controls { padding: 8px 12px 10px; gap: 8px 10px; }
+  .search-bar { flex: 1 1 100%; }
+  #category-select { max-width: 40%; }
+  .flag-toggles { flex: 1 1 100%; flex-wrap: wrap; white-space: normal; row-gap: 6px; }
+  #browse-layout { flex-direction: column; align-items: stretch; }
+  .folder-tree {
+    flex: 0 0 auto;
+    position: static;
+    min-height: 0;
+    max-height: 32vh;
+    border-right: none;
+    border-bottom: 1px solid var(--red-dim);
+  }
+  #grid-view { padding: 12px 12px 40px; }
+  .results-grid { justify-content: center; }
+  .pager { flex-wrap: wrap; gap: 8px 12px; }
+  .detail-layout { grid-template-columns: minmax(0, 1fr); }
+  #settings-panel { max-width: 100vw; }
+}

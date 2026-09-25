@@ -53,7 +53,7 @@
 #     Finish page without scraping the human-facing summary.
 set -u
 
-INSTALLER_VERSION="1.0.44"
+INSTALLER_VERSION="1.0.45"
 
 # ----------------------------------------------------------------------
 # PINNED DOWNLOADS (2026-08-17, docs/COMMERCIAL_READINESS.md item 13)
@@ -1533,6 +1533,45 @@ install_uninstaller() {
     return 0
 }
 
+# The end banner's first three "remaining manual steps" (ui-onboarding-11,
+# 2026-09-25). Every wizard install ended its saved log with "1. tailscale up
+# ... 2. ssh-keygen ... send the .pub file ... 3. SIGN IN", written for a hand
+# run and pointing at a docs/ folder an editor does not have; the wizard has
+# already done all three by the time it runs this script (its Tailscale page
+# gates NEXT on a live connection; it makes the key, offers it to the
+# dashboard and writes identity.json), and a reader of the log made and sent a
+# second key. The wizard says so with CCSYNC_FROM_WIZARD=1 (onboarding/steps.py
+# FROM_WIZARD_ENV). A missing companion is still step 3 either way: that is a
+# real problem, not a step the wizard did.
+print_first_setup_steps() {
+    if [ "${CCSYNC_FROM_WIZARD:-}" = 1 ]; then
+        echo " Remaining steps:"
+        echo "   1-2. DONE BY THE SETUP WIZARD: Tailscale is joined and this Mac's"
+        echo "        SSH key is made. The wizard's last page says whether the key"
+        echo "        still has to be sent to your admin."
+    else
+        echo " Remaining manual steps (see docs/EDITOR_SETUP.md):"
+        echo "   1. tailscale up   (join the tailnet, one-time interactive login)"
+        echo "   2. generate an SSH keypair for rclone if you haven't already:"
+        echo "        ssh-keygen -t ed25519 -f \"$KEY_FILE_PATH\""
+        echo "      and send the .pub file to the admin"
+    fi
+    if [ "${COMPANION_MISSING:-0}" = 1 ]; then
+        echo "   3. INSTALL THE SYNC APP -- it is not on this Mac yet (see the"
+        echo "      block above). Until it is, there is no menu-bar icon and"
+        echo "      nothing syncs."
+    elif [ "${CCSYNC_FROM_WIZARD:-}" = 1 ]; then
+        echo "   3. DONE BY THE SETUP WIZARD: the companion is signed in."
+    else
+        echo "   3. SIGN IN: right-click the CCSync menu-bar icon and choose"
+        # logic-onboarding-4 (2026-09-25): not "TrueNAS": false on a Synology
+        # site and on DASH_AUTH_METHOD=local (a dashboard account).
+        echo "      \"Sign in...\", using the SAME username and password"
+        echo "      the admin gave you. NOTHING SYNCS UNTIL YOU DO THIS -- signing"
+        echo "      in on the dashboard WEBSITE is not the same thing."
+    fi
+}
+
 print_uninstall_step() {
     echo ""
     if [ -n "$UNINSTALLER_PATH" ]; then
@@ -2822,21 +2861,9 @@ else
         echo " is what shares it."
     fi
     echo ""
-    echo " Remaining manual steps (see docs/EDITOR_SETUP.md):"
-    echo "   1. tailscale up   (join the tailnet, one-time interactive login)"
-    echo "   2. generate an SSH keypair for rclone if you haven't already:"
-    echo "        ssh-keygen -t ed25519 -f \"$KEY_FILE_PATH\""
-    echo "      and send the .pub file to the admin"
-    if [ "$COMPANION_MISSING" = 1 ]; then
-        echo "   3. INSTALL THE SYNC APP -- it is not on this Mac yet (see the"
-        echo "      block above). Until it is, there is no menu-bar icon and"
-        echo "      nothing syncs."
-    else
-        echo "   3. SIGN IN: right-click the CCSync menu-bar icon and choose"
-        echo "      \"Sign in...\", using the SAME TrueNAS username and password"
-        echo "      the admin gave you. NOTHING SYNCS UNTIL YOU DO THIS -- signing"
-        echo "      in on the dashboard WEBSITE is not the same thing."
-    fi
+    # ui-onboarding-11 (2026-09-25): steps 1-3 through print_first_setup_steps,
+    # which knows whether onboard's wizard ran this script (it has done all three).
+    print_first_setup_steps
     echo "   4. connect DaVinci Resolve to the Project Server"
     echo "   5. Playback > Proxy Handling > Prefer Proxies"
     print_resolve_mapping_step

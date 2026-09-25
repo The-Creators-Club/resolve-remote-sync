@@ -426,6 +426,31 @@ if ($Resume) {
 # correctly -- but discovering that AFTER a five-minute PyInstaller build (and
 # a password prompt) wasted a run twice on 2026-07-26. The download endpoint
 # answers with the shared token, so check FIRST.
+# bug-ops-2 (2026-09-25): once the journal says this very ship reached
+# `publish`, "already published" is the EXPECTED answer to both probes below,
+# not a collision. They used to run regardless, so every -Resume after a soak
+# refusal (step 2b exit 3, the case -Resume is printed for) or a failed local
+# upgrade died here telling the owner to bump a version that was published and
+# staged by the run being resumed.
+# bug-ops-2 review (2026-09-25): ...but only while the installer version is
+# still the one that run published. The case build_editor_package.ps1 itself
+# sends the owner into -- installer 409, bump $InstallerVersion, re-run -- is a
+# NEW installer version, and skipping its probe (and then re-using the old
+# onboard.exe, which still carries the old steps.py INSTALLER_VERSION) would
+# publish a stale installer under the new number. So the version is parsed
+# first and compared with the journal's.
+$mShipIv = Select-String -Path "installer\windows_bootstrap.ps1" -Pattern '^\$InstallerVersion\s*=\s*"([^"]+)"'
+$script:ResumedPastPublish = $false
+if (Test-StepDone "publish") {
+    $ivNow = if ($mShipIv) { $mShipIv.Matches[0].Groups[1].Value } else { "" }
+    if ($ivNow -and "$($prior.installer_version)" -eq $ivNow) {
+        $script:ResumedPastPublish = $true
+        Write-Step "(resumed after the publish: companion v$CompanionVersion and installer v$ivNow are expected to be on the server already -- not probing for a version collision)"
+    }
+    else {
+        Write-Step "(resumed after the publish, but the installer version is now v$ivNow and that run published v$($prior.installer_version) -- probing as a new ship)"
+    }
+}
 if (-not $DashboardOnly) {
     # -r 0-0 and --max-time, same as the installer probe below (ship.ps1's
     # own comment there explains why, and this one had neither --
@@ -433,10 +458,13 @@ if (-not $DashboardOnly) {
     # PUBLISHED version pulled the whole ccsync-companion.exe over the tailnet
     # to learn "200", and a dashboard mid-restart hung step 0 with no output
     # and no deadline, before any gate had reported.
-    $pubCode = Invoke-CurlWithToken `
-        -Uri "$DashboardUrl/api/v1/companion/package/windows/$CompanionVersion" `
-        -Token $env:DASH_REPORT_TOKEN `
-        -ExtraArgs @("-o", "NUL", "-r", "0-0", "--max-time", "20", "-w", "%{http_code}")
+    $pubCode = ""
+    if (-not $script:ResumedPastPublish) {
+        $pubCode = Invoke-CurlWithToken `
+            -Uri "$DashboardUrl/api/v1/companion/package/windows/$CompanionVersion" `
+            -Token $env:DASH_REPORT_TOKEN `
+            -ExtraArgs @("-o", "NUL", "-r", "0-0", "--max-time", "20", "-w", "%{http_code}")
+    }
     if ($pubCode -eq "200" -or $pubCode -eq "206") {
         Write-Fail "companion v$CompanionVersion is ALREADY published on the server."
         Write-Step "bump VERSION in companion\src\ccsync_companion\config.py AND companion\pyproject.toml"
@@ -456,7 +484,6 @@ if (-not $DashboardOnly) {
     # bundle the previous companion. The four copies of this number are checked
     # against EACH OTHER by step 0b and release.ps1; nothing but this asks the
     # server whether the number is still free.
-    $mShipIv = Select-String -Path "installer\windows_bootstrap.ps1" -Pattern '^\$InstallerVersion\s*=\s*"([^"]+)"'
     if (-not $mShipIv) {
         Write-Fail "could not parse `$InstallerVersion from installer\windows_bootstrap.ps1 -- step 2b would refuse to publish the installer anyway"
         exit 1
@@ -466,10 +493,13 @@ if (-not $DashboardOnly) {
     # -r 0-0: the first byte is enough to answer "does this version exist" and
     # the route honours Range with a 206 (measured against the live dashboard,
     # 2026-08-14) -- so this costs one byte, not a whole onboard.exe.
-    $ivCode = Invoke-CurlWithToken `
-        -Uri "$DashboardUrl/api/v1/companion/package/windows/${InstallerVersion}?kind=onboard" `
-        -Token $env:DASH_REPORT_TOKEN `
-        -ExtraArgs @("-o", "NUL", "-r", "0-0", "--max-time", "20", "-w", "%{http_code}")
+    $ivCode = ""
+    if (-not $script:ResumedPastPublish) {
+        $ivCode = Invoke-CurlWithToken `
+            -Uri "$DashboardUrl/api/v1/companion/package/windows/${InstallerVersion}?kind=onboard" `
+            -Token $env:DASH_REPORT_TOKEN `
+            -ExtraArgs @("-o", "NUL", "-r", "0-0", "--max-time", "20", "-w", "%{http_code}")
+    }
     if ($ivCode -eq "200" -or $ivCode -eq "206") {
         Write-Fail "installer v$InstallerVersion is ALREADY published on the server -- and this ship rebuilds onboard.exe around a NEW companion, so its bytes WILL differ and the upload will 409."
         Write-Step "bump `$InstallerVersion in installer\windows_bootstrap.ps1 AND INSTALLER_VERSION in onboarding\steps.py AND installer\macos_bootstrap.sh AND build_onboard_macos.spec's CFBundleShortVersionString, then re-run"
@@ -902,9 +932,42 @@ if (Test-Path -LiteralPath $builtExe) {
 # script's gate above and applies the same Authenticode refusal to it, since
 # that is the binary a fresh install actually double-clicks
 # (installer-onboard-tools-1, 2026-08-21).
-$pkgArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "installer\build_editor_package.ps1",
-             "-RebuildOnboard", "-Publish", "-MakeCurrent",
-             "-DashboardUrl", $DashboardUrl, "-AdminUser", $AdminUser)
+# bug-ops-2 (2026-09-25): a resumed step 2b must upload the onboard.exe the
+# first attempt built and published, not a rebuild of it. PyInstaller output
+# is not byte-reproducible, so a rebuild under the same installer version is a
+# different-bytes 409 and the resume fails on the very build it came back for.
+# Reused only when that exe is newer than EVERY input it is built from (the
+# same inputs build_editor_package.ps1's staleness check reads: the companion
+# exe it bundles, onboarding\*.py, installer\windows_bootstrap.ps1), i.e. the
+# first attempt really did build it from this tree; otherwise it is rebuilt as
+# before. bug-ops-2 review (2026-09-25): comparing with the companion exe alone
+# let a bumped steps.py / bootstrap ride out inside the old exe, and that
+# script's own staleness check only warns.
+function Test-OnboardReusable {
+    param([string]$OnboardExe, [string]$CompanionExe, [string]$OnboardingDir, [string]$BootstrapPs1)
+    if (-not (Test-Path -LiteralPath $OnboardExe)) { return $false }
+    if (-not (Test-Path -LiteralPath $CompanionExe)) { return $false }
+    $built = (Get-Item -LiteralPath $OnboardExe).LastWriteTimeUtc
+    $inputs = @(Get-Item -LiteralPath $CompanionExe)
+    if (Test-Path -LiteralPath $BootstrapPs1) { $inputs += Get-Item -LiteralPath $BootstrapPs1 } else { return $false }
+    $inputs += @(Get-ChildItem -LiteralPath $OnboardingDir -Filter *.py -File -ErrorAction SilentlyContinue)
+    foreach ($i in $inputs) {
+        if ($i.LastWriteTimeUtc -ge $built) { return $false }
+    }
+    return $true
+}
+$rebuildOnboard = $true
+if ($script:ResumedPastPublish -and
+    (Test-OnboardReusable -OnboardExe (Join-Path $PSScriptRoot "..\onboarding\dist\onboard.exe") `
+        -CompanionExe $builtExe `
+        -OnboardingDir (Join-Path $PSScriptRoot "..\onboarding") `
+        -BootstrapPs1 (Join-Path $PSScriptRoot "..\installer\windows_bootstrap.ps1"))) {
+    $rebuildOnboard = $false
+    Write-Step "(resumed: re-using the onboard.exe the earlier run built and published -- not rebuilding it)"
+}
+$pkgArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "installer\build_editor_package.ps1")
+if ($rebuildOnboard) { $pkgArgs += "-RebuildOnboard" }
+$pkgArgs += @("-Publish", "-MakeCurrent", "-DashboardUrl", $DashboardUrl, "-AdminUser", $AdminUser)
 if ($AllowUnsignedBinary) { $pkgArgs += "-AllowUnsignedBinary" }
 if ($AllowKeyRotation) { $pkgArgs += "-AllowKeyRotation" }
 
@@ -916,7 +979,15 @@ if (Test-StepDone "current") {
 else {
     & powershell @pkgArgs
     $pkgRc = $LASTEXITCODE
-    Save-ShipStep -Step "publish" -Version $CompanionVersion -InstallerVersion $InstallerVersion
+    # bug-ops-2 review (2026-09-25): the journal says `publish` only when step
+    # 2b says both artefacts are up (0) or up and staged (3). It was written
+    # before the exit code was read, so a 2b that died having published
+    # nothing let -Resume skip the version-collision probes and re-use an
+    # onboard.exe no server had accepted. A failed 2b leaves the journal at
+    # `build`, which resumes exactly as it always did.
+    if ($pkgRc -eq 0 -or $pkgRc -eq 3) {
+        Save-ShipStep -Step "publish" -Version $CompanionVersion -InstallerVersion $InstallerVersion
+    }
     if ($pkgRc -eq 3) {
         # NOT a failed ship (REL-1/REL-15): both artefacts are published and
         # staged, and the dashboard refused only the flip to current -- it

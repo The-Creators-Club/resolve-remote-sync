@@ -8,7 +8,7 @@ stayed up with a dead lane, which is the failure mode this fleet keeps hitting.
 
 TWO HALVES, AND THE SPLIT IS THE WHOLE DESIGN
 
-  LOCAL, always on, no configuration, never leaves the machine:
+      ~/.ccsync/crashes/<utc-timestamp>-<thread>.json  (then ~01, ~02 ... in one second)
       ~/.ccsync/crashes/<utc-timestamp>-<thread>.json
   Traceback, version, platform, the failing thread, and the last
   BREADCRUMB_LINES lines of companion.log at the moment it happened. That last
@@ -37,6 +37,7 @@ WHAT IT NEVER DOES
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
@@ -85,7 +86,19 @@ DIAGNOSTIC_CRASH_COUNT = 3
 # property to bet a customer's fleet token on, and this file is meant to be
 # EMAILED, which the log never was. Cheap insurance, applied to the copy only.
 _REDACTIONS = (
-    (re.compile(r"(?i)\b(token|password|passwd|secret|api[_-]?key|dsn)\b\s*[:=]\s*\S+"),
+    # bug-dash-ops-4 (2026-09-25, ported from the dashboard's copy): `\b` is
+    # no boundary after `_`, so TRUENAS_PW=, DASH_SESSION_SECRET= and
+    # SYNCTHING_API_KEY: went through untouched, and so did a JSON or
+    # dict-repr key, whose closing quote sits between the name and the `:`.
+    # The boundary is "not a letter or digit" on both sides, a key may carry
+    # `_SUFFIX` parts (SECRET_PREVIOUS, PW_FILE), `pw` is a key, and a quoted
+    # value is taken whole so a passphrase with a space in it does not leave
+    # its second word behind. Over-redacting a `token_count=5` is the cheap
+    # direction.
+    (re.compile(r"(?i)(?<![a-z0-9])"
+                r"((?:token|password|passwd|secret|api[_-]?key|dsn|pw)(?:_[a-z0-9]+)*)"
+                r"(?![a-z0-9])[\"']?\s*[:=]\s*"
+                r"(?:\"[^\"]*\"?|'[^']*'?|\S+)"),
      r"\1=<redacted>"),
     # Basic-auth and token-bearing URLs: scheme://user:pw@host
     (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@]+:[^\s/@]+@"), r"\1<redacted>@"),
@@ -132,13 +145,39 @@ def _tail(path: Path, lines: int = BREADCRUMB_LINES) -> list[str]:
     return [redact(line) for line in text.splitlines()[-lines:]]
 
 
+# bug-dash-ops-9 review round (2026-09-25): the counter a second crash in the
+# same second (same thread) gets. `~` because every reader here sorts by
+# NAME and treats the last as newest: `-` (0x2d) and a digit both sort before
+# the `.` (0x2e) of the bare `<base>.json`, so the first build's `<base>-1.json`
+# was named as OLDER than the crash before it (crash_summary's "newest" named
+# the first crash, _prune deleted the later one first, and `-10` sorted before
+# `-2`). `~` (0x7e) sorts after `.`, the pad keeps 01..99 in order, and `~` can
+# never come from `base` (the thread name is reduced to [A-Za-z0-9_.-]), so a
+# thread genuinely called "Thread-1" is not mistaken for a counter.
+_COUNTER_SEP = "~"
+
+
+def _crash_name(base: str, n: int) -> str:
+    return f"{base}.json" if n == 0 else f"{base}{_COUNTER_SEP}{n:02d}.json"
+
+
+def _age_key(path: Path) -> tuple[str, int]:
+    """Oldest first. The same order a plain name sort gives for every name
+    _crash_name makes; spelled out so the order does not rest on ASCII."""
+    stem = path.name[:-len(".json")] if path.name.endswith(".json") else path.name
+    base, sep, counter = stem.rpartition(_COUNTER_SEP)
+    if sep and counter.isdigit():
+        return base, int(counter)
+    return stem, 0
+
+
 def _prune(directory: Path, keep: Optional[int] = None) -> None:
     # Read at call time, not bound as a default: a default argument freezes the
     # constant at import and the limit then cannot be lowered by anything --
     # tests included.
     keep = MAX_CRASH_FILES if keep is None else keep
     try:
-        files = sorted(directory.glob("*.json"), key=lambda p: p.name)
+        files = sorted(directory.glob("*.json"), key=_age_key)
         for stale in files[:-keep] if len(files) > keep else []:
             stale.unlink(missing_ok=True)
     except Exception:  # noqa: BLE001
@@ -167,7 +206,7 @@ def _crash_files(cfg: Optional[dict[str, Any]] = None) -> list[Path]:
     sort is by NAME because the name starts with the UTC stamp -- mtime would
     reorder a directory that was copied off the machine and back."""
     try:
-        return sorted(crash_dir(cfg).glob("*.json"), key=lambda p: p.name)
+        return sorted(crash_dir(cfg).glob("*.json"), key=_age_key)
     except Exception:  # noqa: BLE001 - a missing/unreadable dir is "none"
         return []
 
@@ -269,12 +308,36 @@ def write_report(report: dict[str, Any],
         directory.mkdir(parents=True, exist_ok=True)
         stamp = str(report.get("when", "")).replace(":", "").replace("-", "")
         thread = re.sub(r"[^A-Za-z0-9_.-]", "_", str(report.get("thread", "?")))[:40]
-        path = directory / f"{stamp or 'unknown'}-{thread}.json"
+        base = f"{stamp or 'unknown'}-{thread}"
         # Owner-only: this file carries a redacted log tail and absolute paths,
         # and on Windows a default umask would hand it to every local account.
         # 0o600 via os.open rather than chmod-after-write, which leaves a window.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        handle = os.open(path, flags, 0o600)
+        #
+        # bug-dash-ops-9 (2026-09-25, the companion's half): O_EXCL and a
+        # counter, not O_TRUNC. The name is second-resolution plus a thread
+        # name that repeats (a worker thread that crashes, is restarted and
+        # crashes again; the UncleanExit report is always "process"), so two
+        # crashes in one second kept only the second, and the first of a
+        # burst is usually the cause.
+        #
+        # Review round: numbered past the HIGHEST slot on disk, not into the
+        # first free one. _prune removes the oldest of a burst first, which
+        # frees `<base>.json`, and a first-free search would hand that bare
+        # name (the OLDEST by the sort) to the newest crash, so the next prune
+        # deleted it.
+        taken = [_age_key(p) for p in directory.glob(f"{glob.escape(base)}*.json")]
+        start = max((n + 1 for b, n in taken if b == base), default=0)
+        handle = None
+        path = directory / _crash_name(base, start)
+        for n in range(start, 100):
+            path = directory / _crash_name(base, n)
+            try:
+                handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                break
+            except FileExistsError:
+                continue
+        if handle is None:
+            return None
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2, ensure_ascii=False)
         _prune(directory)

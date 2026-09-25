@@ -77,6 +77,11 @@
       {% if ep.state == 'failed' and ep.detail %}
         <div class="cl-note cl-note-bad">{{ ep.detail }}</div>
       {% endif %}
+      {% if ep.opening_phrase %}
+        {# logic-cards-7 (2026-09-25): a stalled open is told apart from a
+           slow one, and the pool gives up rather than hold a seat for ever. #}
+        <div class="cl-note">{{ ep.opening_phrase }}</div>
+      {% endif %}
       {# Information, nothing to press (Alex, 2026-09-14): an editor drives
          their OWN account's companions, so another person being live here is
          something to know, never something to take. #}
@@ -114,17 +119,44 @@
 {% endmacro %}
 
 {% block layout %}
-  <main class="main cl">
+  <main class="main cl"{% if want %} data-want="{{ want.slug }}"{% endif %}>
     <div class="detail-head"><h1>[ TIMELINE CARDS ]</h1></div>
 
     {% if refusal %}
       <p class="cl-refusal"><strong>[ NOT OPENED ]</strong> {{ refusal }}</p>
     {% endif %}
 
+    {# logic-cards-4 (2026-09-25): `?want=<slug>` is where the dispatcher
+       sends a navigation into an episode that is not open (after a restart or
+       a close, an installed episode app lands here). It used to be computed
+       and never drawn, so the phone got a bare list with no mention of the
+       episode it asked for. The banner names it and offers its own button,
+       and cards_landing.js goes straight into it when it turns READY. #}
+    {% if want %}
+      <div class="cl-want" aria-live="polite">
+        {% if want.state == 'ready' %}
+          <p><strong>[ {{ want.name | upper }} IS OPEN ]</strong></p>
+        {% elif want.state == 'loading' %}
+          <p><strong>[ OPENING {{ want.name | upper }} ]</strong> This page
+            takes you into it as soon as it is ready.</p>
+        {% else %}
+          <p><strong>[ {{ want.name | upper }} IS NOT OPEN ]</strong> An
+            episode closes when the dashboard restarts or somebody closes it.
+            Open it again here.</p>
+        {% endif %}
+        <div class="cl-act">{{ ep_actions(want) }}</div>
+      </div>
+    {% endif %}
+
+    {# logic-cards-3 (2026-09-25): "One episode at a time per person" was
+       neither enforced nor true (a laptop and a phone on one account in two
+       episodes is the everyday pair), and the page never said the one rule
+       that IS true: the Resolve agent follows the episode you last entered. #}
     <p class="muted cl-lede">
-      One episode at a time per person, up to {{ cap }} at once on this server
-      ({{ open_count }} open now). Two people in the SAME episode is fine - the
-      cut list takes one edit at a time and both browsers see the same cards.
+      Up to {{ cap }} episodes at once on this server ({{ open_count }} open
+      now). Your Resolve follows the last episode you went into. Two people in
+      the SAME episode is fine - the cut list takes one edit at a time and both
+      browsers see the same cards.
     </p>
 
     {% set opening = episodes | selectattr('state', 'equalto', 'loading') | list %}

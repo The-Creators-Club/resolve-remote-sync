@@ -420,7 +420,11 @@ def test_c4_unsigned_make_current_confirm_copy_is_pinned():
     assert ("This build has no release signature. Companions verify signatures, "
             # UX-16 (usability sweep 2026-09-03): "computer".
             "so making it current stops EVERY computer in the fleet from updating, "
-            "silently. Republish it through tools\\ship.cmd instead. "
+            "silently. {% if feed is defined and feed and feed.configured %}"
+            # logic-admin-6 (2026-09-25): a site on the vendor feed has no
+            # ship.cmd; the next action there is the feed's signed build.
+            "Publish the signed build from AVAILABLE FROM THE VENDOR instead."
+            "{% else %}Republish it through tools\\ship.cmd instead.{% endif %} "
             "Make it current anyway?") in text
 
 

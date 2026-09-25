@@ -217,12 +217,20 @@ def make_current_refusal(
         # chip on this page. A judgement about evidence rather than a fact
         # about the build, so it goes through the SAME typed override the soak
         # gate uses -- one mechanism, not two.
+        # logic-admin-6 (2026-09-25): tools\ship.cmd is the vendor's own
+        # pathway A (RELEASE_PATHWAYS.md). A customer site that reads the
+        # vendor feed has no such script; its way to a signed build is the
+        # Packages page's AVAILABLE FROM THE VENDOR list, which is what the
+        # page itself now says there too.
+        if str(getattr(settings, "release_feed_url", "") or "").strip():
+            instead = "Publish the signed build from AVAILABLE FROM THE VENDOR instead."
+        else:
+            instead = "Republish it through tools\\ship.cmd instead."
         return 409, (
             f"{kind} {version} has no release signature. Companions verify "
             f"signatures, so making it current stops EVERY computer in the fleet "
-            f"from updating, silently. Republish it through tools\\ship.cmd "
-            f"instead. To make it current anyway, type the version number "
-            f"({version}) into the confirmation box."
+            f"from updating, silently. {instead} To make it current anyway, "
+            f"type the version number ({version}) into the confirmation box."
         )
     if _row_value(row, "ever_current"):
         # A ROLLBACK, not a rollout: this build has been what the fleet was
@@ -440,7 +448,7 @@ def store_verified_package(
                     kind, platform, version, published_by, detail)
         raise PackageStoreError(
             400,
-            f"release signature REJECTED ({detail}) -- nothing was published. "
+            f"release signature REJECTED ({detail}): nothing was published. "
             f"The signature must cover this exact record: kind={kind}, "
             f"platform={platform}, version={version}, filename={filename}, "
             f"sha256={sha256}, size_bytes={size_bytes}, min_version={min_version}, "
@@ -515,6 +523,10 @@ def store_verified_package(
             bootstrap_ok=True)
         if refusal is None:
             db.set_current_package(conn, platform, version, kind)
+            # CR-335 (2026-09-25): see release_feed's current-policy branch.
+            db.audit(conn, str(published_by or "publish"), "package.make_current",
+                     version, {"kind": kind, "platform": platform,
+                               "version": version, "by": "publish"})
         else:
             note = f"{STAGED_SENTENCE} {refusal[1]}"
             log.warning("%s %s %s was published STAGED rather than made current "
@@ -604,12 +616,11 @@ def what_is_running(conn: sqlite3.Connection, settings, app_state) -> dict[str, 
         from . import dashboard_update, release_feed
 
         out["dashboard"]["image_mode"] = bool(dashboard_update.image_mode())
-        newest = ""
-        for record in release_feed.dashboard_records(
-                release_feed.verified_records(app_state)):
-            version = str(record.get("version") or "")
-            if version and (not newest or release_trust.version_above(version, newest)):
-                newest = version
+        # logic-release-3 (2026-09-25): what the channel's `current` pointer
+        # offers, not the highest record in it - a STAGED dashboard bundle is
+        # offered to nobody and must not make this box say the server is
+        # behind the vendor.
+        newest, _pointed = release_feed.offered_dashboard_version(app_state)
         out["dashboard"]["newest_offered"] = newest
         out["dashboard"]["behind"] = bool(
             newest and release_trust.version_above(newest, VERSION))

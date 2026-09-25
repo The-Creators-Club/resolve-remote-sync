@@ -62,6 +62,8 @@ import importlib
 import json
 import logging
 import os
+import posixpath
+import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -89,12 +91,13 @@ DISABLED = "disabled"
 # with. Both are live routes in the page, so both answer 200 with an `error`
 # the page already knows how to show: a 403 from a fetch() the page does not
 # expect to fail is a silence.
+# ui-copy-6 (2026-09-25): these sentences reach the page, so no " -- ".
 BLOCKED_PATHS = {
     "/api/restart": ("this Timeline Cards is part of the dashboard and cannot "
-                     "restart itself -- redeploy the dashboard to pick up "
+                     "restart itself: redeploy the dashboard to pick up "
                      "page changes"),
     # docs/CARDS_TWO_PROJECTS.md phase 1: see the module docstring.
-    "/api/root": ("this Timeline Cards has one engine per episode -- go back "
+    "/api/root": ("this Timeline Cards has one engine per episode. Go back "
                   "to the Timeline Cards page to open another episode, and "
                   "this one stays open behind you"),
 }
@@ -417,7 +420,7 @@ class CardsGate:
 
     async def __call__(self, scope, receive, send) -> None:
         if scope.get("type") == "http":
-            for path in sub_paths(scope):
+            for path in _gate_readings(sub_paths(scope)):
                 # bug-hunt-2026-09-03 dash-release-jobs-4: the set holds bare
                 # paths, so `/cards/api/restart/` walked straight past an
                 # exact-membership test into a handler that may normalise the
@@ -433,6 +436,32 @@ class CardsGate:
                                  "at /cards/agent/{state,pending,result}"})
                     return
         await self.app(scope, receive, send)
+
+
+def _gate_readings(paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Each path as sent AND as the handler behind the shim will read it.
+
+    bug-dash-cards-jobs-1 (2026-09-25): the handler is a
+    `BaseHTTPRequestHandler`, and CPython's `parse_request` collapses a
+    leading `//` before it routes (gh-87389, in the shipped 3.12). So
+    `/cards/p/<slug>//api/root` handed this gate `//api/root`, which is not in
+    BLOCKED_PATHS, and handed the handler `/api/root`, which moved engine A
+    onto episode B; `//api/restart` reached `restart_server`, and
+    `//agent/state` reached the page's own agent protocol on a session. The
+    trailing-slash sibling was dash-release-jobs-4. Runs of `/` are collapsed
+    and `.`/`..` segments resolved for the MATCH only, never for what is
+    forwarded: the strictest reading of a path is the one the gate answers
+    to, and the raw one is still checked beside it.
+    """
+    out: list[str] = []
+    for path in paths:
+        out.append(path)
+        collapsed = re.sub(r"/{2,}", "/", path or "/")
+        canonical = posixpath.normpath(collapsed) if collapsed else "/"
+        if collapsed.endswith("/") and canonical != "/":
+            canonical += "/"
+        out.extend((collapsed, canonical))
+    return tuple(dict.fromkeys(out))
 
 
 def sub_paths(scope: dict) -> tuple[str, ...]:
@@ -483,6 +512,10 @@ class CardsDispatch:
         # picker's "last opened" (cards_catalog, 2026-09-24). Set by
         # mount_cards; None in tests that build a dispatcher by hand.
         self.on_enter: Callable[[str, str], None] | None = None
+        # scope -> whether the carry-on cookie gets `Secure` (auth's one
+        # helper, security-3). Set by mount_cards; None means "set no
+        # cookie", which is what a dispatcher built by hand in a test does.
+        self.cookie_secure: Callable[[dict], bool] | None = None
 
     async def __call__(self, scope, receive, send) -> None:
         if scope.get("type") != "http":
@@ -520,11 +553,13 @@ class CardsDispatch:
         if asgi is None:
             await self._not_open(scope, send, slug)
             return
-        user = self._note(scope, slug)
-        if (user and not tail and self.on_enter is not None
-                and scope.get("method") == "GET" and _wants_html(scope)):
-            # The page itself, as a navigation: that is "opened", where a
-            # media range request (several a second) is only "still here".
+        # The page itself, as a navigation: that is "opened", where a media
+        # range request (several a second) is only "still here". It is also
+        # what moves this person's agent to this episode (bug-dash-cards-jobs-2).
+        entering = (not tail and scope.get("method") == "GET"
+                    and _wants_html(scope))
+        user = self._note(scope, slug, entering)
+        if user and entering and self.on_enter is not None:
             try:
                 # A file write: off the event loop (Fable review, 2026-09-25).
                 await asyncio.to_thread(self.on_enter, slug, user)
@@ -540,7 +575,43 @@ class CardsDispatch:
             self._evict(slug)
             gate = self.make_gate(asgi)
             self._gates[slug] = (asgi, gate)
+        if entering:
+            send = self._with_carry_on(scope, send, slug)
         await gate(self._child(scope, rel, slug, tail), receive, send)
+
+    def _with_carry_on(self, scope: dict, send: Callable, slug: str) -> Callable:
+        """`send`, plus the landing page's carry-on cookie on the page itself.
+
+        logic-cards-4 (2026-09-25): the cookie was set only by `POST
+        /cards/open`, i.e. only when THIS browser built an episode that was not
+        open yet. Entering one through a READY row's link, a bookmark or an
+        installed episode app never touched it, so "carry on" named the last
+        episode you BUILT, not the last one you were in. Per browser on
+        purpose (cards_landing.LAST_COOKIE): a laptop and a phone in two
+        episodes each carry on with their own.
+        """
+        if self.cookie_secure is None:
+            return send
+        try:
+            from starlette.responses import Response as _Response
+
+            from . import cards_landing
+
+            holder = _Response()
+            cards_landing.remember(holder, slug, bool(self.cookie_secure(scope)))
+            extra = [(k, v) for k, v in holder.raw_headers if k == b"set-cookie"]
+        except Exception:  # noqa: BLE001 - a convenience cookie is never a 500
+            log.exception("Timeline Cards: could not build the carry-on cookie")
+            return send
+
+        async def wrapped(message: dict) -> None:
+            if (message.get("type") == "http.response.start"
+                    and int(message.get("status", 500)) < 400):
+                message = dict(message)
+                message["headers"] = list(message.get("headers") or []) + extra
+            await send(message)
+
+        return wrapped
 
     def evict(self, slug: str) -> None:
         """Forget a closed episode's gate. Called by the pool (dash-cards-5).
@@ -570,7 +641,7 @@ class CardsDispatch:
             log.exception("Timeline Cards: the WSGI pool for %s did not shut "
                           "down cleanly", slug)
 
-    def _note(self, scope: dict, slug: str) -> str:
+    def _note(self, scope: dict, slug: str, entering: bool = False) -> str:
         """Who is in this episode -- for the cap's sentence, and for phase 1a.
 
         `login_gate` has already resolved the session by the time a request
@@ -584,7 +655,7 @@ class CardsDispatch:
         except Exception:  # noqa: BLE001 - a visit note is never worth a 500
             return ""
         if user:
-            self.pool.note_visit(slug, user)
+            self.pool.note_visit(slug, user, enter=entering)
         return user or ""
 
     @staticmethod
@@ -605,7 +676,7 @@ class CardsDispatch:
             return
         state = getattr(entry, "state", "") or "not open"
         await _json_response(send, 409, {
-            "error": f"this episode is {state} -- the Timeline Cards page is "
+            "error": f"this episode is {state}: the Timeline Cards page is "
                      f"where it opens",
             "state": state, "slug": slug, "landing": MOUNT_PATH + "/"})
 
@@ -614,7 +685,7 @@ class CardsDispatch:
             await _redirect(send, MOUNT_PATH + "/")
             return
         await _json_response(send, 404, {
-            "error": "Timeline Cards is one page per episode now -- this "
+            "error": "Timeline Cards is one page per episode now: this "
                      "address has moved under /cards/p/<episode>/",
             "landing": MOUNT_PATH + "/"})
 
@@ -763,6 +834,15 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
 
     dispatch.on_enter = (
         lambda slug, user: cards_catalog.note_opened(settings, slug, user))
+
+    def _secure(scope: dict) -> bool:
+        from starlette.requests import Request as _Request
+
+        from . import auth
+
+        return auth.cookie_secure(settings, _Request(scope))
+
+    dispatch.cookie_secure = _secure
     app.mount(MOUNT_PATH, dispatch)
     log.info("Timeline Cards mounted at %s (vault %s, from %s, up to %d "
              "episode(s) at once)", MOUNT_PATH, root, src, pool.cap)
@@ -770,6 +850,36 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
 
 
 # ------------------------------------------------------------- the health line
+
+def _agent_here(engine: Any) -> bool:
+    """Is a Resolve agent attached to this engine NOW? Never raises.
+
+    logic-cards-8 (2026-09-25): this read `bool(engine.agent_name)`, which the
+    other repo sets on the first `agent_state` and never clears (agent.py), so
+    /api/v1/health said `agent: true` for an episode whose companion quit
+    hours ago while the page itself said "Resolve agent away" - green while
+    dead. `agent_here()` is the engine's own liveness test (`agent_seen`
+    within AGENT_GONE_S). An engine without it (an older checkout) falls back
+    to the name, which is the old answer and no worse.
+    """
+    if engine is None:
+        return False
+    try:
+        here = getattr(engine, "agent_here", None)
+        if callable(here):
+            return bool(here())
+        return bool(getattr(engine, "agent_name", None))
+    except Exception:  # noqa: BLE001 - a health line never raises
+        return False
+
+
+def _last_agent(engine: Any) -> str:
+    """Who the last agent was, attached or not ("" if none ever was)."""
+    try:
+        return str(getattr(engine, "agent_name", None) or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
 
 def health_block(app: FastAPI) -> dict[str, Any]:
     """What GET /api/v1/health says about /cards. Never raises.
@@ -794,7 +904,8 @@ def health_block(app: FastAPI) -> dict[str, Any]:
         try:
             out["cap"] = pool.cap
             out["open"] = [{"slug": e.slug, "root": e.root, "state": e.state,
-                            "agent": bool(getattr(e.engine, "agent_name", None)),
+                            "agent": _agent_here(e.engine),
+                            "last_agent": _last_agent(e.engine),
                             "occupants": e.occupants()}
                            for e in pool.entries()]
             ready = [e for e in pool.entries() if e.state == cards_pool.READY]
@@ -807,7 +918,7 @@ def health_block(app: FastAPI) -> dict[str, Any]:
     if engine is not None:
         try:
             out.setdefault("root", str(getattr(engine, "root", "") or ""))
-            out.setdefault("agent", bool(getattr(engine, "agent_name", None)))
+            out.setdefault("agent", _agent_here(engine))
         except Exception:  # noqa: BLE001
             pass
     if pool is None and engine is None:

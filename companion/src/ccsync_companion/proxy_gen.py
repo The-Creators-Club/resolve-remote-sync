@@ -955,6 +955,20 @@ class ProxyGenerator:
         time so that installing ffmpeg starts generation with no restart."""
         try:
             ok, message = self._available_fn(self.ffmpeg_path)
+            if ok:
+                # bug-comp-media-5 (2026-09-25): ffprobe too, the way
+                # capabilities.py reports it as its own capability. Every clip
+                # is probed before it is encoded, so a lone ffmpeg.exe on PATH
+                # (which also stops the sidecar installing the managed pair)
+                # read RUNNING while every queued clip failed "ffprobe could
+                # not be run" three times, was capped as a bad CLIP, and filled
+                # the history ledger with failures of files that were fine.
+                probe_path = ffmpeg_tools.ffprobe_for(self.ffmpeg_path)
+                probe_ok, _found = self._available_fn(probe_path)
+                if not probe_ok:
+                    ok, message = False, (
+                        f"ffmpeg is here but ffprobe is not (looked for "
+                        f"'{probe_path}' beside it and on PATH)")
         except Exception:
             log.debug("proxy gen: ffmpeg probe failed", exc_info=True)
             return False
@@ -1502,7 +1516,7 @@ class ProxyGenerator:
         if name and 0 < here < missing:
             head = (
                 f"{here} {'clip' if here == 1 else 'clips'} in {name} "
-                f"({missing} on this machine) have no proxy, so nobody else in "
+                f"({missing} on this computer) have no proxy, so nobody else in "
                 f"the team can see them."
             )
         else:
@@ -1520,7 +1534,7 @@ class ProxyGenerator:
         if not self.generation_enabled:
             return head + " Ask your admin to generate proxies for them."
         if not self._ffmpeg_ok:
-            return head + " This machine has no ffmpeg, so it can only tell you."
+            return head + " This computer has no ffmpeg, so it can only tell you."
         return head + " I'll make them while you're away from the keyboard."
 
     def _maybe_notify(self) -> Optional[str]:
@@ -1938,7 +1952,7 @@ class ProxyGenerator:
         if floor_bytes <= 0 or free >= floor_bytes:
             return None
         return (f"only {free / gb:.1f} GB free on the drive holding {directory} "
-                f"(CCSync keeps {floor_bytes / gb:.1f} GB clear so the sync lanes "
+                f"(CCSync keeps {floor_bytes / gb:.1f} GB clear so syncing "
                 f"and Resolve's cache do not run out)")
 
     def _surface_low_space(self, why: str) -> None:

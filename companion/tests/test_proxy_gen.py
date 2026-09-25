@@ -1848,6 +1848,10 @@ def test_the_encoder_is_spawned_below_normal_with_no_window(windows, monkeypatch
             self.pid = 4321
 
     monkeypatch.setattr(sp, "Popen", _Popen)
+    # The argv[0] lookup (bug-comp-media-1) is not what this pins, and under
+    # the faked win32 on a macOS runner shutil.which takes its Windows branch
+    # and dies on _winapi being None (release-macos, 2026-09-25).
+    monkeypatch.setattr(proxy_gen.ffmpeg_tools, "spawn_argv", lambda cmd: list(cmd))
     proxy_gen._default_popen(["ffmpeg", "-i", "x"])
 
     flags = captured["kwargs"]["creationflags"]

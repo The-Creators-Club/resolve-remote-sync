@@ -12072,6 +12072,15 @@ def run() -> None:
         _sidecar_tools.ensure_ca_bundle()
     except Exception:
         log.debug("could not set this process's CA bundle", exc_info=True)
+    # CR-350 (2026-09-26): on Windows, leave expired certificates out of the
+    # trust every default SSL context builds. Before any HTTPS call, like the
+    # bundle above.
+    try:
+        from . import win_trust as _win_trust
+
+        _win_trust.install()
+    except Exception:
+        log.debug("could not install the Windows trust filter", exc_info=True)
     errors, _warnings = config_mod.validate_config(cfg)
     if errors:
         log.error(

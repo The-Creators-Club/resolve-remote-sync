@@ -31431,6 +31431,34 @@ the top". The safe-to-close line is drawn blank so an editor's list never
 jumps, but the fleet-wide view has no "this computer" and the line could
 only ever be blank there. **Fixed**: not drawn on the admin view.
 
+## CR-350 - a Windows companion on https could lose the dashboard to an expired certificate Windows itself ignores - FIXED in repo, companion (next ship, not built)
+
+2026-09-26, the owner asked for leso and Ruskin to talk to the dashboard over
+https (`https://truenas.tail26290e.ts.net:9443`, Tailscale Serve, a Let's
+Encrypt YE2 certificate valid until 2026-11-16). leso's Mac switched cleanly.
+Ruskin's companion failed EVERY call (report, selection, site manifest) with
+`CERTIFICATE_VERIFY_FAILED ... certificate has expired`, while curl.exe on the
+same machine (Schannel) connected. Python's `create_default_context()` on
+Windows loads every certificate in the CA and ROOT stores as a trust anchor,
+expired or not, and his CurrentUser\CA store held a cached "ISRG Root X2,
+issued by ISRG Root X1" that expired 2025-09-16; OpenSSL built the chain
+through it. Reproduced by exporting his stores to PEM (173 certificates, 27
+expired) and bisecting: removing that one certificate is enough. It was
+removed by hand that day (backup `~/.ccsync/removed-151682F5....cer`), but
+Windows re-caches intermediates, and any machine can carry its own.
+
+**Fixed** (`win_trust.py`, installed in `app.run` beside
+`sidecar_tools.ensure_ca_bundle`, before any HTTPS): the stdlib's
+`SSLContext._load_windows_store_certs` is replaced with the same loop minus
+any certificate whose notAfter (read with a stdlib DER walk: the vendor build
+has no `cryptography`) is in the past; an unreadable date keeps the
+certificate. Verified against his exported stores: stdlib loader fails on the
+dashboard exactly as live, the patched loader reaches it, GitHub and YouTube
+still verify. **Order matters**: Python 3.12's `HTTPSHandler` builds its
+context at construction, so an opener made before `install()` keeps the old
+trust (the first verification attempt was fooled by exactly that).
+Not covered: the onboarding wizard is a separate program with its own TLS.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

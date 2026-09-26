@@ -54,6 +54,29 @@ single-instance guard, so a companion already started by hand makes the
 relaunched copy exit 0 with "already running" -- there is never a second
 tray.
 
+ON macOS (2026-09-26, the owner: "it should be able to auto start after a
+crash"). The same process, with three POSIX substitutes for the Windows
+parts. WAITING is a kqueue EVFILT_PROC/NOTE_EXIT on the pid, but macOS hands
+an exit status only to a PARENT and the supervisor is the companion's child,
+so the exit code is always unknown there. The DELIBERATE-EXIT test therefore
+moves into the marker: crash_report registers an atexit hook that stamps
+`"exiting": true` on it, and atexit runs on every interpreter exit (sys.exit,
+an uncaught exception, the "Python-level failure" that is exit code 1 on
+Windows) and on none of the deaths this exists for (SIGABRT from Tcl_Panic,
+SIGSEGV, SIGKILL from jetsam or the kernel's code-signing check). A Quit,
+logout and `launchctl bootout` (SIGTERM, which shutdown_guard turns into
+shutdown()) already delete the marker. RELAUNCHING goes through launchd when
+the companion was started by its LaunchAgent (XPC_SERVICE_NAME, carried on
+argv as LAUNCHD_LABEL_FLAG): `launchctl kickstart` puts the new companion
+back under the job, so an installer's bootout still stops it. A direct spawn
+is the fallback when that fails. What a Mac cannot tell apart: a Force Quit
+from Activity Monitor is SIGKILL and reads as a crash, so it is relaunched
+(bounded by the same three an hour); the tray's Quit is the way to stop it.
+A `pkill -f` on the exe path matches the supervisor too, which is the
+Stop-Process guarantee again. What this does NOT cover: a build that dies
+before it spawns a supervisor (the 2026-09-26 OS_REASON_CODESIGNING kill of
+a binary copied over in place) -- there is no process yet to watch it.
+
 STDLIB ONLY, and imported by launcher.py BEFORE the app package: the
 supervisor process is a 50 MB frozen exe already; it must not also import
 the companion, its config, its logging or tkinter. Everything it needs comes
@@ -72,6 +95,16 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 FLAG = "--supervise"
+# macOS: the LaunchAgent label the companion was started under (its
+# XPC_SERVICE_NAME), so a relaunch can go back through launchd. Omitted when
+# there is none; a supervisor one release older never sees it.
+LAUNCHD_LABEL_FLAG = "--launchd-label"
+# Where a supervisor runs. Linux has no frozen build and no tray.
+SUPPORTED_PLATFORMS = ("win32", "darwin")
+# The run-marker key crash_report's atexit hook sets on an interpreter exit.
+# Spelled here and there (this module imports nothing of the companion's);
+# the suite pins the two spellings equal.
+MARKER_EXITING_KEY = "exiting"
 # Written by the supervisor into the crash directory just before it relaunches;
 # read (and removed) by crash_report.install_native on the relaunched
 # companion's start, so the relaunch reaches the log and the crash report.
@@ -142,6 +175,12 @@ def decide(exit_code: Optional[int], marker: Optional[dict[str, Any]],
     if marker_pid != supervised_pid:
         return Decision(False, f"the run marker names pid {marker_pid}, not {supervised_pid}: "
                                "this companion was replaced (self-upgrade or a start by hand)")
+    if marker.get(MARKER_EXITING_KEY):
+        # macOS's only view of a deliberate exit (no exit status for a
+        # non-parent); on Windows the same exits are already codes 0/1.
+        return Decision(False, "the companion's interpreter exited normally (sys.exit, "
+                               "an uncaught error or a startup failure): a deliberate "
+                               "stop, not a crash; not fighting it")
     if exit_code is not None and exit_code in DELIBERATE_EXIT_CODES:
         return Decision(False, f"exit code {_fmt_code(exit_code)} is a deliberate stop "
                                "(a Quit, Stop-Process, End task, or a startup failure); "
@@ -434,6 +473,80 @@ def pid_is_alive_win32(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def wait_for_exit_kqueue(pid: int, poll_seconds: float = 2.0) -> Optional[int]:
+    """macOS: block until `pid` exits. Always returns None: the kernel gives
+    an exit status only to the parent, and the companion is ours to watch,
+    not ours to reap. decide() reads the run marker instead.
+
+    A registration that fails for any reason other than "no such process"
+    falls back to polling, so a supervisor never mistakes "could not watch"
+    for "it died" and relaunches over a live companion."""
+    import errno  # noqa: PLC0415
+    import select  # noqa: PLC0415
+
+    try:
+        kq = select.kqueue()  # type: ignore[attr-defined]
+        try:
+            event = select.kevent(  # type: ignore[attr-defined]
+                pid, filter=select.KQ_FILTER_PROC,  # type: ignore[attr-defined]
+                flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,  # type: ignore[attr-defined]
+                fflags=select.KQ_NOTE_EXIT)  # type: ignore[attr-defined]
+            kq.control([event], 0, 0)
+            while True:
+                if kq.control(None, 1, None):
+                    return None
+        finally:
+            kq.close()
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return None
+    except Exception:  # noqa: BLE001 - no kqueue here: poll instead
+        pass
+    while pid_is_alive_posix(pid):
+        time.sleep(poll_seconds)
+    return None
+
+
+def pid_is_alive_posix(pid: int) -> bool:
+    """Fail-safe: "cannot tell" (EPERM, anything odd) is alive."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def launchd_label(environ: Optional[dict[str, str]] = None) -> Optional[str]:
+    """The LaunchAgent label this process runs under, or None. launchd sets
+    XPC_SERVICE_NAME to the job's label; a process started from Terminal has
+    none, or "0". Restricted to label characters because it ends up on a
+    launchctl command line."""
+    value = str((os.environ if environ is None else environ).get("XPC_SERVICE_NAME") or "")
+    value = value.strip()
+    if not value or value == "0" or len(value) > 200:
+        return None
+    if not all(ch.isalnum() or ch in "._-" for ch in value):
+        return None
+    return value
+
+
+def kickstart_launchd(label: str, run: Optional[Callable[..., Any]] = None) -> bool:
+    """`launchctl kickstart gui/<uid>/<label>` -> whether launchd took it.
+    Without -k: a job that is somehow running already is left alone."""
+    runner = run or subprocess.run
+    try:
+        result = runner(["/bin/launchctl", "kickstart", f"gui/{os.getuid()}/{label}"],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, timeout=30)
+    except Exception:  # noqa: BLE001
+        return False
+    return getattr(result, "returncode", 1) == 0
+
+
 def child_env(base: Optional[dict[str, str]] = None) -> dict[str, str]:
     """The environment a fresh, independent companion (or supervisor) gets."""
     env = {
@@ -463,9 +576,12 @@ def _detached_popen(argv: list[str], cwd: Path, env: dict[str, str]) -> Any:
 
 
 def supervisor_argv(exe: Path, pid: int, crash_dir: Path, state_dir: Path,
-                    prior: Optional[list[float]] = None) -> list[str]:
+                    prior: Optional[list[float]] = None,
+                    label: Optional[str] = None) -> list[str]:
     argv = [str(exe), FLAG, str(pid), "--exe", str(exe),
             "--crash-dir", str(crash_dir), "--state-dir", str(state_dir)]
+    if label:
+        argv += [LAUNCHD_LABEL_FLAG, label]
     # comp-ui-2: omitted entirely when there is nothing to carry, so a
     # companion one release older (which passes none) produces the argv this
     # function always produced.
@@ -481,29 +597,27 @@ def spawn_for(pid: int, exe: Path, crash_dir: Path, state_dir: Path, *,
               spawn: Optional[Callable[..., Any]] = None,
               prior: Optional[list[float]] = None) -> Optional[Any]:
     """Companion side: start a supervisor for `pid`. Returns the Popen, or
-    None with the reason logged by the caller: frozen win32 builds only, and a
-    source run has nothing to relaunch.
+    None with the reason logged by the caller: frozen Windows and macOS
+    builds only, and a source run has nothing to relaunch.
 
-    macOS is NOT covered, and the docstring used to claim launchd covered it
-    (bug-hunt-2026-09-03 comp-core-2). It does not: the companion LaunchAgent
-    `installer/macos_bootstrap.sh` writes is RunAtLoad with, deliberately and
-    with a comment saying so, no KeepAlive -- and the installer rewrites any
-    plist that HAS one. So a Mac companion that aborts (the CR-93 shape) stays
-    dead until the next logon, and crash_report.start_supervisor says so at
-    WARNING there. Porting this is not mechanical: decide() is
-    platform-neutral, but DELIBERATE_EXIT_CODES and the 0xFFFFFFFF
-    Stop-Process test are Windows semantics and need POSIX equivalents."""
+    macOS since 2026-09-26 (see the module docstring). Before that a Mac had
+    no net at all (bug-hunt-2026-09-03 comp-core-2): the companion LaunchAgent
+    is RunAtLoad with, deliberately, no KeepAlive (a self-upgrade would
+    otherwise leave two companions), so a companion that aborted stayed dead
+    until the next logon."""
     environ = os.environ if environ is None else environ
     if not enabled or environ.get(DISABLE_ENV):
         return None
-    if not (sys.platform if platform is None else platform) == "win32":
+    plat = sys.platform if platform is None else platform
+    if plat not in SUPPORTED_PLATFORMS:
         return None
     if not (bool(getattr(sys, "frozen", False)) if frozen is None else frozen):
         return None
     if not exe.is_file():
         return None
     run = spawn or _detached_popen
-    return run(supervisor_argv(exe, pid, crash_dir, state_dir, prior=prior),
+    label = launchd_label(environ) if plat == "darwin" else None
+    return run(supervisor_argv(exe, pid, crash_dir, state_dir, prior=prior, label=label),
                exe.parent, child_env(environ))
 
 
@@ -525,7 +639,7 @@ def _parse_prior(value: str) -> list[float]:
 
 def _parse(argv: list[str]) -> dict[str, Any]:
     args: dict[str, Any] = {"pid": None, "exe": None, "crash_dir": None,
-                            "state_dir": None, "prior": []}
+                            "state_dir": None, "prior": [], "label": None}
     usage = (f"usage: {FLAG} <pid> --exe <path> --crash-dir <dir> "
              f"[--state-dir <dir>] [{PRIOR_FLAG} <t,t,t>]")
     it = iter(argv)
@@ -539,6 +653,8 @@ def _parse(argv: list[str]) -> dict[str, Any]:
                 args["crash_dir"] = Path(next(it))
             elif item == "--state-dir":
                 args["state_dir"] = Path(next(it))
+            elif item == LAUNCHD_LABEL_FLAG:
+                args["label"] = launchd_label({"XPC_SERVICE_NAME": next(it)})
             elif item == PRIOR_FLAG:
                 # comp-ui-2: never a SystemExit. A malformed value is a
                 # supervisor that falls back to the file, not one that
@@ -558,19 +674,24 @@ def main(argv: list[str], *,
          pid_alive: Optional[Callable[[int], bool]] = None,
          spawn: Optional[Callable[..., Any]] = None,
          sleep_fn: Callable[[float], None] = time.sleep,
-         clock: Callable[[], float] = time.time) -> int:
+         clock: Callable[[], float] = time.time,
+         kickstart: Optional[Callable[[str], bool]] = None,
+         platform: Optional[str] = None) -> int:
     """The supervisor process. Waits for one companion, relaunches it at most
     once, exits. Every collaborator is injectable for the suite; the
-    defaults are the Windows ones."""
+    defaults are this platform's."""
     args = _parse(argv)
     pid: int = args["pid"]
     exe: Path = args["exe"]
     crash_dir: Path = args["crash_dir"]
     state_dir: Path = args["state_dir"]
+    label: Optional[str] = args.get("label")
     log = _Log(crash_dir)
-    wait = waiter or wait_for_exit_win32
-    alive = pid_alive or pid_is_alive_win32
+    windows = (sys.platform if platform is None else platform) == "win32"
+    wait = waiter or (wait_for_exit_win32 if windows else wait_for_exit_kqueue)
+    alive = pid_alive or (pid_is_alive_win32 if windows else pid_is_alive_posix)
     run = spawn or _detached_popen
+    kick = kickstart or kickstart_launchd
 
     log(f"watching companion pid {pid} ({exe})")
     try:
@@ -640,6 +761,13 @@ def main(argv: list[str], *,
         log(f"WARNING: could not write {crash_dir / RELAUNCH_NOTE_FILENAME} "
             "-- the relaunched companion will not know how many times this "
             "build has been relaunched, and cannot pass the count on.")
+    if label and not windows:
+        # Back under the LaunchAgent, so an installer's bootout stops it and
+        # the job's environment (RESOLVE_SCRIPT_*) is the one it starts with.
+        if kick(label):
+            log(f"relaunched {exe} through launchd (launchctl kickstart {label})")
+            return 0
+        log(f"launchctl kickstart {label} failed; starting {exe} directly")
     try:
         child = run([str(exe)], exe.parent, child_env())
     except Exception as exc:  # noqa: BLE001

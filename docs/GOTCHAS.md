@@ -933,6 +933,19 @@ Corollaries worth knowing before you debug one of these:
   a LaunchAgent (`com.ccsync.syncthing`), and launchd restarts it. The
   supervisor's macOS half is therefore a `launchctl kickstart -k`, which
   fixes a half-loaded agent rather than a missing process.
+* **The COMPANION on a Mac is relaunched by its own supervisor** (CR-348,
+  companion 0.9.84), not by launchd: its LaunchAgent has no `KeepAlive` on
+  purpose. The Mac supervisor cannot see an exit code (macOS gives it only
+  to a parent), so "deliberate" is the marker's `"exiting": true`, stamped
+  by an atexit hook; a Force Quit (SIGKILL) therefore counts as a crash and
+  comes back. It relaunches through `launchctl kickstart` of the agent's
+  label so a bootout still stops it. Its log is
+  `~/.ccsync/crashes/supervisor.log`.
+* **Never `cp` a new build OVER a Mac binary** (2026-09-26): the kernel
+  caches the code signature per file, and an in-place overwrite gets the new
+  process killed at exec (`launchctl print` says
+  `last exit reason = OS_REASON_CODESIGNING`, the crash report "Invalid
+  Page"). Copy beside it and `mv` over, which is a new inode.
 
 **First thing to check** when an editor's audio, graphics or subtitles have
 stopped arriving: is `syncthing.exe` in Task Manager? Then

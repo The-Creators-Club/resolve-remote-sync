@@ -18,6 +18,7 @@ import pytest
 
 from ccsync_companion import config as config_mod
 from ccsync_companion import crash_report
+from ccsync_companion import supervisor
 
 
 @pytest.fixture(autouse=True)
@@ -532,8 +533,8 @@ def test_start_supervisor_hands_the_spawn_this_pid_and_the_crash_dir(tmp_path, m
     cfg = _cfg(tmp_path)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.delenv("CCSYNC_NO_SUPERVISOR", raising=False)
-    if sys.platform != "win32":
-        pytest.skip("the supervisor is a Windows shape")
+    if sys.platform not in supervisor.SUPPORTED_PLATFORMS:
+        pytest.skip("the supervisor runs on Windows and macOS")
     assert crash_report.start_supervisor(cfg, spawn=_spawn) is True
     assert calls[0][1:3] == ["--supervise", str(os.getpid())]
     assert calls[0][calls[0].index("--crash-dir") + 1] == str(crash_report.crash_dir(cfg))
@@ -575,3 +576,37 @@ def test_a_mac_is_warned_that_nothing_relaunches_it(tmp_path, monkeypatch, caplo
         assert crash_report.start_supervisor(_cfg(tmp_path), spawn=lambda *a: None) is False
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("nothing relaunches it" in r.getMessage() for r in warnings)
+
+
+# -- the macOS supervisor's view of a deliberate exit (2026-09-26) ------------
+
+
+def test_an_interpreter_exit_stamps_our_marker_and_keeps_it(tmp_path):
+    cfg = _cfg(tmp_path)
+    crash_report.write_run_marker(cfg)
+    crash_report.mark_interpreter_exit(cfg)
+    marker = json.loads(crash_report.run_marker_path(cfg).read_text(encoding="utf-8"))
+    assert marker["pid"] == os.getpid()
+    assert marker[supervisor.MARKER_EXITING_KEY] is True
+    # ...which the supervisor reads as deliberate, and the next start still
+    # reports as an unclean exit (the marker is kept).
+    assert supervisor.decide(None, supervisor.read_marker(crash_report.crash_dir(cfg)),
+                             os.getpid(), [], 0.0).relaunch is False
+
+
+def test_an_interpreter_exit_never_creates_a_marker(tmp_path):
+    """After shutdown() the marker is gone; the hook must not bring it back."""
+    cfg = _cfg(tmp_path)
+    crash_report.mark_interpreter_exit(cfg)
+    assert not crash_report.run_marker_path(cfg).exists()
+
+
+def test_an_interpreter_exit_leaves_a_newcomers_marker_alone(tmp_path):
+    """A self-upgrade's new build owns the marker by the time the old one's
+    interpreter exits."""
+    cfg = _cfg(tmp_path)
+    path = crash_report.run_marker_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"pid": os.getpid() + 1}), encoding="utf-8")
+    crash_report.mark_interpreter_exit(cfg)
+    assert supervisor.MARKER_EXITING_KEY not in json.loads(path.read_text(encoding="utf-8"))

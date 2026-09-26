@@ -31374,6 +31374,43 @@ Tests: `tests/test_rclone_handoff.py` (22), `test_config.py`,
 8078 passed. Not yet run on a real SFTP uplink; leso's Mac is the first place
 it matters. Also documented in `docs/CONFIG.md`.
 
+## CR-348 - a Mac companion that crashed stayed dead until the next logon - FIXED, companion 0.9.84
+
+Owner, 2026-09-26, after leso's companion sat dead for 85 minutes: "the mac
+auto restart ability is not that robust then", "it should be able to auto
+start after a crash".
+
+**What was missing.** CR-106 only made the gap honest: `supervisor.py` (the
+Windows relaunch-after-abort net since 0.9.62) declined off win32, and the
+companion LaunchAgent has, deliberately, no `KeepAlive` (a self-upgrade would
+otherwise end with two companions). A Mac that aborted (Tcl_Panic, a
+segfault, a SIGKILL from jetsam) synced nothing until the next logon.
+
+**The fix: the same supervisor on macOS**, three POSIX substitutes.
+Waiting is a kqueue `NOTE_EXIT` on the pid; a failed registration polls
+rather than assume a death. macOS gives an exit status only to a parent, so
+the "deliberate exit" test moved into the run marker: `crash_report`
+registers an atexit hook that stamps `"exiting": true` on OUR marker (never
+creates one, never touches a newcomer's), and atexit runs on sys.exit and
+an uncaught error but not on an abort or a kill. A Quit, logout and
+`launchctl bootout` still delete the marker through shutdown(). A relaunch
+goes back through launchd (`launchctl kickstart gui/<uid>/<label>`, the
+label from `XPC_SERVICE_NAME`, carried on argv as `--launchd-label`) so an
+installer's bootout still stops the relaunched companion; a direct spawn is
+the fallback. Same ceiling (three an hour), same notes and history.
+Verified on leso's Mac (Python 3.9, a sandbox under /tmp, a throwaway
+LaunchAgent): SIGKILL -> relaunched in 4 s; a stamped marker -> stood down;
+SIGABRT of a launchd job -> kickstarted, back under the job.
+
+**Known limits.** A Force Quit from Activity Monitor is SIGKILL and reads as
+a crash, so it is relaunched (the tray's Quit is the way to stop it). And
+it cannot cover a build that dies before spawning its supervisor: the
+incident that prompted it was a hand-run upgrade script that `cp`'d the new
+Mach-O OVER the old file, and the kernel killed the new binary at exec
+(`OS_REASON_CODESIGNING`, "Invalid Page"). Never overwrite a Mac binary in
+place; copy beside it and `mv` (the companion's own upgrade uses
+`os.replace` and is safe).
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

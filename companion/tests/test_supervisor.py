@@ -249,7 +249,6 @@ def test_spawn_for_starts_a_detached_supervisor_with_a_clean_environment(tmp_pat
 
 @pytest.mark.parametrize("frozen, platform, environ", [
     (False, "win32", {}),                       # a source run has nothing to relaunch
-    (True, "darwin", {}),                       # launchd's job there
     (True, "linux", {}),
     (True, "win32", {supervisor.DISABLE_ENV: "1"}),
 ])
@@ -299,3 +298,133 @@ def test_the_flag_is_handled_before_the_app_is_imported(tmp_path):
     assert result.returncode == 0, result.stderr[-2000:]
     assert "stood down cleanly" in result.stdout
     assert "standing down" in (crash / supervisor.LOG_FILENAME).read_text(encoding="utf-8")
+
+
+# -- macOS (2026-09-26): the same supervisor, POSIX substitutes ---------------
+
+
+def test_an_interpreter_exit_stamped_on_the_marker_is_deliberate():
+    """A Mac supervisor never learns the exit code; crash_report's atexit
+    hook stamps the marker instead. sys.exit and an uncaught error run
+    atexit, an abort or a SIGKILL do not."""
+    marker = dict(_marker(), **{supervisor.MARKER_EXITING_KEY: True})
+    verdict = supervisor.decide(None, marker, PID, [], NOW)
+    assert verdict.relaunch is False
+    assert "deliberate" in verdict.reason
+    # Unknown code, unstamped marker: the Mac shape of a crash.
+    assert supervisor.decide(None, _marker(), PID, [], NOW).relaunch is True
+
+
+def test_spawn_for_starts_one_on_a_mac_and_carries_the_launchd_label(tmp_path):
+    crash, state, exe = _dirs(tmp_path)
+    spawn = _Spawn()
+    child = supervisor.spawn_for(
+        PID, exe, crash, state, frozen=True, platform="darwin", spawn=spawn,
+        environ={"PATH": "x", "XPC_SERVICE_NAME": "com.ccsync.companion"})
+    assert child is not None
+    argv = spawn.calls[0][0]
+    assert argv[argv.index(supervisor.LAUNCHD_LABEL_FLAG) + 1] == "com.ccsync.companion"
+
+
+@pytest.mark.parametrize("value", ["", "0", "com.x; rm -rf ~", "a" * 300])
+def test_no_usable_launchd_label_means_no_label_flag(tmp_path, value):
+    """Started from Terminal (no XPC_SERVICE_NAME, or "0"), or a value that
+    is not a label: the supervisor falls back to starting the exe itself."""
+    crash, state, exe = _dirs(tmp_path)
+    spawn = _Spawn()
+    supervisor.spawn_for(PID, exe, crash, state, frozen=True, platform="darwin",
+                         spawn=spawn, environ={"XPC_SERVICE_NAME": value})
+    assert supervisor.LAUNCHD_LABEL_FLAG not in spawn.calls[0][0]
+
+
+def test_windows_never_carries_a_launchd_label(tmp_path):
+    crash, state, exe = _dirs(tmp_path)
+    spawn = _Spawn()
+    supervisor.spawn_for(PID, exe, crash, state, frozen=True, platform="win32",
+                         spawn=spawn, environ={"XPC_SERVICE_NAME": "com.ccsync.companion"})
+    assert supervisor.LAUNCHD_LABEL_FLAG not in spawn.calls[0][0]
+
+
+def _mac_argv(exe, crash, state, label="com.ccsync.companion"):
+    return supervisor.supervisor_argv(exe, PID, crash, state, label=label)[1:]
+
+
+def test_a_mac_relaunch_goes_back_through_launchd(tmp_path):
+    """kickstart puts the new companion back under the LaunchAgent, so an
+    installer's bootout still stops it; nothing is spawned directly."""
+    crash, state, exe = _dirs(tmp_path)
+    (crash / "running.marker").write_text(json.dumps(_marker()), encoding="utf-8")
+    spawn, kicked = _Spawn(), []
+    code = supervisor.main(
+        _mac_argv(exe, crash, state), waiter=lambda pid: None,
+        pid_alive=lambda pid: False, spawn=spawn, sleep_fn=lambda s: None,
+        clock=lambda: NOW, kickstart=lambda label: kicked.append(label) or True,
+        platform="darwin")
+    assert code == 0
+    assert kicked == ["com.ccsync.companion"] and spawn.calls == []
+    assert "through launchd" in (crash / supervisor.LOG_FILENAME).read_text(encoding="utf-8")
+    # The ceiling still counts it.
+    assert json.loads((state / supervisor.HISTORY_FILENAME).read_text(
+        encoding="utf-8"))["relaunches"] == [NOW]
+
+
+def test_a_failed_kickstart_falls_back_to_starting_the_exe(tmp_path):
+    crash, state, exe = _dirs(tmp_path)
+    (crash / "running.marker").write_text(json.dumps(_marker()), encoding="utf-8")
+    spawn = _Spawn()
+    code = supervisor.main(
+        _mac_argv(exe, crash, state), waiter=lambda pid: None,
+        pid_alive=lambda pid: False, spawn=spawn, sleep_fn=lambda s: None,
+        clock=lambda: NOW, kickstart=lambda label: False, platform="darwin")
+    assert code == 0
+    assert spawn.calls and spawn.calls[0][0] == [str(exe)]
+    assert "kickstart com.ccsync.companion failed" in (
+        crash / supervisor.LOG_FILENAME).read_text(encoding="utf-8")
+
+
+def test_a_mac_quit_is_not_fought(tmp_path):
+    """Quit / logout / bootout: SIGTERM -> shutdown() -> no marker."""
+    crash, state, exe = _dirs(tmp_path)
+    kicked: list[str] = []
+    code = supervisor.main(
+        _mac_argv(exe, crash, state), waiter=lambda pid: None,
+        pid_alive=lambda pid: False, spawn=_Spawn(), sleep_fn=lambda s: None,
+        clock=lambda: NOW, kickstart=lambda label: kicked.append(label) or True,
+        platform="darwin")
+    assert code == 0 and kicked == []
+
+
+def test_the_label_on_argv_is_checked_again(tmp_path):
+    crash, state, exe = _dirs(tmp_path)
+    argv = _mac_argv(exe, crash, state, label=None) + [supervisor.LAUNCHD_LABEL_FLAG, "a b"]
+    assert supervisor._parse(argv)["label"] is None
+
+
+def test_kickstart_builds_the_gui_domain_target():
+    if not hasattr(os, "getuid"):
+        pytest.skip("POSIX only")
+    calls = []
+
+    class _R:
+        returncode = 0
+
+    assert supervisor.kickstart_launchd(
+        "com.ccsync.companion", run=lambda argv, **kw: calls.append(argv) or _R()) is True
+    assert calls[0] == ["/bin/launchctl", "kickstart", f"gui/{os.getuid()}/com.ccsync.companion"]
+
+
+@pytest.mark.skipif(not hasattr(__import__("select"), "kqueue"), reason="kqueue is BSD/macOS")
+def test_kqueue_wait_returns_when_a_real_process_exits():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.5)"])
+    try:
+        assert supervisor.wait_for_exit_kqueue(child.pid) is None
+    finally:
+        child.wait(timeout=10)
+    # Already gone: ESRCH, not a hang.
+    assert supervisor.wait_for_exit_kqueue(child.pid) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.kill(pid, 0) is a POSIX probe")
+def test_posix_liveness_probe():
+    assert supervisor.pid_is_alive_posix(os.getpid()) is True
+    assert supervisor.pid_is_alive_posix(0) is False

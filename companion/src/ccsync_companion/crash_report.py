@@ -583,6 +583,28 @@ def mark_clean_exit(cfg: Optional[dict[str, Any]] = None) -> None:
         pass
 
 
+def mark_interpreter_exit(cfg: Optional[dict[str, Any]] = None) -> None:
+    """atexit: stamp OUR marker `"exiting": true` (supervisor.MARKER_EXITING_KEY).
+
+    2026-09-26, the macOS supervisor: a Mac's supervisor never learns the
+    exit code, so this is how it tells sys.exit / an uncaught error / a
+    startup failure (atexit runs) from an abort or a SIGKILL (it does not).
+    The marker is KEPT, so the next start still files the UncleanExit report
+    a Python-level death deserves. Never creates a marker: after shutdown()
+    it is already gone, and a newcomer's is not ours. Never raises."""
+    try:
+        marker = _read_run_marker(cfg)
+        if marker is None or int(marker.get("pid", -1)) != os.getpid():
+            return
+        marker[supervisor.MARKER_EXITING_KEY] = True
+        path = run_marker_path(cfg)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(marker), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _pid_is_alive(pid: int) -> bool:
     """Liveness of another process, fail-safe: "cannot tell" is alive."""
     if pid <= 0:
@@ -678,6 +700,9 @@ def _report_unclean_exit(marker: dict[str, Any],
 # swallows every write failure and used to be the ONLY memory the "three
 # relaunches an hour" ceiling had.
 _relaunch_history: list[float] = []
+# The cfg mark_interpreter_exit's atexit hook reads; None until install_native
+# has written a marker (and registered the hook) once in this process.
+_exit_hook_cfg: Optional[dict[str, Any]] = None
 
 
 def note_relaunch_history(stamps: Any) -> list[float]:
@@ -696,7 +721,7 @@ def install_native(cfg: Optional[dict[str, Any]] = None) -> None:
     instance that is about to exit must not touch the live one's. Never
     raises -- a companion that cannot write a marker still syncs.
     """
-    global _native_handle
+    global _native_handle, _exit_hook_cfg
     cfg = cfg or {}
     try:
         marker = _read_run_marker(cfg)
@@ -745,7 +770,14 @@ def install_native(cfg: Optional[dict[str, Any]] = None) -> None:
         faulthandler.enable(file=_native_handle, all_threads=True)
     except Exception:  # noqa: BLE001
         log.debug("faulthandler could not be enabled", exc_info=True)
-    write_run_marker(cfg)
+    if write_run_marker(cfg) is not None:
+        # Once per process; the cfg of the latest install is the one the hook
+        # reads (the suite installs many times over).
+        if _exit_hook_cfg is None:
+            import atexit  # noqa: PLC0415
+
+            atexit.register(lambda: mark_interpreter_exit(_exit_hook_cfg))
+        _exit_hook_cfg = cfg
 
 
 def start_supervisor(cfg: Optional[dict[str, Any]] = None,
@@ -770,13 +802,11 @@ def start_supervisor(cfg: Optional[dict[str, Any]] = None,
                     "machine without a companion until the next logon", exc_info=True)
         return False
     if child is None:
-        # bug-hunt-2026-09-03 comp-core-2: this used to be a DEBUG line, on the
-        # strength of supervisor.spawn_for's claim that launchd covers macOS.
-        # It does not -- the companion LaunchAgent has no KeepAlive by design
-        # -- so a Mac has no relaunch-after-abort net at all and its log said
-        # nothing about it. WARNING there, INFO everywhere else (a source run
-        # is a developer's own choice).
-        line = ("supervisor: not started (source run, not Windows, or %s set) -- "
+        # bug-hunt-2026-09-03 comp-core-2: this used to be a DEBUG line. A Mac
+        # has had a supervisor since 2026-09-26, so reaching here on one is a
+        # source run or the env switch -- still WARNING there, because the
+        # LaunchAgent has no KeepAlive and nothing else would bring it back.
+        line = ("supervisor: not started (source run, not Windows/macOS, or %s set) -- "
                 "if this companion dies without shutting down, nothing relaunches "
                 "it and this machine syncs nothing until the next logon")
         if sys.platform == "darwin":

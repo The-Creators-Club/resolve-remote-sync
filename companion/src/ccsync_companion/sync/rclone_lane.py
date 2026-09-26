@@ -244,6 +244,40 @@ LANE_STALL_MAX_AGE_SECONDS = 24 * 3600.0
 # waiting on it is the hang we are escaping.
 RCLONE_STALL_RETURNCODE = -9
 
+# -- the hand-off (2026-09-26) ------------------------------------------------
+#
+# A lane A turn that reaches its per-project budget with files still in
+# flight HANDS THAT CHILD to a background thread and returns, instead of
+# holding the sequencer -- and with it every other project's uploads and
+# every proxy download -- until they land. Measured on leso's Mac
+# 2026-09-26: one 22 GB original over a ~17 Mbit/s uplink, --cutoff-mode
+# SOFT stopping new starts at 600 s, so a single SFTP stream (~0.45 MB/s, a
+# quarter of the line) ran ALONE for 13+ hours with three of four transfer
+# slots empty, 52 Elections originals and a proxy download queued behind it.
+# Nothing is done to the child itself: SFTP uploads do not resume, so ending
+# it would throw away everything it had sent. What changes is that the
+# rotation moves on and the next lane A run takes the free slots, with the
+# handed-off files kept out of it (see RcloneLane._build_command).
+#
+# The grace is how far past the budget the hand-off waits, so that every
+# file rclone started before its cutoff has shown up in a --stats tick (2 s)
+# and is in the claim set. Nothing new starts after the cutoff (measured
+# against the bundled 1.74.4: "Fatal error received - not attempting
+# retries"), so the claim set can only shrink from there.
+HANDOFF_GRACE_SECONDS = 10.0
+# What _wait_loop returns when it hands the child off rather than reaping it.
+# Not a real exit code, and never reported as one.
+RCLONE_HANDED_OFF = -1001
+# The temp-file suffix of a run started while a handed-off child is still
+# writing. rclone derives the `.partial` token from the FILE (see
+# EXPRESS_PARTIAL_SUFFIX), so a second run that uploaded the same file would
+# share its temp path and interleave into a corrupt result. The claim set
+# keeps handed-off files out of later runs; this makes a miss cost bandwidth
+# instead of a corrupt file. Numbered per run, bounded to rclone's 16-char
+# limit and still ending in `.partial` for scan_orphan_partials.
+HANDOFF_PARTIAL_SUFFIX_FMT = ".h{n}.partial"
+HANDOFF_PARTIAL_SEQ_MOD = 100000
+
 
 def _stall_budget_seconds(max_duration_seconds: Optional[float]) -> float:
     """The budget the two ceilings are derived from, never zero.
@@ -1517,9 +1551,15 @@ def scan_orphan_partials(
     run_fn: Optional[Callable[[list[str], float], Optional[str]]] = None,
     timeout: float = 120.0,
     max_samples: int = 20,
+    skip: Optional[Callable[[str], bool]] = None,
 ) -> Optional[dict]:
     """Count/size the orphan `*.partial` files left on the NAS under
     `subpath`. REPORTS ONLY -- deliberately never deletes.
+
+    `skip(name)` (name relative to `subpath`, as listed) drops a temp file
+    that is not an orphan at all: one an upload of this machine is writing
+    right now (2026-09-26 -- a handed-off child outlives the turn the scan
+    runs at the end of).
 
     AUDIT_2 C-7 is explicit about this: cleaning them up would be the one
     performance suggestion that adds a delete-on-NAS path, and the
@@ -1563,6 +1603,8 @@ def scan_orphan_partials(
             continue
         size_text, _, name = line.partition(";")
         if not name:
+            continue
+        if skip is not None and skip(name):
             continue
         try:
             size = int(size_text)
@@ -1971,7 +2013,11 @@ def build_up_command(
     stats_interval: str | None = None,
     max_duration_seconds: float | None = None,
     tuning: Optional[RcloneTuning] = None,
+    partial_suffix: str | None = None,
 ) -> list[str]:
+    """`partial_suffix` is given only while a handed-off run of this lane is
+    still writing (see HANDOFF_PARTIAL_SUFFIX_FMT); otherwise rclone's own
+    default applies and the argv is what it always was."""
     validate_filter_file(filter_file)
     tuning = tuning if tuning is not None else RcloneTuning()
     local_sub = _local_subpath(subpath)
@@ -2002,6 +2048,7 @@ def build_up_command(
         # on this lane can be empty.
         "--min-size", LANE_A_MIN_SIZE,
         "--transfers", str(transfers),
+        *(["--partial-suffix", partial_suffix] if partial_suffix else []),
         *tuning.flags(DIRECTION_UP),
         *_transport_flags(),
         *_max_duration_flags(max_duration_seconds),
@@ -2366,6 +2413,10 @@ class RcloneRunTally:
         self.error_count = 0
         self._errors: deque[str] = deque(maxlen=self.MAX_ERRORS)
         self._completed: deque[str] = deque(maxlen=self.MAX_COMPLETED)
+        # The completions not yet handed to the dashboard's history, for a
+        # run that reports in two halves: the part before a hand-off, and
+        # the rest when the handed-off child exits (take_fresh).
+        self._fresh: deque[str] = deque(maxlen=self.MAX_COMPLETED)
 
     def feed_record(self, record: dict) -> None:
         level = record.get("level", "")
@@ -2425,6 +2476,16 @@ class RcloneRunTally:
                 name = str(record.get("object") or "")
                 if name:
                     self._completed.append(name)
+                    self._fresh.append(name)
+
+    def take_fresh(self) -> list[str]:
+        """The completions since the last call, oldest first, and forget
+        them. Only the hand-off uses it; every other run reports
+        result().completed_files once, at its end."""
+        out: list[str] = []
+        while self._fresh:
+            out.append(self._fresh.popleft())
+        return out
 
     def result(self) -> RcloneRunResult:
         return RcloneRunResult(
@@ -2682,6 +2743,102 @@ def _project_rel_for_path(
     # this string becomes an rclone subpath on the NAS, which IS case
     # sensitive.
     return "/".join(["Projects", *parts[1:4]])
+
+
+class _LaneRun:
+    """One periodic rclone child's own view of itself (2026-09-26).
+
+    Until the hand-off, a lane had one child at a time and kept its live
+    stats straight on the lane's LaneStatus. A handed-off child outlives the
+    run_once that spawned it and runs beside the NEXT one, so each child now
+    keeps its own --stats snapshot, its own claim set and the watchdog's loop
+    state, and only the child in the foreground writes the lane's status.
+
+    `seen` is every name rclone has reported in its `transferring` array and
+    `done` every name it reported finished (copied, or failed for good), both
+    relative to the run's source dir exactly as rclone spells them -- which is
+    what a filter rule written back to rclone has to match. A claim is seen
+    and not done: it covers a file between low-level retries, which drops out
+    of `transferring` for a moment without having finished."""
+
+    def __init__(self, cmd: list[str], proc: Any, tally: "RcloneRunTally",
+                 subpath: Optional[str], handoff_at: Optional[float]) -> None:
+        self.cmd = cmd
+        self.proc = proc
+        self.tally = tally
+        self.subpath = str(subpath or "").replace("\\", "/").strip("/")
+        # Seconds into the run after which it may be handed off, or None when
+        # this run must be waited for (consolidate, FIX ALL, lane B, express).
+        self.handoff_at = handoff_at
+        self.handed_off = False
+        self.handed_off_at: Optional[datetime] = None
+        # Set by stop() when it ends a handed-off child, so the finishing
+        # thread logs a deliberate stop rather than a failure.
+        self.stopped = False
+        # Set by end_handoffs_under() with its reason, same purpose.
+        self.ended_why: Optional[str] = None
+        # Set by the watchdog's kill path, same reason.
+        self.killed_for_stall = False
+        self.lock = threading.Lock()
+        self.stats: dict = {}
+        self.seen: set[str] = set()
+        self.done: set[str] = set()
+        # The watchdog loop's state, carried across the hand-off so a child
+        # that went quiet just before it is not given a fresh zero-progress
+        # window just after.
+        self.wait_state: Optional[tuple] = None
+        self.reader_thread: Optional[threading.Thread] = None
+        self.abandoned: Optional[threading.Event] = None
+
+    def note_record(self, record: dict) -> bool:
+        """Fold one rclone JSON record into this run's view. True when it
+        ended a claim, i.e. freed a transfer slot. Never raises."""
+        try:
+            stats = record.get("stats")
+            if isinstance(stats, dict):
+                names = [
+                    str(entry.get("name") or "")
+                    for entry in (stats.get("transferring") or [])
+                    if isinstance(entry, dict)
+                ]
+                with self.lock:
+                    self.stats = dict(stats)
+                    self.seen.update(name for name in names if name)
+                return False
+            name = str(record.get("object") or "")
+            if not name:
+                return False
+            msg = str(record.get("msg") or "")
+            # "Copied (new)" / "Copied (replaced existing)": finished. "Failed
+            # to copy": rclone has given up on it for this run (it retries
+            # nothing after the cutoff), so it is no longer in flight either
+            # and the next run may try it.
+            if "Copied" in msg or "Failed to copy" in msg:
+                with self.lock:
+                    freed = name in self.seen and name not in self.done
+                    self.done.add(name)
+                return freed
+        except Exception:
+            log.debug("could not fold an rclone record into the run", exc_info=True)
+        return False
+
+    def claims(self) -> list[str]:
+        """What this child may still be writing, relative to local_root."""
+        with self.lock:
+            names = sorted(self.seen - self.done)
+        prefix = f"{self.subpath}/" if self.subpath else ""
+        return [f"{prefix}{name}" for name in names]
+
+    def bytes_done(self) -> int:
+        with self.lock:
+            try:
+                return int(self.stats.get("bytes") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return dict(self.stats)
 
 
 class RcloneLane(LaneAdapter):
@@ -2985,6 +3142,28 @@ class RcloneLane(LaneAdapter):
         # Lane B's --backup-dir for the run in flight (see _notify_trash).
         self._last_backup_dir: Optional[str] = None
 
+        # -- the hand-off (lane A only, 2026-09-26; HANDOFF_GRACE_SECONDS) --
+        # Read here like the express keys, for the same reason. On by
+        # default; `lane_a_handoff_enabled = false` puts back the rotation
+        # that waits for every file of a turn to land.
+        self._handoff_enabled = (
+            direction == DIRECTION_UP
+            and bool((cfg or {}).get("lane_a_handoff_enabled", True))
+        )
+        # Children handed off and still running. Guarded by _proc_lock, the
+        # lock stop() already takes to end a child: a handed-off child moves
+        # from _proc to this list inside ONE hold of it, so there is no
+        # instant in which stop() could find it in neither (KNOWN_BUGS B13).
+        self._handoffs: list[_LaneRun] = []
+        # The foreground run's own view, for the combined progress token.
+        self._fg_run: Optional[_LaneRun] = None
+        self._handoff_seq = 0
+        # Called with a handed-off child's subpath when it exits, whatever
+        # the outcome: its slots are free, and a sequencer sitting in its
+        # idle backoff would otherwise leave them empty for minutes. Wired by
+        # the sequencer (to notify_change); None for everyone else.
+        self.handoff_done_fn: Optional[Callable[[str], None]] = None
+
         # -- the stall watchdog (SYNC-1 / SYS-17, CR-91) ------------------
         # Attributes, not constructor arguments: every caller of this class
         # (app.py, consolidate, the tests) would otherwise have to learn
@@ -3063,6 +3242,18 @@ class RcloneLane(LaneAdapter):
         deterministic for a given set."""
         with self._express_inflight_lock:
             return sorted(self._express_inflight)
+
+    def _live_handoffs(self) -> list[_LaneRun]:
+        with self._proc_lock:
+            return list(self._handoffs)
+
+    def handoff_inflight_paths(self) -> list[str]:
+        """What the handed-off children may still be writing
+        (local_root-relative, `/`-separated, sorted)."""
+        paths: set[str] = set()
+        for run in self._live_handoffs():
+            paths.update(run.claims())
+        return sorted(paths)
 
     def periodic_inflight_subpath(self) -> Optional[str]:
         """Scope of the periodic run that is copying RIGHT NOW ("" = the whole
@@ -3157,6 +3348,23 @@ class RcloneLane(LaneAdapter):
                     "%s: deferring %d path(s) to the in-flight express run",
                     self.name, len(excludes),
                 )
+            # ...nor what a handed-off child is still writing (2026-09-26).
+            # The names are rclone's own, so the rule matches what rclone
+            # sees -- including a Mac's NFD names, which rclone reports as it
+            # reads them.
+            handoffs = self._live_handoffs()
+            carried = [
+                rel for rel in (
+                    self._relativize_to_subpath(p, subpath)
+                    for p in self.handoff_inflight_paths()
+                ) if rel and rel not in excludes
+            ]
+            if carried:
+                log.info(
+                    "%s: leaving %d file(s) to the upload still running in the "
+                    "background", self.name, len(carried),
+                )
+                excludes += carried
             if self.extra_excludes_fn is not None:
                 try:
                     moved_away = [
@@ -3174,10 +3382,22 @@ class RcloneLane(LaneAdapter):
                     )
                     excludes += moved_away
             filter_file = self._ensure_filter_file(excludes)
+            transfers = self.transfers
+            partial_suffix = None
+            if handoffs:
+                # The slots the background children hold are not this run's
+                # to use: together they stay at `transfers` streams, never
+                # below one for this run (_run_once_locked does not start a
+                # run at all when the background children fill every slot).
+                transfers = max(1, int(self.transfers) - self._handoff_slots(handoffs))
+                self._handoff_seq += 1
+                partial_suffix = HANDOFF_PARTIAL_SUFFIX_FMT.format(
+                    n=self._handoff_seq % HANDOFF_PARTIAL_SEQ_MOD)
             return build_up_command(
                 self.rclone_path, self.local_root, self.remote, self.remote_root,
-                filter_file, self.transfers, subpath=subpath, stats_interval=stats_interval,
+                filter_file, transfers, subpath=subpath, stats_interval=stats_interval,
                 max_duration_seconds=max_duration_seconds, tuning=self.tuning,
+                partial_suffix=partial_suffix,
             )
         filter_file = self._ensure_filter_file()
         # Remembered so the run can tell the editor WHERE its files went --
@@ -3364,9 +3584,52 @@ class RcloneLane(LaneAdapter):
     def _kill_running_process(self) -> None:
         with self._proc_lock:
             proc = self._proc
-            if proc is None:
-                return
-            self._terminate_child(proc, "rclone")
+            if proc is not None:
+                self._terminate_child(proc, "rclone")
+            # The handed-off children go the same way, and for the same
+            # reason: on Windows they outlive the parent, and a self-upgrade
+            # would leave the old process's upload running beside the new
+            # one's. A sign-out, a fleet halt and Quit all come through here.
+            for run in self._handoffs:
+                run.stopped = True
+                self._terminate_child(run.proc, "handed-off rclone")
+
+    def end_handoffs_under(self, local_dir: str, why: str) -> int:
+        """End every handed-off child uploading from `local_dir` or below
+        it, and return how many there were. Never raises.
+
+        For the repath (the sequencer calls it just before moving a project
+        folder to where the server now keeps it): a child still reading from
+        the old folder holds a handle that makes the move fail on Windows,
+        and anywhere it would go on writing to the server's OLD path, which
+        the move exists to stop (AUDIT_2 C-1). What it had not finished goes
+        again from the new path on the project's next turn."""
+        ended = 0
+        try:
+            base = os.path.normcase(nfc_key(os.path.normpath(str(local_dir))))
+            with self._proc_lock:
+                for run in list(self._handoffs):
+                    src = os.path.join(str(self.local_root), *run.subpath.split("/")) \
+                        if run.subpath else str(self.local_root)
+                    key = os.path.normcase(nfc_key(os.path.normpath(src)))
+                    if key != base and not key.startswith(base.rstrip("\\/") + os.sep):
+                        continue
+                    run.ended_why = why
+                    self._terminate_child(run.proc, "handed-off rclone")
+                    ended += 1
+            if ended:
+                log.info("%s: ended %d background upload(s) under %s -- %s",
+                         self.name, ended, local_dir, why)
+        except Exception:
+            log.exception("%s: could not end the background uploads under %s",
+                          self.name, local_dir)
+        return ended
+
+    def _handoff_slots(self, handoffs: Optional[list[_LaneRun]] = None) -> int:
+        """Transfer slots the handed-off children hold: the files each may
+        still be writing, and never less than one per live child."""
+        runs = self._live_handoffs() if handoffs is None else handoffs
+        return sum(max(1, len(run.claims())) for run in runs)
 
     def _terminate_child(self, proc, what: str) -> None:
         """terminate -> wait -> kill, never raising. Shared by both stop
@@ -3385,7 +3648,88 @@ class RcloneLane(LaneAdapter):
 
     def status(self) -> LaneStatus:
         with self._lock:
-            return LaneStatus(**vars(self._status))
+            snap = LaneStatus(**vars(self._status))
+        handoffs = self._live_handoffs()
+        if not handoffs:
+            return snap
+        try:
+            return self._with_handoffs(snap, handoffs)
+        except Exception:
+            log.debug("%s: could not fold the background uploads into the status",
+                      self.name, exc_info=True)
+            return snap
+
+    def _with_handoffs(self, snap: LaneStatus, handoffs: list[_LaneRun]) -> LaneStatus:
+        """The lane's status with its handed-off children folded in.
+
+        The children ARE this lane's work, so every reader has to see them:
+        the keep-awake and shutdown guards (busy_lanes wants `syncing`, and a
+        Mac allowed to sleep mid-file restarts that file from byte 0), the
+        fleet grid's transfer table, and the dashboard's liveness check,
+        whose token must move while any of them moves. The foreground run's
+        own figures are added to, never replaced; an ERROR it ended in stays
+        visible (its sentence is the one that says what went wrong)."""
+        rows: list[dict] = []
+        moved_bytes = 0
+        total_bytes = 0
+        speed = 0.0
+        eta: Optional[float] = None
+        files = 0
+        for run in handoffs:
+            stats = run.snapshot()
+            rows += self._normalize_transferring(
+                stats.get("transferring"), self._project_slug_for_subpath(run.subpath))
+            try:
+                moved_bytes += int(stats.get("bytes") or 0)
+                total_bytes += int(stats.get("totalBytes") or 0)
+                speed += float(stats.get("speed") or 0.0)
+                if stats.get("eta") is not None:
+                    eta = max(float(eta or 0.0), float(stats["eta"]))
+            except (TypeError, ValueError):
+                pass
+            files += int(getattr(run.tally, "transferred", 0) or 0)
+        fg = self._fg_run
+        if snap.state == STATE_SYNCING and fg is not None:
+            snap.bytes_done = int(snap.bytes_done or 0) + moved_bytes
+            snap.bytes_total = int(snap.bytes_total or 0) + total_bytes
+            snap.speed_bps = float(snap.speed_bps or 0.0) + speed
+            if eta is not None:
+                snap.eta_seconds = max(float(snap.eta_seconds or 0.0), eta)
+            moved_bytes += fg.bytes_done()
+            files += int(getattr(fg.tally, "transferred", 0) or 0)
+        else:
+            snap.bytes_done = moved_bytes
+            snap.bytes_total = total_bytes
+            snap.speed_bps = speed
+            snap.eta_seconds = eta
+            snap.current_project = snap.current_project or handoffs[0].subpath or None
+            if snap.state == STATE_IDLE:
+                # Dated from the hand-off, not from this call: status() is a
+                # snapshot, and re-dating the state on every read would make
+                # "syncing since" meaningless.
+                since = min((run.handed_off_at for run in handoffs
+                             if run.handed_off_at is not None), default=None)
+                object.__setattr__(snap, "state", STATE_SYNCING)
+                if since is not None:
+                    object.__setattr__(snap, "state_since", since)
+                snap.detail = self._handoff_detail(rows, handoffs)
+        snap.transfers = list(snap.transfers or []) + rows
+        snap.transferring = int(snap.transferring or 0) + max(len(rows), len(handoffs))
+        snap.progress_token = progress_token(moved_bytes, files, snap.current_project)
+        return snap
+
+    @staticmethod
+    def _handoff_detail(rows: list[dict], handoffs: list[_LaneRun]) -> str:
+        """The tray/grid sentence while only background uploads are running.
+        User-visible: no em dashes (owner's rule, 2026-08-18)."""
+        names = [str(row.get("name") or "") for row in rows if row.get("name")]
+        if len(names) == 1:
+            name = names[0].rsplit("/", 1)[-1]
+            pct = next((row.get("percentage") for row in rows), None)
+            suffix = f" ({int(pct)}%)" if isinstance(pct, (int, float)) else ""
+            return f"uploading {name}{suffix}"
+        count = len(names) or len(handoffs)
+        return f"uploading {count} file(s)"
 
     # -- leftovers: reported, never deleted (AUDIT_2 P8/P15/C-7) ----------
     def refresh_orphan_report(self, subpath: Optional[str] = None) -> Optional[dict]:
@@ -3397,7 +3741,8 @@ class RcloneLane(LaneAdapter):
         if self.direction != DIRECTION_UP:
             return None
         partials = scan_orphan_partials(
-            self.rclone_path, self.remote, self.remote_root, subpath
+            self.rclone_path, self.remote, self.remote_root, subpath,
+            skip=self._inflight_partial_test(subpath),
         )
         trash = scan_trash_dir(self.local_root)
         report = {
@@ -3425,6 +3770,29 @@ class RcloneLane(LaneAdapter):
         except Exception:
             log.exception("%s: stray project scan failed", self.name)
         return report
+
+    def _inflight_partial_test(
+        self, subpath: Optional[str]
+    ) -> Optional[Callable[[str], bool]]:
+        """A predicate for the temp files this machine's uploads are writing
+        right now under `subpath`, or None when nothing is in flight. The
+        temp name is `<file>.<token><suffix>` whatever the suffix, so a file
+        in flight is recognised by its own name followed by a dot."""
+        inflight = self.handoff_inflight_paths() + self.express_inflight_paths()
+        prefixes = [
+            nfc_key(rel).lower() + "."
+            for rel in (self._relativize_to_subpath(p, subpath) for p in inflight)
+            if rel
+        ]
+        if not prefixes:
+            return None
+
+        def _is_inflight(name: str) -> bool:
+            key = nfc_key(str(name)).lower()
+            return key.endswith(PARTIAL_SUFFIX) and any(
+                key.startswith(prefix) for prefix in prefixes)
+
+        return _is_inflight
 
     def _refresh_size_mismatches(self, subpath: Optional[str] = None) -> Optional[dict]:
         """The "skipped, exists" counter (COMMERCIAL_READINESS.md item 9,
@@ -3770,7 +4138,7 @@ class RcloneLane(LaneAdapter):
 
     def run_once(
         self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None,
-        rotation_pass: bool = False,
+        rotation_pass: bool = False, may_hand_off: bool = False,
     ) -> LaneStatus:
         """One synchronous pass. `max_duration_seconds` is a per-project time
         budget (the sequencer passes project_rotation_seconds) -- without it
@@ -3779,13 +4147,21 @@ class RcloneLane(LaneAdapter):
 
         `rotation_pass` says this call is one of the sequencer's rotation
         turns, and is the only kind of call the stale-subpath gate below may
-        drop (regression-4, 2026-09-11b)."""
+        drop (regression-4, 2026-09-11b).
+
+        `may_hand_off` (lane A, 2026-09-26) lets a pass that is past its
+        budget with files still in flight return while they finish in the
+        background (HANDOFF_GRACE_SECONDS). Only the sequencer's rotation
+        asks for it: consolidate and FIX ALL call this same method to WAIT
+        for their upload, and a return before the file has landed would tell
+        them it had."""
         with self._run_lock:
-            return self._run_once_locked(subpath, max_duration_seconds, rotation_pass)
+            return self._run_once_locked(
+                subpath, max_duration_seconds, rotation_pass, may_hand_off)
 
     def _run_once_locked(
         self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None,
-        rotation_pass: bool = False,
+        rotation_pass: bool = False, may_hand_off: bool = False,
     ) -> LaneStatus:
         # Cleared here rather than only set at the end, so an early return
         # (breaker, stopped lane, missing root) reads as "this pass moved
@@ -3919,6 +4295,20 @@ class RcloneLane(LaneAdapter):
         else:
             local_proxies = 0
 
+        if self.direction == DIRECTION_UP and self._live_handoffs():
+            held = self._handoff_slots()
+            if held >= int(self.transfers):
+                # Every transfer slot is already moving a file in the
+                # background, which is the most this lane is allowed to
+                # move at once. Starting a run here would only list the tree
+                # to find nothing it may start. Not "found nothing" for the
+                # sequencer's skip-ahead either: it has not looked (None).
+                log.info(
+                    "%s: not starting a pass for %s -- all %d upload slot(s) are "
+                    "busy with uploads running in the background",
+                    self.name, subpath or "the whole tree", held)
+                return self.status()
+
         with self._lock:
             self._status.state = STATE_SYNCING
             self._status.transferring = 1
@@ -3996,9 +4386,12 @@ class RcloneLane(LaneAdapter):
                 stderr_text = proc.stderr or ""
                 result = parse_json_log(stderr_text)
             else:
+                handoff_at = None
+                if may_hand_off and self._handoff_enabled and max_duration_seconds:
+                    handoff_at = float(max_duration_seconds) + HANDOFF_GRACE_SECONDS
                 try:
                     returncode, stderr_text, result = self._run_popen(
-                        cmd, max_duration_seconds)
+                        cmd, max_duration_seconds, handoff_at=handoff_at, subpath=subpath)
                 except SpawnCancelled:
                     return self._stand_down_status()
                 except Exception as exc:
@@ -4013,6 +4406,9 @@ class RcloneLane(LaneAdapter):
                     return self.status()
         finally:
             self._set_periodic_scope(None)
+
+        if returncode == RCLONE_HANDED_OFF:
+            return self._note_handed_off(result, subpath)
 
         self._record_completions(result, subpath)
         # What this pass actually moved, for the sequencer's idle backoff
@@ -4171,6 +4567,34 @@ class RcloneLane(LaneAdapter):
             # while proxy download is stopped.
             return self._breaker_stand_down()
         self._maybe_prune_trash()
+        return self.status()
+
+    def _note_handed_off(self, result: RcloneRunResult, subpath: Optional[str]) -> LaneStatus:
+        """End a pass whose child went on in the background (2026-09-26).
+
+        For the rotation this is exactly the --max-duration ending: the
+        budget ran out with work left, so the outcome is WORK_REMAINED and
+        the lane is idle in the foreground. What was copied before the
+        hand-off goes to the history now; the rest follows when the child
+        exits (_finish_handed_off). status() folds the child back in, so no
+        reader sees an idle lane while it is still uploading."""
+        self._record_completions(result, subpath)
+        self._last_run_moved = max(0, int(result.transferred or 0))
+        with self._lock:
+            self._status.state = STATE_IDLE
+            self._status.last_error = None
+            self._status.last_sync = datetime.now(timezone.utc)
+            self._status.transferring = 0
+            self._status.queued = 0
+            self._status.speed_bps = None
+            self._status.eta_seconds = None
+            self._status.transfers = []
+            self._status.current_project = None
+            self._status.detail = (
+                f"transferred {result.transferred} file(s); the rest are still "
+                "uploading in the background"
+            )
+        self._note_run_outcome(subpath, RUN_OUTCOME_WORK_REMAINED)
         return self.status()
 
     def _record_completions(self, result: RcloneRunResult, subpath: Optional[str]) -> None:
@@ -5079,7 +5503,8 @@ class RcloneLane(LaneAdapter):
         return "A" if self.direction == DIRECTION_UP else "B"
 
     def _progress_marker(
-        self, tally: Optional[RcloneRunTally], include_bytes: bool = True
+        self, tally: Optional[RcloneRunTally], include_bytes: bool = True,
+        run: Optional[_LaneRun] = None,
     ) -> tuple[int, int]:
         """(bytes, files) this run has moved so far.
 
@@ -5094,7 +5519,12 @@ class RcloneLane(LaneAdapter):
         # gigabytes while the express child is wedged -- borrowing its bytes
         # would hide exactly the stall we are looking for.
         done = 0
-        if include_bytes:
+        if include_bytes and run is not None:
+            # The run's OWN bytes (2026-09-26): once a child is handed off,
+            # the lane's status belongs to the next run, and borrowing its
+            # bytes would hide the handed-off child's stall the same way.
+            done = run.bytes_done()
+        elif include_bytes:
             with self._lock:
                 done = self._status.bytes_done or 0
         moved = int(getattr(tally, "transferred", 0) or 0) + int(
@@ -5111,6 +5541,7 @@ class RcloneLane(LaneAdapter):
         tally: Optional[RcloneRunTally],
         max_duration_seconds: Optional[float],
         express: bool = False,
+        run: Optional[_LaneRun] = None,
     ) -> int:
         """proc.wait(), but bounded -- the two lines CR-91 asked for.
 
@@ -5128,7 +5559,12 @@ class RcloneLane(LaneAdapter):
         from byte 0 next pass, forever, and leave a `.partial` on the NAS
         each time. So the hard ceiling fires when the run is past it AND has
         moved nothing for two polls; while bytes keep arriving it logs once
-        and lets the transfer finish."""
+        and lets the transfer finish.
+
+        With a `run` whose handoff_at is set (lane A in the rotation,
+        2026-09-26), it returns RCLONE_HANDED_OFF instead of waiting once the
+        run is past that point with files still in flight, leaving the child
+        running and its loop state on the run for _continue_wait."""
         zero_limit = zero_progress_limit_seconds(max_duration_seconds)
         hard_limit = hard_ceiling_seconds(max_duration_seconds)
         clock = self._monotonic
@@ -5136,7 +5572,7 @@ class RcloneLane(LaneAdapter):
         what = "wedged express rclone" if express else "wedged rclone"
         started = clock()
         last_progress_at = started
-        last_marker = self._progress_marker(tally, include_bytes=not express)
+        last_marker = self._progress_marker(tally, include_bytes=not express, run=run)
         over_ceiling_logged = False
         if not express:
             self._child_progress_at = time.monotonic()
@@ -5144,10 +5580,28 @@ class RcloneLane(LaneAdapter):
             return self._wait_loop(
                 cmd, proc, tally, express, zero_limit, hard_limit, clock,
                 spawn_lock, what, started, last_progress_at, last_marker,
-                over_ceiling_logged)
+                over_ceiling_logged, run=run)
         finally:
             if not express:
                 self._child_progress_at = None
+
+    def _continue_wait(self, run: _LaneRun, max_duration_seconds: Optional[float]) -> int:
+        """Go on watching a child _wait_loop stopped watching to hand it
+        off, from the state it stopped in: same ceilings, same clock, same
+        last-progress time. Never hands off again."""
+        clock = self._monotonic
+        run.handoff_at = None
+        state = run.wait_state
+        if state is None:
+            now = clock()
+            state = (now, now, self._progress_marker(run.tally, run=run), False)
+        started, last_progress_at, last_marker, over_ceiling_logged = state
+        return self._wait_loop(
+            run.cmd, run.proc, run.tally, False,
+            zero_progress_limit_seconds(max_duration_seconds),
+            hard_ceiling_seconds(max_duration_seconds), clock,
+            self._proc_lock, "wedged rclone", started, last_progress_at,
+            last_marker, over_ceiling_logged, run=run)
 
     def seconds_since_child_progress(self) -> Optional[float]:
         """CR-279: how long ago the sequencer's rclone child last moved
@@ -5161,7 +5615,7 @@ class RcloneLane(LaneAdapter):
 
     def _wait_loop(self, cmd, proc, tally, express, zero_limit, hard_limit, clock,
                    spawn_lock, what, started, last_progress_at, last_marker,
-                   over_ceiling_logged) -> int:
+                   over_ceiling_logged, run: Optional[_LaneRun] = None) -> int:
         while True:
             try:
                 return proc.wait(timeout=self._wait_poll_seconds)
@@ -5173,11 +5627,14 @@ class RcloneLane(LaneAdapter):
                 # a failed run rather than retried forever in this loop.
                 log.exception("%s: could not wait on the rclone child", self.name)
                 return RCLONE_STALL_RETURNCODE
+            # A handed-off child is no longer the sequencer's: its progress
+            # must not be what keeps the sequencer's heartbeat fresh (CR-279).
+            handed_off = run is not None and run.handed_off
             now = clock()
-            marker = self._progress_marker(tally, include_bytes=not express)
+            marker = self._progress_marker(tally, include_bytes=not express, run=run)
             if marker != last_marker:
                 last_marker, last_progress_at = marker, now
-                if not express:
+                if not express and not handed_off:
                     self._child_progress_at = time.monotonic()
             idle_for = now - last_progress_at
             ran_for = now - started
@@ -5191,6 +5648,15 @@ class RcloneLane(LaneAdapter):
             elif ran_for >= hard_limit and not moving:
                 stalled_for, detail = ran_for, (
                     f"rclone did not exit after {int(ran_for)}s - killed")
+            elif (run is not None and not handed_off and run.handoff_at is not None
+                  and ran_for >= run.handoff_at and run.claims()):
+                # Past the budget, so rclone starts nothing new, and still
+                # writing: hand it off (HANDOFF_GRACE_SECONDS). A run with no
+                # claim is between files or about to exit, and is simply
+                # waited for as before.
+                run.wait_state = (started, last_progress_at, last_marker,
+                                  over_ceiling_logged)
+                return RCLONE_HANDED_OFF
             elif ran_for >= hard_limit:
                 if not over_ceiling_logged:
                     over_ceiling_logged = True
@@ -5208,7 +5674,13 @@ class RcloneLane(LaneAdapter):
                 self.name, detail, last_marker[0], last_marker[1], int(ran_for),
                 " ".join(cmd),
             )
-            self._record_stall(int(stalled_for), detail, express=express)
+            # A handed-off child's stall is on the record and in the report
+            # like any other, but it is not handed to the next foreground
+            # pass as ITS error: that pass is a different child.
+            self._record_stall(int(stalled_for), detail, express=express,
+                               pending=not handed_off)
+            if run is not None:
+                run.killed_for_stall = True
             with spawn_lock:
                 self._terminate_child(proc, what)
             try:
@@ -5224,12 +5696,16 @@ class RcloneLane(LaneAdapter):
                 )
                 return RCLONE_STALL_RETURNCODE
 
-    def _record_stall(self, seconds: int, detail: str, express: bool = False) -> None:
+    def _record_stall(self, seconds: int, detail: str, express: bool = False,
+                      pending: bool = True) -> None:
         """Remember (and persist) a stall this lane just killed.
 
         Persisted because a companion restart -- or the self-upgrade an
         editor performs while chasing the symptom -- would otherwise erase
-        the only local record that anything was killed at all."""
+        the only local record that anything was killed at all.
+
+        `pending=False` keeps it out of the next foreground pass's result
+        (a handed-off child, 2026-09-26)."""
         record = {
             "lane": self._stall_lane_label(express),
             "seconds": max(0, int(seconds)),
@@ -5239,7 +5715,7 @@ class RcloneLane(LaneAdapter):
         }
         with self._lock:
             self._last_stall = record
-            if not express:
+            if not express and pending:
                 # Consumed by _run_once_locked, so the pass reports the stall
                 # rather than rclone's "exited -9", which says nothing.
                 self._pending_stall_detail = detail
@@ -5380,6 +5856,7 @@ class RcloneLane(LaneAdapter):
     # -- Popen-based runner with live --stats JSON parsing ---------------
     def _run_popen(
         self, cmd: list[str], max_duration_seconds: Optional[float] = None,
+        handoff_at: Optional[float] = None, subpath: Optional[str] = None,
     ) -> tuple[int, str, RcloneRunResult]:
         """Run rclone, parsing its stderr AS IT ARRIVES.
 
@@ -5392,7 +5869,11 @@ class RcloneLane(LaneAdapter):
         the stall watchdog's two ceilings are derived from -- see
         zero_progress_limit_seconds / hard_ceiling_seconds. A stall sets
         `self._last_stall` (and persists it) and leaves the child killed;
-        _run_once_locked turns that into the lane's error state."""
+        _run_once_locked turns that into the lane's error state.
+
+        With `handoff_at` (2026-09-26) the child may be handed off: the
+        return is then (RCLONE_HANDED_OFF, "", what it had copied so far),
+        and _finish_handed_off reports the rest when it exits."""
         factory = self.popen_factory or subprocess.Popen
         # SPAWN AND PUBLISH ATOMICALLY. _kill_running_process() takes the
         # same lock, so it can no longer see `_proc is None` for a child that
@@ -5416,6 +5897,8 @@ class RcloneLane(LaneAdapter):
         # still blocked on a pipe a grandchild is holding open must not go on
         # writing this run's status/tally into the NEXT run's.
         abandoned = threading.Event()
+        run = _LaneRun(cmd, proc, tally, subpath, handoff_at)
+        run.abandoned = abandoned
 
         def _reader() -> None:
             # Never let a decode/IO error escape this thread: with no
@@ -5429,7 +5912,7 @@ class RcloneLane(LaneAdapter):
                     if abandoned.is_set():
                         return
                     tail.append(line)
-                    self._handle_stderr_line(line, tally)
+                    self._handle_stderr_line(line, tally, run)
             except Exception:
                 log.exception(
                     "%s: stderr reader failed -- killing rclone so proc.wait() "
@@ -5443,13 +5926,32 @@ class RcloneLane(LaneAdapter):
         reader_thread = threading.Thread(
             target=_reader, name=f"ccsync-{self.name}-stderr-reader", daemon=True
         )
+        run.reader_thread = reader_thread
+        self._fg_run = run
         reader_thread.start()
+        handed_off = False
         try:
-            returncode = self._wait_with_watchdog(cmd, proc, tally, max_duration_seconds)
+            returncode = self._wait_with_watchdog(
+                cmd, proc, tally, max_duration_seconds, run=run)
+            if returncode == RCLONE_HANDED_OFF:
+                handed_off = self._hand_off(run, max_duration_seconds)
+                if not handed_off:
+                    # stop() landed first: this child is its to end, and is
+                    # waited for here exactly as it always was.
+                    returncode = self._continue_wait(run, max_duration_seconds)
         finally:
             with self._proc_lock:
                 if self._proc is proc:
                     self._proc = None
+            if self._fg_run is run:
+                self._fg_run = None
+        if handed_off:
+            # What it copied before the hand-off, for the history now; the
+            # reader goes on feeding the same tally in the background.
+            fresh = tally.take_fresh()
+            return RCLONE_HANDED_OFF, "", RcloneRunResult(
+                ok=True, transferred=int(tally.transferred), errors=[],
+                raw_returncode=RCLONE_HANDED_OFF, completed_files=fresh)
         # BOUNDED (see STDERR_READER_JOIN_SECONDS): rclone has exited, so a
         # reader that is still blocked is waiting on a write handle some
         # grandchild inherited and will never close. Waiting forever here
@@ -5474,11 +5976,129 @@ class RcloneLane(LaneAdapter):
             result = RcloneRunTally().result()
         return returncode, tail_text, result
 
-    def _handle_stderr_line(self, line: str, tally: Optional[RcloneRunTally] = None) -> None:
+    def _hand_off(self, run: _LaneRun, max_duration_seconds: Optional[float]) -> bool:
+        """Move a foreground child to the background. False when stop() has
+        landed, in which case nothing changed and the caller waits for it.
+
+        The flag goes up under _lock FIRST, so the stderr reader stops
+        writing the lane's status before the foreground pass clears it (a
+        late tick would otherwise put this child's row back on a status that
+        status() then adds the same row to). The move itself is one hold of
+        _proc_lock: stop() finds the child in _proc or in _handoffs, never in
+        neither."""
+        with self._lock:
+            run.handed_off = True
+            run.handed_off_at = datetime.now(timezone.utc)
+        with self._proc_lock:
+            moved = not self._stop_event.is_set() and self._proc is run.proc
+            if moved:
+                self._handoffs.append(run)
+                self._proc = None
+        if not moved:
+            with self._lock:
+                run.handed_off = False
+                run.handed_off_at = None
+            return False
+        claims = run.claims()
+        log.info(
+            "%s: %s used its %ds turn with %d file(s) still uploading (%s) -- "
+            "letting them finish in the background so the other files can start",
+            self.name, run.subpath or "the whole tree", int(max_duration_seconds or 0),
+            len(claims), ", ".join(c.rsplit("/", 1)[-1] for c in claims[:3]),
+        )
+        thread = threading.Thread(
+            target=self._finish_handed_off, args=(run, max_duration_seconds),
+            name=f"ccsync-{self.name}-handoff", daemon=True,
+        )
+        try:
+            thread.start()
+        except Exception:
+            # No thread to watch it: watch it here instead, which is only the
+            # old behaviour (the rotation waits) and never an unwatched child.
+            log.exception("%s: could not start the background watcher -- waiting "
+                          "for the upload here", self.name)
+            self._finish_handed_off(run, max_duration_seconds)
+        return True
+
+    def _finish_handed_off(self, run: _LaneRun,
+                           max_duration_seconds: Optional[float]) -> None:
+        """Watch a handed-off child to its end, then report it. Runs on its
+        own thread; never raises.
+
+        Deliberately NOT the lane's status or error state: the foreground
+        passes own those, and one of them is probably running right now. A
+        failure is logged with its argv, and the files go again on the
+        project's next turn (`copy --ignore-existing` skips what landed). A
+        stall is killed and recorded by the watchdog like any other."""
+        returncode = RCLONE_STALL_RETURNCODE
+        try:
+            returncode = self._continue_wait(run, max_duration_seconds)
+        except Exception:
+            log.exception("%s: watching the background upload failed -- ending it",
+                          self.name)
+            with self._proc_lock:
+                self._terminate_child(run.proc, "handed-off rclone")
+        finally:
+            with self._proc_lock:
+                if run in self._handoffs:
+                    self._handoffs.remove(run)
+        reader = run.reader_thread
+        if reader is not None:
+            reader.join(timeout=STDERR_READER_JOIN_SECONDS)
+            if reader.is_alive() and run.abandoned is not None:
+                run.abandoned.set()
+        try:
+            fresh = run.tally.take_fresh()
+            total = int(run.tally.transferred)
+            errors = run.tally.result().errors
+        except RuntimeError:
+            fresh, total, errors = [], 0, []
+        self._record_completions(RcloneRunResult(
+            ok=True, transferred=len(fresh), errors=[], raw_returncode=returncode,
+            completed_files=fresh), run.subpath or None)
+        where = run.subpath or "the whole tree"
+        if run.stopped:
+            log.info("%s: the background upload for %s was ended by stop() "
+                     "(rclone exited %s)", self.name, where, returncode)
+        elif run.ended_why:
+            log.info("%s: the background upload for %s was ended: %s", self.name,
+                     where, run.ended_why)
+        elif run.killed_for_stall:
+            pass  # the watchdog has logged it and recorded the stall
+        elif returncode in (0, RCLONE_EXIT_MAX_DURATION):
+            log.info("%s: the background upload for %s has finished (%d file(s) "
+                     "in that run)", self.name, where, total)
+            self._note_stall_recovered()
+        else:
+            log.warning(
+                "%s: the background upload for %s exited %s -- %s; what did not "
+                "land goes again on the project's next turn\n  argv: %s",
+                self.name, where, returncode,
+                _most_informative_error(errors) or "no error line",
+                " ".join(run.cmd),
+            )
+        if not run.stopped:
+            self._note_handoff_progress(run)
+
+    def _note_handoff_progress(self, run: _LaneRun) -> None:
+        """Tell the rotation a handed-off child has freed a slot (one of its
+        files landed or failed, or it exited). Never raises."""
+        done = self.handoff_done_fn
+        if done is None or run.stopped:
+            return
+        try:
+            done(run.subpath)
+        except Exception:
+            log.debug("%s: handoff_done_fn failed", self.name, exc_info=True)
+
+    def _handle_stderr_line(self, line: str, tally: Optional[RcloneRunTally] = None,
+                            run: Optional[_LaneRun] = None) -> None:
         """Live --stats parse for ONE stderr line, plus the run tally.
 
         `tally` is optional so the line handler stays callable on its own
-        (tests, and any future caller that only wants the status side)."""
+        (tests, and any future caller that only wants the status side).
+        `run` is the child's own view (2026-09-26); a handed-off child writes
+        only that, never the lane's status."""
         line = line.strip()
         if not line or not line.startswith("{"):
             return
@@ -5491,6 +6111,14 @@ class RcloneLane(LaneAdapter):
             # end of the run -- that required keeping the whole stream
             # (AUDIT_3 M-8).
             tally.feed_record(record)
+        if run is not None and run.note_record(record) and run.handed_off:
+            # A background child just finished one of its files. It will
+            # start nothing new (it is past its cutoff), so that slot stays
+            # empty until the rotation's next lane A pass: ask for it now,
+            # not when the child's LAST file lands -- leso's 22 GB original
+            # would otherwise keep a slot that a finished clip freed idle for
+            # hours.
+            self._note_handoff_progress(run)
         stats = record.get("stats")
         if not isinstance(stats, dict):
             return
@@ -5500,6 +6128,8 @@ class RcloneLane(LaneAdapter):
         # exited, so a hard kill mid-pass erased every deletion that pass had
         # made and the machine came back with a fresh budget.
         self._credit_deletes_in_flight(tally)
+        if run is not None and run.handed_off:
+            return
         # The project this run is for, read and released before resolving the
         # slug: that can touch the disk (the marker), and _lock is on the
         # tray's and the reporter's read path.
@@ -5509,6 +6139,8 @@ class RcloneLane(LaneAdapter):
         moved = (int(getattr(tally, "transferred", 0) or 0) + int(
             getattr(tally, "deleted", 0) or 0)) if tally is not None else 0
         with self._lock:
+            if run is not None and run.handed_off:
+                return  # handed off between the check above and here
             self._status.bytes_done = stats.get("bytes")
             self._status.bytes_total = stats.get("totalBytes")
             self._status.speed_bps = stats.get("speed")
@@ -6110,6 +6742,11 @@ class RcloneLane(LaneAdapter):
         # wait for the paths already judged.
         scope = self.periodic_inflight_subpath()
         deferred_to_periodic = 0
+        # ...and the same for a file a handed-off periodic child is still
+        # writing (2026-09-26). NFC and case-folded on both sides: the claim
+        # is rclone's spelling of the name and `rel` the watcher's, and on a
+        # Mac those can be the two forms of one name (CR-90).
+        carried = {nfc_key(path).lower() for path in self.handoff_inflight_paths()}
         for rel, (seen_size, first_seen) in batch.items():
             full = os.path.join(str(self.local_root), rel.replace("/", os.sep))
             try:
@@ -6134,6 +6771,10 @@ class RcloneLane(LaneAdapter):
                 # only just created is legitimately 0 bytes for an instant,
                 # and the next window sees the real ones.
                 deferred[rel] = (0, first_seen)
+                continue
+            if carried and nfc_key(rel).lower() in carried:
+                deferred[rel] = (st.st_size, first_seen)
+                deferred_to_periodic += 1
                 continue
             if scope is not None and self._relativize_to_subpath(rel, scope) is not None:
                 # Deferring loses nothing: that run's own walk usually reaches

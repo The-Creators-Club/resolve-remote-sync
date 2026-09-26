@@ -184,6 +184,12 @@ express_debounce_seconds = 10.0
 # periodic pass rather than shipped as one enormous express run.
 express_max_batch = 200
 
+# When a project's upload turn (project_rotation_seconds) ends with a file
+# still uploading, let it finish in the background and move on: the next
+# upload run takes the free transfer slots, and the rotation is not held by
+# one big original on a thin uplink. false = wait for it, as before.
+lane_a_handoff_enabled = true
+
 # Local Syncthing REST API base URL and API key. Leave syncthing_api_key
 # empty to read it from Syncthing's own config.xml -- first from the
 # installer-managed Syncthing home (%LOCALAPPDATA%\ccsync\syncthing-config

@@ -234,7 +234,10 @@ def test_lane_a_can_never_see_the_archive_at_all():
     source = Path(sequencer.__file__).read_text(encoding="utf-8")
     lane_a_calls = [line.strip() for line in source.splitlines()
                     if "_run_lane(self.lane_a" in line]
-    assert lane_a_calls == ['outcomes["a"] = self._run_lane(self.lane_a, subpath, budget)']
+    # may_hand_off (CR-347, 2026-09-26) changes when lane A returns, never
+    # what it is scoped to: a handed-off child keeps this same subpath.
+    assert lane_a_calls == [
+        'outcomes["a"] = self._run_lane(self.lane_a, subpath, budget, may_hand_off=True)']
     assert 'subpath = f"{PROJECTS_PREFIX}{rel_path}"' in source
 
     # ...and that rel cannot climb back out into Assets/.

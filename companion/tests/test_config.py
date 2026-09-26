@@ -152,6 +152,7 @@ def test_default_toml_text_documents_every_default_key():
         "structure_clone_every_n_passes", "lane_c_pause_scheme",
         "lane_c_max_folder_concurrency", "orphan_scan_every_n_passes",
         "express_upload_enabled", "express_debounce_seconds", "express_max_batch",
+        "lane_a_handoff_enabled",
         "server_p_unc",
         # Power-guard liveness thresholds: same class again. They exist so a
         # machine can be tuned in the field without a rebuild, but the shipped

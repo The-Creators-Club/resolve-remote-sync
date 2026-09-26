@@ -153,7 +153,7 @@ log = logging.getLogger("ccsync.config")
 # and this loop claims it BY ID through a closed idle gate, and a whisper pass
 # finally reports progress -- its stdout is read on a drain thread instead of
 # being buffered until exit, so the fleet chip moves while the GPU works.
-VERSION = "0.9.82"
+VERSION = "0.9.83"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
@@ -319,6 +319,12 @@ DEFAULTS: dict[str, Any] = {
     # Paths per window; a bigger burst (a card ingest) is left to the
     # periodic pass rather than shipped as one enormous express run.
     "express_max_batch": 200,
+    # A lane A turn that runs out of project_rotation_seconds with files
+    # still uploading lets them finish in the background and moves on, so
+    # one big original on a thin uplink no longer holds every other upload
+    # and download behind it (2026-09-26, sync/rclone_lane.py "the
+    # hand-off"). false = the rotation waits for them, as before.
+    "lane_a_handoff_enabled": True,
     "syncthing_url": "http://127.0.0.1:8384",
     "syncthing_api_key": "",
     # Restart a dead local Syncthing (SYNC-17, 2026-08-18). Nothing else on
@@ -1064,6 +1070,9 @@ transfers = 4
 # express_upload_enabled = true
 # express_debounce_seconds = 10.0
 # express_max_batch = 200
+# When a project's upload turn ends with a big file still going, let it
+# finish in the background so the next files and projects can start.
+# lane_a_handoff_enabled = true
 
 # Local Syncthing REST API base URL and API key. Leave syncthing_api_key
 # empty to read it from Syncthing's own config.xml (the installer-managed

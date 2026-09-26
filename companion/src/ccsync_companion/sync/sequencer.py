@@ -354,7 +354,10 @@ class Sequencer:
             else BorrowedFolderManager(
                 admin, self.local_root, lenders_fn=self.borrowed_lenders,
                 selected_slugs_fn=self.expected_folder_slugs,
-                halted=halted, move_dir=_default_move,
+                # _guarded_move, not _default_move: lane A uploads a borrowed
+                # subpath in the borrower's turn, so a handed-off child can be
+                # reading from the folder being moved (2026-09-26).
+                halted=halted, move_dir=self._guarded_move,
                 # SYNC-6, as above: _accept and _repoint both mkdir.
                 root_present_fn=self._local_root_is_present)
         )
@@ -440,6 +443,7 @@ class Sequencer:
         # going offline mid-session with nothing anywhere saying why.
         self.repather = repather if repather is not None else ProjectRepather(
             admin, self.local_root,
+            move_fn=self._guarded_move,
             state_dir=self._state_dir_for(cfg),
             relink_fn=self._relink_moved_project,
         )
@@ -500,6 +504,14 @@ class Sequencer:
             self.lane_b.subpath_still_current = self._subpath_is_current
         except Exception:
             log.debug("sequencer: lane B takes no current-subpath check", exc_info=True)
+        # Lane A's hand-off (2026-09-26): when an upload it let finish in the
+        # background exits, its transfer slots are free -- promote that
+        # project and wake the loop, exactly as a watcher event would, rather
+        # than leave the slots empty for the rest of an idle backoff.
+        try:
+            self.lane_a.handoff_done_fn = self.notify_change
+        except Exception:
+            log.debug("sequencer: lane A takes no hand-off callback", exc_info=True)
 
         self._state = STATE_STARTUP
         self._current_slug: Optional[str] = None
@@ -2525,6 +2537,12 @@ class Sequencer:
         that repath runs first. Two lane A runs on the same project are
         still impossible: RcloneLane._run_lock covers that.
 
+        ONE EXCEPTION since 2026-09-26 (CR-347): a lane A run past its budget
+        with files still uploading hands them to the background and returns,
+        so those files -- and only those, kept out of every later run -- go
+        on beside the rest of the rotation. Anything that moves a folder
+        they are read from ends them first (_guarded_move).
+
         `upload_only` (docs/UPLOAD_ONLY_TICK.md) is the per-PROJECT switch
         for lane B, beside the per-machine `lane_b_enabled`: an upload-only
         tick downloads no proxies. A lone lane A failure is then not
@@ -2565,7 +2583,11 @@ class Sequencer:
 
         def _a() -> None:
             try:
-                outcomes["a"] = self._run_lane(self.lane_a, subpath, budget)
+                # may_hand_off (2026-09-26): past its budget with files still
+                # in flight, lane A returns and lets them finish in the
+                # background, so this turn -- and the rest of the rotation --
+                # is not held by one big original on a thin uplink.
+                outcomes["a"] = self._run_lane(self.lane_a, subpath, budget, may_hand_off=True)
                 outcomes["a_outcome"] = self._lane_outcome(self.lane_a, subpath)
             except Exception:
                 log.exception("sequencer: lane A run_once failed for %s", subpath)
@@ -2817,7 +2839,7 @@ class Sequencer:
 
     @staticmethod
     def _run_lane(lane: Any, subpath: str, budget: Optional[float],
-                  rotation_pass: bool = False) -> Any:
+                  rotation_pass: bool = False, may_hand_off: bool = False) -> Any:
         """run_once with a per-project time budget where the lane supports
         one. Adapters that predate the budget (and test doubles) take
         (subpath) only -- checked by signature rather than by catching
@@ -2835,7 +2857,23 @@ class Sequencer:
             kwargs["max_duration_seconds"] = budget
         if rotation_pass and _accepts_kw(lane.run_once, "rotation_pass"):
             kwargs["rotation_pass"] = True
+        if may_hand_off and _accepts_kw(lane.run_once, "may_hand_off"):
+            kwargs["may_hand_off"] = True
         return lane.run_once(subpath, **kwargs)
+
+    def _guarded_move(self, src: str, dst: str) -> None:
+        """_default_move, after ending any upload lane A let run on in the
+        background from inside `src` (2026-09-26, RcloneLane.
+        end_handoffs_under). Raises what _default_move raises, which is what
+        the repather and the borrowed-folder manager already handle."""
+        end = getattr(self.lane_a, "end_handoffs_under", None)
+        if end is not None:
+            try:
+                end(src, "its folder is being moved to where the server now keeps it")
+            except Exception:
+                log.exception("sequencer: could not end the background uploads under %s",
+                              src)
+        _default_move(src, dst)
 
     def _maybe_clone_structure(self, subpath: str, slug: str, forced: bool = False) -> bool:
         """Structure clone, but not on every pass.

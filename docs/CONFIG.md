@@ -703,6 +703,7 @@ remote_down (ccsync_dl:/)` on the first pass, and Copy diagnostics shows a
 | `lane_c_pause_scheme` | `none` | |
 | `lane_c_max_folder_concurrency` | `2` | |
 | `express_upload_enabled` / `_debounce_seconds` / `_max_batch` | `true` / `10.0` / `200` | The fast path for a just-added file |
+| `lane_a_handoff_enabled` | `true` | A lane A turn that runs out of `project_rotation_seconds` with files still uploading lets them finish in the background and moves on; the next upload run gets the free `transfers` slots, with those files kept out of it (2026-09-26, KNOWN_BUGS CR-347). `false` = the rotation waits for them, which on a thin uplink left one big original uploading alone for hours |
 | `orphan_scan_every_n_passes` | `20` | |
 
 ### Safety (see [`SYNC_SAFETY.md`](SYNC_SAFETY.md))

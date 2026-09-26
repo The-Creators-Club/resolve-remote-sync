@@ -31304,6 +31304,76 @@ Verified by rendering the seeded grid in headless Chromium at 1700, 1173 and
   three-column GRID row, so the table became a grid and the file-name column
   collapsed. Renamed `xft-hist` (template + phone.css).
 
+## CR-347 - one big original uploaded alone for hours while every other upload and download waited behind it - FIXED, companion 0.9.83
+
+Owner, 2026-09-26, on leso's Mac: "there must be a way to improve this
+speed, this is insanely slow. Also why is it only pushing one file at once,
+it should be pushing 4 no", then "make the fix so that when there is more
+than one file to be uploaded, it never gets stuck moving only one".
+
+**What was happening.** Lane A runs one project at a time, and each turn is
+`rclone copy ... --max-duration 600s --cutoff-mode SOFT`: after ten minutes
+rclone starts nothing new and finishes what is in flight, and the sequencer
+WAITS for it. That is right when every file fits in a turn. leso's Base Drone
+turn held `fx3_20260920_1881.MP4` (22.1 GB) on a ~17 Mbit/s uplink: the other
+files of the turn finished early, three of the four `transfers` slots sat
+empty, and one SFTP stream (~0.45 MB/s, a quarter of the measured line) ran
+alone for 13+ hours. Behind it waited every other project's lane A (52
+Elections originals, 25 GB, which would have gone four at a time) and every
+proxy download, because lane B runs inside the same turn. Reproduced locally
+with the bundled rclone 1.74.4 and a 1 MB/s limit: after the cutoff the big
+file uploaded alone while five small ones waited, then "Fatal error received
+- not attempting retries".
+
+**The fix: the hand-off** (`sync/rclone_lane.py`, "the hand-off"; the
+sequencer's `may_hand_off`). A rotation pass that is past its budget
+(+ `HANDOFF_GRACE_SECONDS`) with files still in flight RETURNS and leaves the
+rclone child running on a background thread. The child is not touched: SFTP
+uploads do not resume, and ending it throws away what it sent (the 0.9.77
+install did exactly that to this file on 2026-09-25 at 13:43). Then:
+
+- Each child keeps its own view (`_LaneRun`): its --stats, its CLAIMS (every
+  name rclone reported in flight and not yet copied or failed, in rclone's
+  own spelling), and the watchdog's loop state, so the zero-progress and
+  hard ceilings keep running on it in the background exactly as before.
+- The next lane A run leaves the claimed files out (`- /<file>` filter rules,
+  like the express exclusion), takes only the free slots (`transfers` minus
+  what the background children hold, at least 1), and writes its temp files
+  under its own `--partial-suffix` (`.hN.partial`), because rclone derives the
+  `.partial` token from the file and two runs of one file would interleave
+  into one corrupt temp file. When the background children fill every slot,
+  no run is started at all (outcome None, never "found nothing").
+- Every time a background child finishes a file, and when it exits, the
+  sequencer is woken for that project (`handoff_done_fn` -> `notify_change`),
+  so a freed slot is used within seconds, not after an idle backoff.
+- `status()` folds the children back in: the lane stays `syncing` (the
+  keep-awake and shutdown guards key on that, and a Mac allowed to sleep
+  mid-file starts it again from byte 0), their files are in the transfer
+  table, and the progress token moves while any of them moves.
+- Express defers a claimed file; the orphan `.partial` report skips a temp
+  file still being written; a stall in a background child is recorded and
+  reported but not handed to the next foreground pass as ITS error.
+- `stop()` (sign-out, fleet halt, Quit, self-upgrade) ends background
+  children like the foreground one. A repath or borrowed-folder move ends the
+  children reading from that folder first (`Sequencer._guarded_move` ->
+  `RcloneLane.end_handoffs_under`): on Windows their open handle fails the
+  move, and anywhere they would keep writing to the server's OLD path.
+- Only the rotation hands off. Consolidate and FIX ALL call the same
+  `run_once` to WAIT for their upload, so they never pass `may_hand_off`;
+  lane B and express never hand off. `lane_a_handoff_enabled = false` puts
+  the old waiting rotation back.
+
+**Measured** (bundled rclone, local copy at 1 MB/s per process, 4 slots, one
+20 MB file newest-first plus eight 3 MB files, 4 s budget): 53 s before, with
+15 consecutive seconds of one file moving; 29 s after, with one file moving
+only at the very end, when it really is the last. Every file byte-identical,
+no temp file left behind, both times.
+
+Tests: `tests/test_rclone_handoff.py` (22), `test_config.py`,
+`test_broll_standins.py` (its pinned lane A call line). Whole companion suite
+8078 passed. Not yet run on a real SFTP uplink; leso's Mac is the first place
+it matters. Also documented in `docs/CONFIG.md`.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

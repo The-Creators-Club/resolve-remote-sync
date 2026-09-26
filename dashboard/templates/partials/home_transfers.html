@@ -3,10 +3,15 @@
    keeps partials/transfers.html. Only what is moving: the queued and history
    halves are one link away on /transfers (the bar's "all transfers"). Polled
    every 2 s into the window body, innerHTML, so the frame stays put. The
-   safe-to-close line is always drawn (a blank line on the admin view, which
-   has no "this computer"), so nothing below it shifts. #}
+   safe-to-close line is always drawn on an editor's view (a blank line until
+   it has a sentence), so nothing below it shifts. NOT on the admin's
+   fleet-wide view (2026-09-26, owner: "unwanted gap at the top"): that view
+   has no "this computer", ui.safe_to_close is None there on every poll, so
+   the line was only ever an empty strip above the list. #}
 {% set moving = transfers.transfers if transfers and transfers.transfers else [] %}
+{% if safe_to_close or not scope_admin %}
 <div class="hint xf-close{{ ' warn' if safe_to_close and not safe_to_close.safe }}">{% if safe_to_close %}{{ safe_to_close.sentence }}{% else %}&nbsp;{% endif %}</div>
+{% endif %}
 {% if moving %}
 <div class="xf-list">
   {% for t in moving %}

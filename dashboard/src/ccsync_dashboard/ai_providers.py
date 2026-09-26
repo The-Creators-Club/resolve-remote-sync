@@ -497,7 +497,22 @@ def cli_path(conn: sqlite3.Connection, name: str, settings: Any = None) -> str:
 # the login command needs.
 
 PROBE_TTL_SECONDS = 600.0
-VERSION_TIMEOUT = 10.0
+# 90, not 10 (2026-09-26): the Claude Code binary is 238 MB on a ZFS dataset,
+# and when the NAS disks are busy (SMB copies, an editor's uploads) a cold
+# `--version` measured 50 s; warm it is 30 ms. A 10 s limit read that as "not
+# installed", and every Cards search said "no provider has a working
+# credential" for the next ten minutes. A slow start is not a missing CLI:
+# the real call that follows waits for it just the same.
+VERSION_TIMEOUT = 90.0
+# How long a TIMED-OUT probe is believed. A timeout says the server was busy,
+# not that the credential is gone, so it is re-asked on the next call after
+# this rather than blocking the feature for PROBE_TTL_SECONDS.
+TRANSIENT_TTL_SECONDS = 30.0
+# The detail every timed-out probe carries; `resolved` puts it in front of
+# the generic "no provider" sentence, so the page says what happened.
+SLOW_START_DETAIL = ("{label} was too slow to start ({seconds:.0f}s): the server "
+                     "is busy. It is checked again on the next try; try again in "
+                     "a minute.")
 LOGIN_PROBE_TIMEOUT = 60.0
 # One token of answer, and no data: the probe must not be able to leak
 # anything if the CLI is misconfigured, and it must be the cheapest call the
@@ -519,8 +534,10 @@ def _cached_probe(name: str, *, allow_stale: bool = False) -> dict | None:
     """
     with _probe_lock:
         entry = _probe_cache.get(name)
+        ttl = (TRANSIENT_TTL_SECONDS if entry and entry["value"].get("transient")
+               else PROBE_TTL_SECONDS)
         if entry and (allow_stale
-                      or (time.monotonic() - entry["at"]) < PROBE_TTL_SECONDS):
+                      or (time.monotonic() - entry["at"]) < ttl):
             value = dict(entry["value"])
             if allow_stale:
                 # Only on the stale-tolerant path: `probe_cli`'s answer is a
@@ -535,6 +552,28 @@ def _cached_probe(name: str, *, allow_stale: bool = False) -> dict | None:
 def _store_probe(name: str, value: dict) -> None:
     with _probe_lock:
         _probe_cache[name] = {"at": time.monotonic(), "value": dict(value)}
+
+
+def _store_slow_start(name: str, result: dict, label: str, seconds: float,
+                      force: bool = False) -> dict:
+    """A probe that TIMED OUT (2026-09-26). If the last answer we hold said
+    installed and signed in, keep believing it: the CLI was slow, not gone,
+    and the call that follows will wait for it. Otherwise record the timeout
+    as transient (TRANSIENT_TTL_SECONDS), never as a ten-minute verdict.
+    `force` (the Test button) always reports the timeout: an admin who asked
+    is owed what happened, not the last good answer."""
+    with _probe_lock:
+        entry = _probe_cache.get(name)
+        previous = dict(entry["value"]) if entry else None
+    if not force and previous and previous.get("installed") and previous.get("signed_in")             and not previous.get("transient"):
+        log.warning("%s did not answer its probe within %.0fs; keeping the last "
+                    "good answer (the server is busy, the CLI is not gone)",
+                    label, seconds)
+        return previous
+    result["detail"] = SLOW_START_DETAIL.format(label=label, seconds=seconds)
+    result["transient"] = True
+    _store_probe(name, result)
+    return result
 
 
 def reset_probe_cache() -> None:
@@ -615,6 +654,8 @@ def probe_cli(conn: sqlite3.Connection, name: str, *, force: bool = False,
         return result
     try:
         proc = _run([path, "--version"], None, VERSION_TIMEOUT, env)
+    except subprocess.TimeoutExpired:
+        return _store_slow_start(name, result, provider.label, VERSION_TIMEOUT, force)
     except (OSError, subprocess.SubprocessError) as exc:
         result["detail"] = f"could not run {path}: {type(exc).__name__}"
         _store_probe(name, result)
@@ -630,10 +671,8 @@ def probe_cli(conn: sqlite3.Connection, name: str, *, force: bool = False,
     try:
         probe = _run(_cli_argv(name, path), PROBE_PROMPT, LOGIN_PROBE_TIMEOUT, env)
     except subprocess.TimeoutExpired:
-        result["detail"] = (f"{provider.label} did not answer a one-token probe "
-                            f"within {LOGIN_PROBE_TIMEOUT:.0f}s")
-        _store_probe(name, result)
-        return result
+        result["signed_in"] = False
+        return _store_slow_start(name, result, provider.label, LOGIN_PROBE_TIMEOUT, force)
     except (OSError, subprocess.SubprocessError) as exc:
         result["detail"] = f"could not run {path}: {type(exc).__name__}"
         _store_probe(name, result)
@@ -918,9 +957,21 @@ def resolved(conn: sqlite3.Connection, settings: Any, *, probe: bool = True) -> 
     pref = preference(conn)
     if pref != AUTO:
         rows = provider_states(conn, settings, probe=probe, only=(pref,))
-        return resolve_provider(availability(rows), pref)
+        return _say_why_slow(resolve_provider(availability(rows), pref), rows)
     rows = provider_states(conn, settings, probe=probe)
-    return resolve_provider(availability(rows), pref)
+    return _say_why_slow(resolve_provider(availability(rows), pref), rows)
+
+
+def _say_why_slow(choice: ProviderChoice, rows: list[dict]) -> ProviderChoice:
+    """Nothing available because a CLI was too slow to start is not "no
+    working credential" (2026-09-26): put the slow-start sentence first."""
+    if choice.ok:
+        return choice
+    slow = [str(r.get("detail") or "") for r in rows
+            if "too slow to start" in str(r.get("detail") or "")]
+    if not slow:
+        return choice
+    return ProviderChoice(choice.name, choice.label, slow[0], choice.pinned)
 
 
 # ------------------------------------------------- what the ytdl app is told

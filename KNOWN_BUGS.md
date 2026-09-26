@@ -31411,6 +31411,26 @@ Mach-O OVER the old file, and the kernel killed the new binary at exec
 place; copy beside it and `mv` (the companion's own upgrade uses
 `os.replace` and is safe).
 
+## CR-349 - Cards search said "no provider has a working credential" when Claude Code was only slow to start; a blank strip above the fleet transfers list - FIXED, dashboard 0.7.67
+
+Owner, 2026-09-26, a screenshot of the Cards search box: "no provider has a
+working credential". Claude Code was installed and signed in (a one-line
+prompt answered in 23 s). The probe's `claude --version` has a 10 s limit;
+with the NAS disks busy (SMB copies, leso's uploads, IO pressure ~14%) the
+238 MB binary's cold start took 50 s (warm: 30 ms). TimeoutExpired was
+stored as "not installed" for PROBE_TTL_SECONDS (600 s), so every search
+for ten minutes answered with the generic resolver sentence. **Fixed**
+(`ai_providers.py`): VERSION_TIMEOUT 90 s; a timed-out probe keeps the last
+good answer when there is one (not on the Test button, which reports what
+happened), and otherwise is stored as `transient` and re-asked after
+TRANSIENT_TTL_SECONDS (30 s); `resolved` puts "Claude Code was too slow to
+start" in front of the generic sentence.
+
+Same day, the home page transfers window on the admin view: "unwanted gap at
+the top". The safe-to-close line is drawn blank so an editor's list never
+jumps, but the fleet-wide view has no "this computer" and the line could
+only ever be blank there. **Fixed**: not drawn on the admin view.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

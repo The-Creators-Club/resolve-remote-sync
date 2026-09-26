@@ -338,3 +338,16 @@ def test_the_project_partials_answer_in_the_terminal_look(env, path):
     assert r.status_code == 200, r.text[:300]
     markup = re.sub(r"<!--.*?-->", "", r.text, flags=re.S)
     assert not BRACKET.search(markup), BRACKET.search(markup).group(0)
+
+
+def test_the_admin_transfers_window_has_no_blank_line_at_the_top(env):
+    """Owner, 2026-09-26: "unwanted gap at the top". The fleet-wide view has
+    no "this computer", so the safe-to-close line could only ever be blank
+    there. An editor's view keeps it (blank until it has a sentence), so the
+    list below it never jumps."""
+    client, _conn = env
+    _cookie(client, "owen")
+    assert "xf-close" not in client.get("/partials/home-transfers", headers=_hx()).text
+    assert "xf-close" not in client.get("/").text
+    _cookie(client, "tchen")
+    assert "xf-close" in client.get("/partials/home-transfers", headers=_hx()).text

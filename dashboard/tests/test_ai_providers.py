@@ -818,3 +818,70 @@ def test_timeline_cards_status_says_not_checked_rather_than_unavailable(env, mon
     # to name the control that would answer the question.
     assert "not been checked" in out["why"]
     assert "Settings -> AI providers" in out["why"]
+
+
+# ------------------------------------- a slow start is not a missing CLI (2026-09-26)
+# A cold `claude --version` on a busy NAS measured 50 s (238 MB binary off a
+# ZFS dataset); the old 10 s limit turned that into "no provider has a
+# working credential" on every Cards search for ten minutes.
+
+
+def _slow_cli(monkeypatch, which="--version"):
+    monkeypatch.setattr(ai_providers.shutil, "which", lambda binary: "/usr/bin/claude")
+
+    def run(argv, stdin, timeout, env=None):
+        if (argv[1:] == ["--version"]) == (which == "--version"):
+            raise ai_providers.subprocess.TimeoutExpired(argv, timeout)
+        return FakeProc(0, "2.1.0") if argv[1:] == ["--version"] else FakeProc(0, "ok")
+
+    monkeypatch.setattr(ai_providers, "_run", run)
+
+
+def test_the_version_check_waits_long_enough_for_a_cold_start():
+    assert ai_providers.VERSION_TIMEOUT >= 60
+
+
+@pytest.mark.parametrize("which", ["--version", "probe"])
+def test_a_timeout_with_nothing_known_says_slow_not_no_credential(env, monkeypatch, which):
+    _client, conn, settings = env
+    enable_cli(conn)
+    _slow_cli(monkeypatch, which)
+    choice = ai_providers.resolved(conn, settings)
+    assert not choice.ok
+    assert "too slow to start" in choice.reason
+    assert "working credential" not in choice.reason
+    assert "—" not in choice.reason
+
+
+def test_a_timeout_is_asked_again_soon_not_believed_for_ten_minutes(env, monkeypatch):
+    _client, conn, settings = env
+    enable_cli(conn)
+    clock = [1000.0]
+    monkeypatch.setattr(ai_providers.time, "monotonic", lambda: clock[0])
+    _slow_cli(monkeypatch)
+    assert not ai_providers.resolved(conn, settings).ok
+    fake_cli(monkeypatch)                                   # the disks calm down
+    clock[0] += ai_providers.TRANSIENT_TTL_SECONDS + 1
+    assert ai_providers.resolved(conn, settings).name == "claude_code"
+
+
+def test_a_timeout_after_a_good_answer_keeps_the_good_answer(env, monkeypatch):
+    _client, conn, settings = env
+    enable_cli(conn)
+    clock = [1000.0]
+    monkeypatch.setattr(ai_providers.time, "monotonic", lambda: clock[0])
+    fake_cli(monkeypatch)
+    assert ai_providers.resolved(conn, settings).name == "claude_code"
+    clock[0] += ai_providers.PROBE_TTL_SECONDS + 1          # the cache expires...
+    _slow_cli(monkeypatch)                                  # ...on a busy NAS
+    assert ai_providers.resolved(conn, settings).name == "claude_code"
+
+
+def test_the_test_button_reports_the_timeout_even_after_a_good_answer(env, monkeypatch):
+    _client, conn, _settings = env
+    enable_cli(conn)
+    fake_cli(monkeypatch)
+    ai_providers.probe_cli(conn, "claude_code", force=True)
+    _slow_cli(monkeypatch)
+    probed = ai_providers.probe_cli(conn, "claude_code", force=True)
+    assert probed["installed"] is False and "too slow to start" in probed["detail"]

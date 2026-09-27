@@ -31459,6 +31459,63 @@ context at construction, so an opener made before `install()` keeps the old
 trust (the first verification attempt was fooled by exactly that).
 Not covered: the onboarding wizard is a separate program with its own TLS.
 
+## CR-351 - a busy dashboard made every machine's report hold the database write lock for seconds; the slow-write card blamed the reporting computer - FIXED in repo, dashboard 0.7.68 (not deployed)
+
+2026-09-26, the home page's PROBLEMS THE SERVER FOUND showed `slow_write`
+cards for three computers at once from 09:57 UTC: ruskin/DESKTOP-LQQ41TC 12
+times (up to 17.6 s), leso's MacBook 3 (9.6 s), alex/Creator_1 once (6.2 s),
+plus one `/api/v1/report (database busy)` 503 at 12:30. None of them reports
+much: at most ~12,000 editor_media rows and ~5,500 media_tree rows per
+machine. The NAS pool was idle; the dashboard container was at 122 % CPU, the
+uvicorn process running ~15 threads with CPU, ~83 % of a core between them.
+
+**Cause.** `replace_editor_media` / `replace_media_tree` (and the smaller
+report and collector replaces) inserted with `executemany` inside the write
+transaction. The sqlite3 module takes the GIL back for every row it binds;
+beside a CPU-bound thread each take waits out the 5 ms switch interval, with
+the SQLite write lock held. Measured on the live NAS in the container against
+a copy of dashboard.db, one 3,800-row editor_media replace: **0.08 s** quiet,
+**28 s** beside one busy thread, **181 s** beside two. So every report
+stretched together whenever anything in the process was busy, and whoever
+wrote next waited out its 5 s and got the 503.
+
+**Fixed**: `db.bulk_insert` sends the rows as ONE JSON parameter,
+`INSERT ... SELECT json_extract(value,'$[i]') ... FROM json_each(?) WHERE
+true ORDER BY key [ON CONFLICT ...]`, one sqlite3_step with the GIL released:
+0.09 / 0.14 / 0.97 s on the same measurement. Used by editor_media,
+media_tree_clips, active_transfers, transfer_history, broll_standins,
+missing_files, nas_media and nas_media_pending_moves (the delete too, as a
+row-value IN over json_each). The stored rows are unchanged (types, NULLs,
+decomposed spellings byte for byte, order). The two small executemany calls
+left (invariant_results, 20 rows at most) are not on a hot path.
+
+**The card was also wrong about what it measured.** It was fed the report
+handler's wall time: auth, reads, every separate per-project commit since
+2026-09-03, and the report's OWN waits behind other writers, so a report
+that queued behind the collector was filed as the culprit of the wait it
+suffered. `api._WriteHolds` now takes each transaction's lock with BEGIN
+IMMEDIATE (the same point the first write took it, so nothing locks sooner)
+and times only while it is held; the card gets the longest hold. Its advice
+no longer tells an editor to untick projects: nothing on the reporting
+computer causes this. Tests: `dashboard/tests/test_cr351_bulk_insert.py`.
+
+**The CPU was Timeline Cards** (same day, found by sampling /proc per
+thread; py-spy is impossible there - TrueNAS kills unknown host binaries
+and Yama blocks ptrace in the container): its a2wsgi request threads, born
+when an engine finished building and when a page reopened, ran pure Python
+for seconds. The worst was the offline manifest: `offline.card_words`
+filtered the clip's WHOLE token list for every card, then the manifest
+json.dumps'd the whole word list on every call to take its length.
+Editing 87ccb3f (LIVE on /cards 2026-09-27) bisects a per-interview index
+and sizes the list once per list. Measured on Framing Formosa (1,166
+cards, 114,245 words) in a throwaway engine in the container: card_words
+2.49 -> 0.57 s CPU, a cold manifest ~3.5 -> 1.6 s, a warm one ~0.8 s ->
+0.1 s live. Still in-process: opening an episode (4.6 s CPU of token
+loading, 5-10 s at up to 80 % of a core live) and ~1.6 s after an edit.
+With the one-statement inserts those no longer stretch a report's lock;
+moving the engine into its own process is the next step only if pages
+still stall.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

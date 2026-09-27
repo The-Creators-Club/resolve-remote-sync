@@ -107,6 +107,46 @@ def token_ok(configured: str, presented: str) -> bool:
 SLOW_REPORT_SECONDS = 1.0
 
 
+class _WriteHolds:
+    """How long each of a report's write transactions HELD the lock.
+
+    CR-351 (2026-09-26). The report has been several short transactions since
+    2026-09-03, but the `slow_write` card was still fed the handler's whole
+    wall time: auth, reads, every per-project commit, AND whatever the report
+    itself spent waiting on somebody else's lock -- so a report that queued
+    4.9 s behind the collector and wrote for 0.2 s was filed as the culprit
+    of the 'database busy' it suffered. `begin` takes the lock with BEGIN
+    IMMEDIATE, which waits out busy_timeout BEFORE the clock starts (the same
+    point the first write would have taken it, so nothing is locked sooner),
+    and `commit` stops it. The longest hold is what a waiting writer actually
+    sat behind, and the only number the card may call a lock hold.
+    """
+
+    def __init__(self) -> None:
+        self.longest = 0.0
+        self.what = ""
+        self._started: float | None = None
+        self._what = ""
+
+    def begin(self, conn: sqlite3.Connection, what: str) -> None:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        # Already open (an earlier write this request left uncommitted): the
+        # lock was taken before now, so this hold is under-counted, never
+        # blamed on a wait.
+        self._started = time.monotonic()
+        self._what = what
+
+    def commit(self, conn: sqlite3.Connection) -> None:
+        conn.commit()
+        if self._started is None:
+            return
+        held = time.monotonic() - self._started
+        self._started = None
+        if held > self.longest:
+            self.longest, self.what = held, self._what
+
+
 def get_conn(request: Request) -> Iterator[sqlite3.Connection]:
     conn = db.connect(request.app.state.settings.db_path)
     try:
@@ -10205,6 +10245,10 @@ def api_report(
     # can mean a bounded DNS lookup and no write transaction may be open
     # across it (G2a review round, point 3, 2026-09-25). Never raises.
     report_via = netclass.request_report_via(settings, request)
+    # The first write of the report: its lock hold is timed from here, once
+    # the lock is held (CR-351, _WriteHolds).
+    holds = _WriteHolds()
+    holds.begin(conn, "fleet state")
     # This machine IS reporting and IS being accepted: clear yesterday's
     # refusal, and count (or stop counting) it against the rotation drain.
     db.clear_report_refused(conn, editor, machine)
@@ -10594,11 +10638,12 @@ def api_report(
     # machine per minute, and every other writer on this database -- the
     # session touch, the collector's reconcile, the next machine's report --
     # sat behind it until its 5 s busy timeout ran out and it 500'd.
-    conn.commit()
+    holds.commit(conn)
 
     if payload.local_manifest is not None:
         for rel, m in payload.local_manifest.items():
             slug = _slug_for_rel(conn, rel)
+            holds.begin(conn, f"manifest {slug}")
             db.upsert_editor_media_project(
                 conn, editor=editor, machine=machine, slug=slug, mode=mode,
                 n_originals=m.n_originals, bytes_originals=m.bytes_originals,
@@ -10610,7 +10655,7 @@ def api_report(
                 files += [(rel_p, "proxy", size) for rel_p, size in (m.proxies or [])]
                 db.replace_editor_media(conn, editor, machine, slug, files, received_at)
             # One project, one short lock (see the commit above).
-            conn.commit()
+            holds.commit(conn)
 
     if payload.media_tree is not None:
         # media_tree is keyed by the RESOLVE PROJECT NAME; map it to a slug via
@@ -10622,11 +10667,12 @@ def api_report(
             if slug is None:
                 continue
             rows = [(c.bin_path, c.clip_name, c.file_path, c.kind, c.present) for c in clips]
+            holds.begin(conn, f"media tree {slug}")
             db.replace_media_tree(conn, editor, machine, slug, rows, received_at)
             # One project, one short lock (see the commit above the manifest
             # loop). The commit is INSIDE the loop on purpose: a machine with
             # thirty ticked projects is thirty brief locks, not one long one.
-            conn.commit()
+            holds.commit(conn)
 
     # Anything the two loops left open, and a no-op when they committed already.
     conn.commit()
@@ -10636,20 +10682,22 @@ def api_report(
         # holding the write lock when everybody else timed out (2026-09-03
         # database is locked, api_report held the lock).
         log.info("report from %s/%s took %.1fs to write (%d project manifests, "
-                 "%d media trees)",
+                 "%d media trees); the longest lock hold was %.2fs (%s)",
                  editor, machine, write_seconds,
-                 len(payload.local_manifest or {}), len(payload.media_tree or {}))
-        if write_seconds > db.BUSY_TIMEOUT_MS / 1000.0:
-            # Longer than any request waits: this write is what a "database is
-            # locked" elsewhere was waiting on. Said where a container recreate
-            # cannot lose it (notices.record_slow_write, 2026-09-17); the log
-            # line above is the copy that lasts while the container does.
-            try:
-                notices.record_slow_write(
-                    conn, f"report from {editor}/{machine}", write_seconds,
-                    now=received_at)
-            except Exception:  # noqa: BLE001 - never fail a report over its own record
-                log.exception("could not record a slow-write notice")
+                 len(payload.local_manifest or {}), len(payload.media_tree or {}),
+                 holds.longest, holds.what or "none")
+    if holds.longest > db.BUSY_TIMEOUT_MS / 1000.0:
+        # ONE transaction held the lock longer than any request waits: this
+        # write is what a "database is locked" elsewhere was waiting on. Said
+        # where a container recreate cannot lose it (notices.record_slow_write,
+        # 2026-09-17). The hold, never the wall time (CR-351: the wall time
+        # counts this report's own waits and all its separate commits).
+        try:
+            notices.record_slow_write(
+                conn, f"report from {editor}/{machine}", holds.longest,
+                now=received_at)
+        except Exception:  # noqa: BLE001 - never fail a report over its own record
+            log.exception("could not record a slow-write notice")
     result: dict[str, Any] = {
         "ok": True, "lanes": len(payload.lanes), "received_at": received_at,
         # WHICH DASHBOARD IS ANSWERING (res-fleet-3, 2026-09-18). The report

@@ -728,6 +728,44 @@ def connect(path: str | Path, *, busy_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Conn
     return conn
 
 
+def bulk_insert(
+    conn: sqlite3.Connection, head: str, columns: Sequence[str],
+    rows: Sequence[Sequence[Any]], tail: str = "",
+) -> int:
+    """`{head} (columns) SELECT ... FROM json_each(?) {tail}` -- every row in
+    ONE statement. Returns the rows written, as executemany's rowcount did.
+
+    CR-351 (2026-09-26): never executemany a big list inside a write
+    transaction here. The sqlite3 module takes the GIL back for every row it
+    binds, and when any other thread in this process is CPU-bound each of
+    those takes waits out the 5 ms switch interval -- with the write lock
+    held. Measured on the live NAS against a copy of dashboard.db, one
+    3,800-row editor_media replace: 0.08 s quiet, 28 s beside ONE busy
+    thread, 181 s beside two; as one json_each statement 0.09 / 0.14 / 0.97 s.
+    That is what made every machine's report a 6-17 s `slow_write` at once and
+    503'd whoever wrote next. One statement is one sqlite3_step with the GIL
+    released for all of it.
+
+    json_extract, not `->>`: the operator needs SQLite 3.38, and the image's
+    is 3.40 today but nothing pins it. `WHERE true` is required: without it an
+    ON CONFLICT in `tail` parses as a join constraint of the SELECT. ORDER BY
+    key keeps the list's order, which an AUTOINCREMENT table (transfer
+    history) reads as time. A bool must be passed as an int: JSON true would
+    arrive as 1 anyway, but the columns are declared INTEGER and nothing
+    should depend on that coercion.
+    """
+    if not rows:
+        return 0
+    cols = ", ".join(columns)
+    picks = ", ".join(f"json_extract(value, '$[{i}]')" for i in range(len(columns)))
+    sql = (f"{head} ({cols}) SELECT {picks} FROM json_each(?) "
+           f"WHERE true ORDER BY key {tail}")
+    # ensure_ascii=False: raw UTF-8, so a Mac's decomposed name or a CJK one
+    # is stored byte for byte as the parameter binding stored it before.
+    cur = conn.execute(sql, (json.dumps([list(r) for r in rows], ensure_ascii=False),))
+    return int(cur.rowcount or 0)
+
+
 # Ordered migration steps: (target user_version, script). `script=None` means
 # "apply the base schema.sql" (the v0 -> v1 bootstrap). Each entry's
 # user_version is committed IMMEDIATELY after that entry's script runs -- not
@@ -3251,10 +3289,9 @@ def replace_missing_files(
     conn.execute(
         "DELETE FROM missing_files WHERE project_id=? AND device_id=?", (project_id, device_id)
     )
-    conn.executemany(
-        """INSERT OR REPLACE INTO missing_files
-             (project_id, device_id, name, size, truncated, refreshed_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+    bulk_insert(
+        conn, "INSERT OR REPLACE INTO missing_files",
+        ("project_id", "device_id", "name", "size", "truncated", "refreshed_at"),
         [(project_id, device_id, name, size, int(truncated), now)
          for name, size in files[:MISSING_FILES_CAP]],
     )
@@ -10369,10 +10406,9 @@ def replace_nas_media(
             )
             return False
     conn.execute("DELETE FROM nas_media WHERE project_id=?", (project_id,))
-    conn.executemany(
-        """INSERT OR REPLACE INTO nas_media
-             (project_id, rel_path, kind, ext, size, mtime_ns, refreshed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+    bulk_insert(
+        conn, "INSERT OR REPLACE INTO nas_media",
+        ("project_id", "rel_path", "kind", "ext", "size", "mtime_ns", "refreshed_at"),
         [(project_id, media_rel_key(rel), kind, ext, size, mtime, now)
          for rel, kind, ext, size, mtime in rows],
     )
@@ -10465,15 +10501,14 @@ def record_pending_move_halves(
     """
     if not halves:
         return 0
-    cur = conn.executemany(
-        """INSERT INTO nas_media_pending_moves
-             (half, base, size, mtime_ns, slug, project_rel, rel_path, raw_path, seen_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(half, base, size, mtime_ns, slug, rel_path) DO NOTHING""",
+    return bulk_insert(
+        conn, "INSERT INTO nas_media_pending_moves",
+        ("half", "base", "size", "mtime_ns", "slug", "project_rel", "rel_path",
+         "raw_path", "seen_at"),
         [(str(h[0]), str(h[1]), int(h[2]), int(h[3]), str(h[4]), str(h[5]),
           media_rel_key(h[6]), str(h[7]), now) for h in halves],
+        tail="ON CONFLICT(half, base, size, mtime_ns, slug, rel_path) DO NOTHING",
     )
-    return int(cur.rowcount or 0)
 
 
 def pending_move_halves(
@@ -10505,12 +10540,20 @@ def delete_pending_move_halves(
     back). halves: [(half, base, size, mtime_ns, slug, rel_path)]."""
     if not halves:
         return 0
-    cur = conn.executemany(
+    # One statement, not executemany, for the reason bulk_insert gives
+    # (CR-351): up to PENDING_MOVE_HALF_LIMIT rows inside the collector's
+    # write transaction.
+    payload = json.dumps(
+        [[str(h[0]), str(h[1]), int(h[2]), int(h[3]), str(h[4]), media_rel_key(h[5])]
+         for h in halves], ensure_ascii=False)
+    cur = conn.execute(
         """DELETE FROM nas_media_pending_moves
-            WHERE half=? AND base=? AND size=? AND mtime_ns=? AND slug=?
-              AND rel_path=?""",
-        [(str(h[0]), str(h[1]), int(h[2]), int(h[3]), str(h[4]), media_rel_key(h[5]))
-         for h in halves],
+            WHERE (half, base, size, mtime_ns, slug, rel_path) IN (
+              SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'),
+                     json_extract(value, '$[2]'), json_extract(value, '$[3]'),
+                     json_extract(value, '$[4]'), json_extract(value, '$[5]')
+                FROM json_each(?))""",
+        (payload,),
     )
     return int(cur.rowcount or 0)
 
@@ -10546,13 +10589,12 @@ def record_standins_placed(
     )
     if not keys:
         return
-    conn.executemany(
-        """INSERT INTO broll_standins
-             (archive_rel, editor_username, machine, first_seen, last_seen)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(archive_rel, editor_username, machine) DO UPDATE SET
-             last_seen=excluded.last_seen""",
+    bulk_insert(
+        conn, "INSERT INTO broll_standins",
+        ("archive_rel", "editor_username", "machine", "first_seen", "last_seen"),
         [(key, editor, machine, now, now) for key in keys],
+        tail="""ON CONFLICT(archive_rel, editor_username, machine) DO UPDATE SET
+             last_seen=excluded.last_seen""",
     )
 
 
@@ -10657,10 +10699,10 @@ def replace_editor_media(
             continue
         per_kind[kind] = n + 1
         kept.append((rel, kind, size))
-    conn.executemany(
-        """INSERT OR REPLACE INTO editor_media
-             (editor_username, machine, project_slug, rel_path, kind, size, refreshed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+    bulk_insert(
+        conn, "INSERT OR REPLACE INTO editor_media",
+        ("editor_username", "machine", "project_slug", "rel_path", "kind", "size",
+         "refreshed_at"),
         [(editor, machine, slug, media_rel_key(rel), kind, size, now)
          for rel, kind, size in kept],
     )
@@ -10675,11 +10717,10 @@ def replace_media_tree(
         "DELETE FROM media_tree_clips WHERE editor_username=? AND machine=? AND project_slug=?",
         (editor, machine, slug),
     )
-    conn.executemany(
-        """INSERT OR REPLACE INTO media_tree_clips
-             (editor_username, machine, project_slug, bin_path, clip_name, file_path,
-              kind, present, refreshed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    bulk_insert(
+        conn, "INSERT OR REPLACE INTO media_tree_clips",
+        ("editor_username", "machine", "project_slug", "bin_path", "clip_name",
+         "file_path", "kind", "present", "refreshed_at"),
         [(editor, machine, slug, bin_path, clip_name, file_path, kind, int(present), now)
          for bin_path, clip_name, file_path, kind, present in clips[:MEDIA_TREE_CAP]],
     )
@@ -10694,11 +10735,11 @@ def replace_active_transfers(
     conn.execute(
         "DELETE FROM active_transfers WHERE editor_username=? AND machine=?", (editor, machine)
     )
-    conn.executemany(
-        """INSERT OR REPLACE INTO active_transfers
-             (editor_username, machine, lane, name, direction, bytes_done, bytes_total,
-              percentage, speed_bps, eta_seconds, project_slug, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    bulk_insert(
+        conn, "INSERT OR REPLACE INTO active_transfers",
+        ("editor_username", "machine", "lane", "name", "direction", "bytes_done",
+         "bytes_total", "percentage", "speed_bps", "eta_seconds", "project_slug",
+         "updated_at"),
         [(editor, machine, r["lane"], r["name"], r.get("direction", ""),
           r.get("bytes_done"), r.get("bytes_total"), r.get("percentage"),
           r.get("speed_bps"), r.get("eta_seconds"), r.get("project_slug"), now)
@@ -10949,14 +10990,14 @@ def add_transfer_history(
 ) -> None:
     """Append completed-file events, keeping only the newest
     TRANSFER_HISTORY_CAP_PER_MACHINE rows per (editor, machine)."""
-    for e in entries:
-        conn.execute(
-            """INSERT INTO transfer_history
-                 (editor_username, machine, lane, name, direction, completed_at, received_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (editor, machine, str(e.get("lane") or ""), str(e.get("name") or ""),
-             str(e.get("direction") or ""), str(e.get("at") or now), now),
-        )
+    bulk_insert(
+        conn, "INSERT INTO transfer_history",
+        ("editor_username", "machine", "lane", "name", "direction", "completed_at",
+         "received_at"),
+        [(editor, machine, str(e.get("lane") or ""), str(e.get("name") or ""),
+          str(e.get("direction") or ""), str(e.get("at") or now), now)
+         for e in entries],
+    )
     if entries:
         conn.execute(
             """DELETE FROM transfer_history WHERE editor_username=? AND machine=?

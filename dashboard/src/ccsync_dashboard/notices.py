@@ -1478,10 +1478,16 @@ def record_slow_write(
               f"{seconds:.1f} s. Every other writer in that window (a companion "
               f"report, the collector, a page) waited on it, and one that ran out "
               f"of patience shows as 'database busy'."),
-        fix=("A report this slow carries tens of thousands of media rows, or the "
-             "pool was slow under it. If it is always the same computer, untick the "
-             "projects it does not need; if it is the collector, send the text of "
-             "this notice to support."),
+        # CR-351 (2026-09-26): the old advice ("tens of thousands of media
+        # rows ... untick the projects") was wrong on the day it mattered:
+        # three machines of at most 12,000 rows each were slow at once, because
+        # the dashboard process itself was busy and the row-at-a-time insert
+        # waited on it. The inserts are one statement now, so an editor
+        # unticking projects is never the fix; this card is for support.
+        fix=("Nothing on the reporting computer causes this and nothing needs "
+             "unticking. The server was busy, or its storage was slow, while it "
+             "saved this report. One now and then is harmless; if it keeps "
+             "climbing, send the text of this notice to support."),
         now=stamp)
     conn.commit()
 

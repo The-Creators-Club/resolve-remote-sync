@@ -31529,6 +31529,28 @@ never matched: the element did not have that class. **Fixed**: the dialog is
 already had); `dialog.cc-dialog` gains `overflow: visible`. Checked in
 headless Chrome with the real stylesheets: centred, no scrollbars.
 
+## CR-353 - CI's "third-party notices are up to date" check had never passed on linux - FIXED in repo (tools only)
+
+2026-09-27. The linux job's `tools/gen_notices.py --check` failed on every CI
+run since it was added (2026-09-18), so `main` has been red for a week and a
+real failure could hide behind it. The notices' package tables were
+rendered from whichever developer venvs the machine held: the runner has no
+companion venv and installs Linux wheels, and the base rig's venvs held
+stale installs (`ccsync-companion` 0.9.71 and 0.9.80, `ccsync-dashboard`
+twice), so no two machines could render the same bytes, and regenerating
+only moved the failure. **Fixed**: each component's table is its
+`requirements.lock` (every platform's packages, so the Mac-only pyobjc pair
+and Linux-only uvloop are listed now), and a licence comes from the
+committed file's own row for that exact (package, version) first, then a
+venv, then `tools/notices_extra/lock_only.json` (uvloop), then the
+per-binary licence files; anything else is UNKNOWN and named. A version's
+licence never changes, so the committed row winning is what makes the
+render machine-independent, and a moved pin with no recorded licence still
+fails the check, which is the gate's purpose. `--rescan` ignores the
+committed rows. Verified: `--check` passes here with no venv at all and
+with only the dashboard venv (the runner's shape). Still red on CI and not
+touched: the macOS job's onboarding suite segfaults (exit 139) on every run.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

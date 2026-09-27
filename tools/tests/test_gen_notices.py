@@ -476,3 +476,76 @@ def test_every_spec_bundles_the_licence_texts(spec, dest):
     assert "THIRD_PARTY_NOTICES.md" in text
     assert "gen_notices.py --write-texts" in text   # the refusal names the fix
     assert dest in text
+
+
+# ------------------------------------------------------------------ CR-353
+# 2026-09-27: `--check` failed on the CI linux runner on every run since it
+# was added, because the tables were whatever venvs the machine held. They
+# are the component locks now, and a licence already committed wins.
+
+def _locks(tmp_path, monkeypatch, body="somepkg==1.0 \\n    --hash=sha256:aa\n"):
+    path = tmp_path / "requirements.lock"
+    path.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(gen_notices, "COMPONENT_LOCKS",
+                        {label: path for label, _v, _d in gen_notices.COMPONENTS})
+    monkeypatch.setattr(gen_notices, "COMPONENTS",
+                        [("companion", tmp_path / "no-venv", "desc")])
+    return path
+
+
+def test_the_committed_row_wins_over_a_venv(tmp_path, monkeypatch):
+    _locks(tmp_path, monkeypatch)
+    record = {("somepkg", "1.0"): {"License": "MIT", "URL": "u", "text": True}}
+    venv = {"companion": [dict(PKG, License="MIT License (spelt by a newer pip-licenses)")]}
+    rows, unresolved = gen_notices.lock_components(venv, record, {}, {})
+    assert rows["companion"][0]["License"] == "MIT"
+    assert unresolved == []
+
+
+def test_sources_are_tried_in_order_and_the_rest_is_unknown(tmp_path, monkeypatch):
+    _locks(tmp_path, monkeypatch,
+           "a==1 \\n  --hash=sha256:aa\nb==1 \\n  --hash=sha256:aa\n"
+           "c==1 \\n  --hash=sha256:aa\nd==1 \\n  --hash=sha256:aa\n")
+    venv = {"companion": [dict(PKG, Name="A", Version="1", License="from-venv")]}
+    extra = {("b", "1"): {"License": "from-lock-only", "URL": "", "text": True}}
+    files = {("c", "1"): {"License": "from-licence-file", "text": False}}
+    rows, unresolved = gen_notices.lock_components(venv, {}, files, extra)
+    got = {r["Name"]: r["License"] for r in rows["companion"]}
+    assert got == {"a": "from-venv", "b": "from-lock-only",
+                   "c": "from-licence-file", "d": "UNKNOWN"}
+    assert len(unresolved) == 1 and "d 1" in unresolved[0]
+
+
+def test_a_venv_at_another_version_is_not_this_versions_licence(tmp_path, monkeypatch):
+    _locks(tmp_path, monkeypatch)
+    venv = {"companion": [dict(PKG, Version="0.9")]}
+    rows, unresolved = gen_notices.lock_components(venv, {}, {}, {})
+    assert rows["companion"][0]["License"] == "UNKNOWN" and unresolved
+
+
+def test_what_a_machine_has_installed_does_not_change_the_document(tmp_path, monkeypatch):
+    _locks(tmp_path, monkeypatch)
+    record = {("somepkg", "1.0"): {"License": "MIT", "URL": "u", "text": True}}
+    here = gen_notices.lock_components(
+        {"companion": [PKG, dict(PKG, Name="stale-local-install")]}, record, {}, {})
+    runner = gen_notices.lock_components({}, record, {}, {})
+    assert (gen_notices.render(here[0], here[1], "h", [])
+            == gen_notices.render(runner[0], runner[1], "h", []))
+
+
+def test_the_committed_record_is_read_back_from_both_tables(tmp_path):
+    body = gen_notices.render(
+        {"companion": [dict(PKG, License="MIT | Apache-2.0", URL="")]}, [], "h", [])
+    record = gen_notices.committed_record(_write(tmp_path, body))
+    assert record[("somepkg", "1.0")] == {
+        "License": "MIT | Apache-2.0", "URL": "", "text": True}
+
+
+def test_the_committed_notices_render_the_same_with_no_venv_at_all():
+    """Exactly what CI's `--check` does on a runner without the venvs: if
+    this fails, a lock moved and the file was not regenerated."""
+    per_component, warnings = gen_notices.lock_components({})
+    rendered = gen_notices.render(
+        per_component, warnings, gen_notices.existing_hand_block(gen_notices.OUT_PATH))
+    assert warnings == []
+    assert rendered == gen_notices.OUT_PATH.read_text(encoding="utf-8")

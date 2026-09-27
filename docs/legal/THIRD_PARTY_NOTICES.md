@@ -5,9 +5,11 @@
      <!-- END HAND-MAINTAINED --> is written by hand and is preserved
      verbatim across regeneration: it carries the components pip
      cannot see, which is where every copyleft obligation actually is.
-     The developer-venv tables list what is installed for development;
-     the dashboard-container table is the shipped image's own lock
-     (server-tools-1, 2026-09-18), with its licences read from a venv. -->
+     The per-component tables are each component's requirements.lock
+     (CR-353, 2026-09-27); the dashboard-container table is the shipped
+     image's own lock (server-tools-1, 2026-09-18). A licence already
+     stated here for a (package, version) is kept on regeneration;
+     `--rescan` reads every one from the venvs again. -->
 
 # CC Sync: third-party notices
 
@@ -43,20 +45,19 @@ through.
 
 ## Python dependencies by component
 
-What is installed in each component's development virtualenv. This is
-**not** the same as what a customer receives: the frozen companion ships
-only what `companion/build.spec` collects, and the deployed container
-installs `dashboard/deploy/requirements.txt`.
+What each component's `requirements.lock` pins, every platform's
+packages included. This is **not** the same as what a customer
+receives: the frozen companion ships only what `companion/build.spec`
+collects, and the deployed container installs
+`dashboard/deploy/requirements.txt`.
 
 ### companion
 
-editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv: `companion/.venv`, 22 package(s).
+editor tray app; the frozen build ships a SUBSET of this (see build.spec). Lock: `companion/requirements.lock`, 22 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
 | `asn1crypto` | 1.5.1 | MIT License | https://github.com/wbond/asn1crypto |
-| `ccsync-companion` | 0.9.71 | UNKNOWN | UNKNOWN |
-| `ccsync-companion` | 0.9.80 | UNKNOWN | UNKNOWN |
 | `colorama` | 0.4.6 | BSD License | https://github.com/tartley/colorama |
 | `flatbuffers` | 25.12.19 | Apache Software License | https://google.github.io/flatbuffers/ |
 | `iniconfig` | 2.3.0 | MIT | https://github.com/pytest-dev/iniconfig |
@@ -68,7 +69,9 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv:
 | `pluggy` | 1.6.0 | MIT License | UNKNOWN |
 | `protobuf` | 7.35.1 | 3-Clause BSD License | https://developers.google.com/protocol-buffers/ |
 | `psycopg2-binary` | 2.9.13 | GNU Library or Lesser General Public License (LGPL) | https://psycopg.org/ |
-| `Pygments` | 2.21.0 | BSD-2-Clause | https://pygments.org |
+| `pygments` | 2.21.0 | BSD-2-Clause | https://pygments.org |
+| `pyobjc-core` | 12.2.2 | MIT | - |
+| `pyobjc-framework-cocoa` | 12.2.2 | MIT | - |
 | `pytest` | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ |
 | `python-dateutil` | 2.9.0.post0 | Apache Software License; BSD License | https://github.com/dateutil/dateutil |
 | `scramp` | 1.4.17 | MIT No Attribution License (MIT-0) | https://codeberg.org/tlocke/scramp |
@@ -79,7 +82,7 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv:
 
 ### dashboard
 
-FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Venv: `dashboard/.venv`, 59 package(s).
+FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Lock: `dashboard/requirements.lock`, 57 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -90,8 +93,6 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 | `anyio` | 4.14.2 | MIT | https://anyio.readthedocs.io/en/stable/versionhistory.html |
 | `bcrypt` | 5.0.0 | Apache Software License | https://github.com/pyca/bcrypt/ |
 | `bgutil-ytdlp-pot-provider` | 1.3.1 | GNU General Public License v3 (GPLv3) | UNKNOWN |
-| `ccsync-dashboard` | 0.7.43 | UNKNOWN | UNKNOWN |
-| `ccsync-dashboard` | 0.7.43 | UNKNOWN | UNKNOWN |
 | `certifi` | 2026.7.22 | Mozilla Public License 2.0 (MPL 2.0) | https://github.com/certifi/python-certifi |
 | `cffi` | 2.1.1 | MIT-0 | https://cffi.readthedocs.io/en/latest/whatsnew.html |
 | `charset-normalizer` | 3.5.1 | MIT | https://github.com/jawah/charset_normalizer/blob/master/CHANGELOG.md |
@@ -99,7 +100,7 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 | `colorama` | 0.4.6 | BSD License | https://github.com/tartley/colorama |
 | `cryptography` | 50.0.0 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
 | `distro` | 1.9.0 | Apache Software License | https://github.com/python-distro/distro |
-| `docstring_parser` | 0.18.0 | MIT License | https://github.com/rr-/docstring_parser |
+| `docstring-parser` | 0.18.0 | MIT License | https://github.com/rr-/docstring_parser |
 | `fastapi` | 0.141.1 | MIT | https://github.com/fastapi/fastapi |
 | `flatbuffers` | 25.12.19 | Apache Software License | https://google.github.io/flatbuffers/ |
 | `h11` | 0.16.0 | MIT License | https://github.com/python-hyper/h11 |
@@ -109,9 +110,9 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 | `iniconfig` | 2.3.0 | MIT | https://github.com/pytest-dev/iniconfig |
 | `invoke` | 3.0.3 | BSD-2-Clause | https://github.com/pyinvoke/invoke |
 | `jieba` | 0.42.1 | MIT License | https://github.com/fxsjy/jieba |
-| `Jinja2` | 3.1.6 | BSD License | https://github.com/pallets/jinja/ |
+| `jinja2` | 3.1.6 | BSD License | https://github.com/pallets/jinja/ |
 | `jiter` | 0.16.0 | MIT | https://github.com/pydantic/jiter/ |
-| `MarkupSafe` | 3.0.3 | BSD-3-Clause | https://github.com/pallets/markupsafe/ |
+| `markupsafe` | 3.0.3 | BSD-3-Clause | https://github.com/pallets/markupsafe/ |
 | `numpy` | 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | https://numpy.org |
 | `onnxruntime` | 1.28.0 | MIT License | https://onnxruntime.ai |
 | `opencc-python-reimplemented` | 0.1.7 | Apache Software License | https://github.com/yichen0831/opencc-python |
@@ -122,22 +123,22 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 | `psycopg2-binary` | 2.9.13 | GNU Library or Lesser General Public License (LGPL) | https://psycopg.org/ |
 | `pycparser` | 3.0 | BSD-3-Clause | https://github.com/eliben/pycparser |
 | `pydantic` | 2.13.4 | MIT | https://github.com/pydantic/pydantic |
-| `pydantic_core` | 2.46.4 | MIT | https://github.com/pydantic |
-| `Pygments` | 2.21.0 | BSD-2-Clause | https://pygments.org |
-| `PyJWT` | 2.13.0 | MIT | https://github.com/jpadilla/pyjwt |
-| `PyNaCl` | 1.6.2 | Apache Software License | https://github.com/pyca/pynacl |
+| `pydantic-core` | 2.46.4 | MIT | https://github.com/pydantic |
+| `pygments` | 2.21.0 | BSD-2-Clause | https://pygments.org |
+| `pyjwt` | 2.13.0 | MIT | https://github.com/jpadilla/pyjwt |
+| `pynacl` | 1.6.2 | Apache Software License | https://github.com/pyca/pynacl |
 | `pypinyin` | 0.55.0 | MIT License | https://github.com/mozillazg/python-pinyin |
 | `pyspnego` | 0.12.1 | MIT | https://github.com/jborean93/pyspnego |
 | `pytest` | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ |
 | `python-multipart` | 0.0.32 | Apache-2.0 | https://github.com/Kludex/python-multipart |
-| `RapidFuzz` | 3.14.5 | MIT | https://github.com/rapidfuzz/RapidFuzz |
+| `rapidfuzz` | 3.14.5 | MIT | https://github.com/rapidfuzz/RapidFuzz |
 | `requests` | 2.34.2 | Apache Software License | https://github.com/psf/requests |
 | `smbprotocol` | 1.17.0 | MIT | https://github.com/jborean93/smbprotocol |
 | `sniffio` | 1.3.1 | Apache Software License; MIT License | https://github.com/python-trio/sniffio |
 | `sspilib` | 0.5.0 | MIT | https://github.com/jborean93/sspilib |
 | `starlette` | 1.6.0 | BSD-3-Clause | https://github.com/Kludex/starlette |
+| `typing-extensions` | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | `typing-inspection` | 0.4.4 | MIT | https://github.com/pydantic/typing-inspection |
-| `typing_extensions` | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | `urllib3` | 2.7.0 | MIT | https://github.com/urllib3/urllib3/blob/main/CHANGES.rst |
 | `uvicorn` | 0.52.3 | BSD-3-Clause | https://uvicorn.dev/ |
 | `yt-dlp` | 2026.8.19 | Unlicense | https://github.com/yt-dlp/yt-dlp |
@@ -145,7 +146,7 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 
 ### music/web
 
-music search UI mounted at /music; deliberately no torch. Venv: `music/web/.venv`, 32 package(s).
+music search UI mounted at /music; deliberately no torch. Lock: `music/web/requirements.lock`, 33 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -169,22 +170,23 @@ music search UI mounted at /music; deliberately no torch. Venv: `music/web/.venv
 | `pluggy` | 1.6.0 | MIT License | UNKNOWN |
 | `protobuf` | 7.35.1 | 3-Clause BSD License | https://developers.google.com/protocol-buffers/ |
 | `pydantic` | 2.13.4 | MIT | https://github.com/pydantic/pydantic |
-| `pydantic_core` | 2.46.4 | MIT | https://github.com/pydantic |
-| `Pygments` | 2.21.0 | BSD-2-Clause | https://pygments.org |
+| `pydantic-core` | 2.46.4 | MIT | https://github.com/pydantic |
+| `pygments` | 2.21.0 | BSD-2-Clause | https://pygments.org |
 | `pytest` | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ |
 | `python-dotenv` | 1.2.3 | BSD-3-Clause | https://github.com/theskumar/python-dotenv |
 | `python-multipart` | 0.0.32 | Apache-2.0 | https://github.com/Kludex/python-multipart |
-| `PyYAML` | 6.0.3 | MIT License | https://pyyaml.org/ |
+| `pyyaml` | 6.0.3 | MIT License | https://pyyaml.org/ |
 | `starlette` | 1.6.0 | BSD-3-Clause | https://github.com/Kludex/starlette |
+| `typing-extensions` | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | `typing-inspection` | 0.4.4 | MIT | https://github.com/pydantic/typing-inspection |
-| `typing_extensions` | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | `uvicorn` | 0.52.3 | BSD-3-Clause | https://uvicorn.dev/ |
+| `uvloop` | 0.22.1 | Apache Software License; MIT License | https://github.com/MagicStack/uvloop |
 | `watchfiles` | 1.2.0 | MIT License | https://github.com/samuelcolvin/watchfiles |
 | `websockets` | 17.0.1 | BSD-3-Clause | https://github.com/python-websockets/websockets |
 
 ### broll/web
 
-b-roll search UI mounted at /broll. Venv: `broll/web/.venv`, 31 package(s).
+b-roll search UI mounted at /broll. Lock: `broll/web/requirements.lock`, 32 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -207,16 +209,17 @@ b-roll search UI mounted at /broll. Venv: `broll/web/.venv`, 31 package(s).
 | `packaging` | 26.3 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 | `pluggy` | 1.6.0 | MIT License | UNKNOWN |
 | `pydantic` | 2.13.4 | MIT | https://github.com/pydantic/pydantic |
-| `pydantic_core` | 2.46.4 | MIT | https://github.com/pydantic |
-| `Pygments` | 2.21.0 | BSD-2-Clause | https://pygments.org |
+| `pydantic-core` | 2.46.4 | MIT | https://github.com/pydantic |
+| `pygments` | 2.21.0 | BSD-2-Clause | https://pygments.org |
 | `pytest` | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ |
 | `python-dotenv` | 1.2.3 | BSD-3-Clause | https://github.com/theskumar/python-dotenv |
-| `PyYAML` | 6.0.3 | MIT License | https://pyyaml.org/ |
-| `RapidFuzz` | 3.14.5 | MIT | https://github.com/rapidfuzz/RapidFuzz |
+| `pyyaml` | 6.0.3 | MIT License | https://pyyaml.org/ |
+| `rapidfuzz` | 3.14.5 | MIT | https://github.com/rapidfuzz/RapidFuzz |
 | `starlette` | 1.6.0 | BSD-3-Clause | https://github.com/Kludex/starlette |
+| `typing-extensions` | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | `typing-inspection` | 0.4.4 | MIT | https://github.com/pydantic/typing-inspection |
-| `typing_extensions` | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | `uvicorn` | 0.52.3 | BSD-3-Clause | https://uvicorn.dev/ |
+| `uvloop` | 0.22.1 | Apache Software License; MIT License | https://github.com/MagicStack/uvloop |
 | `watchfiles` | 1.2.0 | MIT License | https://github.com/samuelcolvin/watchfiles |
 | `websockets` | 17.0.1 | BSD-3-Clause | https://github.com/python-websockets/websockets |
 
@@ -293,9 +296,6 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `asn1crypto` | 1.5.1 | MIT License | companion | yes |
 | `bcrypt` | 5.0.0 | Apache Software License | dashboard, dashboard-container | yes |
 | `bgutil-ytdlp-pot-provider` | 1.3.1 | GNU General Public License v3 (GPLv3) | dashboard | no |
-| `ccsync-companion` | 0.9.71 | UNKNOWN | companion | no |
-| `ccsync-companion` | 0.9.80 | UNKNOWN | companion | no |
-| `ccsync-dashboard` | 0.7.43 | UNKNOWN | dashboard, dashboard | no |
 | `certifi` | 2026.7.22 | Mozilla Public License 2.0 (MPL 2.0) | dashboard, music/web, broll/web, dashboard-container | yes |
 | `cffi` | 2.1.1 | MIT-0 | dashboard, dashboard-container | yes |
 | `charset-normalizer` | 3.5.1 | MIT | dashboard, dashboard-container | yes |
@@ -303,7 +303,7 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `colorama` | 0.4.6 | BSD License | companion, dashboard, music/web, broll/web, dashboard-container | yes |
 | `cryptography` | 50.0.0 | Apache-2.0 OR BSD-3-Clause | dashboard, dashboard-container | yes |
 | `distro` | 1.9.0 | Apache Software License | dashboard, dashboard-container | yes |
-| `docstring_parser` | 0.18.0 | MIT License | dashboard, dashboard-container | yes |
+| `docstring-parser` | 0.18.0 | MIT License | dashboard, dashboard-container | yes |
 | `fastapi` | 0.141.1 | MIT | dashboard, music/web, broll/web, dashboard-container | yes |
 | `flatbuffers` | 25.12.19 | Apache Software License | companion, dashboard, music/web, dashboard-container | no |
 | `h11` | 0.16.0 | MIT License | dashboard, music/web, broll/web, dashboard-container | yes |
@@ -314,9 +314,9 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `iniconfig` | 2.3.0 | MIT | companion, dashboard, music/web, broll/web | yes |
 | `invoke` | 3.0.3 | BSD-2-Clause | dashboard, dashboard-container | yes |
 | `jieba` | 0.42.1 | MIT License | dashboard, broll/web, dashboard-container | no |
-| `Jinja2` | 3.1.6 | BSD License | dashboard, dashboard-container | yes |
+| `jinja2` | 3.1.6 | BSD License | dashboard, dashboard-container | yes |
 | `jiter` | 0.16.0 | MIT | dashboard, dashboard-container | yes |
-| `MarkupSafe` | 3.0.3 | BSD-3-Clause | dashboard, dashboard-container | yes |
+| `markupsafe` | 3.0.3 | BSD-3-Clause | dashboard, dashboard-container | yes |
 | `numpy` | 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | companion, dashboard, music/web, broll/web, dashboard-container | yes |
 | `onnxruntime` | 1.29.0 | MIT License | companion | yes |
 | `onnxruntime` | 1.28.0 | MIT License | dashboard, music/web, dashboard-container | yes |
@@ -331,18 +331,20 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `psycopg2-binary` | 2.9.12 | GNU Library or Lesser General Public License (LGPL) | dashboard-container | no |
 | `pycparser` | 3.0 | BSD-3-Clause | dashboard, dashboard-container | yes |
 | `pydantic` | 2.13.4 | MIT | dashboard, music/web, broll/web, dashboard-container | yes |
-| `pydantic_core` | 2.46.4 | MIT | dashboard, music/web, broll/web, dashboard-container | yes |
-| `Pygments` | 2.21.0 | BSD-2-Clause | companion, dashboard, music/web, broll/web | yes |
-| `PyJWT` | 2.13.0 | MIT | dashboard, dashboard-container | yes |
-| `PyNaCl` | 1.6.2 | Apache Software License | dashboard, dashboard-container | yes |
+| `pydantic-core` | 2.46.4 | MIT | dashboard, music/web, broll/web, dashboard-container | yes |
+| `pygments` | 2.21.0 | BSD-2-Clause | companion, dashboard, music/web, broll/web | yes |
+| `pyjwt` | 2.13.0 | MIT | dashboard, dashboard-container | yes |
+| `pynacl` | 1.6.2 | Apache Software License | dashboard, dashboard-container | yes |
+| `pyobjc-core` | 12.2.2 | MIT | companion | yes |
+| `pyobjc-framework-cocoa` | 12.2.2 | MIT | companion | yes |
 | `pypinyin` | 0.55.0 | MIT License | dashboard, dashboard-container | yes |
 | `pyspnego` | 0.12.1 | MIT | dashboard, dashboard-container | yes |
 | `pytest` | 9.1.1 | MIT | companion, dashboard, music/web, broll/web | yes |
 | `python-dateutil` | 2.9.0.post0 | Apache Software License; BSD License | companion | yes |
 | `python-dotenv` | 1.2.3 | BSD-3-Clause | music/web, broll/web | yes |
 | `python-multipart` | 0.0.32 | Apache-2.0 | dashboard, music/web, dashboard-container | yes |
-| `PyYAML` | 6.0.3 | MIT License | music/web, broll/web | yes |
-| `RapidFuzz` | 3.14.5 | MIT | dashboard, broll/web, dashboard-container | yes |
+| `pyyaml` | 6.0.3 | MIT License | music/web, broll/web | yes |
+| `rapidfuzz` | 3.14.5 | MIT | dashboard, broll/web, dashboard-container | yes |
 | `requests` | 2.34.2 | Apache Software License | dashboard, dashboard-container | yes |
 | `scramp` | 1.4.17 | MIT No Attribution License (MIT-0) | companion | yes |
 | `six` | 1.17.0 | MIT License | companion | yes |
@@ -350,10 +352,11 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `sniffio` | 1.3.1 | Apache Software License; MIT License | dashboard, dashboard-container | yes |
 | `sspilib` | 0.5.0 | MIT | dashboard, dashboard-container | yes |
 | `starlette` | 1.6.0 | BSD-3-Clause | dashboard, music/web, broll/web, dashboard-container | yes |
+| `typing-extensions` | 4.16.0 | PSF-2.0 | dashboard, music/web, broll/web, dashboard-container | yes |
 | `typing-inspection` | 0.4.4 | MIT | dashboard, music/web, broll/web, dashboard-container | yes |
-| `typing_extensions` | 4.16.0 | PSF-2.0 | dashboard, music/web, broll/web, dashboard-container | yes |
 | `urllib3` | 2.7.0 | MIT | dashboard, dashboard-container | yes |
 | `uvicorn` | 0.52.3 | BSD-3-Clause | dashboard, music/web, broll/web, dashboard-container | yes |
+| `uvloop` | 0.22.1 | Apache Software License; MIT License | music/web, broll/web | yes |
 | `watchdog` | 6.0.0 | Apache Software License | companion | yes |
 | `watchfiles` | 1.2.0 | MIT License | music/web, broll/web | yes |
 | `websockets` | 17.0.1 | BSD-3-Clause | music/web, broll/web | yes |

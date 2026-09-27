@@ -1,0 +1,9 @@
+{
+  "_comment": "CR-353 (2026-09-27): licences for LOCKED distributions no development machine here can install (a platform marker keeps them off Windows), in the exact shape pip-licenses reports them (--from=mixed: the licence classifiers, sorted, joined with '; '). Keyed name==version, so a pin that moves is unresolved again until this is updated. Read by tools/gen_notices.py after the committed notices and the venvs.",
+  "uvloop==0.22.1": {
+    "License": "Apache Software License; MIT License",
+    "URL": "https://github.com/MagicStack/uvloop",
+    "text": true,
+    "source": "uvloop-0.22.1-cp312-cp312-manylinux_2_17_x86_64 wheel METADATA (Classifier: License :: OSI Approved :: Apache Software License / MIT License; licenses/LICENSE-APACHE, LICENSE-MIT), read 2026-09-27"
+  }
+}

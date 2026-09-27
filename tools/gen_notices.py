@@ -264,6 +264,179 @@ def collect() -> tuple[dict[str, list[dict]], list[str]]:
     return per_component, warnings
 
 
+# ---------------------------------------------------- CR-353, 2026-09-27
+# THE TABLES ARE THE LOCKS, NOT THE VENVS. `--check` has failed on the CI
+# linux runner on every run since it was added (2026-09-18): the document was
+# rendered from whichever developer venvs the machine happened to hold, so the
+# runner - no companion venv, Linux wheels - and the base rig - two stale
+# `ccsync-companion` installs in its companion venv - could never render the
+# same bytes, and regenerating the file only moved the failure. A component's
+# rows are now its requirements.lock (every platform's markers included), the
+# same bytes everywhere.
+#
+# Where a row's licence comes from, in order:
+#   1. the COMMITTED notices file's own row for that exact (name, version) -
+#      a version's licence never changes, and preferring it is what makes the
+#      render independent of the machine and of pip-licenses' own version;
+#   2. an installed venv holding that exact version (pip-licenses metadata);
+#   3. tools/notices_extra/lock_only.json, for a locked distribution no
+#      development machine here can install (uvloop: Linux only);
+#   4. docs/legal/licenses/<frozen>/<name>-<version>.txt, which records the
+#      metadata licence of everything frozen into a binary;
+#   5. UNKNOWN, named under "Scan warnings".
+# So a pin that moves has no committed row: CI, with no venv holding it,
+# renders UNKNOWN and fails, and the fix is to regenerate where the venv is -
+# exactly the gate the check was meant to be. `--rescan` skips step 1.
+COMPONENT_LOCKS: dict[str, Path] = {
+    "companion": REPO / "companion" / "requirements.lock",
+    "dashboard": REPO / "dashboard" / "requirements.lock",
+    "music/web": REPO / "music" / "web" / "requirements.lock",
+    "broll/web": REPO / "broll" / "web" / "requirements.lock",
+}
+
+LOCK_ONLY_PATH = Path(__file__).resolve().parent / "notices_extra" / "lock_only.json"
+
+
+def lock_only_record(path: Path | None = None) -> dict[tuple[str, str], dict]:
+    """{(normalised name, version): {License, URL, text}} from lock_only.json."""
+    try:
+        data = json.loads((path or LOCK_ONLY_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    record: dict[tuple[str, str], dict] = {}
+    for spec, row in data.items():
+        name, sep, version = spec.partition("==")
+        if sep and isinstance(row, dict) and row.get("License"):
+            record[(normalize(name), version.strip())] = {
+                "License": str(row["License"]), "URL": str(row.get("URL") or ""),
+                "text": bool(row.get("text"))}
+    return record
+
+
+_COMPONENT_HEAD = ("Package", "Version", "Licence", "Home page")
+_MERGED_HEAD = ("Package", "Version", "Licence", "Components", "Licence text on disk")
+
+
+def _cells(line: str) -> list[str]:
+    """A markdown table row's cells, `esc` undone: "-" is empty and an
+    escaped pipe is a pipe."""
+    parts = re.split(r"(?<!\\)\|", line.strip())[1:-1]
+    out = []
+    for part in parts:
+        value = part.strip().replace("\\|", "|")
+        out.append("" if value == "-" else value)
+    return out
+
+
+def committed_record(path: Path | None = None) -> dict[tuple[str, str], dict]:
+    """{(normalised name, version): {License, URL, text}} as the committed
+    notices file states them, from its per-component tables (the home page)
+    and its merged table (whether a licence text is on disk). {} if absent."""
+    try:
+        text = (path or OUT_PATH).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    record: dict[tuple[str, str], dict] = {}
+    mode = ""
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            mode = ""
+            continue
+        cells = _cells(line)
+        if tuple(cells) == _COMPONENT_HEAD:
+            mode = "component"
+            continue
+        if tuple(cells) == _MERGED_HEAD:
+            mode = "merged"
+            continue
+        if not mode or not cells or set(cells[0]) <= set("-"):
+            continue
+        name = cells[0].strip("`")
+        key = (normalize(name), cells[1])
+        row = record.setdefault(key, {"License": "", "URL": "", "text": False})
+        if cells[2] and cells[2] != "UNKNOWN":
+            row["License"] = cells[2]
+        if mode == "component" and len(cells) >= 4:
+            row["URL"] = row["URL"] or cells[3]
+        if mode == "merged" and len(cells) >= 5:
+            row["text"] = cells[4] == "yes"
+    return record
+
+
+def licence_file_record(root: Path | None = None) -> dict[tuple[str, str], dict]:
+    """{(normalised name, version): {License, text}} from the per-binary
+    licence files `--write-texts` commits under docs/legal/licenses/."""
+    record: dict[tuple[str, str], dict] = {}
+    for path in sorted((root or LICENSES_DIR).glob("*/*.txt")):
+        if path.name == BUNDLE_NAME:
+            continue
+        try:
+            head = path.read_text(encoding="utf-8", errors="replace").split("\n", 6)
+        except OSError:
+            continue
+        title = head[0].strip().rsplit(" ", 1)
+        declared = next((h.split(":", 1)[1].strip() for h in head
+                         if h.startswith("Licence declared in its metadata:")), "")
+        files = next((h.split(":", 1)[1].strip() for h in head
+                      if h.startswith("Files:")), "")
+        if len(title) != 2 or not declared or declared == "not declared":
+            continue
+        record.setdefault((normalize(title[0]), title[1]), {
+            "License": declared, "text": bool(files) and files != "none shipped"})
+    return record
+
+
+def lock_components(installed: dict[str, list[dict]],
+                    record: dict[tuple[str, str], dict] | None = None,
+                    files: dict[tuple[str, str], dict] | None = None,
+                    extra: dict[tuple[str, str], dict] | None = None,
+                    ) -> tuple[dict[str, list[dict]], list[str]]:
+    """({label: rows}, [unresolved]) -- each component's LOCK as package rows,
+    licences resolved in the order the block above gives. `installed` is
+    collect()'s venv scan; `record` is committed_record() (pass {} to
+    rescan)."""
+    record = committed_record() if record is None else record
+    files = licence_file_record() if files is None else files
+    extra = lock_only_record() if extra is None else extra
+    by_exact: dict[tuple[str, str], dict] = {}
+    for label, _venv, _desc in COMPONENTS:
+        for pkg in installed.get(label, []):
+            by_exact.setdefault((normalize(pkg.get("Name", "")),
+                                 str(pkg.get("Version", ""))), pkg)
+    out: dict[str, list[dict]] = {}
+    unresolved: list[str] = []
+    for label, _venv, _desc in COMPONENTS:
+        rows: list[dict] = []
+        for name, version in read_lock(COMPONENT_LOCKS[label]):
+            key = (normalize(name), version)
+            row = {"Name": name, "Version": version, "License": "UNKNOWN",
+                   "URL": "", "LicenseText": ""}
+            kept = record.get(key)
+            pkg = by_exact.get(key)
+            if kept and kept.get("License"):
+                row.update(License=kept["License"], URL=kept.get("URL", ""),
+                           LicenseText="yes" if kept.get("text") else "")
+            elif pkg is not None:
+                row.update(License=pkg.get("License") or "UNKNOWN",
+                           URL=pkg.get("URL") or "",
+                           LicenseText="yes" if has_license_text(pkg) else "")
+            elif key in extra:
+                row.update(License=extra[key]["License"], URL=extra[key]["URL"],
+                           LicenseText="yes" if extra[key]["text"] else "")
+            elif key in files:
+                row.update(License=files[key]["License"],
+                           LicenseText="yes" if files[key]["text"] else "")
+            else:
+                unresolved.append(
+                    f"{label}: {name} {version}: no licence known -- installed in "
+                    f"no scanned venv and in no committed row; regenerate on a "
+                    f"machine whose {label} venv holds it")
+            rows.append(row)
+        if rows:
+            out[label] = rows
+    return out, unresolved
+
+
 def merged(per_component: dict[str, list[dict]]) -> list[dict]:
     """De-duplicated by (name, version), carrying the components it appears in.
 
@@ -339,9 +512,11 @@ def render(per_component: dict[str, list[dict]], warnings: list[str],
     add("     <!-- END HAND-MAINTAINED --> is written by hand and is preserved")
     add("     verbatim across regeneration: it carries the components pip")
     add("     cannot see, which is where every copyleft obligation actually is.")
-    add("     The developer-venv tables list what is installed for development;")
-    add("     the dashboard-container table is the shipped image's own lock")
-    add("     (server-tools-1, 2026-09-18), with its licences read from a venv. -->")
+    add("     The per-component tables are each component's requirements.lock")
+    add("     (CR-353, 2026-09-27); the dashboard-container table is the shipped")
+    add("     image's own lock (server-tools-1, 2026-09-18). A licence already")
+    add("     stated here for a (package, version) is kept on regeneration;")
+    add("     `--rescan` reads every one from the venvs again. -->")
     add("")
     add("# CC Sync: third-party notices")
     add("")
@@ -389,8 +564,8 @@ def render(per_component: dict[str, list[dict]], warnings: list[str],
     if warnings:
         add("## Scan warnings")
         add("")
-        add("These components were NOT scanned; their packages are missing from")
-        add("every table below.")
+        add("What this run could not establish. A row below that reads UNKNOWN")
+        add("is one of these, and is not a finding that the package is permissive.")
         add("")
         for warning in warnings:
             add(f"- {warning}")
@@ -398,10 +573,11 @@ def render(per_component: dict[str, list[dict]], warnings: list[str],
 
     add("## Python dependencies by component")
     add("")
-    add("What is installed in each component's development virtualenv. This is")
-    add("**not** the same as what a customer receives: the frozen companion ships")
-    add("only what `companion/build.spec` collects, and the deployed container")
-    add("installs `dashboard/deploy/requirements.txt`.")
+    add("What each component's `requirements.lock` pins, every platform's")
+    add("packages included. This is **not** the same as what a customer")
+    add("receives: the frozen companion ships only what `companion/build.spec`")
+    add("collects, and the deployed container installs")
+    add("`dashboard/deploy/requirements.txt`.")
     add("")
     for label, venv, desc in COMPONENTS:
         packages = per_component.get(label)
@@ -409,8 +585,10 @@ def render(per_component: dict[str, list[dict]], warnings: list[str],
             continue
         add(f"### {label}")
         add("")
-        add(f"{desc}. Venv: `{shown_path(VENV_OVERRIDES.get(label, venv))}`, "
-            f"{len(packages)} package(s).")
+        lock = COMPONENT_LOCKS.get(label)
+        where = (f"Lock: `{shown_path(lock)}`" if lock is not None
+                 else f"Venv: `{shown_path(VENV_OVERRIDES.get(label, venv))}`")
+        add(f"{desc}. {where}, {len(packages)} package(s).")
         add("")
         add("| Package | Version | Licence | Home page |")
         add("|---|---|---|---|")
@@ -987,6 +1165,9 @@ def main(argv: list[str] | None = None) -> int:
                          "frozen binary carries) instead of the notices file")
     ap.add_argument("--venv", action="append", default=[], metavar="LABEL=PATH",
                     help="scan PATH instead of LABEL's usual venv (repeatable)")
+    ap.add_argument("--rescan", action="store_true",
+                    help="read every licence from the venvs again instead of "
+                         "keeping the one this file already states (CR-353)")
     args = ap.parse_args(argv)
 
     for spec in args.venv:
@@ -1013,10 +1194,17 @@ def main(argv: list[str] | None = None) -> int:
                          f"'Binaries the installer fetches' table would be "
                          f"missing a row, so nothing was written\n")
         return 2
-    per_component, warnings = collect()
+    # The venv scan's own warnings (a component with no venv, a pip-licenses
+    # failure) describe THIS machine, so they go to stderr only: in the
+    # document they made every machine render different bytes (CR-353).
+    installed, _machine_warnings = collect()
+    per_component, warnings = lock_components(
+        installed, record={} if args.rescan else None)
     if not per_component:
-        sys.stderr.write("ERROR: no venv could be scanned; nothing to generate\n")
+        sys.stderr.write("ERROR: no component lock could be read; nothing to generate\n")
         return 2
+    for warning in warnings:
+        sys.stderr.write(f"WARNING: {warning}\n")
     rendered = render(per_component, warnings, hand_block, binaries)
 
     if args.check:

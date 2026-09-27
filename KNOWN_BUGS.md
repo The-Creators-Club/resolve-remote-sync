@@ -31516,6 +31516,19 @@ With the one-statement inserts those no longer stretch a report's lock;
 moving the engine into its own process is the next step only if pages
 still stall.
 
+## CR-352 - the "are you sure" confirm opened in the top left with scrollbars - FIXED, dashboard 0.7.69
+
+2026-09-27, the owner (screenshot, DISMISS on a home-page problem): the one
+confirm dialog (`#cc-confirm`, shell.html) sat in the top-left corner with a
+horizontal and a vertical scrollbar. The `<dialog>` element itself carried
+`.win`, whose `position: relative` beats the browser's centring of a modal
+dialog, and `.win::after` draws the dithered shadow 8px past the box, which a
+`<dialog>` scrolls. The centring rule written for it, `dialog.cc-dialog`,
+never matched: the element did not have that class. **Fixed**: the dialog is
+`.cc-dialog` and the window is its form (the shape Settings' `#site-ask`
+already had); `dialog.cc-dialog` gains `overflow: visible`. Checked in
+headless Chrome with the real stylesheets: centred, no scrollbars.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

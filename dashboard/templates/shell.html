@@ -137,8 +137,14 @@
   {% include "partials/hint_sheet.html" %}
   {# The one confirm dialog (3.2): a real modal <dialog>, opened by
      cc/cc.js's htmx:confirm handler with showModal(); Cancel is focused. #}
-  <dialog id="cc-confirm" class="win dialog" aria-labelledby="cc-confirm-t" aria-describedby="cc-confirm-q">
-    <form method="dialog">
+  {# The window is a CHILD of the <dialog>, never the dialog itself
+     (2026-09-27): `.win` sets position: relative, which beats the browser's
+     own centring of a modal dialog, so it opened in the top left; and its
+     dithered shadow reaches 8px past the box, which a <dialog> scrolls.
+     `dialog.cc-dialog` (components.css) is the centring and lets the
+     shadow show - the same shape as Settings' #site-ask. #}
+  <dialog id="cc-confirm" class="cc-dialog" aria-labelledby="cc-confirm-t" aria-describedby="cc-confirm-q">
+    <form method="dialog" class="win dialog">
       <div class="bar"><h2 class="t" id="cc-confirm-t">are you sure</h2></div>
       <div class="body">
         <p class="cc-confirm-q" id="cc-confirm-q" data-cc-confirm-q></p>

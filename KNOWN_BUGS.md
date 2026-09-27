@@ -31551,6 +31551,25 @@ committed rows. Verified: `--check` passes here with no venv at all and
 with only the dashboard venv (the runner's shape). Still red on CI and not
 touched: the macOS job's onboarding suite segfaults (exit 139) on every run.
 
+## CR-354 - CI's macOS job segfaulted in the onboarding suite on every run - FIXED (tests only)
+
+2026-09-27. The macOS job's `onboarding -- pytest` step died with exit 139
+on every CI run for days, in a different wizard test each time. The runner's
+own crash report gave the native stack: AppKit (UIIntelligenceSupport,
+"simulating" opening the app menu) asked Tk's process-wide TKApplication to
+validate a menu item, and TKApplication called `Tcl_FindCommand` on the
+interpreter it was set up with - the FIRST one the process created - which
+a finished test's OnboardWizard had already freed (the address was freed
+memory). Every wizard test builds its own `tk.Tk()`; the wizard in the field
+builds one per process and cannot hit this. **Fixed**:
+`onboarding/tests/conftest.py`, on darwin only, creates the first Tk
+interpreter itself at session start, destroys its window at once and keeps
+the reference for the session. Keeping a live, withdrawn root instead hung
+`clipboard_get` (the COPY LOG test) until the job timed out. Verified on
+the macos-latest runner (branch debug/mac-onboarding-segv): the w2 file
+alone crashed on its first run before, and ran 12 of 12 clean after, plus 4
+of 4 full suites.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

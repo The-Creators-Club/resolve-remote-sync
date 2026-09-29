@@ -885,3 +885,87 @@ def test_the_test_button_reports_the_timeout_even_after_a_good_answer(env, monke
     _slow_cli(monkeypatch)
     probed = ai_providers.probe_cli(conn, "claude_code", force=True)
     assert probed["installed"] is False and "too slow to start" in probed["detail"]
+
+
+# ------------------------------- a refused CLI says so, everywhere (CR-355)
+# 2026-09-29: Claude Code's OAuth session on the live dashboard expired and
+# could not be refreshed. Every YouTube job failed with "no provider has a
+# working credential" while the credential FILE (expiresAt 0, no refresh
+# token) kept Settings' unprobed read and /cards saying signed in.
+
+EXPIRED = "Failed to authenticate: OAuth session expired and could not be refreshed"
+
+
+def test_a_refused_cli_names_its_own_reason_in_the_refusal(env, monkeypatch):
+    _client, conn, settings = env
+    enable_cli(conn)
+    fake_cli(monkeypatch, probe=FakeProc(1, EXPIRED))
+    choice = ai_providers.resolved(conn, settings)
+    assert choice.ok is False
+    assert "Claude Code is not signed in on this server" in choice.reason
+    assert "OAuth session expired" in choice.reason
+    assert "Settings -> AI providers" in choice.reason
+    # And that is what the ytdl app is handed as the job's error.
+    assert ai_providers.lookup_payload(conn, settings) == {
+        "provider": "", "detail": choice.reason}
+
+
+def test_the_refusal_reason_is_redacted(env, monkeypatch):
+    """The reason lands in jobs.error, which any editor reads."""
+    _client, conn, settings = env
+    enable_cli(conn)
+    token = "sk-ant-oat01-" + "A" * 40
+    fake_cli(monkeypatch, probe=FakeProc(1, f"bad token {token}"))
+    reason = ai_providers.resolved(conn, settings).reason
+    assert token not in reason and "not signed in" in reason
+
+
+def test_a_refused_probe_beats_the_wizards_snapshot(env, monkeypatch):
+    _client, conn, settings = env
+    enable_cli(conn)
+    fake_wizard(monkeypatch)                     # the file says signed in
+    ai_providers._store_probe("claude_code", {
+        "installed": True, "signed_in": False, "path": "/usr/bin/claude",
+        "version": "2.1.284", "detail": EXPIRED})
+    no_subprocess(monkeypatch)
+    row = {r["name"]: r for r in
+           ai_providers.provider_states(conn, settings, probe=False)}["claude_code"]
+    assert row["status"] == ai_providers.ST_NOT_SIGNED_IN
+    assert row["available"] is False
+    assert row["detail"] == EXPIRED
+    # (No resolved() check here: fake_wizard signs Codex in too, so the chain
+    # rightly falls through to it. The reason text is pinned above.)
+
+
+def test_a_slow_start_does_not_beat_the_wizards_snapshot(env, monkeypatch):
+    """A transient probe proves nothing (2026-09-26); the snapshot stands."""
+    _client, conn, settings = env
+    enable_cli(conn)
+    fake_wizard(monkeypatch)
+    ai_providers._store_probe("claude_code", {
+        "installed": True, "signed_in": False, "path": "/usr/bin/claude",
+        "version": "2.1.284", "detail": "slow", "transient": True})
+    no_subprocess(monkeypatch)
+    row = {r["name"]: r for r in
+           ai_providers.provider_states(conn, settings, probe=False)}["claude_code"]
+    assert row["status"] == ai_providers.ST_AVAILABLE
+
+
+def test_a_dead_credential_file_is_not_a_sign_in_after_a_restart(env, monkeypatch):
+    """The live file, restarted container, nothing faked but the subprocess ban."""
+    from ccsync_dashboard import cli_tools
+
+    _client, conn, settings = env
+    enable_cli(conn)
+    no_subprocess(monkeypatch)
+    monkeypatch.setattr(ai_providers.shutil, "which", lambda binary: None)
+    wizard_installed_on_disk(settings)
+    cred = cli_tools.home_dir(settings, "claude_code") / cli_tools.spec(
+        "claude_code").credential_file
+    cred.write_text('{"claudeAiOauth": {"accessToken": "SECRET-TOKEN", '
+                    '"expiresAt": 0, "subscriptionType": "max"}}', encoding="utf-8")
+    row = {r["name"]: r for r in
+           ai_providers.provider_states(conn, settings, probe=False)}["claude_code"]
+    assert row["available"] is False
+    assert row["signin_state"] == "failed"
+    assert ai_providers.resolved(conn, settings, probe=False).ok is False

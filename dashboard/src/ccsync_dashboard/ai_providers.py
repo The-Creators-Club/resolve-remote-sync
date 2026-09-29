@@ -788,6 +788,18 @@ def unprobed_cli_state(conn: sqlite3.Connection, name: str, settings: Any,
         out["detail"] = ("signed in when it was last checked"
                          + (" (not re-checked since)" if cached.get("stale") else ""))
         return out
+    if (cached is not None and cached.get("installed")
+            and not cached.get("signed_in") and not cached.get("transient")):
+        # A REAL probe that ran the CLI and was refused beats the wizard's
+        # snapshot (CR-355, 2026-09-29): the snapshot is a file on disk, the
+        # probe is the CLI saying "OAuth session expired". Settings and
+        # /cards said signed in while every YouTube job failed. A transient
+        # (slow-start) probe proves nothing and still defers to the wizard,
+        # and a sign-in clears this cache (`cli_tools._reset_probe_cache`),
+        # so a fresh login is never held back by the old refusal.
+        out["status"] = ST_NOT_SIGNED_IN
+        out["detail"] = cached.get("detail", "")
+        return out
     if wizard is not None:
         installed = bool(wizard["install"]["installed"]) or bool(
             cli_path(conn, name, settings))
@@ -957,21 +969,38 @@ def resolved(conn: sqlite3.Connection, settings: Any, *, probe: bool = True) -> 
     pref = preference(conn)
     if pref != AUTO:
         rows = provider_states(conn, settings, probe=probe, only=(pref,))
-        return _say_why_slow(resolve_provider(availability(rows), pref), rows)
+        return _say_why_none(resolve_provider(availability(rows), pref), rows)
     rows = provider_states(conn, settings, probe=probe)
-    return _say_why_slow(resolve_provider(availability(rows), pref), rows)
+    return _say_why_none(resolve_provider(availability(rows), pref), rows)
 
 
-def _say_why_slow(choice: ProviderChoice, rows: list[dict]) -> ProviderChoice:
-    """Nothing available because a CLI was too slow to start is not "no
-    working credential" (2026-09-26): put the slow-start sentence first."""
+def _say_why_none(choice: ProviderChoice, rows: list[dict]) -> ProviderChoice:
+    """When nothing is available, say WHY in the refusal every AI feature
+    shows: a CLI too slow to start (2026-09-26), else a CLI that is
+    installed and refused (CR-355). Only then the generic sentence."""
     if choice.ok:
         return choice
     slow = [str(r.get("detail") or "") for r in rows
             if "too slow to start" in str(r.get("detail") or "")]
-    if not slow:
+    if slow:
+        return ProviderChoice(choice.name, choice.label, slow[0], choice.pinned)
+    # A CLI that is installed and REFUSED is not "no working credential"
+    # either (CR-355, 2026-09-29): the YouTube page showed that sentence for
+    # a Claude Code whose OAuth session had expired, and the CLI's own words
+    # - which say what to do - were only on the Settings page. The detail is
+    # the CLI's stderr, which also lands in jobs.error that any editor can
+    # read, so it goes through the sign-in transcript's redaction first.
+    refused = [r for r in rows
+               if r.get("status") == ST_NOT_SIGNED_IN and r.get("detail")]
+    if not refused:
         return choice
-    return ProviderChoice(choice.name, choice.label, slow[0], choice.pinned)
+    row = refused[0]
+    said = " ".join(cli_tools._redact(str(row["detail"])).split())[:200]
+    return ProviderChoice(
+        choice.name, choice.label,
+        f"{row['label']} is not signed in on this server ({said}). An admin "
+        # No closing full stop: the YouTube page appends ". <hint>" itself.
+        f"must sign it in again on Settings -> AI providers", choice.pinned)
 
 
 # ------------------------------------------------- what the ytdl app is told

@@ -1867,10 +1867,17 @@ def _credential_on_disk(settings: Any, name: str) -> dict | None:
     this server" until an admin clicked TEST. The file the CLI itself wrote is
     the one piece of that truth that survives the process.
 
-    EXISTENCE AND SIZE ONLY. The file IS the credential (an OAuth access and
-    refresh token); nothing here opens it, parses it, logs it or puts a byte
-    of it in a value an admin or an API sees. An OSError is "cannot tell",
-    which falls back to the idle answer.
+    The file IS the credential (an OAuth access and refresh token); nothing
+    here logs it or puts a byte of it in a value an admin or an API sees. An
+    OSError is "cannot tell", which falls back to the idle answer.
+
+    It was EXISTENCE AND SIZE ONLY until CR-355 (2026-09-29): a Claude Code
+    credential whose refresh failed is rewritten with `expiresAt: 0` and no
+    refresh token, and that dead file read as "signed in" here while every
+    real call answered "OAuth session expired and could not be refreshed" -
+    the YouTube page said "no provider" while Settings and /cards said
+    signed in. `_credential_is_dead` reads two FACTS from it (is there a
+    refresh token, is the access token past its expiry), never a value.
     """
     if settings is None:
         return None
@@ -1885,12 +1892,57 @@ def _credential_on_disk(settings: Any, name: str) -> dict | None:
         written = dt.datetime.fromtimestamp(st.st_mtime, dt.timezone.utc)
     except (OSError, ValueError, OverflowError):
         return None
+    if _credential_is_dead(name, path, st.st_size):
+        return {"state": "failed", "strategy": "on_disk",
+                "detail": ("the saved sign-in has expired and cannot renew "
+                           "itself. Sign in again"),
+                "url": "", "user_code": "", "account": {}, "tool": name,
+                "mode": "", "expires_in": 0}
     return {"state": "signed_in", "strategy": "on_disk",
             "detail": (f"signed in earlier - the CLI's own credential is on "
                        f"disk ({rel}, written "
                        f"{written.strftime('%Y-%m-%d %H:%M UTC')})"),
             "url": "", "user_code": "", "account": {}, "tool": name,
             "mode": "", "expires_in": 0}
+
+
+# A Claude Code credential file is a few hundred bytes. Anything far bigger
+# is not the shape this reads, and is left to the existence rule.
+_CREDENTIAL_READ_LIMIT = 64 * 1024
+
+
+def _credential_is_dead(name: str, path: Path, size: int) -> bool:
+    """True only when the file PROVES the sign-in cannot work (CR-355).
+
+    Claude Code only: `claudeAiOauth` with no refresh token AND an access
+    token whose `expiresAt` (epoch ms) has passed. That pair is what the CLI
+    leaves after a refresh it could not do, and nothing but a new sign-in
+    brings it back. A live access token with no refresh token still works
+    until it expires, so it is not dead yet. Every doubt - another tool, an
+    unreadable or unexpected file, a missing field - is False, which keeps
+    the pre-CR-355 existence answer: a wrong "dead" would dim Claude on a
+    site where it works.
+
+    Two booleans leave this function and nothing else: no token value is
+    kept, returned or logged.
+    """
+    if name != CLAUDE_CODE or size > _CREDENTIAL_READ_LIMIT:
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+        if not isinstance(oauth, dict):
+            return False
+        has_refresh = bool(oauth.get("refreshToken"))
+        expires_at = oauth.get("expiresAt")
+        del data, oauth
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+    if has_refresh or isinstance(expires_at, bool) \
+            or not isinstance(expires_at, (int, float)):
+        return False
+    return expires_at <= time.time() * 1000
 
 
 def signin_status(settings: Any, name: str) -> dict:

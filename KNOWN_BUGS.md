@@ -31570,6 +31570,37 @@ the macos-latest runner (branch debug/mac-onboarding-segv): the w2 file
 alone crashed on its first run before, and ran 12 of 12 clean after, plus 4
 of 4 full suites.
 
+## CR-355 - "no AI provider" on the YouTube page while Settings and /cards said Claude Code was signed in - FIXED in repo (dashboard 0.7.70, unshipped)
+
+2026-09-29, reported by Ruskin: two YouTube searches (jobs 106, 107) failed
+with `claude_auth: no provider has a working credential`. The live
+dashboard's only AI provider is the wizard-installed Claude Code CLI, and
+its OAuth session had expired and could not be refreshed: the CLI rewrote
+`/data/tools/claude-code/home/.claude/.credentials.json` with `expiresAt: 0`
+and no refresh token, and every real call answered "Failed to authenticate:
+OAuth session expired and could not be refreshed". Last good job: 105,
+2026-09-28 13:02 UTC. **Live fix, same day:** re-signed in through the
+wizard's own sign-in route (a minted, then deleted, admin session); TEST
+answered and the new credential carries a refresh token.
+
+Two defects made it look like something else. (1) The refusal the job
+carried dropped the CLI's own words: `resolved()` only named a slow start
+(2026-09-26), so an installed-and-refused CLI read as "no working
+credential". **Fixed**: `ai_providers._say_why_none` (was `_say_why_slow`)
+names the refused CLI and its redacted stderr, which is what reaches
+`jobs.error` and the YouTube page. (2) The unprobed read kept saying signed
+in. CR-195's on-disk check was existence and size only, so the dead file
+counted as a sign-in, and `unprobed_cli_state` let the wizard snapshot beat a
+cached probe that had just been refused. **Fixed**:
+`cli_tools._credential_is_dead` reads two facts from the Claude Code file (a
+refresh token exists; the access token's `expiresAt` has passed), never a
+value, and only "no refresh token AND expired" is refused, as `failed` with
+"Sign in again"; every doubt keeps the existence answer, and Codex's file is
+still never opened. A non-transient refused probe now beats the snapshot (a
+slow start still does not; a sign-in clears the probe cache). Tests:
+`test_cli_tools.py` (the never-opened test became never-leaked),
+`test_ai_providers.py` CR-355 block. Why the refresh failed is not known.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

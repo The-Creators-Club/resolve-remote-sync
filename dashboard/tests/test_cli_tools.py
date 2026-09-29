@@ -27,7 +27,6 @@ import hashlib
 import io
 import json
 import os
-import pathlib
 import tarfile
 import threading
 import time
@@ -868,21 +867,12 @@ def test_a_sign_out_beats_the_file_on_disk(settings):
     assert cli_tools.signin_status(settings, name)["state"] == "idle"
 
 
-def test_the_credential_is_never_read_only_stat_ed(settings, monkeypatch):
-    """It IS the credential. Existence and size, nothing else: no open, no
-    parse, and not one byte of it in a value an admin or an API sees."""
+def test_the_credential_is_never_leaked(settings):
+    """It IS the credential. Since CR-355 it is read for two facts (a refresh
+    token exists, the access token has expired), and not one byte of it is in
+    a value an admin or an API sees."""
     name = cli_tools.CLAUDE_CODE
-    path = write_credential(settings)
-
-    real_open = builtins.open
-
-    def refuse(file, *a, **kw):
-        if str(file) == str(path):
-            raise AssertionError("the credential file must never be opened")
-        return real_open(file, *a, **kw)
-
-    monkeypatch.setattr(builtins, "open", refuse)
-    monkeypatch.setattr(pathlib.Path, "read_text", _no_read_text(path))
+    write_credential(settings)
     answer = cli_tools.signin_status(settings, name)
     assert answer["state"] == "signed_in"
     blob = json.dumps(answer)
@@ -891,15 +881,52 @@ def test_the_credential_is_never_read_only_stat_ed(settings, monkeypatch):
     assert "claudeAiOauth" not in blob
 
 
-def _no_read_text(path):
-    real = pathlib.Path.read_text
+# CR-355 (2026-09-29): what the CLI leaves after a refresh it could not do.
+DEAD_CREDENTIAL = ('{"claudeAiOauth": {"accessToken": "SECRET-ACCESS-TOKEN", '
+                   '"expiresAt": 0, "subscriptionType": "max"}}')
 
-    def guard(self, *a, **kw):
-        if str(self) == str(path):
-            raise AssertionError("the credential file must never be read")
-        return real(self, *a, **kw)
 
-    return guard
+def test_a_credential_that_cannot_renew_is_not_a_sign_in(settings):
+    name = cli_tools.CLAUDE_CODE
+    write_credential(settings, text=DEAD_CREDENTIAL)
+    answer = cli_tools.signin_status(settings, name)
+    assert answer["state"] == "failed"
+    assert answer["strategy"] == "on_disk"
+    assert "Sign in again" in answer["detail"]
+    assert "—" not in answer["detail"]
+    assert "SECRET-ACCESS-TOKEN" not in json.dumps(answer)
+
+
+@pytest.mark.parametrize("text", [
+    # An expired access token with a refresh token renews on the next call.
+    '{"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": 0}}',
+    # No refresh token, but the access token still has hours left.
+    '{"claudeAiOauth": {"accessToken": "a", "expiresAt": %d}}'
+    % int((time.time() + 3600) * 1000),
+    # Shapes this does not know: the existence rule stands.
+    '{"claudeAiOauth": {"accessToken": "a"}}',
+    '{"claudeAiOauth": {"accessToken": "a", "expiresAt": "0"}}',
+    '{"something": "else"}',
+    'not json at all',
+])
+def test_only_a_provably_dead_credential_is_refused(settings, text):
+    write_credential(settings, text=text)
+    assert cli_tools.signin_status(settings, cli_tools.CLAUDE_CODE)["state"] == "signed_in"
+
+
+def test_codex_credential_is_still_existence_only(settings, monkeypatch):
+    """The dead-file rule knows Claude Code's shape only; Codex's file is
+    never opened."""
+    path = write_credential(settings, cli_tools.CODEX, text=DEAD_CREDENTIAL)
+    real_open = builtins.open
+
+    def refuse(file, *a, **kw):
+        if str(file) == str(path):
+            raise AssertionError("the codex credential must not be opened")
+        return real_open(file, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", refuse)
+    assert cli_tools.signin_status(settings, cli_tools.CODEX)["state"] == "signed_in"
 
 
 def test_codex_has_its_own_credential_path(settings):

@@ -31601,6 +31601,33 @@ slow start still does not; a sign-in clears the probe cache). Tests:
 `test_cli_tools.py` (the never-opened test became never-leaked),
 `test_ai_providers.py` CR-355 block. Why the refresh failed is not known.
 
+## CR-359 - Timeline Cards: the lane crawled while zooming (most with the pad's stick) and while panning over many cuts, on a 4K screen with a tall lane - FIXED, LIVE on /cards 2026-10-04 (Editing 15dc634 + 83d4fb5)
+
+2026-10-04, Alex on the "Razer" (really an ASUS ROG Zephyrus G15 GA503QS),
+3840x2160 120 Hz Samsung at 150 %, lane docked ~650 CSS px tall. Chrome was
+on the AMD iGPU (no `UserGpuPreferences` entry); moved to the RTX 3080 with
+`GpuPreference=2;` the same day, and that changed NOTHING. His own DevTools
+trace said why: the GPU PROCESS'S MAIN THREAD was 80-100 % busy with 16-104
+ms tasks every zoom second, 15-40 of 120 frames presented. That is CPU work
+in Chrome's GPU process, not the GPU chip. Three defects in
+`03-lane.js`, all in the waveform/text path take four (CR-202) left: (1) a
+zoom draws direct for 300 ms after every LZ change, a held stick changes LZ
+every frame, and the direct draw was still one rect per pixel column in one
+path (~3400 sub-contours at 3840 device px): 198 ms of GPU-process time a
+frame at the laptop geometry. Now one outline contour per clip (the bars'
+union, same region): 5.6 ms. (2) with more than 24 clips on screen the LRU
+evicted the bitmaps the frame was about to blit (51 allocations a frame
+panning, 89 playing), and the pixel bound alone could do it with a tall lane
+at DPR 1.5. Now narrow clips draw direct, bitmaps are capped in device px
+(8192 wide, 384 tall, blitted stretched) and nothing blitted this frame is
+evicted: 0 allocations a frame. (3) `wrapCached` keys on clip width, so a
+zoom re-wrapped every clip every frame, quadratically; `wrapText` now sums
+cached unit and pair widths, output pinned identical to the old wrap. The
+extend ghost had (1) worse (1.55 s a frame on a 2000 px drag) and is fixed
+the same way. Write-up: MulticamPipeline `docs/LANE-ZOOM-PERF-INVESTIGATION.md`
+"take five" (numbered CR-357 in 15dc634 before this ledger was checked; the
+comments say CR-359 since 83d4fb5). Owed: a re-trace on the laptop.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

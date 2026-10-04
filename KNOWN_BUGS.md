@@ -31601,7 +31601,7 @@ slow start still does not; a sign-in clears the probe cache). Tests:
 `test_cli_tools.py` (the never-opened test became never-leaked),
 `test_ai_providers.py` CR-355 block. Why the refresh failed is not known.
 
-## CR-359 - Timeline Cards: the lane crawled while zooming (most with the pad's stick) and while panning over many cuts, on a 4K screen with a tall lane - FIXED, LIVE on /cards 2026-10-04 (Editing 15dc634 + 83d4fb5)
+## CR-359 - Timeline Cards: the lane crawled while zooming (most with the pad's stick) and while panning over many cuts, on a 4K screen with a tall lane - FIXED, LIVE on /cards 2026-10-04 and confirmed on the laptop (Editing 15dc634 + 83d4fb5)
 
 2026-10-04, Alex on the "Razer" (really an ASUS ROG Zephyrus G15 GA503QS),
 3840x2160 120 Hz Samsung at 150 %, lane docked ~650 CSS px tall. Chrome was
@@ -31626,7 +31626,8 @@ cached unit and pair widths, output pinned identical to the old wrap. The
 extend ghost had (1) worse (1.55 s a frame on a 2000 px drag) and is fixed
 the same way. Write-up: MulticamPipeline `docs/LANE-ZOOM-PERF-INVESTIGATION.md`
 "take five" (numbered CR-357 in 15dc634 before this ledger was checked; the
-comments say CR-359 since 83d4fb5). Owed: a re-trace on the laptop.
+comments say CR-359 since 83d4fb5). Confirmed on the laptop the same day
+(Alex: "wonderfully performant now").
 
 ## Carryover — unchanged from before the 2026-08-11 hunt
 

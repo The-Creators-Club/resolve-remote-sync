@@ -392,9 +392,17 @@ if [ "${YTDL_YTDLP_NIGHTLY:-1}" != "0" ]; then
         # (and any over-the-air code root) exists. umask 077 in the subshell:
         # this runs before the script-wide one below, and CODE that the app
         # will import must be no more writable than the rest of /data.
+        #
+        # IN THE BACKGROUND (2026-10-05, CR-361's first live boot): the install
+        # took 146 s on the NAS (pip lists yt-dlp's PyPI index, hundreds of
+        # nightlies long) and the boot waited for it, so the dashboard was down
+        # for the whole of it -- and up to ~20 min if every retry ran. The
+        # dashboard must never wait on PyPI. What this installs applies at the
+        # NEXT start, which is already the rule for the daily refresh; this
+        # boot uses whatever `current` named when the suffix below was read.
         ( umask 077
           PYTHONPATH=/ytdl-app "$VENV/bin/python" -m ytdlweb.ytdlp_nightly install \
-              --root "$YTDLP_NIGHTLY_ROOT" ) || true
+              --root "$YTDLP_NIGHTLY_ROOT" || true ) &
     fi
 fi
 ytdlp_nightly_suffix() {

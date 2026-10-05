@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,8 @@ def build_world(tmp_path: Path, *, image_mode: bool, exits: list[str]) -> dict:
         # makes it fail, which run.sh must shrug off.
         'if [ "$1" = "-m" ] && [ "$2" = "ytdlweb.ytdlp_nightly" ]; then\n'
         f'  echo "NIGHTLY $3 root=$5 PYTHONPATH=$PYTHONPATH" >> "{log}"\n'
+        # STUB_NIGHTLY_SLEEP: a slow PyPI (146 s live, 2026-10-05).
+        '  if [ -n "${STUB_NIGHTLY_SLEEP:-}" ]; then sleep "$STUB_NIGHTLY_SLEEP"; fi\n'
         '  if [ -n "${STUB_NIGHTLY:-}" ]; then\n'
         '    mkdir -p "$5/versions/$STUB_NIGHTLY/yt_dlp"\n'
         '    echo "__version__ = \'$STUB_NIGHTLY\'" > "$5/versions/$STUB_NIGHTLY/yt_dlp/version.py"\n'
@@ -312,16 +315,55 @@ def test_the_nightly_is_installed_at_boot_and_put_on_the_apps_path(tmp_path, ima
     proc = run(world, DASH_SITE_YOUTUBE_DOWNLOAD="1", STUB_NIGHTLY=NIGHTLY)
     assert proc.returncode == 0, proc.stderr
     root = world["data"] / "ytdlp-nightly"
-    calls = [c for c in world["log"].read_text().splitlines() if c.startswith("NIGHTLY ")]
+    nightly_dir = f"{root.as_posix()}/versions/{NIGHTLY}"
+
+    # The install runs in the BACKGROUND since its first live boot took 146 s
+    # with the dashboard down for all of it (2026-10-05), so it may still be
+    # finishing when run.sh's own stub app has exited.
+    deadline = time.monotonic() + 15
+    calls = []
+    while time.monotonic() < deadline:
+        calls = [c for c in world["log"].read_text().splitlines()
+                 if c.startswith("NIGHTLY ")]
+        if calls and (root / "current").exists():
+            break
+        time.sleep(0.2)
     assert len(calls) == 1, calls
     assert f"install root={root.as_posix()}" in calls[0]
     # the image's own module, with nothing but /ytdl-app on the path
     assert calls[0].endswith("PYTHONPATH=/ytdl-app"), calls[0]
     paths = _app_paths(world)
     assert paths, "the app was never started"
+    # This boot did not wait for it: the app's path either has no nightly yet
+    # or (if the background install won the race) the resolved directory.
     for line in paths:
-        assert line.endswith(f":{root.as_posix()}/versions/{NIGHTLY}"), line
         assert "current" not in line
+        assert "ytdlp-nightly" not in line or line.endswith(f":{nightly_dir}"), line
+
+    # The NEXT start imports it.
+    proc = run(world, DASH_SITE_YOUTUBE_DOWNLOAD="1", STUB_NIGHTLY=NIGHTLY)
+    assert proc.returncode == 0, proc.stderr
+    last = _app_paths(world)[-1]
+    assert last.endswith(f":{nightly_dir}"), last
+
+
+def test_the_boot_never_waits_for_the_nightly_install(tmp_path):
+    """2026-10-05: the first live boot waited 146 s on pip with the dashboard
+    down. A slow install must not delay the app's start."""
+    world = build_world(tmp_path, image_mode=True, exits=["0"])
+    # run() returns only once the background install lets go of the output
+    # pipe, so the proof is ORDER: the app started long before the slow
+    # install wrote `current`.
+    proc = run(world, timeout=90.0, DASH_SITE_YOUTUBE_DOWNLOAD="1",
+               STUB_NIGHTLY=NIGHTLY, STUB_NIGHTLY_SLEEP="12")
+    assert proc.returncode == 0, proc.stderr
+    assert _app_paths(world), "the app was never started"
+    current = world["data"] / "ytdlp-nightly" / "current"
+    assert current.exists()
+    started = world["app_pypath_log"].stat().st_mtime
+    assert current.stat().st_mtime - started > 8, (started, current.stat().st_mtime)
+    # and that boot ran without it
+    assert "ytdlp-nightly" not in _app_paths(world)[0]
 
 
 def test_no_youtube_signal_means_no_install_but_an_installed_nightly_still_counts(tmp_path):

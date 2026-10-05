@@ -2022,7 +2022,10 @@ function card(v) {
   meta.appendChild(el('div', 'sub',
     [v.channel || '?', fmtDur(v.duration), fmtDate(v.upload_date)].filter(Boolean).join(' · ')));
   if (v.meta_error) meta.appendChild(el('div', 'why', 'unavailable'));
-  else if (!v.relevant && v.relevance_note) meta.appendChild(el('div', 'why', v.relevance_note));
+  // A RELEVANT row's note is shown too since CR-360 (2026-10-05): a result
+  // described from the search page under a date range stays relevant but
+  // arrives unticked, and the note is the only thing saying why.
+  else if (v.relevance_note) meta.appendChild(el('div', 'why', v.relevance_note));
   n.appendChild(meta);
 
   n.onclick = () => { if (!v.duplicate) toggle(v, !v.selected); };

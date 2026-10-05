@@ -231,6 +231,17 @@ CREATE TABLE IF NOT EXISTS job_videos (
     -- "whose IP got this clip", and the first thing to look at when one editor's
     -- downloads fail and everybody else's do not (YTDL_LOCAL_DOWNLOAD.md §4).
     download_host  TEXT,
+    -- The duration the SEARCH PAGE showed for this video (migrations/015,
+    -- CR-360, 2026-10-05). Kept beside `duration` rather than in it, because
+    -- the metadata phase's to-do list is "duration IS NULL": a search-page
+    -- number written there would skip the real fetch for every row. Only read
+    -- when that fetch is refused by a bot check.
+    flat_duration  REAL,
+    -- NULL: the details are the metadata phase's (or it has not run yet).
+    -- 'search': YouTube bot-checked the metadata fetch, so title, channel,
+    -- views, thumbnail and duration are what the search results page carried
+    -- and the upload date is usually unknown (worker.META_FROM_SEARCH).
+    meta_source    TEXT,
     UNIQUE(job_id, video_id)
 );
 

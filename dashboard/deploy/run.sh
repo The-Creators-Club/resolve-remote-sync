@@ -350,6 +350,72 @@ PYMARKER
     fi
 fi
 
+# THE yt-dlp NIGHTLY (CR-361, owner decision 2026-10-05: "accept any yt-dlp
+# build, daily etc, to get the latest"). requirements.lock pins yt-dlp, and the
+# pin only moved when somebody raised it and shipped an image -- CR-80 and
+# CR-83 were both "the server's yt-dlp is weeks behind a fix yt-dlp already
+# published". YouTube now moves faster than yt-dlp's STABLE releases (stable
+# 2026.08.19 vs nightly 2026.09.27.232945 on 2026-10-05), so the newest
+# NIGHTLY is installed beside the pinned copy, under /data (uid-3000-owned,
+# survives an image update; /venv is a read-only layer in image mode, CR-84),
+# and SHADOWS it: every PYTHONPATH entry precedes /venv's site-packages on
+# sys.path. UNPINNED BY DESIGN -- the deliberate exception to the hash-pinned
+# lock rule; ytdlweb/ytdlp_nightly.py says what replaces the pin.
+#
+# The same shape as the unblock block above: gated on the site's YouTube
+# signals, NEVER fatal (the module always exits 0 and records what happened
+# in /data/ytdlp-nightly/install.json, which /ytdl's health reads), retried
+# for CR-73's no-DNS-yet boot, and on any failure /ytdl simply runs on the
+# image's pinned yt-dlp. It is not re-run on every boot: a successful check
+# less than 20 h old is not repeated. A site that turned the downloader on
+# from Settings (no env var) gets its nightly from the in-process daily
+# refresh instead, at the next process start.
+#
+# `YTDL_YTDLP_NIGHTLY=0` in the container environment turns all of it off.
+#
+# WHICH directory goes on the path is decided by `ytdlp_nightly_suffix`, in
+# plain sh: `current` names a versions/<name> directory, and the RESOLVED
+# path is what the app gets, never a pointer -- a refresh while the app runs
+# moves `current` and must not move the files under a live import. It is
+# re-read on every pass of the image-mode restart loop below, so an exit-75
+# re-exec picks up a newer nightly too.
+YTDLP_NIGHTLY_ROOT=/data/ytdlp-nightly
+YTDLP_NIGHTLY_ON=""
+if [ "${YTDL_YTDLP_NIGHTLY:-1}" != "0" ]; then
+    YTDLP_NIGHTLY_ON=1
+    # Exported so the app's daily refresh uses the same root, and runs at all.
+    export YTDL_YTDLP_NIGHTLY_ROOT="$YTDLP_NIGHTLY_ROOT"
+    if [ "${DASH_SITE_YOUTUBE_DOWNLOAD:-0}" = "1" ] \
+            || [ "${DASH_SITE_YOUTUBE_UNBLOCK:-0}" = "1" ]; then
+        echo "run.sh: youtube_download is on -- checking for a newer yt-dlp nightly"
+        # /ytdl-app alone on the path: the image's own module, before the app
+        # (and any over-the-air code root) exists. umask 077 in the subshell:
+        # this runs before the script-wide one below, and CODE that the app
+        # will import must be no more writable than the rest of /data.
+        ( umask 077
+          PYTHONPATH=/ytdl-app "$VENV/bin/python" -m ytdlweb.ytdlp_nightly install \
+              --root "$YTDLP_NIGHTLY_ROOT" ) || true
+    fi
+fi
+ytdlp_nightly_suffix() {
+    [ -n "$YTDLP_NIGHTLY_ON" ] || return 0
+    _ytn_name=""
+    if [ -f "$YTDLP_NIGHTLY_ROOT/current" ]; then
+        read -r _ytn_name < "$YTDLP_NIGHTLY_ROOT/current" || true
+        # A trailing CR (a pointer written on Windows) is whitespace, exactly
+        # as ytdlp_nightly.read_current's strip() treats it.
+        _ytn_name="$(printf '%s' "$_ytn_name" | tr -d '\r')"
+    fi
+    # A bare version: digits and dots, not starting with a dot, so nothing in
+    # that file can walk out of versions/.
+    case "$_ytn_name" in
+        ''|.*|*[!0-9.]*) return 0 ;;
+    esac
+    _ytn_dir="$YTDLP_NIGHTLY_ROOT/versions/$_ytn_name"
+    [ -f "$_ytn_dir/yt_dlp/version.py" ] || return 0
+    printf ':%s' "$_ytn_dir"
+}
+
 # Anything this process creates under /data (dashboard.db, the WAL, and
 # packages/) stays owner-only: the process's effective GID is 3001
 # (editors, needed for the setgid /projects tree), so a default umask would
@@ -411,6 +477,9 @@ export PYTHONPATH=/app/src:/broll-app:/music-app:/ytdl-app
 # decision instead of two that can disagree.
 IMAGE_PYTHONPATH="$PYTHONPATH$PYTHONPATH_EXTRA"
 PYTHONPATH="$IMAGE_PYTHONPATH"
+# The yt-dlp nightly (CR-361), last and only when one is installed: empty
+# adds nothing, so the path never gains an empty entry.
+PYTHONPATH="$PYTHONPATH$(ytdlp_nightly_suffix)"
 export PYTHONPATH
 
 # Static ffmpeg/ffprobe, mounted read-only from the host at /opt/ffmpeg by
@@ -507,6 +576,9 @@ if [ -n "$IMAGE_MODE" ]; then
             echo "run.sh: WARNING: select_code_root.py printed nothing -- using the image's own code." >&2
             PYTHONPATH="$IMAGE_PYTHONPATH"
         fi
+        # Re-read every pass (CR-361): a nightly the app staged since the
+        # last start is picked up by this re-exec.
+        PYTHONPATH="$PYTHONPATH$(ytdlp_nightly_suffix)"
         export PYTHONPATH
         echo "run.sh: PYTHONPATH=$PYTHONPATH"
         "$VENV/bin/python" -m uvicorn --factory ccsync_dashboard.app:create_app \

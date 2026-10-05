@@ -161,8 +161,56 @@ def search(query: str, max_results: int, period: str | None = None) -> list[dict
     return entries[:max_results]
 
 
+def _positive_number(value):
+    """A duration or a count as a number, or None. yt-dlp's flat entries are
+    normally numeric already; a string or a bool is not trusted to be one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if value > 0 else None
+
+
+def flat_meta(entry: dict) -> dict:
+    """What a FLAT search entry already says about a video (CR-360, 2026-10-05).
+
+    Kept so the job survives a bot-checked metadata pass: on 2026-10-05 the
+    studio's IP got the flat search through in two seconds and had every
+    per-video extract_info refused, and the flat entries were all the server
+    ever learned about those videos. yt-dlp builds them from the results
+    page's video renderers, so they normally carry a title, the channel, a
+    view count, thumbnails and a duration parsed from the length badge. The
+    upload date is normally ABSENT: yt-dlp only guesses one from "3 years
+    ago" under the `approximate_date` extractor arg, which is deliberately not
+    asked for here (a guessed date is worse than no date to a range filter).
+
+    A live or upcoming entry gets no duration even if the page showed one: the
+    filter phase reads "no duration" as "live or nothing usable", which is
+    right for both.
+    """
+    thumb = entry.get("thumbnail")
+    if not thumb:
+        thumbs = [t for t in (entry.get("thumbnails") or [])
+                  if isinstance(t, dict) and t.get("url")]
+        if thumbs:
+            # The widest one; yt-dlp lists them smallest first, so the last
+            # entry wins a tie and an entry with no width at all.
+            thumb = max(enumerate(thumbs),
+                        key=lambda it: ((it[1].get("width") or 0), it[0]))[1]["url"]
+    live = entry.get("live_status") in ("is_live", "is_upcoming") or entry.get("is_live")
+    date = str(entry.get("upload_date") or "")
+    views = _positive_number(entry.get("view_count"))
+    return {
+        "title": entry.get("title"),
+        "channel": entry.get("channel") or entry.get("uploader"),
+        "duration": None if live else _positive_number(entry.get("duration")),
+        "upload_date": date if len(date) == 8 and date.isdigit() else None,
+        "view_count": int(views) if views is not None else None,
+        "thumbnail": thumb or None,
+    }
+
+
 def enrich(entries: list[dict], jobs: int | None = None, progress=None,
-           pause: float | None = None, sleeper=time.sleep) -> list[dict]:
+           pause: float | None = None, sleeper=time.sleep,
+           abort_if=None) -> list[dict]:
     """Fetch full metadata for each candidate (dates, real durations, views).
 
     Unavailable / private / live entries come back with an 'error' field rather
@@ -188,6 +236,13 @@ def enrich(entries: list[dict], jobs: int | None = None, progress=None,
 
     `sleeper` is injectable so the suite can prove the pacing happens without
     spending 75 real seconds doing it.
+
+    `abort_if(result) -> bool` stops the pass early (CR-360, 2026-10-05): once
+    one result satisfies it, every entry that has not yet made its request
+    comes back as {"id", "url", "title", "aborted": True} without one. The
+    worker passes its bot-check test, because a challenged IP is challenged
+    for every video and the requests still queued behind the gate would only
+    tell YouTube again that this IP is busy. Requests already in flight finish.
     """
     import yt_dlp  # lazy: see vendor/__init__.py
 
@@ -196,6 +251,7 @@ def enrich(entries: list[dict], jobs: int | None = None, progress=None,
     opts = {"quiet": True, "no_warnings": True, "noplaylist": True, **net_opts()}
 
     gate = threading.Lock()
+    stop = threading.Event()
 
     def wait_turn():
         """Take the next slot. Deliberately sleeps holding the lock.
@@ -211,8 +267,23 @@ def enrich(entries: list[dict], jobs: int | None = None, progress=None,
             sleeper(pause)
 
     def fetch(e):
-        wait_turn()
+        result = _fetch(e)
+        if abort_if is not None and not result.get("aborted") and abort_if(result):
+            stop.set()
+        return result
+
+    def _fetch(e):
         url = e.get("url") or f"https://www.youtube.com/watch?v={e['id']}"
+        # Asked on both sides of the wait: before it so an aborted pass does
+        # not spend the pacing on requests it will not make, after it because
+        # the trip usually lands while this thread is queued at the gate.
+        if stop.is_set():
+            return {"id": e.get("id"), "url": url, "title": e.get("title"),
+                    "aborted": True}
+        wait_turn()
+        if stop.is_set():
+            return {"id": e.get("id"), "url": url, "title": e.get("title"),
+                    "aborted": True}
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)

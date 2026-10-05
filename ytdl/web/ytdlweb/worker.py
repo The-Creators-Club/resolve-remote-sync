@@ -27,7 +27,8 @@ import threading
 import time
 from pathlib import Path
 
-from ytdlweb import claude_cli, config, db, ytdl_common, ytdl_evidence
+from ytdlweb import (claude_cli, config, db, ytdl_common, ytdl_evidence,
+                     ytdlp_nightly)
 from ytdlweb.vendor import downloader, ytsearch
 # The naming/fallback contract BOTH executors run under, moved out of this file
 # on 2026-08-14 so the companion can vendor it (docs/YTDL_LOCAL_DOWNLOAD.md §5).
@@ -188,6 +189,15 @@ def ensure_started():
             return True
         _thread = threading.Thread(target=_run, name='ytdl-worker', daemon=True)
         _thread.start()
+    # CR-361 (2026-10-05): the daily yt-dlp nightly refresh rides the same
+    # start, so it exists exactly when the downloader does and YTDL_WORKER=0
+    # keeps it off in every suite. It stages a build for the NEXT process
+    # start and never touches the one this process imported
+    # (ytdlp_nightly's docstring has the restart semantics).
+    try:
+        ytdlp_nightly.ensure_refresher_started()
+    except Exception:  # noqa: BLE001 - never at the worker's expense
+        log.exception('could not start the yt-dlp nightly refresh')
     return True
 
 
@@ -570,7 +580,11 @@ def _phase_search(c, job):
                     capped = True
                     continue
                 url = e.get('url') or f'https://www.youtube.com/watch?v={vid}'
-                if db.add_video(c, job_id, vid, url, e.get('title')):
+                # The flat entry's own details ride along (CR-360): they are
+                # all the server will ever know about this video if the
+                # metadata pass behind this is bot-checked.
+                if db.add_video(c, job_id, vid, url, e.get('title'),
+                                flat=ytsearch.flat_meta(e)):
                     new += 1
                 have.add(vid)
             # Linked for every term that returned it, seen before or not --
@@ -600,6 +614,26 @@ def _phase_search(c, job):
 # phase paced itself and this one, the busier of the two, did not.
 
 
+# CR-360 (2026-10-05): the value of job_videos.meta_source on a row whose
+# details came from the search results page because the metadata fetch was
+# bot-checked. The filter phase reads it (an unknown upload date under a date
+# range), and so does the next pass of this phase (the row is done).
+META_FROM_SEARCH = 'search'
+
+# The warning an editor sees above a review grid built from search-page
+# details. Stored in jobs.error on a NON-failed phase, the DEGRADED_NOTE
+# convention: the SPA renders it as a warning unless the phase is 'failed'.
+# Says what is missing and what still works, not just that something broke:
+# the downloads themselves normally run on the editor's own computer, which
+# YouTube is not limiting (the 2026-10-05 measurement: Ruskin's PC fetched
+# every clip the server could not describe).
+SEARCH_PAGE_NOTE = (
+    'YouTube is limiting this server right now (it asked the server to prove '
+    'it is not a bot), so the details on these results come from the search '
+    'page instead of from each video: upload dates are missing and some '
+    'durations may be too. Open a clip on YouTube before relying on its date.')
+
+
 def _phase_enrich(c, job):
     """Full metadata for every candidate: real durations, dates, thumbnails.
 
@@ -608,10 +642,22 @@ def _phase_enrich(c, job):
     config.ENRICH_PAUSE. Nothing is re-capped here: these rows are the search's
     output and dropping some now would leave a manifest full of videos with no
     metadata, which the filter phase then reads as "live or no duration".
+
+    A BOT CHECK no longer fails the job (CR-360, 2026-10-05). It used to raise
+    at the first refused row, which on 2026-10-05 failed every search the
+    studio made (jobs 117, 119, 120) while the flat search had succeeded and
+    the editor's own companion could have downloaded every clip. Now the pass
+    stops asking (the IP is challenged; more requests only confirm it), every
+    row it did not get is filled from what the search page said, and the job
+    goes on to the review with SEARCH_PAGE_NOTE above it. It still FAILS, with
+    BOT_CHECK_NOTE, when the search page gave no duration for anything either:
+    a grid where the filter has dropped every row as "live or no duration" is
+    a failure wearing a review's clothes.
     """
     job_id = job['id']
     todo = [v for v in db.videos(c, job_id)
-            if v['duration'] is None and not v['meta_error']]
+            if v['duration'] is None and not v['meta_error']
+            and not v['meta_source']]
     db.set_job(c, job_id, enrich_total=len(todo), enrich_done=0)
     if not todo:
         db.set_phase(c, job_id, 'filtering')
@@ -619,6 +665,10 @@ def _phase_enrich(c, job):
 
     entries = [{'id': v['video_id'], 'url': v['url']} for v in todo]
     seen = {'done': 0}
+    # The rows the pass did not get, once it has been bot-checked: the
+    # refused ones, the ones `abort_if` turned back unasked, and every chunk
+    # after. Filled from their search-page details below.
+    refused = []
 
     def _seen(done, _total):
         # Called from a pool thread, so it touches memory ONLY: a sqlite3
@@ -633,17 +683,28 @@ def _phase_enrich(c, job):
     # 400-candidate job is five minutes long, and the flag is read between
     # chunks, never inside the pool.
     CHUNK = max(4, config.ENRICH_WORKERS * 4)
+    by_id = {v['video_id']: v for v in todo}
+    fetched = 0
     for start in range(0, len(entries), CHUNK):
         if _cancelled(c, job_id):
             return
         chunk = entries[start:start + CHUNK]
+        if refused:
+            # Bot-checked in an earlier chunk: not one more request.
+            refused.extend(e['id'] for e in chunk)
+            continue
         results = ytsearch.enrich(chunk, jobs=config.ENRICH_WORKERS,
-                                  progress=_seen, pause=config.ENRICH_PAUSE)
+                                  progress=_seen, pause=config.ENRICH_PAUSE,
+                                  abort_if=lambda r: _bot_checked(r.get('error')))
         for r in results:
-            if _bot_checked(r.get('error')):
+            if r.get('aborted') or _bot_checked(r.get('error')):
                 # Not a dead video: the whole IP is challenged, and every
-                # remaining entry would fail the same way.
-                raise BotCheckError(BOT_CHECK_NOTE)
+                # remaining entry would fail the same way. Collected rather
+                # than raised (CR-360); the rest of this chunk's answers are
+                # still worth writing.
+                refused.append(r['id'])
+                continue
+            fetched += 1
             if r.get('error'):
                 # Unavailable/private/geo-blocked. Kept as a row so the editor
                 # can see the search found something they cannot have, rather
@@ -652,15 +713,60 @@ def _phase_enrich(c, job):
                              relevant=0, selected=0,
                              relevance_note='unavailable')
                 continue
+            # The search page's details (CR-360) stand in for any field the
+            # fetch came back without, rather than being blanked by it.
+            was = by_id.get(r['id'])
+            prior = (lambda k: was[k]) if was is not None else (lambda _k: None)
             db.set_video(c, job_id, r['id'],
-                         url=r.get('url'), title=r.get('title'),
-                         channel=r.get('channel'), duration=r.get('duration'),
-                         upload_date=r.get('upload_date'),
-                         view_count=r.get('view_count'),
-                         thumbnail=r.get('thumbnail'))
-        db.set_job(c, job_id, enrich_done=min(start + seen['done'], len(entries)))
+                         url=r.get('url') or prior('url'),
+                         title=r.get('title') or prior('title'),
+                         channel=r.get('channel') or prior('channel'),
+                         duration=r.get('duration'),
+                         upload_date=r.get('upload_date') or prior('upload_date'),
+                         view_count=(r.get('view_count')
+                                     if r.get('view_count') is not None
+                                     else prior('view_count')),
+                         thumbnail=r.get('thumbnail') or prior('thumbnail'))
+        # What was really fetched, not what the pool counted: an aborted
+        # entry made no request and a refused one got nothing, and "metadata
+        # 40/40" over a grid of search-page details would be a lie.
+        db.set_job(c, job_id, enrich_done=fetched if refused
+                   else min(start + seen['done'], len(entries)))
 
+    if refused:
+        _fill_from_search_page(c, job_id, refused)
     db.set_phase(c, job_id, 'filtering')
+
+
+def _fill_from_search_page(c, job_id, refused):
+    """The metadata pass was bot-checked: describe every row it did not get
+    from what the search page said, and say so on the job (CR-360).
+
+    -> nothing; raises BotCheckError when the search page gave no duration for
+    any row on the job, enriched or not. Checked BEFORE anything is written,
+    so a job that fails here fails exactly as it did before CR-360.
+    """
+    rows = {v['video_id']: v for v in db.videos(c, job_id)}
+    refused = set(refused)
+    usable = any(
+        (v['duration'] or (vid in refused and v['flat_duration']))
+        for vid, v in rows.items() if not v['meta_error'])
+    if not usable:
+        log.warning('job %s: bot-checked while fetching metadata and the '
+                    'search page gave no durations either; failing', job_id)
+        raise BotCheckError(BOT_CHECK_NOTE)
+    log.warning('job %s: bot-checked while fetching metadata; %d row(s) '
+                'described from the search page instead', job_id, len(refused))
+    for vid in refused:
+        v = rows.get(vid)
+        if v is None:
+            continue
+        # duration stays NULL where the page showed none: the filter's
+        # "live or no duration" is the right verdict for a row nothing can
+        # describe, and meta_source is what keeps this phase from retrying it.
+        db.set_video(c, job_id, vid, duration=v['flat_duration'],
+                     meta_source=META_FROM_SEARCH)
+    db.set_job(c, job_id, error=SEARCH_PAGE_NOTE)
 
 
 # ---------------------------------------------------------- 4. the filtering
@@ -711,6 +817,22 @@ def _phase_filter(c, job):
                          relevance_note='uploaded %s, outside %s'
                                         % (_iso(v['upload_date']),
                                            _date_range_text(date_from, date_to)))
+        elif _date_unchecked(v, date_from, date_to):
+            # CR-360 (2026-10-05): a row described from the SEARCH PAGE has no
+            # upload date because YouTube refused to say, not because the
+            # video has none, so "cannot tell never drops" would hand the
+            # editor every out-of-range clip ticked and silent, and dropping
+            # it would throw away a result for a fact nobody knows. Neither:
+            # it stays relevant (the judge below still sees it and can still
+            # drop it), arrives UNTICKED, and says why on its card. A job
+            # that used YouTube's own `period` filter instead of a range has
+            # no bounds here, so nothing of this applies to it: the search
+            # page itself was already limited to that period.
+            db.set_video(c, job_id, v['video_id'], selected=0,
+                         relevance_note='upload date unknown, so not checked '
+                                        'against %s: unticked until you look'
+                                        % _date_range_text(*_bounds(date_from,
+                                                                    date_to)))
 
     # (b) Claude's relevance verdicts. DEGRADE, DO NOT FAIL: an editor with an
     # unfiltered manifest and a banner is fine; an editor with no manifest
@@ -735,7 +857,15 @@ def _phase_filter(c, job):
             log.warning('job %s: relevance filter unavailable (%s)', job_id, exc)
             # jobs.error with a NON-failed phase is the degraded banner. The
             # SPA renders `error` as a warning unless phase == 'failed'.
-            db.set_job(c, job_id, error=f'{exc.prefix} {DEGRADED_NOTE}')
+            # The search-page warning the metadata phase may have left there
+            # (CR-360) is kept AFTER this one: the SPA's hint lookup matches
+            # the prefix at the start of the string, and appends ". <hint>"
+            # to the rest, hence the trailing full stop coming off.
+            note = f'{exc.prefix} {DEGRADED_NOTE}'
+            earlier = db.get_job(c, job_id)['error']
+            if earlier:
+                note = f'{note}. {earlier.rstrip(".")}'
+            db.set_job(c, job_id, error=note)
             verdicts = {}
         for vid, (keep, why) in verdicts.items():
             if keep:
@@ -759,14 +889,10 @@ def _outside_dates(video, date_from, date_to):
     so this is a string comparison on purpose: no parsing to get wrong, and a
     value that is not eight digits is "unknown", which never drops.
     """
-    def _ymd(v):
-        v = str(v or '').strip()
-        return v if len(v) == 8 and v.isdigit() else None
-
     # The bounds are sanitised here too, not only in db.date_range_of: a row
     # written by hand with 'soon' in it must be no bound, never a string
     # comparison that drops every video ('19990101' < 'soon' is True).
-    date_from, date_to = _ymd(date_from), _ymd(date_to)
+    date_from, date_to = _bounds(date_from, date_to)
     if not date_from and not date_to:
         return False
     d = _ymd(video['upload_date'])
@@ -775,6 +901,35 @@ def _outside_dates(video, date_from, date_to):
     if date_from and d < date_from:
         return True
     return bool(date_to and d > date_to)
+
+
+def _ymd(v):
+    """YYYYMMDD or None. Anything that is not eight digits is "unknown"."""
+    v = str(v or '').strip()
+    return v if len(v) == 8 and v.isdigit() else None
+
+
+def _bounds(date_from, date_to):
+    return _ymd(date_from), _ymd(date_to)
+
+
+def _date_unchecked(video, date_from, date_to):
+    """True when the job HAS a date range and this row's upload date is
+    unknown because it was described from the search page (CR-360).
+
+    Deliberately limited to META_FROM_SEARCH rows: an enriched row with no
+    date is yt-dlp genuinely having none, rare, and still kept the way
+    _outside_dates has always kept it. A search-page row with no date is the
+    NORMAL case, so on a bot-checked job it is every row.
+    """
+    try:
+        source = video['meta_source']
+    except (IndexError, KeyError):
+        return False
+    if source != META_FROM_SEARCH:
+        return False
+    date_from, date_to = _bounds(date_from, date_to)
+    return bool(date_from or date_to) and _ymd(video['upload_date']) is None
 
 
 def _iso(yyyymmdd):
@@ -1658,6 +1813,15 @@ def _phase_download(c, job):
     # there right now", and a re-queue by hand is a human saying it may not be.
     streak = {'sig': None, 'n': 0}
 
+    # Is this run the SECOND CHANCE after a companion handed the job back
+    # (CR-360, 2026-10-05)? end_lease leaves exactly this shape: the mode back
+    # to 'server' and `claimed_by` kept as the record of who fetched the clips.
+    # Nothing else does -- a job created for the server never had a holder,
+    # a reclaim of an abandoned lease clears claimed_by, and start_download's
+    # clear_mode_lock clears it for every fresh run -- so those keep the
+    # fail-fast below.
+    handed_back = bool(job['claimed_by']) and job['download_mode'] == db.MODE_SERVER
+
     def breaker_note(error):
         """-> the phase note when this failure has now landed N times, else None."""
         if MAX_IDENTICAL_FAILURES <= 0:
@@ -1806,6 +1970,12 @@ def _phase_download(c, job):
             log.warning('job %s: download failed for %s (%s)', job_id, vid, exc,
                         exc_info=True)
             _record_failure(c, job_id, vid, outdir, before, exc)
+            if handed_back and (isinstance(exc, BotCheckError)
+                                or _bot_checked(exc)):
+                # CR-360: the second chance found the server's IP blocked.
+                # Not a dead job -- the editor's machine fetched the rest.
+                _give_back_bot_checked(c, job_id, vid, outdir)
+                return
             if isinstance(exc, BotCheckError):
                 # Already classified inside _download_video (WP3, 2026-08-26)
                 # and already carrying the note for the path that was refused,
@@ -1891,6 +2061,47 @@ def _phase_download(c, job):
     # `done` even with per-video failures: those are visible per row, and a job
     # that fetched 38 of 41 clips is not a failed job. `failed` is reserved for
     # the pipeline itself dying.
+    db.set_phase(c, job_id, 'done')
+
+
+# CR-360 (2026-10-05): what a clip row and the job say when the server's one
+# retry after a companion hand-back is bot-checked. Plain words, and they name
+# the way out: [ RETRY N FAILED ] on a `done` job clears the server pin
+# (db.clear_mode_lock) and offers the clips to the editor's own machine again.
+HANDBACK_CLIP_NOTE = (
+    'YouTube is blocking the server right now (it asked the server to prove '
+    'it is not a bot), so the server could not retry this clip. Press RETRY '
+    'to fetch it from your own computer again.')
+HANDBACK_JOB_NOTE = (
+    'Your computer downloaded the clips it could. The server could not retry '
+    'the ones that failed there, because YouTube is blocking the server right '
+    'now (it asked the server to prove it is not a bot). Press RETRY to try '
+    'them from your own computer again.')
+
+
+def _give_back_bot_checked(c, job_id, vid, outdir):
+    """End a post-hand-back retry that hit the bot check: `done`, not `failed`.
+
+    Before CR-360 this was the fail-fast every server run gets, so while the
+    studio IP was bot-checked every requester-first job with even one clip that
+    failed on the editor's machine ended `failed` after one server request,
+    although the editor had downloaded the rest. The clip in hand and every
+    clip still queued behind it (the rest of the second chance) are marked
+    failed with HANDBACK_CLIP_NOTE WITHOUT a request each -- the IP is
+    challenged for all of them -- and the job ends `done` with
+    HANDBACK_JOB_NOTE, a warning because the phase is not `failed`.
+    """
+    log.warning('job %s: the post-hand-back retry was bot-checked at %s; '
+                'leaving the remaining clips failed and ending the job done',
+                job_id, vid)
+    db.set_video(c, job_id, vid, dl_error=HANDBACK_CLIP_NOTE)
+    for v in db.pending_videos(c, job_id):
+        db.set_video(c, job_id, v['video_id'], dl_state='failed',
+                     dl_error=HANDBACK_CLIP_NOTE)
+        db.bump(c, job_id, 'dl_failed')
+    _clear_progress(job_id)
+    write_manifest(c, job_id, outdir)
+    db.set_job(c, job_id, error=HANDBACK_JOB_NOTE)
     db.set_phase(c, job_id, 'done')
 
 

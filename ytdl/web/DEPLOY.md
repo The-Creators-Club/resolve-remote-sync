@@ -292,9 +292,64 @@ the file does not.
 | `ytdl-data` volume | `/ytdl-data:rw`, `3000:3000 770` | `ytdl.db` |
 | `/projects:rw` | already mounted | downloads land here |
 | `anthropic` + `ANTHROPIC_API_KEY` | `deploy/requirements.txt` + container env | the two AI calls |
-| `yt-dlp` | `deploy/requirements.txt` | the downloader |
+| `yt-dlp` | `deploy/requirements.txt` (the pinned FALLBACK) + the newest nightly in `/data/ytdlp-nightly` | the downloader; see "yt-dlp runs on the NIGHTLY channel" below |
 | `/opt/ffmpeg:ro` | already mounted | merge + the H.264/CFR conversion |
 | **`deno` binary** | `/opt/deno:ro`, on PATH | **only on a `youtube_unblock` site** — see below |
+
+## yt-dlp runs on the NIGHTLY channel (CR-361, 2026-10-05)
+
+**Owner decision 2026-10-05: "accept any yt-dlp build, daily etc, to get the
+latest".** YouTube's anti-bot changes now land faster than yt-dlp cuts stable
+releases (stable sat at 2026.08.19 for seven weeks while the nightly reached
+2026.09.27.232945), and the pinned yt-dlp in `requirements.lock` only moved
+when somebody raised the pin and shipped an image. CR-80 and CR-83 were both
+"the server's yt-dlp is weeks behind a fix yt-dlp already published".
+
+| what | where | detail |
+|---|---|---|
+| the pinned yt-dlp | `/venv` (image / `requirements.lock`) | **the fallback only**: used when no nightly is installed, when every install failed, or with `YTDL_YTDLP_NIGHTLY=0` |
+| the nightly | `/data/ytdlp-nightly/versions/<version>/` | `pip install --pre --upgrade --no-deps --target ...` from PyPI, where yt-dlp publishes every nightly as `<date>.<HHMMSS>.dev0` |
+| which one is active | `/data/ytdlp-nightly/current` | a bare version name; `run.sh` resolves it and appends `versions/<name>` to PYTHONPATH, which sits ahead of site-packages, so it shadows the pinned copy |
+| what happened | `/data/ytdlp-nightly/install.json` | `{ok, at, checked_at, version, previous, base_version, error, note, attempts}`, written on success AND failure |
+
+**When it installs.** At boot, by `run.sh`, when `DASH_SITE_YOUTUBE_DOWNLOAD`
+or `DASH_SITE_YOUTUBE_UNBLOCK` is `1` (retried 5/15/30 s for CR-73's no-DNS-yet
+boot, never fatal, skipped if a successful check is under 20 h old). Then by
+a thread in the running dashboard (`ytdlweb/ytdlp_nightly.py`, started with the
+ytdl worker) that wakes every 6 h and asks PyPI at most once per 20 h after a
+success, so a failure is retried within 6 h and a success is roughly daily.
+
+**When it applies -- read this before expecting a fix to be live.** The
+dashboard is ONE long-lived process and yt-dlp is imported into it once.
+Python does not re-import a package because its files changed, and swapping
+yt-dlp's files under a live import would mix two versions in one process, so
+the refresh never does that: each build gets its own directory, the running
+process keeps the one it started with (pruning never deletes it), and the
+refresh only moves `current`. **A refreshed nightly is used from the NEXT
+process start**: a container restart, an image update, or an over-the-air
+code update's exit-75 re-exec (run.sh re-reads `current` on every pass). The
+dashboard does not restart itself to apply one; `/ytdl/api/health` says when
+a newer build is waiting (below), and a restart from the TrueNAS Apps page
+applies it.
+
+**Unpinned by design**, the deliberate exception to the hash-pinned-lock rule
+(COMMERCIAL_READINESS item 13). What replaces the pin: PyPI over TLS with
+pip's own per-file sha256 from the index, `--no-deps` (only yt-dlp moves; its
+optional libraries stay the image's pinned ones), the staged copy imported in
+a child process (and a `YoutubeDL` built) before anything points at it, and a
+refusal to activate a build that ranks BELOW the image's own yt-dlp.
+`tools/check_licenses.py` reads the locks and is unaffected; yt-dlp is
+Unlicense either way.
+
+**Turning it off.** `YTDL_YTDLP_NIGHTLY=0` in the container environment: no
+boot install, no daily refresh, nothing on PYTHONPATH, the pinned copy runs.
+`rm -rf /data/ytdlp-nightly` plus a restart does the same once.
+
+The editors' companions moved to the nightly at the same time: their managed
+`yt-dlp.exe` / `yt-dlp_macos` installs from `yt-dlp/yt-dlp-nightly-builds` and
+runs `yt-dlp --update-to nightly` daily (`companion/ytdlp_manager.py`). The
+fleet floor (`YTDL_MIN_YTDLP_VERSION`) ranks a four-part nightly version
+numerically, so `2026.09.27.232945` is above a `2026.08.19` floor.
 
 ## The unblock components (`[features] youtube_unblock`)
 
@@ -350,6 +405,30 @@ for the standalone utility's sake; nothing on the NAS sets it.
 
 Treat the file as a credential — it is a logged-in session for whichever
 account exported it.
+
+### 2026-10-05: a bot-checked METADATA pass is a warning now, not a failure (CR-360)
+
+Measured live that day: with the studio IP bot-checked, the flat search still
+worked (2 s, entries back) and every per-video metadata call was refused, so
+every search job failed at `enriching` with `enrich_done=0` while the
+editor's own companion, on a different IP, would have downloaded every clip.
+Since CR-360 the worker stops the metadata pass at the first bot check (no
+further requests from the server), describes the remaining rows from what the
+search results page carried (title, channel, views, thumbnail, duration;
+**no upload date**) and takes the job to the review with a warning banner
+("YouTube is limiting this server right now ..."). Under a custom date range
+those rows arrive relevant but **unticked**, with a card note saying their
+date could not be checked.
+
+So the sign that the server is bot-checked is now usually that **banner on a
+finished search**, not a failed job. A job still fails with the
+cookies.txt note when the search page gave no duration for anything, when the
+search itself is bot-checked, or when the SERVER is the whole download (a
+job on the server from the start, or one reclaimed from an expired lease).
+The server's one retry after a companion hands a job back ends `done`
+instead: the clips it could not retry stay failed with a note saying YouTube
+is blocking the server, and `[ RETRY n FAILED ]` offers them to the editor's
+own machine again.
 
 ### 2026-08-26 REVERSAL: the signed-in cookie jar is now the thing that BREAKS it (CR-80)
 
@@ -477,6 +556,7 @@ paint a blank pip. The keys to read instead:
 | key | values | what it tells you |
 |---|---|---|
 | `yt_dlp_version` | e.g. `2026.08.19` | the yt-dlp this container is actually running. Answering this took a `docker exec` during CR-80, and it was half the diagnosis |
+| `yt_dlp_nightly` | `{state, installed, running, pending_restart, at, error, note}` | CR-361. `state`: `off` (switched off, or a run.sh that does not manage it), `unknown` (no install.json yet: NOT CHECKED, never OK), `ok`, `failed`. `running` is the version imported in this process; `installed` is what the next start imports; `pending_restart` is true when that is newer. The age tooltip says the same in words |
 | `cookies_state` | `none` / `empty` / `anonymous` / `present` | what the jar HOLDS, not whether a path is set. `empty` (header lines only) is the intended state since CR-80 and means the cookies path is never attempted; `anonymous` is a jar yt-dlp has written its own consent/visitor cookies into (PREF, SOCS, YSC, VISITOR_INFO1_LIVE) with no login cookie, which is NOT a session and is never attempted either; only a login cookie (SID, SAPISID, LOGIN_INFO, __Secure-3PSID...) makes it `present` (CR-84) |
 | `pot_provider` | `unconfigured` / `ok` / `unreachable` | whether the bgutil sidecar ANSWERED its own `/ping`, from a 1 s probe cached for 60 s. `unconfigured` is not an error - a deployment with an unblocked IP needs no provider. `unreachable` is CR-73's shape, which sat undetected for days behind a configured-and-silent sidecar |
 | `paths` | `{anonymous\|cookies: {ok, error, at, video_id, source}}` | the last real outcome per path. A key appears only once that path has been tried. Mirrored to `<YTDL_DATA_ROOT>/ytdl_evidence.json`, so a container restart does not blank it |

@@ -31664,3 +31664,194 @@ Full write-ups in `docs/bug-hunt-2026-08.md` and
   deployed companion until the fleet republish.
 - **NAS hygiene (was item 7 incidental)** — `owen_laptop` in the `editors`
   group still looks like a machine-shaped account; rename if it is one.
+
+## CR-360 - ytdl: a bot-checked metadata pass failed every search, though the flat search worked and the editor's companion would have downloaded every clip - FIXED in repo (ytdl web, schema v15, unshipped)
+
+2026-10-05, measured in the live container. YouTube is bot-checking the
+studio's public IP (shared by the NAS container and the base rig). With the
+bgutil PO-token plugin loaded and deno present, `ytsearch.search()` (flat)
+succeeded in 2 s with entries, but every per-video `extract_info` in
+`ytsearch.enrich()` answered "Sign in to confirm you're not a bot".
+`worker._phase_enrich` raised `BotCheckError` at the first such row, so
+ruskin's jobs 117, 119 and 120 all went `failed` with `enrich_done=0`. yt-dlp
+nightly 2026.09.27 did not help. Ruskin's own PC (another IP) fetched the same
+videos fine, and requester-first downloads mean his companion does the
+downloading: the server only has to get the job to the review.
+
+**Fixed:**
+
+1. **The search keeps what the results page said.** `ytsearch.flat_meta`
+   reads a flat entry's title, channel/uploader, view count, widest
+   thumbnail and duration (none for `is_live`/`is_upcoming`; no
+   `approximate_date` guess, so normally no upload date), and
+   `db.add_video(..., flat=)` stores them. The duration goes to the new
+   `job_videos.flat_duration`, NEVER to `duration`, because the metadata
+   pass's to-do list is `duration IS NULL`. Migration
+   `015_job_videos_flat_meta.sql` adds it and `job_videos.meta_source`
+   (`'search'` = described from the search page), additive and inert.
+2. **A bot check ends the metadata pass, not the job.** `ytsearch.enrich`
+   takes `abort_if(result)`: once one result is bot-checked, every entry not
+   yet requested comes back `aborted` without a request, and later chunks are
+   never handed to it. `_fill_from_search_page` then sets `duration =
+   flat_duration`, `meta_source = 'search'` on every row the pass did not get,
+   writes `worker.SEARCH_PAGE_NOTE` into `jobs.error` on a non-failed phase
+   (the `DEGRADED_NOTE` convention: a warning banner) and the job goes on to
+   `filtering`. A fetched row's details are kept and a missing fetched field
+   falls back to the search page's. `enrich_done` counts what was really
+   fetched. It still FAILS with `BOT_CHECK_NOTE` when no row on the job has a
+   duration from either source, checked before anything is written.
+3. **Filter decisions on search-page rows.** A row with no search-page
+   duration is dropped as "live or no duration", as before. **Under a custom
+   date range** (`date_from`/`date_to`) a search-page row with no upload date
+   is neither dropped nor passed silently: it stays relevant (the AI judge
+   still sees it and can still drop it), arrives UNTICKED, and its card says
+   "upload date unknown, so not checked against <range>: unticked until you
+   look". `static/app.js` now shows a relevance note on a relevant card too
+   (no other relevant row carries one). A FETCHED row with no date keeps the
+   old rule (kept, ticked). A `period` search has no bounds here: YouTube's
+   own `sp` filter already limited the results page. If the AI filter also
+   degrades, its prefixed note comes first and the search-page warning
+   follows it, so the SPA's prefix hint still matches.
+4. **The server's retry after a hand-back ends `done`, not `failed`.**
+   Before, with no cookie jar, the first bot-checked server download raised
+   `BotCheckError` and the job went `failed` after one request, so while the
+   IP was bot-checked every requester-first job with even one clip that failed
+   on the editor's machine ended `failed` although the editor had the rest.
+   Now `_phase_download` recognises the second chance by the shape
+   `end_lease` leaves (`claimed_by` kept, `download_mode='server'`; a reclaim
+   and `clear_mode_lock` both clear `claimed_by`). There, a bot check (or
+   `DownloadPathsBlockedError`) runs `_give_back_bot_checked`: the clip in hand
+   and every clip still queued behind it are marked `failed` with
+   `HANDBACK_CLIP_NOTE` (the server is being blocked by YouTube; press RETRY
+   to fetch it from your own computer) WITHOUT a request each, the manifest
+   is written, and the job ends `done` with `HANDBACK_JOB_NOTE` as its
+   warning. **Unchanged:** a job that is on the server from the start, and a
+   job the server reclaimed from an expired lease, still fail fast with the
+   cookies.txt note after one request; with a jar configured the
+   anonymous/cookies fallback and the identical-failure breaker apply as
+   before. No loop either way: `done`/`failed` are never picked up again by
+   `claim_next_job`.
+   **What the SPA shows:** the job banner renders `jobs.error` as a warning
+   on a `done` job, each failed row carries the clip note, and
+   `[ RETRY n FAILED ]` is offered (it shows for `done` with failures).
+   Pressing it is `POST /api/jobs/<id>/download`, whose `clear_mode_lock`
+   drops the pin, `claimed_by` and the warning, and `retryFailed()` then
+   calls `dispatchLocal`, so the editor's companion CAN claim the retry
+   (pinned by test). That depends on requester-first being available for the
+   job (`LOCAL_DOWNLOAD` on, `created_local=1`, the companion answering the
+   browser's probe). Where it is not, the retry runs on the server as a fresh
+   run (`claimed_by` cleared), which fails fast on the bot check as any
+   server run does.
+
+Tests: `ytdl/web/tests/test_bot_checked_metadata.py` (20: flat_meta, no
+skipped fetch, the stop at the first refusal, later chunks not requested, the
+fallback rows, the resumed pass asking nothing again, the still-fails case,
+the date-range note, a judge drop replacing it, a `period` search, an
+enriched no-date row, both warnings together, the real `enrich()` with
+`abort_if`, migration 015, `add_video` without flat details, the bot-checked
+hand-back retry ending `done` with both notes and one request, then RETRY
+letting the companion claim, a server-from-the-start job and a reclaimed job
+still failing fast); `test_worker.py::test_a_bot_check_while_enriching_stops_the_job`
+narrowed to the no-duration-anywhere case. `tests/conftest.py`'s
+`FakeYouTube` gained `flat` and honours `abort_if`. `ytdl/web/DEPLOY.md` has a
+2026-10-05 note in the cookies section. Verified live by the coordinator the
+same day: from the bot-checked server a flat entry carries duration, channel,
+uploader, view_count and two thumbnails and NO upload_date or timestamp. Not
+verified: the SPA rendering of the warning and the unticked cards in a
+browser. Deploy: dashboard only; schema v15 means an older image refuses this
+`ytdl.db` (the usual one-way migration).
+
+## CR-361 - yt-dlp only ever moved to a STABLE release, which YouTube's changes now outrun; the fleet and the server run the newest NIGHTLY instead - BUILT in repo (companion + dashboard/ytdl web, unbuilt, unshipped)
+
+2026-10-05, owner decision: "accept any yt-dlp build, daily etc, to get the
+latest." Stable yt-dlp was 2026.08.19 (seven weeks old) while the nightly was
+2026.09.27.232945. Both halves only ever took stable. The companion installed
+from `yt-dlp/yt-dlp` `releases/latest` and ran `yt-dlp -U` (which stays on
+the channel the binary came from), and only when the binary was below the
+dashboard's floor or past the 21-day max age (YT-1). The server's yt-dlp was
+the `requirements.lock` pin baked into the image, so it moved only when
+somebody raised the pin and shipped an image (CR-80/CR-83's shape). Note: in
+CR-360's measurement that same day, nightly 2026.09.27 did NOT get past the
+bot check on the studio's IP. This change is about being current, not a fix
+for that.
+
+**Companion (`ytdlp_manager.py`):**
+
+1. Fresh installs come from
+   `https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/<asset>`
+   with that release's own `SHA2-256SUMS`, still a CONDITION. Checked against
+   the GitHub API on 2026-10-05: same asset names (`yt-dlp.exe`,
+   `yt-dlp_macos`) and checksum file as stable, and the same two redirect
+   hosts (github.com, then `release-assets.githubusercontent.com`), so the
+   host allow-list is unchanged. The nightly publishes about once a day and
+   `latest/` is resolved per request, so a sha mismatch now re-fetches the
+   list ONCE. The bytes are still kept only if a published list names them.
+2. Every update is `yt-dlp --update-to nightly` (`UPDATE_ARGS`), not `-U`.
+   Checked on a real stable 2026.08.19 `yt-dlp.exe`: it moved to
+   `nightly@2026.09.27.232945` and exited 0. On a binary that is already
+   newest it says "up to date" and exits 0. So a machine installed from stable
+   moves to nightly on its first pass after the companion update.
+3. The daily pass now runs that update whatever the binary's age
+   (`_check_for_newer`, which replaces `_enforce_max_age`). It is throttled
+   by `tools/yt-dlp.update-check.json`, so a tray restart within 20 h does
+   not ask GitHub again. Only a SUCCESSFUL check is stamped. A fresh install
+   and a floor update stamp too. The 21-day max age now only grades a FAILED
+   check: within it the pass is ACTION_NONE ("could not check today"), past
+   it ACTION_STALE as before. `ytdlp_max_age_days = 0` still turns every
+   self-initiated update off, and a version we cannot date is still never
+   updated on a guess. CR-321's `latest` flag holds. `ytdlp_path` overrides
+   are untouched.
+4. A nightly version (`2026.09.27.232945`) parses, ranks above a
+   `2026.08.19` floor (tuple ranking on both sides:
+   `upgrade.parse_version`, `ytdlweb.config.version_rank`, the dashboard's
+   `_ytdlp_version_key`), and ages by its first three parts.
+
+**Server (`dashboard/deploy/run.sh`, new `ytdl/web/ytdlweb/ytdlp_nightly.py`):**
+
+5. At boot, when `DASH_SITE_YOUTUBE_DOWNLOAD` or `_UNBLOCK` is 1, run.sh runs
+   `python -m ytdlweb.ytdlp_nightly install`. It does
+   `pip install --pre --upgrade --no-deps --target` (PyPI publishes each
+   nightly as `<date>.<HHMMSS>.dev0`; 2026.9.27.232945.dev0 is the same build)
+   into a staging dir under `/data/ytdlp-nightly`. It imports the staged copy
+   in a child process and builds a `YoutubeDL`, refuses a build older than the
+   image's own, renames it to `versions/<version>`, and moves the `current`
+   pointer. It is never fatal (always exit 0), retried 5/15/30 s, skipped if
+   a successful check is under 20 h old, and recorded in `install.json`.
+   run.sh resolves `current` in plain sh (a bare version name only) and
+   APPENDS `versions/<name>` to PYTHONPATH, which precedes site-packages, so
+   the nightly shadows the pinned copy. Any failure leaves the image's pinned
+   yt-dlp in charge. `YTDL_YTDLP_NIGHTLY=0` turns it all off.
+6. A thread started with the ytdl worker
+   (`ytdlp_nightly.ensure_refresher_started`, only when run.sh exported
+   `YTDL_YTDLP_NIGHTLY_ROOT`) wakes every 6 h and refreshes at most once per
+   20 h after a success.
+7. **Restart semantics, honestly:** the dashboard is one long-lived process
+   and yt-dlp is imported into it once. The refresh never swaps files under a
+   live import (each build has its own dir, the running process's is never
+   pruned), so **a refreshed nightly is used from the NEXT process start**:
+   a container restart, an image update, or an OTA's exit-75 re-exec (the
+   pointer is re-read on every pass of run.sh's loop). The dashboard does not
+   restart itself for it. `/ytdl/api/health` gains `yt_dlp_nightly` {state,
+   installed, running, pending_restart, ...}, and the age tooltip names a
+   newer build waiting for a restart. `yt_dlp_version` / `yt_dlp_stale` still
+   read the version actually imported.
+8. **Unpinned by design**: a deliberate exception to the hash-pinned-lock rule
+   (COMMERCIAL_READINESS item 13). What stands in for the pin is PyPI over TLS
+   with pip's per-file hash, `--no-deps`, the import proof, and the
+   no-downgrade check. The locks are untouched, so `tools/check_licenses.py`
+   is unaffected (yt-dlp is Unlicense).
+
+Tests: companion `test_ytdlp_manager.py` (the nightly URL, `--update-to
+nightly` in the fake, daily check inside the window, stable -> nightly with a
+4-part version, quiet failed check, restart throttle, unstamped failure,
+ignored stamps, install counts as the check, the checksum re-fetch both ways)
+and `test_bug_hunt_2026_09_24_w2_c-ytdl.py` (renamed seam);
+`dashboard/tests/test_run_sh_restart_loop.py` (boot install + path in both
+modes, no signal, the switch, bad pointers, a failed install, exit 75 picking
+up a newer build; the stub python answers the new module);
+`ytdl/web/tests/test_ytdlp_nightly.py` (30, the import proof run for real).
+Verified live on the base rig: the module installed 2026.09.27.232945 from
+PyPI into a scratch root over the venv's 2026.08.19 and throttled the rerun.
+Not verified: run.sh on the NAS, the image-mode `/data` permissions, and the
+daily thread over a real day. Deploy: dashboard (image) and companion
+separately, in either order.

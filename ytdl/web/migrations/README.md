@@ -100,3 +100,11 @@ This database was created at v1. Since then (2026-08-11 bug hunt):
   backfill and none is possible: every term an existing database holds WAS
   searched (which is what `enabled` defaults to) and every job in it is
   terminal or already running (so `queue_position` 0 is honest).
+- `015_job_videos_flat_meta.sql` - v15 (2026-10-05, KNOWN_BUGS CR-360),
+  `job_videos.flat_duration` (the duration the search results page showed)
+  and `job_videos.meta_source` (`'search'` on a row whose details came from
+  that page because YouTube bot-checked the per-video metadata fetch). The
+  duration has its own column on purpose: the metadata phase's to-do list is
+  `duration IS NULL`, and a search-page number written into `duration` would
+  have skipped the real fetch for every row. Additive and inert: NULL in both
+  is every existing row, which is what they are (enriched, or not yet).

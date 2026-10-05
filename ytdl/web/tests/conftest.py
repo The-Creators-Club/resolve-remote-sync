@@ -373,20 +373,35 @@ class FakeYouTube:
         # bot-checked; this records how the worker paced them.
         self.enrich_calls = []
 
+    # {video id: extra keys on its FLAT search entry} (CR-360): what a real
+    # results page carries beyond id/title/url -- duration, channel,
+    # thumbnails, view_count -- for the tests of the bot-checked fallback.
+    flat = None
+
     def search(self, query, max_results, period=None):
         self.searched.append((query, max_results, period))
         if query in self.fail_terms:
             raise RuntimeError('HTTP 429 from YouTube')
+        flat = self.flat or {}
         return [{'id': vid, 'title': f'{vid} title',
-                 'url': f'https://www.youtube.com/watch?v={vid}'}
+                 'url': f'https://www.youtube.com/watch?v={vid}',
+                 **flat.get(vid, {})}
                 for vid in self.results.get(query, [])][:max_results]
 
     def enrich(self, entries, jobs=None, progress=None, pause=None,
-               sleeper=None):
+               sleeper=None, abort_if=None):
+        # abort_if is honoured the way the real one honours it, serially: an
+        # entry after the trip makes no request (and is not in `enriched`).
         self.enrich_calls.append({'n': len(entries), 'jobs': jobs,
                                   'pause': pause})
         out = []
+        tripped = False
         for i, e in enumerate(entries, start=1):
+            if tripped:
+                out.append({'id': e['id'], 'url': e['url'], 'aborted': True})
+                if progress:
+                    progress(i, len(entries))
+                continue
             self.enriched.append(e['id'])
             base = {'id': e['id'], 'url': e['url'], 'title': f"{e['id']} title",
                     'channel': 'Test Channel', 'duration': 120.0,
@@ -395,6 +410,8 @@ class FakeYouTube:
                     'is_live': False}
             base.update(self.meta.get(e['id'], {}))
             out.append(base)
+            if abort_if is not None and abort_if(base):
+                tripped = True
             if progress:
                 progress(i, len(entries))
         return out

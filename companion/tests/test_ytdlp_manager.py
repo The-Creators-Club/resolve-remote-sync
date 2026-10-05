@@ -180,6 +180,10 @@ class _World:
                 raise FileNotFoundError(argv[0])
             return _Proc(0, self.installed + "\n")
         if argv[1:] == ["-U"]:
+            raise AssertionError(
+                "-U stays on the channel the binary came from; CR-361 needs "
+                "--update-to nightly")
+        if argv[1:] == list(ytdlp_mod.UPDATE_ARGS):
             if not self.update_ok:
                 return _Proc(1, "", "ERROR: unable to update")
             if self.update_to:
@@ -190,7 +194,7 @@ class _World:
 
     @property
     def updated(self) -> bool:
-        return any(argv[1:] == ["-U"] for argv in self.argvs)
+        return any(argv[1:] == list(ytdlp_mod.UPDATE_ARGS) for argv in self.argvs)
 
 
 # A FROZEN "today" for every ensure() in this file. YT-1's max-age rule made
@@ -307,6 +311,8 @@ def test_parse_version_output(text, expected):
     ("2026.08.10", "2026.08.10", False),
     ("2026.08.11", "2026.08.10", False),
     ("2026.08.11", "2026.08.11.120000", True),      # nightly beats the stable it built on
+    ("2026.09.27.232945", "2026.08.19", False),     # CR-361: nightly above a stable floor
+    ("2026.08.19", "2026.09.27.232945", True),
     ("garbage", "2026.08.10", False),               # unrankable = leave it alone
     ("2026.08.11", "", False),
     (None, "2026.08.10", False),
@@ -452,7 +458,10 @@ def test_install_downloads_verifies_and_lands_the_binary(tools):
     # the release did not vouch for first.
     assert calls[0].endswith("/SHA2-256SUMS")
     assert calls[1].endswith("/" + ytdlp_mod.binary_name())
-    assert all(u.startswith("https://github.com/yt-dlp/yt-dlp/releases/") for u in calls)
+    # The NIGHTLY channel (CR-361, 2026-10-05), not stable.
+    assert all(u.startswith(
+        "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/")
+        for u in calls)
     # No temp file survives a success either.
     assert not (tools / (ytdlp_mod.binary_name() + ".new")).exists()
 
@@ -472,6 +481,36 @@ def test_install_sha_mismatch_leaves_the_old_binary_untouched(tools, caplog):
     assert installed.read_bytes() == b"the yt-dlp that already works"
     assert not (tools / (ytdlp_mod.binary_name() + ".new")).exists()
     assert any("sha256 mismatch" in r.getMessage() for r in caplog.records)
+
+
+def test_install_survives_a_nightly_published_between_the_two_fetches(tools):
+    """CR-361: `latest/download/` is resolved afresh per request, and the
+    nightly channel publishes about daily, so the list can be yesterday's and
+    the binary today's. One re-fetch of the list, and the bytes are kept only
+    because the NEW list names them."""
+    today = b"the nightly cut a second ago"
+    lists = [f"{'1' * 64}  {ytdlp_mod.binary_name()}\n".encode(),
+             f"{hashlib.sha256(today).hexdigest()}  {ytdlp_mod.binary_name()}\n".encode()]
+    calls = []
+
+    def opener(url, headers, timeout):
+        calls.append(url)
+        if url.endswith("/" + ytdlp_mod.CHECKSUM_ASSET):
+            return _FakeResponse(lists.pop(0))
+        return _FakeResponse(today)
+
+    assert _manager(github=opener).install() is True
+    assert (tools / ytdlp_mod.binary_name()).read_bytes() == today
+    assert [u.rsplit("/", 1)[1] for u in calls] == [
+        ytdlp_mod.CHECKSUM_ASSET, ytdlp_mod.binary_name(), ytdlp_mod.CHECKSUM_ASSET]
+
+
+def test_install_still_refuses_when_the_refetched_list_disagrees_too(tools):
+    """The re-fetch is one more chance for a PUBLISHED checksum to match,
+    never a way round one: two lists that both disagree is a refusal."""
+    sums = f"{'2' * 64}  {ytdlp_mod.binary_name()}\n".encode()
+    assert _manager(github=_release(b"unvouched", sums=sums)).install() is False
+    assert not (tools / ytdlp_mod.binary_name()).exists()
 
 
 def test_install_refuses_an_asset_the_release_does_not_list(tools, caplog):
@@ -549,6 +588,9 @@ def test_install_when_the_tools_dir_cannot_be_created(monkeypatch):
 
 @pytest.mark.parametrize("url, allowed", [
     ("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe", True),
+    # CR-361: the nightly repo and the tag URL its latest/ redirect lands on
+    ("https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.exe", True),
+    ("https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/download/2026.09.27.232945/SHA2-256SUMS", True),
     ("https://objects.githubusercontent.com/blah", True),
     ("https://release-assets.githubusercontent.com/blah", True),
     ("http://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe", False),
@@ -639,23 +681,26 @@ def test_ensure_reports_failure_when_the_self_update_fails():
     assert status["version"] == "2026.07.01"
 
 
-def test_ensure_does_nothing_when_the_binary_is_current():
+def test_ensure_on_a_current_binary_asks_once_and_changes_nothing():
+    """CR-361: a binary above the floor is still asked for a newer nightly
+    on the daily pass, and when there is none it is published as the newest,
+    never as an update."""
     world = _World(installed="2026.08.11")
     mgr = _manager(world, min_version="2026.08.10")
     mgr.install = lambda: pytest.fail("install() on a current binary")
     status = mgr.ensure()
     assert status["action"] == ytdlp_mod.ACTION_NONE
     assert status["ok"] is True
-    assert not world.updated
+    assert status["latest"] is True
+    assert world.updated
 
 
 def test_ensure_leaves_a_present_binary_alone_when_the_dashboard_is_down():
     """An unreachable dashboard is not evidence that anything is stale.
 
-    The version is INSIDE the max-age window on purpose (YT-1, 2026-08-28):
-    what this test owns is that a missing floor never moves the binary, and
-    the max-age rule -- which does move it, dashboard or no dashboard -- has
-    its own tests below."""
+    What this test owns is that a missing floor never REPLACES the binary
+    with a fresh install or fails it; the daily nightly check (CR-361) asks
+    GitHub, not the dashboard, so it still runs."""
     world = _World(installed=_days_ago(5))
     mgr = ytdlp_mod.YtDlpManager(
         {"dashboard_url": "http://dash.example.com"},
@@ -664,10 +709,11 @@ def test_ensure_leaves_a_present_binary_alone_when_the_dashboard_is_down():
         run_fn=world.run,
         clock=lambda: _NOW,
     )
+    mgr.install = lambda: pytest.fail("install() over a present binary")
     status = mgr.ensure()
-    assert not world.updated
     assert status["action"] == ytdlp_mod.ACTION_NONE
     assert status["ok"] is True
+    assert status["version"] == _days_ago(5)
 
 
 # ---------------------------------------------------------------------------
@@ -708,13 +754,110 @@ def test_a_binary_past_the_max_age_updates_itself_with_no_floor_at_all():
     assert "40 days old" in status["message"]
 
 
-def test_a_binary_inside_the_window_is_still_left_alone():
-    world = _World(installed=_days_ago(20))
-    mgr = _manager(world, min_version=None)
-    status = mgr.ensure()
-    assert not world.updated
+# -- CR-361 (2026-10-05): the daily nightly check ---------------------------
+
+
+def test_a_binary_inside_the_window_is_still_updated_daily():
+    """THE point of CR-361. YT-1 only moved a binary once it was 21 days
+    old, which left a machine up to three weeks behind a YouTube fix yt-dlp
+    had already published as a nightly."""
+    world = _World(installed=_days_ago(2), update_to=_days_ago(0) + ".232945")
+    status = _manager(world, min_version=None).ensure()
+    assert world.updated
+    assert status["action"] == ytdlp_mod.ACTION_UPDATED
+    assert status["ok"] is True
+    assert status["version"] == _days_ago(0) + ".232945"
+
+
+def test_a_stable_install_moves_to_nightly_on_its_next_pass():
+    """A machine installed before CR-361 holds a STABLE yt-dlp. `-U` would
+    keep it on stable for ever; `--update-to nightly` moves it across (seen
+    on a real 2026.08.19 yt-dlp.exe on 2026-10-05). The nightly's
+    four-part version must then rank as newer, be dateable, and be ok."""
+    world = _World(installed="2026.08.19", update_to="2026.09.27.232945")
+    clock = calendar.timegm(datetime.date(2026, 10, 5).timetuple()) + 12 * 3600
+    status = _manager(world, min_version="2026.08.19",
+                      clock=lambda: clock).ensure()
+    assert world.argvs[-2][1:] == ["--update-to", "nightly"]
+    assert status["action"] == ytdlp_mod.ACTION_UPDATED
+    assert status["ok"] is True
+    assert status["version"] == "2026.09.27.232945"
+    report = ytdlp_mod.status_report(status, clock)
+    assert report["stale"] is False and report["age_days"] == 8
+
+
+def test_a_failed_check_inside_the_window_is_quiet_not_stale():
+    """GitHub blips. A binary a few days old whose check failed today is
+    neither stale nor broken: ok, current, and a word in the message."""
+    world = _World(installed=_days_ago(3), update_ok=False)
+    status = _manager(world, min_version=None).ensure()
+    assert world.updated
     assert status["action"] == ytdlp_mod.ACTION_NONE
-    assert "is current" in status["message"]
+    assert status["ok"] is True
+    assert "could not check" in status["message"]
+    assert "—" not in status["message"]
+    assert not status.get("latest")
+
+
+def test_the_daily_check_is_not_repeated_by_a_tray_restart():
+    """The stamp lives on disk, so a restarted tray (by hand, or the
+    supervisor's relaunches) does not ask GitHub again within 20 h."""
+    world = _World(installed=_days_ago(2))
+    _manager(world, min_version=None).ensure()
+    asked = sum(1 for a in world.argvs if a[1:] == list(ytdlp_mod.UPDATE_ARGS))
+    assert asked == 1
+
+    status = _manager(world, min_version=None,
+                      clock=lambda: _NOW + 3600).ensure()     # a new manager
+    assert sum(1 for a in world.argvs
+               if a[1:] == list(ytdlp_mod.UPDATE_ARGS)) == 1
+    assert status["action"] == ytdlp_mod.ACTION_NONE
+    assert status["latest"] is True
+
+    later = _NOW + ytdlp_mod.UPDATE_CHECK_MIN_INTERVAL_SECONDS
+    _manager(world, min_version=None, clock=lambda: later).ensure()
+    assert sum(1 for a in world.argvs
+               if a[1:] == list(ytdlp_mod.UPDATE_ARGS)) == 2
+
+
+def test_a_failed_check_is_not_stamped_so_the_next_pass_asks_again():
+    world = _World(installed=_days_ago(3), update_ok=False)
+    _manager(world, min_version=None).ensure()
+    world.update_ok = True
+    _manager(world, min_version=None, clock=lambda: _NOW + 60).ensure()
+    assert sum(1 for a in world.argvs
+               if a[1:] == list(ytdlp_mod.UPDATE_ARGS)) == 2
+
+
+def test_a_stamp_for_a_different_binary_or_from_the_future_is_ignored(tools):
+    world = _World(installed=_days_ago(2))
+    stamp = tools / ytdlp_mod.UPDATE_STAMP_NAME
+    for record in ({"checked_at": _NOW, "version": "2026.01.01", "channel": "nightly"},
+                   {"checked_at": _NOW + 9999, "version": _days_ago(2), "channel": "nightly"},
+                   {"checked_at": _NOW, "version": _days_ago(2), "channel": "stable"},
+                   "not json"):
+        world.argvs.clear()
+        stamp.write_text(record if isinstance(record, str) else json.dumps(record),
+                         encoding="utf-8")
+        _manager(world, min_version=None).ensure()
+        assert world.updated, record
+
+
+def test_a_fresh_install_counts_as_todays_check(tools):
+    world = _World(installed=None)
+    mgr = _manager(world, min_version=None)
+    real_install = mgr.install
+
+    def install_and_record():
+        ok = real_install()
+        world.installed = _days_ago(0)
+        world._sync_disk()
+        return ok
+
+    mgr.install = install_and_record
+    assert mgr.ensure()["action"] == ytdlp_mod.ACTION_INSTALLED
+    _manager(world, min_version=None, clock=lambda: _NOW + 60).ensure()
+    assert not world.updated
 
 
 def test_the_max_age_is_config_overridable_and_can_be_switched_off():
@@ -767,7 +910,7 @@ def test_an_update_that_finds_nothing_newer_is_current_and_says_latest():
     assert status["action"] == ytdlp_mod.ACTION_NONE
     assert status["latest"] is True
     assert status["version"] == _days_ago(40)
-    assert "newest release" in status["message"]
+    assert "newest nightly build" in status["message"]
     assert "—" not in status["message"]
     report = ytdlp_mod.status_report(status, _NOW)
     assert report["stale"] is False and report["latest"] is True
@@ -829,7 +972,9 @@ def test_a_floor_this_cannot_rank_is_said_out_loud(caplog):
     anywhere is a 403 whose message contradicts the daily "yt-dlp X is
     current" in every companion's log."""
     world = _World(installed="2026.08.11")
-    mgr = _manager(world, min_version="latest")
+    # The daily nightly check (CR-361) is switched off so that what is left
+    # is the floor's own effect: an unrankable floor must never be a reason.
+    mgr = _manager(world, min_version="latest", cfg={"ytdlp_max_age_days": 0})
 
     with caplog.at_level(logging.ERROR, logger="ccsync.ytdlp"):
         status = mgr.ensure()

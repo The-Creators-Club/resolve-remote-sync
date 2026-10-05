@@ -434,6 +434,14 @@ never mean "that editor's downloads are broken for a month".
   First run downloads the binary from github's release URL — over the same
   origin-checked download_and_verify machinery upgrade.py already has, with
   sha256 from the github API, free-space check first.
+- **Superseded in part by CR-361 (2026-10-05):** the binary comes from
+  yt-dlp's NIGHTLY channel (`yt-dlp/yt-dlp-nightly-builds`, same asset
+  names, same `SHA2-256SUMS`), and every daily pass runs
+  `yt-dlp --update-to nightly` (throttled to once per 20 h across tray
+  restarts by `tools/yt-dlp.update-check.json`), not `-U` only when below
+  the floor or past the 21-day max age. `--update-to nightly` is also what
+  moves a pre-CR-361 stable install onto nightly. Owner decision: "accept
+  any yt-dlp build, daily etc, to get the latest".
 - Capability handshake reports the version; a stale/missing/broken binary
   = no capability = server-side path. Editors never see a broken local
   downloader — they see the old behaviour.

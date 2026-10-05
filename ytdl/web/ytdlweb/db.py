@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 15
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the database?"
@@ -109,6 +109,12 @@ _MIGRATIONS = {
     # One column, so the predicate is the same shape 005's and 009's are.
     14: ('014_jobs_claim_free_bytes.sql',
          lambda con: 'claim_free_bytes' in _columns(con, 'jobs')),
+    # What the search page said about each video, for when the per-video
+    # fetch is bot-checked (CR-360, 2026-10-05). Two columns in one file, so
+    # the predicate asks about both, the way 013's does.
+    15: ('015_job_videos_flat_meta.sql',
+         lambda con: {'flat_duration', 'meta_source'}
+         <= set(_columns(con, 'job_videos'))),
 }
 
 # What made a job. 'search' is a topic Claude expands and the editor reviews;
@@ -368,7 +374,7 @@ _VIDEO_COLS = frozenset({
     'url', 'title', 'channel', 'duration', 'upload_date', 'view_count',
     'thumbnail', 'meta_error', 'relevant', 'relevance_note', 'duplicate',
     'duplicate_of', 'selected', 'dl_state', 'dl_error', 'filepath',
-    'download_host'})
+    'download_host', 'meta_source'})
 
 # The claim/lease columns are deliberately NOT in _JOB_COLS. Every one of them
 # is written by a compare-and-set below (claim_download / heartbeat_download /
@@ -1513,15 +1519,27 @@ def mark_term_searched(c, term_id, hits):
 
 # ----------------------------------------------------------------- videos
 
-def add_video(c, job_id, video_id, url, title=None):
+def add_video(c, job_id, video_id, url, title=None, flat=None):
     """-> True if this video is new to the job.
 
     The caller uses the answer for the `candidates` counter; the term link is
     recorded either way (see link_term).
+
+    `flat` is what the search results page carried (ytsearch.flat_meta,
+    CR-360, 2026-10-05). Its duration goes to `flat_duration`, NEVER to
+    `duration`: the metadata phase's to-do list is "duration IS NULL", so a
+    search-page number there would skip the real fetch for every row. The
+    rest lands in the ordinary columns, where the metadata phase overwrites it
+    with the real thing and the grid has something to show if it never can.
     """
+    flat = flat or {}
     cur = c.execute(
-        'INSERT OR IGNORE INTO job_videos(job_id,video_id,url,title) '
-        'VALUES(?,?,?,?)', (job_id, video_id, url, title))
+        'INSERT OR IGNORE INTO job_videos(job_id,video_id,url,title,channel,'
+        'upload_date,view_count,thumbnail,flat_duration) '
+        'VALUES(?,?,?,?,?,?,?,?,?)',
+        (job_id, video_id, url, title or flat.get('title'), flat.get('channel'),
+         flat.get('upload_date'), flat.get('view_count'), flat.get('thumbnail'),
+         flat.get('duration')))
     return bool(cur.rowcount)
 
 

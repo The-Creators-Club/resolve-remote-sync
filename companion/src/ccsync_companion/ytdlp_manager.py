@@ -66,9 +66,21 @@ TOOLS_DIR_NAME = "tools"
 BINARY_NAMES = {"win32": "yt-dlp.exe", "darwin": "yt-dlp_macos"}
 DEFAULT_BINARY_NAME = "yt-dlp"
 
-# The official release. `latest/download/<name>` always resolves to the newest
-# published release, so no GitHub API call (and no rate limit) is involved.
-RELEASE_BASE_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download"
+# THE NIGHTLY CHANNEL (CR-361, owner decision 2026-10-05: "accept any yt-dlp
+# build, daily etc, to get the latest"). YouTube's anti-bot changes now land
+# faster than yt-dlp cuts stable releases -- stable sat at 2026.08.19 for
+# seven weeks while nightly reached 2026.09.27.232945 -- and a fix that exists
+# only in a nightly is a fix this fleet did not have. yt-dlp publishes its
+# nightlies as ordinary GitHub releases of a sibling repo, with the same asset
+# names and the same SHA2-256SUMS as stable (verified against the GitHub API
+# 2026-10-05), so the checksum condition below is unchanged.
+# `latest/download/<name>` still resolves to the newest release with no API
+# call (and no rate limit), through the same two hosts as stable: github.com,
+# then a 302 into release-assets.githubusercontent.com.
+UPDATE_CHANNEL = "nightly"
+RELEASE_BASE_URL = (
+    "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download"
+)
 CHECKSUM_ASSET = "SHA2-256SUMS"
 
 # Where a release download is allowed to end up. github.com answers the
@@ -100,9 +112,24 @@ CONFIG_TIMEOUT_SECONDS = 5.0
 # editor on a hotel link, bounded so a stalled CDN connection cannot pin the
 # thread until the process exits.
 DOWNLOAD_TIMEOUT_SECONDS = 300.0
-# `yt-dlp -U` downloads a full replacement binary and swaps it, so it gets the
-# download budget rather than the probe's.
+# `yt-dlp --update-to nightly` downloads a full replacement binary and swaps
+# it, so it gets the download budget rather than the probe's.
 UPDATE_TIMEOUT_SECONDS = 300.0
+# The argv tail of every self-update (CR-361, 2026-10-05). NOT `-U`: `-U`
+# means "the newest build of the channel I was built from", so a STABLE
+# binary already on an editor's machine would stay on stable for ever.
+# `--update-to nightly` moves it across -- checked on a real 2026.08.19
+# stable yt-dlp.exe on 2026-10-05: "Updated yt-dlp to nightly@2026.09.27.232945
+# from yt-dlp/yt-dlp-nightly-builds", exit 0 -- and on a binary already on
+# the newest nightly it prints "yt-dlp is up to date" and also exits 0.
+UPDATE_ARGS = ("--update-to", UPDATE_CHANNEL)
+# How often the daily pass may ask yt-dlp for a newer nightly (CR-361). The
+# loop runs every CHECK_INTERVAL_SECONDS, so this is always met there; what
+# it stops is a tray that restarts (by hand, or the supervisor's up to three
+# relaunches an hour) asking GitHub again on every start. Persisted beside
+# the binary for exactly that reason -- an in-memory stamp dies with the tray.
+UPDATE_CHECK_MIN_INTERVAL_SECONDS = 20 * 3600.0
+UPDATE_STAMP_NAME = "yt-dlp.update-check.json"
 
 # Hard ceilings on what a response may write to the editor's disk, the same
 # defence (and the same reasoning) as upgrade.MAX_DOWNLOAD_BYTES: nothing here
@@ -157,8 +184,16 @@ ACTION_NONE = "none"            # present and current
 ACTION_INSTALLED = "installed"
 ACTION_UPDATED = "updated"
 ACTION_FAILED = "failed"        # needed an install/update and did not get one
-ACTION_STALE = "stale"          # past MAX AGE and -U could not fix it (still usable)
+ACTION_STALE = "stale"          # past MAX AGE and the update could not fix it (still usable)
 
+# THE DAILY NIGHTLY CHECK (CR-361, 2026-10-05) replaced "update only once the
+# binary is past its max age": every daily pass now runs
+# `yt-dlp --update-to nightly` (throttled by UPDATE_CHECK_MIN_INTERVAL_SECONDS),
+# so "the latest" is at most a day behind. The max age below survives with a
+# narrower job: it is the line past which a check that FAILS is published as
+# ACTION_STALE rather than as a quiet "could not check today", and 0 still
+# switches every self-initiated update off.
+#
 # THE MAX-AGE RULE (YT-1, resilience sweep 2026-08-28). Before this the only
 # thing that ever moved a companion's yt-dlp was the dashboard's floor, and
 # that floor is a constant in a dashboard release (ytdlweb/config.py's
@@ -168,8 +203,9 @@ ACTION_STALE = "stale"          # past MAX AGE and -U could not fix it (still us
 # fleet sits on a binary that cannot download while logging "yt-dlp X is
 # current" nightly, until a human notices and ships a release. yt-dlp versions
 # ARE dates, so staleness is measurable here without asking anybody: past this
-# many days we run `yt-dlp -U` on our own initiative. It cannot roll backwards
-# (-U only ever goes to the latest stable) and it never touches an override.
+# many days we run `yt-dlp -U` on our own initiative. It never touches an
+# override. (Since CR-361 the update runs daily whatever the age, and goes to
+# the newest NIGHTLY: see above.)
 # 21 days is roughly three of yt-dlp's release cycles: long enough that a
 # healthy fleet updates on the floor as it always did, short enough that a
 # YouTube break is closed without a release.
@@ -481,8 +517,10 @@ def version_age_days(current: Any, now_ts: Optional[float] = None) -> Optional[i
 
     yt-dlp's versions ARE release dates (YYYY.MM.DD, plus an occasional
     `.1` for a same-day re-release), which is what makes the max-age rule
-    possible without asking GitHub anything (YT-1, 2026-08-28). None for
-    anything unparseable and for a version stamped in the FUTURE: a machine
+    possible without asking GitHub anything (YT-1, 2026-08-28). A NIGHTLY's
+    `2026.09.27.232945` is dated by its first three parts; the fourth is the
+    build's HHMMSS, not a day (CR-361 put every managed binary on nightly).
+    None for anything unparseable and for a version stamped in the FUTURE: a machine
     with a wrong clock, or an editor running a nightly built tomorrow, must
     not be told it is stale -- "we cannot tell" is a different answer from
     "it is old", and only the second one may trigger an update.
@@ -839,66 +877,148 @@ class YtDlpManager:
             return DEFAULT_MAX_AGE_DAYS
         return int(raw)
 
-    def _enforce_max_age(self, current: str, floor: Optional[str]) -> Optional[dict[str, Any]]:
-        """`yt-dlp -U` when the installed version is past its shelf life.
+    # -- the daily nightly check (CR-361) --------------------------------
+    @staticmethod
+    def _stamp_path() -> Path:
+        return tools_dir() / UPDATE_STAMP_NAME
 
-        Called only after the floor comparison has said the binary is fine,
-        so this is the branch that used to be "yt-dlp X is current" forever
-        (YT-1, 2026-08-28). Returns None when the rule does not apply -- an
-        age we cannot compute, a rule switched off, a binary inside the window
-        -- and ensure() then publishes what it always did.
+    def _read_stamp(self) -> dict[str, Any]:
+        """The last SUCCESSFUL update check, or {}. Never raises: a stamp we
+        cannot read only costs one extra check, which is the safe direction."""
+        try:
+            data = json.loads(self._stamp_path().read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
 
-        An update that FAILS is not ok=False: the binary is above the
-        dashboard's floor and can very probably still download. It is
-        published as ACTION_STALE with the age in the message, because a
-        machine drifting past three release cycles is a thing the owner has to
-        be able to see before an editor hits it, and "could not check" must
-        never render as "fine".
+    def _write_stamp(self, version_str: Optional[str]) -> None:
+        """Record that this machine just asked the nightly channel and holds
+        `version_str` as a result. Temp + os.replace so a killed tray cannot
+        leave half a JSON (which _read_stamp would shrug off anyway)."""
+        if not version_str:
+            return
+        path = self._stamp_path()
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(
+                json.dumps({"checked_at": self._clock(), "version": version_str,
+                            "channel": UPDATE_CHANNEL}),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception as exc:
+            log.debug("ytdlp: could not record the update check (%s)", exc)
+            _unlink_quietly(tmp)
+
+    def _recently_checked(self, current: str) -> Optional[float]:
+        """Seconds since the last successful check, when it was recent enough
+        to skip this one AND it left the very binary we have now; else None.
+
+        A different version than the stamp recorded (an install, a hand
+        swap) is a reason to ask again, and so is a stamp from the future (a
+        clock that jumped): neither is evidence that we are on the newest."""
+        stamp = self._read_stamp()
+        if str(stamp.get("version") or "") != current:
+            return None
+        if str(stamp.get("channel") or "") != UPDATE_CHANNEL:
+            return None
+        try:
+            since = float(self._clock()) - float(stamp.get("checked_at"))
+        except (TypeError, ValueError):
+            return None
+        if since < 0 or since >= UPDATE_CHECK_MIN_INTERVAL_SECONDS:
+            return None
+        return since
+
+    def _check_for_newer(self, current: str, floor: Optional[str]) -> Optional[dict[str, Any]]:
+        """`yt-dlp --update-to nightly`, once a day, for a binary already
+        at or above the dashboard's floor (CR-361, 2026-10-05).
+
+        This is the branch that used to be YT-1's max-age rule, which only
+        updated a binary once it was 21 days old: with the fleet on nightly
+        and the owner asking for "the latest", that left a machine up to
+        three weeks behind a fix yt-dlp had already published. Now every
+        daily pass asks, and the max age keeps one job: deciding whether a
+        check that FAILS is worth an alarm.
+
+        Returns None when nothing should run -- the rule switched off
+        (ytdlp_max_age_days <= 0, the escape hatch for a machine that must not
+        fetch a binary on its own), a version we cannot date (a wrong clock,
+        or a string that is not a real date: "we cannot tell" never replaces
+        a binary), or a check that already succeeded for this very binary
+        within UPDATE_CHECK_MIN_INTERVAL_SECONDS -- and ensure() publishes
+        "current" as it always did.
+
+        An update that FAILS is never ok=False: the binary is above the
+        floor and can very probably still download. Inside the max age it is
+        a quiet "could not check today" (GitHub blips, and tomorrow's pass
+        asks again); past it, ACTION_STALE with the age in the message,
+        because "could not check" must never render as "fine" for a binary
+        that old.
         """
         limit = self._max_age_days()
         if limit <= 0:
             return None
         age = version_age_days(current, self._clock())
-        if age is None or age <= limit:
+        if age is None:
             return None
-        log.info(
-            "ytdlp: %s is %s days old (limit %s) -- updating on our own "
-            "initiative, no dashboard floor involved", current, age, limit,
-        )
+        since = self._recently_checked(current)
+        if since is not None:
+            # The last check left exactly this binary, so it WAS the newest
+            # nightly then. Say when, rather than claim it is still true now.
+            return self._publish(
+                True, current, ACTION_NONE,
+                f"yt-dlp {current} was the newest {UPDATE_CHANNEL} "
+                f"{since / 3600:.0f} h ago; next check after "
+                f"{UPDATE_CHECK_MIN_INTERVAL_SECONDS / 3600:.0f} h",
+                latest=True,
+            )
+        log.info("ytdlp: %s is %s days old -- asking the %s channel for "
+                 "anything newer", current, age, UPDATE_CHANNEL)
         updated = self.self_update()
         after = version(cfg=self.cfg, run_fn=self._run) if updated else None
         if not updated or after is None:
+            if age > limit:
+                return self._publish(
+                    True, current, ACTION_STALE,
+                    f"yt-dlp {current} is {age} days old and it could not update "
+                    f"itself -- YouTube downloads on this computer may start failing",
+                )
             return self._publish(
-                True, current, ACTION_STALE,
-                f"yt-dlp {current} is {age} days old and it could not update "
-                f"itself -- YouTube downloads on this computer may start failing",
+                True, current, ACTION_NONE,
+                f"yt-dlp {current} ({age} days old); could not check for a newer "
+                f"{UPDATE_CHANNEL} build today, will try again on the next pass",
             )
-        # -U goes to the latest stable only, so it cannot roll backwards; the
-        # guard is for the day it does something else. Keeping the OLD string
-        # in that case would report a version that is no longer installed.
+        self._write_stamp(after)
+        # --update-to can DOWNGRADE (that is half of what the flag is for),
+        # and the managed binary only ever came from the nightly channel, so
+        # "the newest nightly is older than what we hold" should not happen.
+        # If it does, report what is actually installed, never the old string.
         if version_is_older(after, current):
             log.warning(
-                "ytdlp: -U left %s where %s was -- reporting what is actually "
-                "installed", after, current,
+                "ytdlp: --update-to %s left %s where %s was -- reporting what "
+                "is actually installed", UPDATE_CHANNEL, after, current,
             )
         ok = after is not None and not (floor and version_is_older(after, floor))
         if after == current:
-            # CR-321 (2026-09-24): -U ran and found nothing newer, so this IS
-            # the newest release, and "stale" was a false alarm. It went to
-            # the dashboard as ACTION_STALE and raised `ytdlp_stale` on every
-            # machine once yt-dlp went 21 days without a release (2026.08.19,
-            # 36 days on 09-24, on Creator_1, Razer and ruskin). Published as
-            # current, with `latest` set so the dashboard can tell "checked,
-            # newest" from "never checked". Age alone is not staleness.
+            # CR-321 (2026-09-24): the update ran and found nothing newer, so
+            # this IS the newest build, and "stale" would be a false alarm. It
+            # went to the dashboard as ACTION_STALE and raised `ytdlp_stale`
+            # on every machine once yt-dlp went 21 days without a release
+            # (2026.08.19, 36 days on 09-24, on Creator_1, Razer and ruskin).
+            # Published as current, with `latest` set so the dashboard can
+            # tell "checked, newest" from "never checked". Age alone is not
+            # staleness.
             return self._publish(
                 True, current, ACTION_NONE,
-                f"yt-dlp {current} is the newest release ({age} days old; "
-                f"checked with -U, nothing newer to take)",
+                f"yt-dlp {current} is the newest {UPDATE_CHANNEL} build "
+                f"({age} days old; checked, nothing newer to take)",
                 latest=True,
             )
         return self._publish(
             ok, after, ACTION_UPDATED,
-            f"yt-dlp {current} was {age} days old, updated to {after}",
+            f"yt-dlp {current} ({age} days old) updated to {after}",
         )
 
     # -- install ---------------------------------------------------------
@@ -1017,6 +1137,17 @@ class YtDlpManager:
             return False
 
         if digest.hexdigest() != expected:
+            # CR-361 (2026-10-05): the nightly channel publishes roughly once
+            # a day, and `latest/download/` is resolved afresh by each of the
+            # two requests, so a release cut between the SHA2-256SUMS fetch
+            # and the binary fetch hands us yesterday's list beside today's
+            # binary. Ask for the list ONCE more and compare again. This is
+            # still the condition, not a loosening of it: the bytes are kept
+            # only if a SHA2-256SUMS the release itself published names them.
+            again = self._fetch_expected_sha256(name)
+            if again is not None and again != expected:
+                expected = again
+        if digest.hexdigest() != expected:
             log.warning(
                 "ytdlp: sha256 mismatch on the downloaded %s -- discarding it and "
                 "keeping whatever was already installed", name,
@@ -1035,23 +1166,32 @@ class YtDlpManager:
         return True
 
     def self_update(self) -> bool:
-        """`yt-dlp -U`: its OWN self-updater, which handles the in-place swap
-        on all three platforms (plan §6). Deliberately not a re-download +
-        rename of our own: yt-dlp knows how to replace a running binary on
-        each OS, and a second mechanism doing the same job differently is one
-        more thing to be wrong on the one platform nobody tested."""
+        """`yt-dlp --update-to nightly`: its OWN self-updater, which handles
+        the in-place swap on all three platforms (plan §6). Deliberately not a
+        re-download + rename of our own: yt-dlp knows how to replace a running
+        binary on each OS, and a second mechanism doing the same job
+        differently is one more thing to be wrong on the one platform nobody
+        tested. yt-dlp's updater verifies the new binary against the channel's
+        own SHA2-256SUMS before it swaps, so the checksum condition install()
+        keeps holds on this path too.
+
+        `--update-to nightly`, not `-U` (CR-361, 2026-10-05): see UPDATE_ARGS.
+        It is also what moves a machine installed from STABLE before CR-361
+        onto nightly, on its first pass after the companion update."""
         path = self.binary()
         try:
-            proc = self._run([str(path), "-U"], UPDATE_TIMEOUT_SECONDS)
+            proc = self._run([str(path), *UPDATE_ARGS], UPDATE_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            log.warning("ytdlp: -U did not finish within %.0fs", UPDATE_TIMEOUT_SECONDS)
+            log.warning("ytdlp: --update-to %s did not finish within %.0fs",
+                        UPDATE_CHANNEL, UPDATE_TIMEOUT_SECONDS)
             return False
         except Exception as exc:
-            log.info("ytdlp: -U could not be run (%s)", exc)
+            log.info("ytdlp: --update-to %s could not be run (%s)", UPDATE_CHANNEL, exc)
             return False
         if getattr(proc, "returncode", 1) != 0:
             log.info(
-                "ytdlp: -U exited %s (%s)", getattr(proc, "returncode", "?"),
+                "ytdlp: --update-to %s exited %s (%s)", UPDATE_CHANNEL,
+                getattr(proc, "returncode", "?"),
                 str(getattr(proc, "stderr", "") or "").strip()[:200],
             )
             return False
@@ -1065,9 +1205,11 @@ class YtDlpManager:
 
             opt-out (ytdl_local_downloads=false) -> nothing, action=disabled
             ytdlp_path override                  -> version check ONLY
-            binary missing                       -> install
-            binary older than min_version        -> yt-dlp -U
-            binary older than max age (21 days)  -> yt-dlp -U   (YT-1)
+            binary missing                       -> install (newest nightly)
+            binary older than min_version        -> yt-dlp --update-to nightly
+            otherwise, once a day                -> yt-dlp --update-to nightly
+                                                    (CR-361; YT-1's max age now
+                                                    only grades a FAILED check)
             otherwise                            -> nothing
 
         `min_version` defaults to the dashboard's `min_ytdlp_version`; when
@@ -1138,6 +1280,9 @@ class YtDlpManager:
                         "-- YouTube downloads stay on the server",
                     )
                 current = version(cfg=self.cfg, run_fn=self._run)
+                # A fresh install IS the newest nightly: no reason to ask
+                # GitHub the same question again on the next restart.
+                self._write_stamp(current)
                 ok = current is not None and not (floor and version_is_older(current, floor))
                 return self._publish(
                     ok, current, ACTION_INSTALLED,
@@ -1155,19 +1300,20 @@ class YtDlpManager:
                         f"asks for and it could not update itself -- YouTube "
                         f"downloads stay on the server",
                     )
+                self._write_stamp(after)
                 return self._publish(
                     ok, after, ACTION_UPDATED,
                     f"updated yt-dlp {current} -> {after or '(version unreadable)'}",
                 )
 
-            # YT-1 (2026-08-28): the max-age rule, and it lives HERE rather
-            # than beside the floor test on purpose -- everything above it
-            # already decided to touch the binary, and the override branch has
-            # returned long since (nothing installs or updates over a
-            # hand-managed yt-dlp).
-            aged = self._enforce_max_age(current, floor)
-            if aged is not None:
-                return aged
+            # CR-361 (2026-10-05; YT-1's max-age rule before it): the daily
+            # nightly check, and it lives HERE rather than beside the floor
+            # test on purpose -- everything above it already decided to touch
+            # the binary, and the override branch has returned long since
+            # (nothing installs or updates over a hand-managed yt-dlp).
+            checked = self._check_for_newer(current, floor)
+            if checked is not None:
+                return checked
 
             return self._publish(True, current, ACTION_NONE, f"yt-dlp {current} is current")
 

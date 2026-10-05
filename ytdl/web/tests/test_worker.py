@@ -1312,14 +1312,22 @@ def test_a_bot_check_while_searching_stops_the_job_and_names_the_escape_hatch(
 def test_a_bot_check_while_enriching_stops_the_job(
         con, job, fake_claude, fake_youtube):
     """Metadata failures arrive as a per-row `error` string, not an exception --
-    forty of them read as forty dead videos."""
+    forty of them read as forty dead videos.
+
+    Narrowed by CR-360 (2026-10-05): the job still FAILS only when nothing
+    anywhere gave a duration -- here the search entries carry none, as the
+    fake's always used to. A search page that did is
+    tests/test_bot_checked_metadata.py."""
     _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa', 'bbbbbbbbbbb']},
-          meta={'aaaaaaaaaaa': {'error': _BOT_MSG}})
+          meta={'aaaaaaaaaaa': {'error': _BOT_MSG},
+                'bbbbbbbbbbb': {'error': _BOT_MSG}})
     worker.run_job(con, job['id'])
 
     fresh = db.get_job(con, job['id'])
     assert fresh['phase'] == 'failed'
     assert 'YTDL_COOKIES_FILE' in fresh['error']
+    # ...and the pass stopped asking at the first refusal
+    assert fake_youtube.enriched == ['aaaaaaaaaaa']
 
 
 def test_a_bot_check_while_downloading_stops_the_rest_of_the_queue(

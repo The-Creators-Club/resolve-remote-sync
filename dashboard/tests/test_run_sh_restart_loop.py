@@ -53,6 +53,7 @@ def build_world(tmp_path: Path, *, image_mode: bool, exits: list[str]) -> dict:
     log = tmp_path / "calls.log"
     pip_log = tmp_path / "pip.log"
     pypath_log = tmp_path / "pypath.log"
+    app_pypath_log = tmp_path / "app_pypath.log"
     counter = tmp_path / "counter"
     counter.write_text("0")
 
@@ -87,12 +88,34 @@ def build_world(tmp_path: Path, *, image_mode: bool, exits: list[str]) -> dict:
         'case "$1" in\n'
         f'  -) echo "MARKER $2 ok=$3 attempts=$4" >> "{log}"; exit 0 ;;\n'
         'esac\n'
+        # The yt-dlp nightly boot install (CR-361) is `-m ytdlweb.ytdlp_nightly
+        # install --root R`: answered here for the same reason as the marker.
+        # With STUB_NIGHTLY set it stages that version the way the real module
+        # does (versions/<v>/yt_dlp/version.py + `current`); STUB_NIGHTLY_EXIT
+        # makes it fail, which run.sh must shrug off.
+        'if [ "$1" = "-m" ] && [ "$2" = "ytdlweb.ytdlp_nightly" ]; then\n'
+        f'  echo "NIGHTLY $3 root=$5 PYTHONPATH=$PYTHONPATH" >> "{log}"\n'
+        '  if [ -n "${STUB_NIGHTLY:-}" ]; then\n'
+        '    mkdir -p "$5/versions/$STUB_NIGHTLY/yt_dlp"\n'
+        '    echo "__version__ = \'$STUB_NIGHTLY\'" > "$5/versions/$STUB_NIGHTLY/yt_dlp/version.py"\n'
+        '    echo "$STUB_NIGHTLY" > "$5/current"\n'
+        '  fi\n'
+        '  exit "${STUB_NIGHTLY_EXIT:-0}"\n'
+        'fi\n'
         f'echo "PYTHONPATH=$PYTHONPATH" >> "{pypath_log}"\n'
         'case "$1" in\n'
         f'  *select_code_root.py) echo "{tmp_path}/selected-root"; exit 0 ;;\n'
         "esac\n"
+        # Past the selection: from here on this IS an app launch, and
+        # app_pypath_log records only those (CR-361's tests read it).
+        f'echo "PYTHONPATH=$PYTHONPATH" >> "{app_pypath_log}"\n'
         f'n=$(cat "{counter}")\n'
         f'n=$((n + 1)); echo "$n" > "{counter}"\n'
+        # A one-shot hook run by the first app launch: how a test makes the
+        # running app "stage" something between two passes of the loop.
+        f'if [ -f "{tmp_path}/launch_hook.sh" ]; then\n'
+        f'  . "{tmp_path}/launch_hook.sh"; rm -f "{tmp_path}/launch_hook.sh"\n'
+        'fi\n'
         + "".join(f'if [ "$n" = "{i + 1}" ]; then exit {code}; fi\n'
                   for i, code in enumerate(exits))
         + "exit 0\n",
@@ -106,6 +129,7 @@ def build_world(tmp_path: Path, *, image_mode: bool, exits: list[str]) -> dict:
                 .replace("/data", data.as_posix()))
     script.write_text(text, encoding="utf-8", newline="\n")
     return {"script": script, "log": log, "pip_log": pip_log, "pypath_log": pypath_log,
+            "app_pypath_log": app_pypath_log,
             "venv": venv, "app": app, "data": data}
 
 
@@ -261,3 +285,122 @@ def test_run_sh_has_no_carriage_returns():
     MSYS grep strips a CR before matching -- so this is a byte scan
     (.gitattributes, 2026-08-10)."""
     assert b"\r" not in RUN_SH.read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# CR-361 (2026-10-05): the yt-dlp nightly beside the image's pinned copy
+# ---------------------------------------------------------------------------
+
+NIGHTLY = "2026.09.27.232945"
+
+
+def _app_paths(world) -> list[str]:
+    log = world["app_pypath_log"]
+    return [line for line in (log.read_text().splitlines() if log.exists() else [])
+            if line.startswith("PYTHONPATH=")]
+
+
+@pytest.mark.parametrize("image_mode", [True, False])
+def test_the_nightly_is_installed_at_boot_and_put_on_the_apps_path(tmp_path, image_mode):
+    """Installed under /data (a read-only /venv cannot take it, CR-84) and
+    LAST on PYTHONPATH -- every PYTHONPATH entry is ahead of site-packages,
+    so it shadows the pinned yt-dlp without getting a vote on where `app`,
+    `musicweb` or `ytdlweb` come from. The RESOLVED versions/<v> directory,
+    never the `current` pointer: a refresh while the app runs must not move
+    files under a live import."""
+    world = build_world(tmp_path, image_mode=image_mode, exits=["0"])
+    proc = run(world, DASH_SITE_YOUTUBE_DOWNLOAD="1", STUB_NIGHTLY=NIGHTLY)
+    assert proc.returncode == 0, proc.stderr
+    root = world["data"] / "ytdlp-nightly"
+    calls = [c for c in world["log"].read_text().splitlines() if c.startswith("NIGHTLY ")]
+    assert len(calls) == 1, calls
+    assert f"install root={root.as_posix()}" in calls[0]
+    # the image's own module, with nothing but /ytdl-app on the path
+    assert calls[0].endswith("PYTHONPATH=/ytdl-app"), calls[0]
+    paths = _app_paths(world)
+    assert paths, "the app was never started"
+    for line in paths:
+        assert line.endswith(f":{root.as_posix()}/versions/{NIGHTLY}"), line
+        assert "current" not in line
+
+
+def test_no_youtube_signal_means_no_install_but_an_installed_nightly_still_counts(tmp_path):
+    """The vendor build asks PyPI for nothing. A nightly the app's daily
+    refresh staged earlier (a site that turned the downloader on from
+    Settings, which sets no env var) is still what the next start imports."""
+    world = build_world(tmp_path, image_mode=True, exits=["0"])
+    root = world["data"] / "ytdlp-nightly"
+    (root / "versions" / NIGHTLY / "yt_dlp").mkdir(parents=True)
+    (root / "versions" / NIGHTLY / "yt_dlp" / "version.py").write_text("x\n")
+    (root / "current").write_text(NIGHTLY + "\n")
+    proc = run(world, DASH_SITE_YOUTUBE_DOWNLOAD="0", DASH_SITE_YOUTUBE_UNBLOCK="0")
+    assert proc.returncode == 0, proc.stderr
+    assert not any(c.startswith("NIGHTLY ")
+                   for c in world["log"].read_text().splitlines())
+    assert all(p.endswith(f"/versions/{NIGHTLY}") for p in _app_paths(world))
+
+
+def test_the_switch_turns_it_all_off(tmp_path):
+    world = build_world(tmp_path, image_mode=True, exits=["0"])
+    root = world["data"] / "ytdlp-nightly"
+    (root / "versions" / NIGHTLY / "yt_dlp").mkdir(parents=True)
+    (root / "versions" / NIGHTLY / "yt_dlp" / "version.py").write_text("x\n")
+    (root / "current").write_text(NIGHTLY + "\n")
+    proc = run(world, DASH_SITE_YOUTUBE_DOWNLOAD="1", YTDL_YTDLP_NIGHTLY="0",
+               STUB_NIGHTLY=NIGHTLY)
+    assert proc.returncode == 0, proc.stderr
+    assert not any(c.startswith("NIGHTLY ")
+                   for c in world["log"].read_text().splitlines())
+    assert not any("ytdlp-nightly" in p for p in _app_paths(world))
+
+
+@pytest.mark.parametrize("pointer", ["../../etc", ".", "..", "2026.09.27/../x", "", "abc"])
+def test_a_pointer_that_is_not_a_bare_version_is_ignored(tmp_path, pointer):
+    world = build_world(tmp_path, image_mode=True, exits=["0"])
+    root = world["data"] / "ytdlp-nightly"
+    root.mkdir(parents=True)
+    (root / "current").write_text(pointer + "\n")
+    proc = run(world)
+    assert proc.returncode == 0, proc.stderr
+    assert not any("ytdlp-nightly" in p for p in _app_paths(world))
+
+
+def test_a_pointer_to_a_missing_build_is_ignored(tmp_path):
+    """`current` naming a directory that is not there (or holds no yt_dlp)
+    must leave the app on the pinned copy, not on an empty path entry."""
+    world = build_world(tmp_path, image_mode=True, exits=["0"])
+    root = world["data"] / "ytdlp-nightly"
+    root.mkdir(parents=True)
+    (root / "current").write_text(NIGHTLY + "\n")
+    proc = run(world)
+    assert proc.returncode == 0, proc.stderr
+    assert not any("ytdlp-nightly" in p for p in _app_paths(world))
+    assert not any(p.endswith(":") or "::" in p for p in _app_paths(world))
+
+
+def test_a_failed_nightly_install_never_stops_the_boot(tmp_path):
+    world = build_world(tmp_path, image_mode=True, exits=["0"])
+    proc = run(world, DASH_SITE_YOUTUBE_DOWNLOAD="1", STUB_NIGHTLY_EXIT="1")
+    assert proc.returncode == 0, proc.stderr
+    assert _app_paths(world), "the app must still start on the pinned yt-dlp"
+    assert not any("ytdlp-nightly" in p for p in _app_paths(world))
+
+
+def test_an_exit_75_restart_picks_up_a_nightly_staged_while_the_app_ran(tmp_path):
+    """The restart semantics, end to end: the running app's daily refresh
+    moves `current`; the app is NOT restarted for it; the next start the
+    loop makes (an OTA's exit 75 here) imports the new build."""
+    world = build_world(tmp_path, image_mode=True, exits=["75", "0"])
+    root = world["data"] / "ytdlp-nightly"
+    newer = "2026.10.04.232901"
+    (tmp_path / "launch_hook.sh").write_text(
+        f'mkdir -p "{root.as_posix()}/versions/{newer}/yt_dlp"\n'
+        f'echo x > "{root.as_posix()}/versions/{newer}/yt_dlp/version.py"\n'
+        f'echo {newer} > "{root.as_posix()}/current"\n',
+        encoding="utf-8", newline="\n")
+    proc = run(world, DASH_SITE_YOUTUBE_DOWNLOAD="1", STUB_NIGHTLY=NIGHTLY)
+    assert proc.returncode == 0, proc.stderr
+    paths = _app_paths(world)
+    assert len(paths) == 2, paths
+    assert paths[0].endswith(f"/versions/{NIGHTLY}"), paths[0]
+    assert paths[1].endswith(f"/versions/{newer}"), paths[1]

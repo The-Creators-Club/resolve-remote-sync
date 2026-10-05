@@ -268,7 +268,8 @@ def test_an_installed_but_unreadable_binary_is_rechecked_soon(monkeypatch):
     monkeypatch.setattr(ytdlp_mod, "version", lambda **kw: next(versions))
     monkeypatch.setattr(mgr, "install", lambda: True)
     monkeypatch.setattr(mgr, "fetch_min_version", lambda: None)
-    monkeypatch.setattr(mgr, "_enforce_max_age", lambda current, floor: None)
+    # CR-361 renamed the max-age rule to the daily nightly check.
+    monkeypatch.setattr(mgr, "_check_for_newer", lambda current, floor: None)
     ok_side = {"ok": True, "action": "none", "message": "none"}
     monkeypatch.setattr(sidecar_tools, "ensure", lambda *a, **k: ok_side)
     seen = []

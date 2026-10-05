@@ -45,7 +45,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ytdlweb import (attestation, claude_cli, config, db, projects, worker,
-                     ytdl_canary, ytdl_evidence)
+                     ytdl_canary, ytdl_evidence, ytdlp_nightly)
 from ytdlweb.db import con
 from ytdlweb.session import current_user
 from ytdlweb.vendor import downloader, ytsearch
@@ -207,6 +207,12 @@ def health_snapshot(app_or_state=None, *, allow_probe=True):
         'yt_dlp_age_days': _yt_dlp_age_days(),
         'yt_dlp_stale': _yt_dlp_is_stale(),
         'yt_dlp_age_detail': _yt_dlp_age_detail(),
+        # CR-361 (2026-10-05): the nightly kept beside the image's pinned
+        # copy. `running` is the version above (what this process actually
+        # imported); `installed` is what the next process start will import;
+        # `pending_restart` says a newer build is waiting for one, because a
+        # refresh never swaps yt-dlp under a live process.
+        'yt_dlp_nightly': _yt_dlp_nightly_state(),
         # 'none' | 'empty' | 'present' -- what the jar HOLDS, next to the old
         # boolean that only says a path is configured. CR-80's fix parked the
         # flagged jar as its two header lines with the path still set.
@@ -240,6 +246,16 @@ def _yt_dlp_version():
         return str(yt_dlp.version.__version__ or '')
     except Exception:  # noqa: BLE001
         return ''
+
+
+def _yt_dlp_nightly_state():
+    """ytdlp_nightly.health_state for the running yt-dlp. Never raises."""
+    try:
+        return ytdlp_nightly.health_state(_yt_dlp_version())
+    except Exception:  # noqa: BLE001 - health must never 500
+        log.debug('yt-dlp nightly state unreadable', exc_info=True)
+        return {'state': 'unknown', 'installed': '', 'running': _yt_dlp_version(),
+                'pending_restart': False, 'at': '', 'error': '', 'note': ''}
 
 
 def _yt_dlp_age_days():
@@ -287,11 +303,20 @@ def _yt_dlp_age_detail():
                 f'this can age, so nothing here can tell you whether it is stale')
     limit = config.YTDLP_MAX_AGE_DAYS
     line = f'the running yt-dlp is {age} days old ({version})'
+    # CR-361: a newer nightly already installed and waiting for the next
+    # restart is the answer to "old", so it is said in the same line.
+    nightly = _yt_dlp_nightly_state()
+    waiting = ''
+    if nightly.get('pending_restart'):
+        waiting = (f'. A newer build, {nightly.get("installed")}, is installed '
+                   'and is used after the next dashboard restart.')
     if limit > 0 and age > limit:
+        if waiting:
+            return line + f', past the {limit} day limit' + waiting
         return (line + f', past the {limit} day limit. YouTube breaks yt-dlp '
                 'deliberately, so update the copy on this server before '
                 'downloads start failing.')
-    return line
+    return line + waiting
 
 
 def _newest(paths, source):

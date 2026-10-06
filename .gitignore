@@ -61,3 +61,8 @@ tools/.ship-state.json
 # one line per clip). Reproducible from the tree; never the same twice.
 broll/indexer/proxy-prepass-*.jsonl
 broll/indexer/run_backcatalogue.log
+
+# CI test reports (ci.yml --junitxml=../junit-<suite>.xml), written into the
+# checkout before the tools suite runs: never source, and an untracked file
+# here reads as an unmapped path to tools/test_map.toml (2026-10-06)
+/junit-*.xml

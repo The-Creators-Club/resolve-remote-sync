@@ -658,9 +658,14 @@ def test_ci_step_with_no_bash_tests_is_a_failure(tmp_path):
 
 
 def _macos_row():
+    # The whole row, its -Changed guard included (2026-10-06, MODULAR_UPDATES
+    # M1 wrapped every row in `if ($null -ne (Get-PlanTargets ...)) { } else
+    # { $notSelected += ... }`): a slice from the banner to the next blank
+    # Write-Host now cut through that if and parsed as nothing.
     text = (TOOLS / "run_all_tests.ps1").read_text(encoding="utf-8")
-    start = text.index('Write-Host "`n=== installer/macos')
-    end = text.index('Write-Host ""', start)
+    start = text.index('if ($null -ne (Get-PlanTargets "installer/macos"))')
+    tail = 'else { $notSelected += "installer/macos" }'
+    end = text.index(tail, start) + len(tail)
     return text[start:end]
 
 
@@ -671,6 +676,9 @@ def _run_macos_row(tmp_path):
         f"$repo = '{tmp_path}'\n"
         f"$bashExe = '{BASH}'\n"
         "$results = @()\n"
+        "$notSelected = @()\n"
+        # no -Changed plan: every row runs, as in the no-flag run
+        "function Get-PlanTargets($name) { return ,@('tests') }\n"
         + _macos_row()
         + "\nforeach ($r in $results) { Write-Output (\"ROW \" + $r.Name + \" \" + $r.Outcome) }\n",
         encoding="utf-8",

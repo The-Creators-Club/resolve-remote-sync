@@ -531,3 +531,56 @@ matters for memory and threads but not for `cards_tunnel._routed`, whose
 whole point is two identities. And no agent was connected, so the
 release/reload handshake is still the thing that has never run live (CLAUDE.md
 says FF5lab first, and it still means it).
+
+## 13. The installed app opens on the landing page (2026-10-06)
+
+Alex: "the mobile app should default to taking you first to the cards page of
+the dash so you can choose which to open. Right now on mobile once you're in a
+cut file there's no way to back out without quitting and going through the
+browser to /dash".
+
+**Before.** An episode page links `manifest.webmanifest` document-relative,
+and until today that reached the ENGINE, whose `render_manifest()` says
+`id`/`start_url`/`scope` `"."`. Under `/cards/p/<slug>/` that made an app
+installed from a cut file open on that cut file for ever, with `/cards/`
+outside its scope. The landing page linked the DASHBOARD's manifest (through
+`shell.html`), and `/cards/manifest.webmanifest` (id `/cards/`) was linked by
+nothing.
+
+**Now.** `cards_landing.app_manifest()` is the one Cards app manifest:
+the checkout's own look (fullscreen, portrait, colours, name) with
+`id`/`start_url`/`scope` all `/cards/` and the icon at `/cards/icon.svg`. It
+answers at `/cards/manifest.webmanifest` AND at
+`/cards/p/<slug>/manifest.webmanifest` (a route ahead of the mount, open or
+closed episode alike), and the landing page links it in place of the
+dashboard's (`{% block manifest %}` in `shell.html`). The standalone server
+is untouched: there `"."` is the whole origin and there is no landing.
+
+**The id is `/cards/`, not the old `"."`, on purpose.** A manifest id is
+resolved against the ORIGIN of `start_url`, not the page, so the engine's
+`"."` was always `https://<dash>/`: the dashboard app's own id
+(`static/manifest.webmanifest`). Keeping it while moving `start_url` to the
+landing would make the landing page's manifest (the dashboard's, same id) a
+valid update source, and the first update check would turn the Cards icon
+into a "CC Sync" app opening on `/`.
+
+**On the phone: install it once more.** Every Cards app installed so far
+carries the old id `https://<dash>/`: one installed from an episode page, and
+one installed from the flat `/cards/` page before the pool (that page was the
+engine's too, with the same `"."`). Chrome will not update either into this
+one. Remove the old Cards icon (long-press, Uninstall / Remove), open
+`/cards/` in Chrome, menu, Add to Home screen / Install.
+
+**The way out of a cut file** is the Cards page's (MulticamPipeline
+`page/01-state.js` `cardsHome`, `tests/test_cards_home.js`): the header's
+link and a row at the top of the drawer (the phone has no header; the gear
+opens the drawer) go to `<prefix>/cards/`. Offline they refuse with a line
+instead of leaving.
+
+**What this costs offline.** The landing page is the server's page and no
+service worker serves it (`/cards/sw.js` is the kill switch, the dashboard's
+worker passes `/cards/` through). An app launched with no network now shows
+the browser's offline page instead of the cached cut file; an episode already
+open in the app keeps working offline exactly as before. Launching straight
+into the last cut while offline would need a worker at the `/cards/` scope,
+which is the thing the kill switch exists to prevent; not attempted.

@@ -421,6 +421,95 @@ def test_the_flat_manifest_and_icon_stay_open_for_an_older_install(landing):
     assert client.get("/cards/icon.svg", follow_redirects=False).status_code == 200
 
 
+# ------------------------------------- the installed app opens on /cards/
+# Alex, 2026-10-06: "the mobile app should default to taking you first to the
+# cards page of the dash so you can choose which to open". An episode page's
+# manifest used to come from its engine with start_url/scope "." - i.e. the
+# cut file, for ever, with /cards/ outside the app.
+
+
+def test_an_episode_page_installs_the_one_app_that_opens_on_the_landing(landing):
+    client, app, roots = landing
+    entry = open_episode(app, roots[0])
+    client.cookies.clear()           # a manifest is fetched with no cookie
+    resp = client.get(f"/cards/p/{entry.slug}/manifest.webmanifest",
+                      follow_redirects=False)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["start_url"] == "/cards/"
+    assert data["scope"] == "/cards/"      # every /cards/p/<slug>/ inside it
+    # NOT "." and NOT "/": an id resolves against the ORIGIN, so either of
+    # those is the dashboard's own app id (static/manifest.webmanifest).
+    assert data["id"] == "/cards/"
+    assert data == client.get("/cards/manifest.webmanifest").json()
+    assert all(icon["src"] == "/cards/icon.svg" for icon in data["icons"])
+
+
+def test_the_episode_manifest_answers_with_the_episode_closed(landing):
+    """It names no episode, and the engine is not asked: a phone checking
+    for an app update must not 303 to the landing page or 409."""
+    client, app, roots = landing
+    slug = cards_pool.slug_for(str(roots[1]))
+    assert app.state.cards_pool.get(slug) is None
+    client.cookies.clear()
+    resp = client.get(f"/cards/p/{slug}/manifest.webmanifest",
+                      follow_redirects=False)
+    assert resp.status_code == 200
+    assert resp.json()["start_url"] == "/cards/"
+
+
+def test_the_episode_manifest_route_takes_only_a_slug(landing):
+    client, _, _ = landing
+    resp = client.get("/cards/p/Not_A_Slug/manifest.webmanifest",
+                      follow_redirects=False)
+    assert resp.status_code == 404
+
+
+def test_the_landing_page_links_the_cards_app_not_the_dashboard(landing):
+    """The page an installed app launches on is the one Chrome reads for the
+    app's update check. The dashboard's manifest here would rewrite the
+    Cards icon into a CC Sync app opening on `/`."""
+    client, _, _ = landing
+    page = client.get("/cards/").text
+    assert '<link rel="manifest" href="/cards/manifest.webmanifest">' in page
+    assert 'href="/manifest.webmanifest"' not in page
+
+
+def test_every_other_page_still_links_the_dashboard_manifest(landing):
+    client, _, _ = landing
+    page = client.get("/").text
+    assert '<link rel="manifest" href="/manifest.webmanifest">' in page
+    assert "/cards/manifest.webmanifest" not in page
+
+
+def test_the_app_looks_the_way_the_checkout_designed_it(monkeypatch):
+    """Fullscreen and portrait come from the Cards repo's own manifest; only
+    the identity, front door and scope are the dashboard's."""
+    import json
+    import sys
+    import types
+
+    from ccsync_dashboard import cards_landing
+
+    page = types.ModuleType("multicam_pipeline.cards.page")
+    page.render_manifest = lambda: json.dumps({
+        "name": "Timeline Cards", "id": ".", "start_url": ".", "scope": ".",
+        "display": "fullscreen", "orientation": "portrait",
+        "icons": [{"src": "icon.svg"}]})
+    pkg = types.ModuleType("multicam_pipeline")
+    sub = types.ModuleType("multicam_pipeline.cards")
+    sub.page = page
+    pkg.cards = sub
+    monkeypatch.setitem(sys.modules, "multicam_pipeline", pkg)
+    monkeypatch.setitem(sys.modules, "multicam_pipeline.cards", sub)
+    monkeypatch.setitem(sys.modules, "multicam_pipeline.cards.page", page)
+    data = cards_landing.app_manifest()
+    assert data["display"] == "fullscreen"
+    assert data["orientation"] == "portrait"
+    assert (data["id"], data["start_url"], data["scope"]) == ("/cards/",) * 3
+    assert all(icon["src"] == "/cards/icon.svg" for icon in data["icons"])
+
+
 def test_the_open_pattern_never_widens_past_those_three():
     """The pattern is the thing that could quietly open the whole page."""
     from ccsync_dashboard.app import _open_path

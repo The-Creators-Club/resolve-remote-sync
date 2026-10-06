@@ -30,7 +30,11 @@
   <link rel="stylesheet" href="{{ asset_url('cc/components.css') }}">
   <link rel="stylesheet" href="{{ asset_url('cc/phone.css') }}">
   {% block head %}{% endblock %}
+  {# A block since 2026-10-06: /cards/ links the Timeline Cards app's own
+     manifest instead (cards_landing.APP_ID says why it has to). #}
+  {% block manifest %}
   <link rel="manifest" href="/manifest.webmanifest">
+  {% endblock %}
   {# theme-color is the terminal --bg, so the phone's status bar matches. #}
   <meta name="theme-color" content="#070403">
   <meta name="apple-mobile-web-app-capable" content="yes">

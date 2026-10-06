@@ -490,26 +490,98 @@ def cards_sw(request: Request) -> Response:
                     headers={"cache-control": "no-cache"})
 
 
+# The installed phone app is ONE app whose front door is this landing page
+# (Alex, 2026-10-06: "the mobile app should default to taking you first to the
+# cards page of the dash so you can choose which to open. Right now on mobile
+# once you're in a cut file there's no way to back out"). Until today each
+# episode page's manifest came from its engine, relative: `start_url` and
+# `scope` "." resolved to `/cards/p/<slug>/`, so an app installed from a cut
+# file opened on that cut file for ever, and `/cards/` was OUTSIDE its scope.
+#
+# THE ID IS "/cards/" AND NOT THE ENGINE'S ".", deliberately. A manifest `id`
+# is resolved against the ORIGIN of start_url, not against the manifest or
+# the page (W3C appmanifest, "processing the id member"; Chrome does the
+# same), so the engine's "." has always meant `https://<dash>/` -- the very id
+# the dashboard's own manifest claims (static/manifest.webmanifest, "id": "/").
+# Keeping it would make the landing page, which links the DASHBOARD's
+# manifest through shell.html, a valid update source for the Cards app: the
+# first update check after start_url moved here would turn the installed
+# Cards icon into a "CC Sync" app opening on `/`. "/cards/" is the id this
+# route has carried since 2026-09-14 (linked by nothing until today). Every
+# Cards app installed before today carries the engine's id, so a phone
+# installs it once more (docs/CARDS_TWO_PROJECTS.md section 13).
+APP_ID = "/cards/"
+APP_START = "/cards/"
+APP_SCOPE = "/cards/"
+
+
+def app_manifest() -> dict:
+    """The Cards app's manifest, served at `/cards/` AND under every episode.
+
+    The checkout's `render_manifest()` is the source of what the app LOOKS
+    like (fullscreen, portrait, its colours, its name), so the phone app is
+    the one the Cards repo designed; this only moves its identity, front door
+    and scope onto the dashboard's layout. Imported lazily and by name, like
+    the icon: this answers before any engine exists, and a checkout that
+    cannot be imported must still leave the app installable.
+    """
+    data: dict = {
+        "name": "Timeline Cards", "short_name": "Cards",
+        "description": "Which episode, and which cut list.",
+        "display": "standalone",
+        "background_color": "#0b0b0b", "theme_color": "#0b0b0b",
+    }
+    try:
+        from multicam_pipeline.cards import page as cards_page
+
+        theirs = json.loads(cards_page.render_manifest())
+        if isinstance(theirs, dict):
+            data.update(theirs)
+    except Exception:  # noqa: BLE001 - the fallback is the point
+        pass
+    data.update({
+        "id": APP_ID, "start_url": APP_START, "scope": APP_SCOPE,
+        # Absolute, and the landing's own route: a relative `icon.svg` under
+        # an episode prefix would resolve to the ENGINE's icon, which answers
+        # only while that episode is open.
+        "icons": [{"src": "/cards/icon.svg", "sizes": "any",
+                   "type": "image/svg+xml", "purpose": "any"},
+                  {"src": "/cards/icon.svg", "sizes": "any",
+                   "type": "image/svg+xml", "purpose": "maskable"}],
+    })
+    return data
+
+
+def _manifest_response() -> Response:
+    return Response(json.dumps(app_manifest(), ensure_ascii=False),
+                    media_type="application/manifest+json; charset=utf-8",
+                    headers={"cache-control": "no-cache"})
+
+
 @router.get("/cards/manifest.webmanifest", include_in_schema=False)
 def cards_manifest(request: Request) -> Response:
-    """The LANDING page's manifest, for a phone that installed `/cards/`.
+    """The app's manifest, as linked by the landing page itself.
 
     Fetched without the session cookie (which is why app.py keeps this path
-    open, CR-100), and it names nothing a login page would not: an app that
-    was installed before the episodes existed opens the landing page and
-    chooses one. Each episode's own manifest is served by its engine under
-    its own prefix, with `id`/`scope`/`start_url` relative -- so an episode
-    installed from the phone is its own app, which is what a person means
-    when they install two.
+    open, CR-100), and it names nothing a login page would not.
     """
-    return Response(json.dumps({
-        "name": "Timeline Cards", "short_name": "Cards", "id": "/cards/",
-        "description": "Which episode, and which cut list.",
-        "start_url": "/cards/", "scope": "/cards/", "display": "standalone",
-        "background_color": "#0b0b0b", "theme_color": "#0b0b0b",
-        "icons": [{"src": "/cards/icon.svg", "sizes": "any",
-                   "type": "image/svg+xml", "purpose": "any maskable"}],
-    }), media_type="application/manifest+json; charset=utf-8")
+    return _manifest_response()
+
+
+@router.get("/cards/p/{slug}/manifest.webmanifest", include_in_schema=False)
+def cards_episode_manifest(slug: str) -> Response:
+    """The SAME manifest under an episode's prefix (2026-10-06).
+
+    The page links `manifest.webmanifest` document-relative, which lands
+    here, ahead of the mount, instead of on the engine: an episode page
+    installs the one Cards app, opening on the landing page with every
+    episode inside its scope. Served whether or not the episode is open --
+    it names no episode. Open to the login gate through app._OPEN_PATTERN,
+    GET only, exactly as the engine's copy was.
+    """
+    if not cards_pool.is_slug(slug):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return _manifest_response()
 
 
 _ICON = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'

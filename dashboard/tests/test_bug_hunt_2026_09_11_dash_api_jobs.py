@@ -60,6 +60,18 @@ def env(tmp_path):
     app = create_app(settings)
     app.state.credential_verifier = lambda s, u, p: p == "pw"
     with TestClient(app) as client:
+        # THE REAL COLLECTOR IS STOPPED (2026-10-06, M0 of MODULAR_UPDATES.md:
+        # CI red on 0.7.72/0.7.73 with `'failed' == 'requested'`). Every test
+        # here runs on the fixed clock NOW, and the collector's first cycle
+        # runs db.prune -> expire_leases on the WALL clock, on its own thread.
+        # A lease taken at NOW expired weeks before the real date, so when
+        # that cycle landed between the test's claim and its cancel it
+        # correctly re-queued the job, and the cancel then answered "failed"
+        # (queued) instead of "requested" (held). Windows happened to lose
+        # that race and the Linux runner won it. stop() joins the thread, and
+        # nothing is queued before it returns, so a cycle that ran in the gap
+        # has nothing to move. Same pattern as test_alerts.py's fixture.
+        client.app.state.collector.stop()
         conn = dbmod.connect(settings.db_path)
         yield client, conn, settings
         conn.close()

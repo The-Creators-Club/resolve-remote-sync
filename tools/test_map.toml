@@ -1,0 +1,643 @@
+# The one path -> tests map. docs/MODULAR_UPDATES.md Part A, phase M1
+# (2026-10-06). Read by tools/select_suites.py; checked by
+# tools/tests/test_test_map.py.
+#
+# HOW IT IS READ
+#   * [[area]] rows are tried IN FILE ORDER and the FIRST match wins, so the
+#     narrow rows (the version stamp, the shared files that force the full
+#     gate) come before the broad ones they carve out of.
+#   * A path no row matches selects the FULL gate. That is the map's bug,
+#     never a reason to skip tests -- and test_test_map.py fails on any
+#     tracked file that is unmapped, so it stays an exception.
+#   * tier: neutral        -> smoke set only (+ the row's own tests)
+#           scoped         -> the row's suites and tests, plus smoke
+#           dashboard-wide -> [tiers] dashboard-wide, plus the row's own, plus smoke
+#           full           -> every suite and every [[full_check]]
+#   * suites = whole suites; tests = repo-relative globs of test FILES.
+#     `**` spans directories, `*` does not.
+#
+# HOW IT IS KEPT TRUE
+#   `python tools/select_suites.py --audit` walks every test file's imports
+#   and the repo paths it names in string literals, and prints the row to
+#   change for every test a change would NOT select. test_test_map.py runs it.
+#   A new cross-tree test lands with its row here, or the tools suite fails.
+
+# ---------------------------------------------------------------- the suites
+# Exactly the rows tools/run_all_tests.ps1 runs (test_test_map.py pins the two
+# lists equal). `files` names the suite's test files; `runner = "script"` rows
+# are run whole or not at all.
+
+[suites.companion]
+dir = "companion"
+files = ["companion/tests/**/test_*.py"]
+
+[suites.dashboard]
+dir = "dashboard"
+files = ["dashboard/tests/**/test_*.py"]
+
+[suites.server]
+dir = "server"
+files = ["server/tests/**/test_*.py"]
+
+[suites.onboarding]
+dir = "onboarding"
+files = ["onboarding/tests/**/test_*.py"]
+
+[suites.bench]
+dir = "bench"
+files = ["bench/tests/**/test_*.py"]
+
+[suites."broll/web"]
+dir = "broll/web"
+files = ["broll/web/tests/**/test_*.py"]
+
+[suites."broll/indexer"]
+dir = "broll/indexer"
+files = ["broll/indexer/tests/**/test_*.py"]
+
+[suites."music/web"]
+dir = "music/web"
+files = ["music/web/tests/**/test_*.py"]
+
+[suites."music/indexer"]
+dir = "music/indexer"
+files = ["music/indexer/tests/**/test_*.py"]
+
+[suites."ytdl/web"]
+dir = "ytdl/web"
+files = ["ytdl/web/tests/**/test_*.py"]
+
+[suites.tools]
+dir = "tools"
+files = ["tools/tests/**/test_*.py"]
+
+[suites.installer]
+dir = "installer"
+runner = "script"
+files = ["installer/tests/Test-*.ps1"]
+
+[suites."installer/macos"]
+dir = "installer"
+runner = "script"
+files = ["installer/tests/test_*.sh"]
+
+# ------------------------------------------------------------------ the tiers
+# dashboard-wide: the dashboard suite plus every suite that imports
+# ccsync_dashboard (A.1). Not companion, onboarding, bench, the indexers or
+# the installer. `full` is every suite above and is not listed.
+[tiers]
+dashboard-wide = ["dashboard", "broll/web", "music/web", "ytdl/web", "tools", "server"]
+
+# The two non-pytest checks the full gate adds (A.1 tier 4). Run from the
+# repo root under the dashboard venv, as CLAUDE.md's "part of the gate" line
+# says. CI runs check_licenses with --strict, where every lock is installed;
+# here it is not, so it is the warning-level run.
+[[full_check]]
+name = "licenses"
+argv = ["tools/check_licenses.py"]
+
+[[full_check]]
+name = "notices"
+argv = ["tools/gen_notices.py", "--check"]
+
+# ------------------------------------------------------------- the smoke set
+# A.2: runs whatever changed. Small, fast, and aimed at the seams between the
+# modules, which is exactly what a scoped run would otherwise miss. M0 holds
+# it to a two-minute budget; split a slow file rather than drop it.
+[smoke]
+tests = [
+    # boot and mounts
+    "dashboard/tests/test_smoke_boot.py",
+    "dashboard/tests/test_mount_status.py",
+    "dashboard/tests/test_broll_mount.py",
+    "dashboard/tests/test_music_mount.py",
+    "dashboard/tests/test_ytdl_mount.py",
+    "dashboard/tests/test_cards_mount.py",
+    "dashboard/tests/test_secrets_boot.py",
+    # cross-module contracts: document-relative URLs under each mount, and the
+    # identity / fleet-auth copies ("MUST NOT DRIFT") each sub-app carries.
+    # The module-API range test (B.3) joins this list with M4.
+    "broll/web/tests/test_mounted_prefix.py",
+    "music/web/tests/test_mounted_prefix.py",
+    "ytdl/web/tests/test_mounted_prefix.py",
+    "broll/web/tests/test_fleet_credentials.py",
+    "ytdl/web/tests/test_fleet_credentials.py",
+    "music/web/tests/test_fleet_ingest.py",
+    # owner rules: every suite's em-dash scan, and the docs index
+    "dashboard/tests/test_no_em_dash.py",
+    "broll/web/tests/test_no_em_dashes.py",
+    "music/web/tests/test_no_em_dashes.py",
+    "ytdl/web/tests/test_no_em_dash.py",
+    "tools/tests/test_docs_index.py",
+    # the map's own check: a new cross-tree test, or a file no area claims,
+    # fails the scoped run it arrives in rather than the nightly
+    "tools/tests/test_test_map.py",
+]
+
+# --------------------------------------------------------------- the import
+# roots the audit resolves `import x` against (after the test's own directory
+# and its suite's directory, which is where `python -m pytest` runs from).
+[audit]
+import_roots = [
+    "dashboard/src",
+    "companion/src",
+    "broll/web",
+    "music/web",
+    "ytdl/web",
+    "server",
+    "tools",
+    "onboarding",
+    "bench",
+    "broll/indexer",
+    "music/indexer",
+]
+
+# ================================================================== the areas
+
+# --- the version stamp ------------------------------------------------------
+# Every dashboard and companion commit bumps one of these. Neutral ONLY when
+# the diff of that file against the base is the VERSION line alone; anything
+# more falls through to the rows below (pyproject -> dependencies -> full,
+# __init__.py -> dashboard core, config.py -> companion).
+[[area]]
+name = "version stamp"
+tier = "neutral"
+version_line_only = true
+paths = [
+    "dashboard/src/ccsync_dashboard/__init__.py",
+    "dashboard/pyproject.toml",
+    "companion/src/ccsync_companion/config.py",
+    "companion/pyproject.toml",
+]
+# The two pins that say the two copies of each VERSION agree. The audit cannot
+# find these (it never treats a file as version-only), so they are named here:
+# a bump that moves one copy and not the other is exactly what a neutral run
+# must still catch.
+tests = [
+    "dashboard/tests/test_hardening.py",
+    "companion/tests/test_config.py",
+]
+
+# --- what forces the full gate (A.3) -----------------------------------------
+
+[[area]]
+name = "the gate itself"
+tier = "full"
+why = "decides what the tests themselves mean"
+paths = [
+    "tools/test_map.toml",
+    "tools/select_suites.py",
+    "tools/run_all_tests.ps1",
+    "tools/ship*",
+    ".github/**",
+    "**/conftest.py",
+    ".gitattributes",
+]
+
+[[area]]
+name = "dependencies"
+tier = "full"
+why = "every lock and dependency list; a pyproject change beyond the VERSION line"
+paths = [
+    "**/requirements*.lock",
+    "**/requirements*.txt",
+    "**/requirements*.in",
+    "**/pyproject.toml",
+]
+
+[[area]]
+name = "shipped paperwork"
+tier = "full"
+why = "travels in the bundle and in three byte-identical EULA copies"
+paths = [
+    "docs/legal/**",
+    "companion/src/ccsync_companion/assets/EULA.md",
+    "onboarding/assets/EULA.md",
+    "LICENSE",
+]
+
+[[area]]
+name = "schema and data"
+tier = "full"
+why = "ytdl reads projects, machine_state and editor_media_project straight out of the dashboard's database"
+paths = [
+    "dashboard/src/ccsync_dashboard/db.py",
+    "dashboard/src/ccsync_dashboard/schema.sql",
+]
+
+[[area]]
+name = "process and routing"
+tier = "full"
+why = "boot, settings and the container; run.sh runs ytdlweb.ytdlp_nightly at boot"
+paths = [
+    "dashboard/src/ccsync_dashboard/app.py",
+    "dashboard/src/ccsync_dashboard/settings.py",
+    "dashboard/src/ccsync_dashboard/site_store.py",
+    "dashboard/src/ccsync_dashboard/secrets_boot.py",
+    "dashboard/src/ccsync_dashboard/mount_status.py",
+    "dashboard/deploy/**",
+    "ytdl/web/ytdlweb/ytdlp_nightly.py",
+    ".dockerignore",
+]
+
+[[area]]
+name = "auth"
+tier = "full"
+why = "the login gate and the identity every mount stamps"
+paths = [
+    "dashboard/src/ccsync_dashboard/auth.py",
+    "dashboard/src/ccsync_dashboard/sessions.py",
+    "dashboard/src/ccsync_dashboard/local_users.py",
+    "dashboard/src/ccsync_dashboard/oidc.py",
+    # the 8899 loopback's origin allow-list is the dashboard origin's contract
+    "companion/src/ccsync_companion/loopback_guard.py",
+]
+
+[[area]]
+name = "the shell"
+tier = "full"
+why = "every page extends shell.html and the SPAs fetch /partials/topbar"
+paths = [
+    "dashboard/src/ccsync_dashboard/ui.py",
+    "dashboard/src/ccsync_dashboard/ui_chrome.py",
+    "dashboard/src/ccsync_dashboard/ui_assets.py",
+    "dashboard/templates/shell.html",
+    "dashboard/templates/partials/topbar.html",
+    "dashboard/static/sw.js",
+    "dashboard/static/cc/cc.js",
+    "dashboard/static/cc/terminal.css",
+    "dashboard/static/cc/components.css",
+    "dashboard/static/cc/hud.css",
+    "dashboard/static/cc/phone.css",
+]
+
+[[area]]
+name = "AI and site switches"
+tier = "full"
+why = "the provider resolution every AI feature shares, and the [features] readers"
+paths = [
+    "dashboard/src/ccsync_dashboard/ai_providers.py",
+    "dashboard/src/ccsync_dashboard/cli_tools.py",
+    "site.example.toml",
+]
+
+# --- docs ---------------------------------------------------------------------
+# docs/legal/** is taken above. A doc a test READS is a dependency of that
+# test and gets a row of its own above this one (the audit finds them).
+
+[[area]]
+name = "docs a test reads"
+tier = "neutral"
+paths = [
+    "docs/HOW_IT_WORKS.md",
+]
+tests = [
+    "dashboard/tests/test_help_doc_matches_the_companion.py",
+    # found by select_suites.py --audit, 2026-10-06
+    "companion/tests/test_bug_hunt_2026_09_24_w2_c-resolve.py",
+    "dashboard/tests/test_bug_hunt_2026_09_11_dash_mounts_ui.py",
+    "dashboard/tests/test_bug_hunt_2026_09_24_w2_d-ops.py",
+    "dashboard/tests/test_help_page.py",
+    "dashboard/tests/test_legal_docs.py",
+    "server/tests/test_bug_hunt_2026_09_11b_server_tools.py",
+    "server/tests/test_bug_hunt_2026_09_18_webapps_tools.py",
+    "server/tests/test_image_mode.py",
+    "tools/tests/test_build_dashboard_bundle.py",
+]
+
+[[area]]
+name = "docs"
+tier = "neutral"
+paths = [
+    "docs/**",
+    "KNOWN_BUGS.md",
+    "SPEC.md",
+    "CLAUDE.md",
+    "*/README.md",
+    "*/*/README.md",
+    "broll/*.md",
+    "music/*.md",
+    "**/.gitignore",
+]
+tests = [
+    "tools/tests/test_docs_index.py",
+    # found by select_suites.py --audit, 2026-10-06
+    "companion/tests/test_bug_hunt_2026_09_24_w2_c-resolve.py",
+    "companion/tests/test_config.py",
+    "dashboard/tests/test_bug_hunt_2026_09_11_dash_mounts_ui.py",
+    "dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py",
+    "dashboard/tests/test_bug_hunt_2026_09_24_w2_d-api.py",
+    "dashboard/tests/test_dashboard_update.py",
+    "dashboard/tests/test_help_page.py",
+    "dashboard/tests/test_legal_docs.py",
+    "dashboard/tests/test_machine_settings_wire.py",
+    "dashboard/tests/test_notices_sweep_wave2.py",
+    "dashboard/tests/test_setup_engine.py",
+    "server/tests/test_bug_hunt_2026_09_11_server_tools.py",
+    "server/tests/test_bug_hunt_2026_09_11b_server_tools.py",
+    "server/tests/test_bug_hunt_2026_09_18_webapps_tools.py",
+    "server/tests/test_cards_snapshot.py",
+    "server/tests/test_image_mode.py",
+    "tools/tests/test_bug_hunt_2026_09_24_w2_release-tools.py",
+    "tools/tests/test_bug_hunt_2026_09_24_webapps_ops.py",
+    "tools/tests/test_build_dashboard_bundle.py",
+    "tools/tests/test_release_scripts.py",
+    "ytdl/web/tests/test_dedupe.py",
+]
+
+# --- components with nothing to deploy on the dashboard -----------------------
+
+[[area]]
+name = "companion"
+tier = "scoped"
+paths = ["companion/**"]
+suites = ["companion"]
+tests = [
+    "dashboard/tests/test_help_doc_matches_the_companion.py",
+    "dashboard/tests/test_jobs_contract.py",
+    "dashboard/tests/test_site_telemetry.py",
+    "dashboard/tests/test_report_optouts.py",
+    # found by select_suites.py --audit, 2026-10-06
+    "dashboard/tests/test_bug_hunt_2026_09_11b_dash_api.py",
+    "dashboard/tests/test_bug_hunt_2026_09_24_w2_d-diag.py",
+    "dashboard/tests/test_cr313_315_ruskin_phantoms.py",
+    "dashboard/tests/test_packages.py",
+    "dashboard/tests/test_release_channel.py",
+    "dashboard/tests/test_report_via.py",
+    "onboarding/tests/test_bug_hunt_2026_09_11_install_onboard.py",
+    "onboarding/tests/test_bug_hunt_2026_09_11b_install_onboard.py",
+    "onboarding/tests/test_bug_hunt_2026_09_18_webapps_tools.py",
+    "onboarding/tests/test_bug_hunt_2026_09_24_w2_onboarding.py",
+    "onboarding/tests/test_eula_step.py",
+    "onboarding/tests/test_legal_steps.py",
+    "onboarding/tests/test_site_manifest.py",
+    "onboarding/tests/test_site_prefix_handoff.py",
+    "onboarding/tests/test_steps.py",
+    "server/tests/test_cross_component.py",
+    "tools/tests/test_bug_hunt_2026_09_24_webapps_ops.py",
+    "tools/tests/test_build_dashboard_bundle.py",
+    "tools/tests/test_gen_notices.py",
+    "tools/tests/test_publish_feed.py",
+    "tools/tests/test_publish_package.py",
+    "tools/tests/test_release_notes_flag.py",
+    "tools/tests/test_scan_frozen.py",
+    "tools/tests/test_sign_release.py",
+    "ytdl/web/tests/test_bug_hunt_2026_09_24_w2_music-ytdl.py",
+]
+
+[[area]]
+name = "onboarding"
+tier = "scoped"
+paths = ["onboarding/**"]
+suites = ["onboarding"]
+tests = [
+    # found by select_suites.py --audit, 2026-10-06
+    "tools/tests/test_gen_notices.py",
+    "tools/tests/test_scan_frozen.py",
+]
+
+[[area]]
+name = "installer"
+tier = "scoped"
+paths = ["installer/**"]
+suites = ["installer", "installer/macos"]
+tests = [
+    # found by select_suites.py --audit, 2026-10-06
+    "companion/tests/test_config.py",
+    "companion/tests/test_rclone_stanza_rewrite.py",
+    "companion/tests/test_resolve_mapping_helper.py",
+    "dashboard/tests/test_bug_hunt_2026_09_11_dash_mounts_ui.py",
+    "onboarding/tests/test_bug_hunt_2026_09_24_w2_onboarding.py",
+    "onboarding/tests/test_macos_steps.py",
+    "onboarding/tests/test_release_gates.py",
+    "onboarding/tests/test_site_prefix_handoff.py",
+    "tools/tests/test_bug_hunt_2026_09_11b_server_tools.py",
+    "tools/tests/test_bug_hunt_2026_09_24_w2_release-tools.py",
+    "tools/tests/test_bug_hunt_2026_09_24_webapps_ops.py",
+    "tools/tests/test_gen_notices.py",
+    "tools/tests/test_release_scripts.py",
+    "tools/tests/test_scan_frozen.py",
+]
+
+[[area]]
+name = "server"
+tier = "scoped"
+paths = ["server/**"]
+suites = ["server"]
+tests = [
+    # found by select_suites.py --audit, 2026-10-06
+    "dashboard/tests/test_recovery.py",
+    "dashboard/tests/test_sweep_2026_09_04_copy.py",
+    "tools/tests/test_gen_notices.py",
+    "tools/tests/test_release_scripts.py",
+]
+
+[[area]]
+name = "bench"
+tier = "scoped"
+paths = ["bench/**"]
+suites = ["bench"]
+tests = [
+    # found by select_suites.py --audit, 2026-10-06
+    "server/tests/test_bug_hunt_2026_09_18_webapps_tools.py",
+]
+
+[[area]]
+name = "b-roll indexer"
+tier = "scoped"
+paths = [
+    "broll/indexer/**",
+    "broll/eval/**",
+    "broll/docs/**",
+    "broll/morning_report.py",
+]
+suites = ["broll/indexer"]
+tests = [
+    # found by select_suites.py --audit, 2026-10-06
+    "broll/web/tests/test_archive_names.py",
+    "broll/web/tests/test_normalize_parity.py",
+    "broll/web/tests/test_sprite_geometry.py",
+    "broll/web/tests/test_stale_vectors.py",
+    "companion/tests/test_broll_ingest_media.py",
+    "companion/tests/test_ffmpeg_tools.py",
+    "server/tests/test_cross_component.py",
+]
+
+[[area]]
+name = "music indexer"
+tier = "scoped"
+paths = [
+    "music/indexer/**",
+    "music/eval/**",
+]
+suites = ["music/indexer"]
+tests = [
+    # found by select_suites.py --audit, 2026-10-06
+    "companion/tests/test_music_clap_sidecar.py",
+    "music/web/tests/test_debias.py",
+    "music/web/tests/test_eval_sweep.py",
+    "music/web/tests/test_ingest_queue.py",
+    "music/web/tests/test_proxies.py",
+    "music/web/tests/test_rescore.py",
+    "music/web/tests/test_text_encoder.py",
+    "ytdl/web/tests/test_dedupe.py",
+]
+
+[[area]]
+name = "tools"
+tier = "scoped"
+paths = ["tools/**"]
+suites = ["tools"]
+
+# --- the three sub-apps the dashboard mounts in-process ------------------------
+tests = [
+    # found by select_suites.py --audit, 2026-10-06
+    "companion/tests/test_publish_password_hygiene.py",
+    "dashboard/tests/test_android.py",
+    "dashboard/tests/test_bug_hunt_2026_09_11_dash_mounts_ui.py",
+    "dashboard/tests/test_dashboard_update.py",
+    "dashboard/tests/test_mobile_origin.py",
+    "onboarding/tests/test_macos_steps.py",
+    "onboarding/tests/test_release_gates.py",
+]
+
+[[area]]
+name = "b-roll web"
+tier = "scoped"
+paths = [
+    "broll/web/**",
+    "broll/schema.sql",
+    "broll/migrations/**",
+]
+# broll/indexer's conftest builds its test database from broll/schema.sql,
+# so the indexer suite is part of a b-roll schema change.
+suites = ["broll/web", "broll/indexer"]
+tests = [
+    "dashboard/tests/test_broll_*.py",
+    # found by select_suites.py --audit, 2026-10-06
+    "broll/indexer/tests/test_bug_hunt_2026_09_18_webapps_tools.py",
+    "companion/tests/test_broll_ingest_media.py",
+    "dashboard/tests/test_cc_css_facts.py",
+    "dashboard/tests/test_legal_db.py",
+    "dashboard/tests/test_theme_css.py",
+    "dashboard/tests/test_ui_chrome.py",
+    "music/web/tests/test_cc_body.py",
+    "music/web/tests/test_theme_css.py",
+    "server/tests/test_broll_drain.py",
+    "server/tests/test_cross_component.py",
+    "tools/tests/test_build_dashboard_bundle.py",
+    "ytdl/web/tests/test_cc_body.py",
+    "ytdl/web/tests/test_theme_css.py",
+]
+
+[[area]]
+name = "music web"
+tier = "scoped"
+paths = ["music/web/**"]
+suites = ["music/web"]
+tests = [
+    "dashboard/tests/test_music_*.py",
+    # found by select_suites.py --audit, 2026-10-06
+    "broll/web/tests/test_cc_body.py",
+    "broll/web/tests/test_theme_css.py",
+    "dashboard/tests/test_cc_css_facts.py",
+    "dashboard/tests/test_theme_css.py",
+    "dashboard/tests/test_ui_chrome.py",
+    "music/indexer/tests/test_config_paths.py",
+    "music/indexer/tests/test_drain_failures.py",
+    "server/tests/test_cross_component.py",
+    "tools/tests/test_build_dashboard_bundle.py",
+    "ytdl/web/tests/test_cc_body.py",
+    "ytdl/web/tests/test_dedupe.py",
+    "ytdl/web/tests/test_theme_css.py",
+]
+
+[[area]]
+name = "ytdl web"
+tier = "scoped"
+paths = ["ytdl/web/**"]
+suites = ["ytdl/web"]
+tests = [
+    "dashboard/tests/test_ytdl_*.py",
+    # found by select_suites.py --audit, 2026-10-06
+    "broll/web/tests/test_cc_body.py",
+    "broll/web/tests/test_normalize_parity.py",
+    "broll/web/tests/test_theme_css.py",
+    "companion/tests/test_ytdl_executor.py",
+    "companion/tests/test_ytdl_feature_gate.py",
+    "dashboard/tests/test_cc_css_facts.py",
+    "dashboard/tests/test_dashboard_update.py",
+    "dashboard/tests/test_theme_css.py",
+    "dashboard/tests/test_ui_chrome.py",
+    "music/web/tests/test_cc_body.py",
+    "music/web/tests/test_theme_css.py",
+    "server/tests/test_cross_component.py",
+    "tools/tests/test_build_dashboard_bundle.py",
+]
+
+# --- the Cards integration (its engine is another repo) -----------------------
+
+[[area]]
+name = "Cards integration"
+tier = "scoped"
+paths = [
+    "dashboard/src/ccsync_dashboard/cards*.py",
+    "dashboard/templates/cards_landing.html",
+    "dashboard/static/cards_landing.js",
+    "dashboard/static/cc/cards_landing.css",
+]
+tests = [
+    "dashboard/tests/test_cards_*.py",
+    "dashboard/tests/test_cc_cards_landing.py",
+    "dashboard/tests/test_bug_hunt_2026_09_24_w2_d-cards*.py",
+    # found by select_suites.py --audit, 2026-10-06
+    "dashboard/tests/chaos/test_fault_injection_wave2.py",
+    "dashboard/tests/test_account_page.py",
+    "dashboard/tests/test_ai_providers.py",
+    "dashboard/tests/test_alerts.py",
+    "dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py",
+    "dashboard/tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py",
+    "dashboard/tests/test_bug_hunt_2026_09_18_dashboard.py",
+    "dashboard/tests/test_bug_hunt_2026_09_24_w2_d-diag.py",
+    "dashboard/tests/test_bug_hunt_2026_09_24_w2_d-ui.py",
+    "dashboard/tests/test_bug_hunt_2026_09_24_webapps_ops.py",
+    "dashboard/tests/test_cc_a11y_copy.py",
+    "dashboard/tests/test_cc_css_facts.py",
+    "dashboard/tests/test_cc_everyday.py",
+    "dashboard/tests/test_cc_home.py",
+    "dashboard/tests/test_cc_home_review_fixes.py",
+    "dashboard/tests/test_cc_settings_people.py",
+    "dashboard/tests/test_cc_settings_review_fixes.py",
+    "dashboard/tests/test_cc_settings_site_packages.py",
+    "dashboard/tests/test_every_template_renders.py",
+    "dashboard/tests/test_help_page.py",
+    "dashboard/tests/test_jobs_contract.py",
+    "dashboard/tests/test_jobs_pinning.py",
+    "dashboard/tests/test_mobile_admin.py",
+    "dashboard/tests/test_mobile_css.py",
+    "dashboard/tests/test_static_js_syntax.py",
+    "dashboard/tests/test_sweep_2026_09_04_copy.py",
+    "dashboard/tests/test_sweep_2026_09_04_dash_ui.py",
+    "dashboard/tests/test_tab_memory.py",
+    "server/tests/test_bug_hunt_2026_09_11_server_tools.py",
+    "tools/tests/test_build_dashboard_bundle.py",
+]
+
+# --- dashboard core: everything else the dashboard is --------------------------
+
+[[area]]
+name = "dashboard core"
+tier = "dashboard-wide"
+paths = [
+    "dashboard/src/**",
+    "dashboard/templates/**",
+    "dashboard/static/**",
+    "dashboard/tests/**",
+    "dashboard/design/**",
+]
+tests = [
+    # found by select_suites.py --audit, 2026-10-06
+    "companion/tests/test_bug_hunt_2026_09_24_w2_c-core.py",
+    "companion/tests/test_upgrade.py",
+]
+

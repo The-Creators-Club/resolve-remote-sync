@@ -1572,7 +1572,8 @@ def _code_block(settings) -> dict[str, Any]:
         return dashboard_update.health_code_block(settings)
     except Exception:  # noqa: BLE001
         log.exception("could not describe the running code root")
-        return {"running": VERSION, "image": "", "source": "", "runtime_id": ""}
+        return {"running": VERSION, "image": "", "source": "", "runtime_id": "",
+                "commit": None}
 
 
 @router.get("/health")

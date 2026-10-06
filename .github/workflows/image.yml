@@ -201,6 +201,12 @@ jobs:
           file: dashboard/deploy/Dockerfile
           push: true
           tags: ${{ steps.tags.outputs.dash_tags }}
+          # The full commit, for /api/v1/health's `code.commit` (2026-10-06,
+          # MODULAR_UPDATES.md M0): the build context has no .git to read it
+          # from (.dockerignore), and the short sha in the tag is not on the
+          # wire once the container runs.
+          build-args: |
+            CCSYNC_GIT_SHA=${{ github.sha }}
           sbom: true
           cache-from: type=gha,scope=ccsync-dashboard
           cache-to: type=gha,mode=max,scope=ccsync-dashboard

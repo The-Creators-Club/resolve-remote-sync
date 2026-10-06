@@ -431,17 +431,34 @@ def test_a_failed_nightly_install_never_stops_the_boot(tmp_path):
 def test_an_exit_75_restart_picks_up_a_nightly_staged_while_the_app_ran(tmp_path):
     """The restart semantics, end to end: the running app's daily refresh
     moves `current`; the app is NOT restarted for it; the next start the
-    loop makes (an OTA's exit 75 here) imports the new build."""
+    loop makes (an OTA's exit 75 here) imports the new build.
+
+    THE FIRST BUILD IS STAGED BEFORE THE BOOT, NOT BY IT (2026-10-06, M0 of
+    MODULAR_UPDATES.md). This test predates CR-361 and let the boot install
+    stage NIGHTLY, which was deterministic while that install ran in the
+    foreground. Since 0.7.72 it runs in the background, so whether the first
+    start saw NIGHTLY was a race with the stub install (Windows won it, the
+    Linux CI runner lost it: "PYTHONPATH=.../selected-root" with no nightly),
+    and the same background writer could also land on `current` AFTER the
+    hook below and put NIGHTLY back. Both are run.sh behaving as designed;
+    what this test pins is only the restart re-reading `current`, so the boot
+    install stays off here. test_the_nightly_is_installed_at_boot_... and
+    test_the_boot_never_waits_for_the_nightly_install own that install."""
     world = build_world(tmp_path, image_mode=True, exits=["75", "0"])
     root = world["data"] / "ytdlp-nightly"
+    (root / "versions" / NIGHTLY / "yt_dlp").mkdir(parents=True)
+    (root / "versions" / NIGHTLY / "yt_dlp" / "version.py").write_text("x\n")
+    (root / "current").write_text(NIGHTLY + "\n")
     newer = "2026.10.04.232901"
     (tmp_path / "launch_hook.sh").write_text(
         f'mkdir -p "{root.as_posix()}/versions/{newer}/yt_dlp"\n'
         f'echo x > "{root.as_posix()}/versions/{newer}/yt_dlp/version.py"\n'
         f'echo {newer} > "{root.as_posix()}/current"\n',
         encoding="utf-8", newline="\n")
-    proc = run(world, DASH_SITE_YOUTUBE_DOWNLOAD="1", STUB_NIGHTLY=NIGHTLY)
+    proc = run(world, DASH_SITE_YOUTUBE_DOWNLOAD="0", DASH_SITE_YOUTUBE_UNBLOCK="0")
     assert proc.returncode == 0, proc.stderr
+    assert not any(c.startswith("NIGHTLY ")
+                   for c in world["log"].read_text().splitlines())
     paths = _app_paths(world)
     assert len(paths) == 2, paths
     assert paths[0].endswith(f"/versions/{NIGHTLY}"), paths[0]

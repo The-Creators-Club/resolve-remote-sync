@@ -181,6 +181,17 @@ USER 3000:3000
 # overrides it and run.sh defaults to 8480.
 EXPOSE 8480
 
+# WHICH COMMIT THIS IMAGE'S CODE IS (2026-10-06, MODULAR_UPDATES.md M0 / A.4).
+# /api/v1/health's `code.commit` reads it when the image's own /app is what
+# is running; a bundle applied over the air answers from its manifest.json
+# instead (dashboard_update.running_commit). .dockerignore keeps .git out of
+# the context, so the commit can only come in as a build arg:
+# .github/workflows/image.yml passes `github.sha`. A hand build that passes
+# nothing bakes "" and health says null, never a guess. Declared LAST so a new
+# sha invalidates only this metadata layer, never the venv or the code copy.
+ARG CCSYNC_GIT_SHA=""
+ENV CCSYNC_GIT_SHA=${CCSYNC_GIT_SHA}
+
 # NOTHING sets HOME, PYTHONPATH or PATH here on purpose -- run.sh owns all
 # three, and it is the entrypoint in both modes so the two cannot drift.
 # /opt/ffmpeg, /opt/claude and /opt/deno stay MOUNTS rather than image content:

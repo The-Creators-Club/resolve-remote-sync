@@ -98,13 +98,20 @@ With a session or a companion token, it also returns `syncthing_reachable`,
 
 ```json
 { "code": { "running": "0.5.1", "image": "0.5.0",
-            "source": "volume", "runtime_id": "9f2c…" } }
+            "source": "volume", "runtime_id": "9f2c…",
+            "commit": "0c37831…" } }
 ```
 
 `code` says WHICH code is live (`ZERO_TOUCH_PLAN.md` WP K, 2026-08-18):
 `running` is this process's `VERSION`, `image` is the version baked into the
 container image, `source` is `image` | `volume` | `checkout`, and `runtime_id`
-is the image's `/venv/.runtime-id` (empty in bind-mount mode). **`ok` and
+is the image's `/venv/.runtime-id` (empty in bind-mount mode). `commit`
+(2026-10-06, `MODULAR_UPDATES.md` M0) is the full git commit of the code that
+is running, read from the SAME place `source` names: an applied bundle's
+`manifest.json` `git_commit`, or the image's `CCSYNC_GIT_SHA` (baked from
+`image.yml`'s build arg). It is `null` for a checkout, an image built by hand
+without the arg, or anything that is not 7-40 hex characters; never a guess
+and never HEAD. **`ok` and
 `version` are unchanged** and stay where they are: release tooling, the
 onboarding wizard and the container healthcheck read those two and nothing
 else.

@@ -651,6 +651,100 @@ def test_health_says_which_code_is_live(world):
     assert body["code"]["image"] == IMAGE_VERSION
     assert body["code"]["runtime_id"] == RUNTIME_ID
     assert body["code"]["source"] == "checkout"  # this suite runs from a checkout
+    # ...and a checkout has no recorded commit: null, never "" or HEAD.
+    assert body["code"]["commit"] is None
+
+
+# The live commit on the wire (2026-10-06, MODULAR_UPDATES.md M0 / A.4): the
+# scoped test gate diffs against it, so each source must answer from ITS OWN
+# stamp, and "cannot tell" must be null.
+
+IMAGE_SHA = "0c37831" + "e" * 33
+
+
+def test_health_reports_the_image_commit_when_the_image_code_runs(world, monkeypatch):
+    monkeypatch.setattr(dashboard_update, "running_root",
+                        lambda: dashboard_update.IMAGE_APP_ROOT / "src")
+    monkeypatch.setenv("CCSYNC_GIT_SHA", IMAGE_SHA.upper())
+    code = world["client"].get("/api/v1/health").json()["code"]
+    assert code["source"] == "image"
+    assert code["commit"] == IMAGE_SHA
+
+
+@pytest.mark.parametrize("baked", ["", "   ", "0c37831+dirty", "main", "0c3783", "g" * 40])
+def test_an_image_built_without_a_usable_sha_reports_null(world, monkeypatch, baked):
+    """A hand `docker build` passes no build arg and bakes "". Nothing that
+    could not be a `git diff` base is reported as a commit."""
+    monkeypatch.setattr(dashboard_update, "running_root",
+                        lambda: dashboard_update.IMAGE_APP_ROOT / "src")
+    monkeypatch.setenv("CCSYNC_GIT_SHA", baked)
+    assert world["client"].get("/api/v1/health").json()["code"]["commit"] is None
+
+
+def test_an_image_with_no_sha_in_its_environment_reports_null(world, monkeypatch):
+    monkeypatch.setattr(dashboard_update, "running_root",
+                        lambda: dashboard_update.IMAGE_APP_ROOT / "src")
+    monkeypatch.delenv("CCSYNC_GIT_SHA", raising=False)
+    assert world["client"].get("/api/v1/health").json()["code"]["commit"] is None
+
+
+def test_an_applied_bundle_reports_its_own_commit_not_the_images(real_bundle_world, monkeypatch):
+    """End to end through a REAL apply: the bundle builder writes
+    `git_commit`, apply keeps it in the tree's manifest.json, and health reads
+    it back. The image's sha is set to something else on purpose: an
+    over-the-air tree runs inside an older image, and naming the image's
+    commit there would name code that is not running."""
+    settings = real_bundle_world["settings"]
+    dashboard_update.apply(settings, real_bundle_world["app"].state,
+                           version=NEW_VERSION, started_by="owen")
+    tree = dashboard_update.code_dir(settings) / NEW_VERSION
+    monkeypatch.setattr(dashboard_update, "running_root", lambda: tree / "src")
+    monkeypatch.setenv("CCSYNC_GIT_SHA", IMAGE_SHA)
+    expected = real_bundle_world["bundle"]["manifest"]["git_commit"]
+
+    code = real_bundle_world["client"].get("/api/v1/health").json()["code"]
+    assert code["source"] == "volume"
+    if expected:
+        assert code["commit"] == expected.lower() != IMAGE_SHA
+    else:
+        # a source drop with no .git builds a bundle with git_commit ""
+        assert code["commit"] is None
+
+
+def test_a_bundle_whose_manifest_names_no_commit_reports_null(world, monkeypatch):
+    tree = dashboard_update.code_dir(world["settings"]) / NEW_VERSION
+    (tree / "src").mkdir(parents=True)
+    (tree / "manifest.json").write_text(
+        json.dumps({"kind": "dashboard", "version": NEW_VERSION, "git_commit": ""}),
+        encoding="utf-8")
+    monkeypatch.setattr(dashboard_update, "running_root", lambda: tree / "src")
+    monkeypatch.setenv("CCSYNC_GIT_SHA", IMAGE_SHA)
+    code = world["client"].get("/api/v1/health").json()["code"]
+    assert code["source"] == "volume"
+    assert code["commit"] is None
+
+
+def test_the_image_build_bakes_the_commit_it_was_built_from():
+    """The two halves of the image wiring: the Dockerfile turns the build arg
+    into the env var running_commit reads, and the image workflow passes the
+    full sha (the build context has no .git to read it from)."""
+    dockerfile = (REPO / "dashboard" / "deploy" / "Dockerfile").read_text(encoding="utf-8")
+    assert 'ARG CCSYNC_GIT_SHA=""' in dockerfile
+    assert "ENV CCSYNC_GIT_SHA=${CCSYNC_GIT_SHA}" in dockerfile
+    workflow = (REPO / ".github" / "workflows" / "image.yml").read_text(encoding="utf-8")
+    assert "CCSYNC_GIT_SHA=${{ github.sha }}" in workflow
+
+
+def test_the_code_block_fallback_keeps_the_commit_key(world, monkeypatch):
+    """api._code_block's except branch: a failure describing the code still
+    answers with the same key set, commit null."""
+    def boom(_settings):
+        raise RuntimeError("no idea where this code came from")
+
+    monkeypatch.setattr(dashboard_update, "health_code_block", boom)
+    code = world["client"].get("/api/v1/health").json()["code"]
+    assert code["commit"] is None
+    assert code["source"] == ""
 
 
 def test_an_unauthenticated_health_is_unchanged(world):

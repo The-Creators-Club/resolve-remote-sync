@@ -345,14 +345,57 @@ def running_source(settings) -> str:
         return "checkout"
 
 
+def _commit_or_none(value: Any) -> str | None:
+    """A git object name, lower-cased, or None. Anything that is not 7-40 hex
+    characters (an empty build arg, a `+dirty` suffix, a ref name somebody
+    passed by hand) is None: a value that cannot be handed to `git diff` as a
+    base is not a commit, and a wrong base is worse than no base."""
+    text = str(value or "").strip().lower()
+    if 7 <= len(text) <= 40 and all(ch in "0123456789abcdef" for ch in text):
+        return text
+    return None
+
+
+def running_commit(settings, source: str | None = None) -> str | None:
+    """The git commit the code answering this request was built from, or None
+    when that cannot be known. (2026-10-06, MODULAR_UPDATES.md M0 / A.4: the
+    scoped test gate diffs against the commit live on the studio dashboard,
+    and until now nothing on the wire said which one that was.)
+
+    Asked of the SAME root `running_source` names, never of whichever stamp
+    happens to be readable: an over-the-air bundle runs inside an image built
+    from some older commit, and reporting the image's sha there would name
+    code that is not running.
+
+      volume    the bundle's own manifest.json `git_commit`
+                (tools/build_dashboard_bundle.py; apply keeps the key).
+      image     CCSYNC_GIT_SHA, baked by deploy/Dockerfile from the build
+                arg .github/workflows/image.yml passes.
+      checkout  None. A developer's tree (or a bind-mount copy with no .git)
+                has no recorded commit, and HEAD is not what is running when
+                the tree is dirty.
+    """
+    if source is None:
+        source = running_source(settings)
+    if source == "volume":
+        manifest = _read_json(running_root().parent / "manifest.json")
+        return _commit_or_none(manifest.get("git_commit"))
+    if source == "image":
+        return _commit_or_none(os.environ.get("CCSYNC_GIT_SHA"))
+    return None
+
+
 def health_code_block(settings) -> dict[str, Any]:
     """The `code` object /api/v1/health gained (WP K). `ok` and `version` are
-    untouched beside it -- the fleet reads those two and nothing else."""
+    untouched beside it -- the fleet reads those two and nothing else.
+    `commit` (2026-10-06) is None, never "", when unknown: see running_commit."""
+    source = running_source(settings)
     return {
         "running": VERSION,
         "image": image_version(),
-        "source": running_source(settings),
+        "source": source,
         "runtime_id": image_runtime_id(),
+        "commit": running_commit(settings, source),
     }
 
 

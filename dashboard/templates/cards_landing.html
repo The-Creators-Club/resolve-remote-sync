@@ -3,6 +3,9 @@
 {% block head %}
   <link rel="stylesheet" href="{{ asset_url('cc/cards_landing.css') }}">
   <script src="{{ asset_url('cards_landing.js') }}" defer></script>
+  {# The app's front door offline (2026-10-11): registers /cards/sw.js and
+     marks the cut lists downloaded on this device. #}
+  <script src="{{ asset_url('cards_offline.js') }}" defer></script>
 {% endblock %}
 {# The installed phone app's front door (2026-10-06): this page links the
    Cards app's manifest, not the dashboard's, so Chrome's update check on
@@ -73,6 +76,7 @@
 
 {% macro ep_row(ep) %}
   <div class="ep cl-ep" data-state="{{ ep.state or '' }}" data-slug="{{ ep.slug }}"
+       data-root="{{ ep.root or '' }}"
        data-name="{{ (ep.name or '') | lower }}"
        data-search="{{ ((ep.name or '') ~ ' ' ~ (ep.show or '') ~ ' ' ~ (ep.path_label or '') ~ ' ' ~ (ep.year or '')) | lower }}"
        data-year="{{ ep.year or '' }}"

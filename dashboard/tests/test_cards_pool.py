@@ -384,17 +384,18 @@ def test_the_root_switch_is_blocked_inside_the_page(tmp_path, fake_src, monkeypa
 
 # --------------------------------------------------------------- the phone
 
-def test_the_flat_service_worker_is_a_kill_switch(landing):
-    """Its scope is `/cards/`, which covers every `/cards/p/<slug>/` URL, and
-    every navigation in scope goes through the old worker's own shellAnswer:
-    a phone whose network verdict is "down" would be served the OLD page over
-    the new project URL."""
+def test_the_flat_service_worker_is_the_offline_front_door(landing):
+    """2026-10-11: `/cards/` is the installed app's start_url, so this worker
+    answers it offline. It keeps the kill switch's one guarantee: it never
+    serves the old flat page, and touches only `/cards/` and episode
+    navigations no episode worker claimed."""
     client, _, _ = landing
     resp = client.get("/cards/sw.js")
     assert resp.status_code == 200
     assert "javascript" in resp.headers["content-type"]
-    assert "unregister()" in resp.text
-    assert "addEventListener('fetch'" not in resp.text
+    assert "%VER%" not in resp.text
+    assert "addEventListener('fetch'" in resp.text
+    assert "cards-landing" in resp.text
 
 
 def test_the_three_pwa_surfaces_are_open_under_the_episode_prefix(landing):
@@ -701,32 +702,31 @@ def test_the_flat_data_dir_is_named_rather_than_silently_orphaned(tmp_path,
     assert str(data / "cards") in said
 
 
-def test_the_kill_switch_leaves_the_dashboards_own_caches_alone():
-    """dash-cards-4: CacheStorage is per ORIGIN, so the unfiltered
-    `caches.keys()` sweep emptied the dashboard PWA's own `ccsync-<version>`
-    precache (the offline page, htmx_errors.js) and `cards-media`, the clips
-    an editor deliberately downloaded for an offline session."""
+def test_the_front_door_deletes_no_cache_but_its_own_page():
+    """dash-cards-4 / dash-cards-1 still hold: CacheStorage is per ORIGIN, and
+    the dashboard's precache, `cards-media` and every episode's
+    `cards-shell-*` are not this worker's to delete."""
     from ccsync_dashboard import cards_landing
 
-    js = cards_landing.KILL_SW
-    assert "unregister()" in js
-    body = js[js.index("addEventListener('activate'"):]
-    assert "await caches.keys()) await caches.delete(k)" not in body
+    js = cards_landing.CARDS_SW
+    assert "caches.delete" not in js
+    assert "c.delete(pageKey())" in js
 
 
-def test_the_kill_switch_deletes_no_cache_at_all():
-    """dash-cards-1: the narrowed sweep was narrowed to nothing. Every page
-    this checkout serves - the dead flat one and every live /cards/p/<slug>/
-    one - names its shell cache `cards-shell-<one page_version()>` on ONE
-    origin, so the prefix filter deleted the live per-episode worker's shell,
-    which only `install` can refill. The kill switch cannot tell them apart,
-    so it touches CacheStorage not at all."""
+def test_the_front_door_serves_the_saved_list_when_the_server_is_dark():
     from ccsync_dashboard import cards_landing
 
-    body = cards_landing.KILL_SW
-    body = body[body.index("addEventListener('install'"):]
-    assert "caches" not in body
-    assert "unregister()" in body
+    js = cards_landing.CARDS_SW
+    assert "NAV_MS = 8000" in js
+    assert "r.status >= 500" in js
+    assert 'name="cards-offline"' in js
+
+
+def test_the_landing_page_carries_what_the_offline_picker_needs(landing):
+    client, app, roots = landing
+    page = client.get("/cards/").text
+    assert "cards_offline.js" in page
+    assert 'data-root="' in page
 
 
 def test_the_failed_episode_detail_is_not_another_repos_exception_text():

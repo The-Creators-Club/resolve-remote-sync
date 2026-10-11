@@ -17,8 +17,8 @@ a route of the mounted page:
     `/cards/...` -- because a phone that installed this app before today is
     pointed at them.
 
-THE SERVICE WORKER AT `/cards/sw.js` IS NOW A KILL SWITCH, and that is not
-tidiness. The installed worker's scope is `/cards/`, which covers every new
+THE SERVICE WORKER AT `/cards/sw.js` WAS A KILL SWITCH from 2026-09-14 to
+2026-10-11 (now CARDS_SW below, which keeps its one guarantee). The installed worker's scope is `/cards/`, which covers every new
 `/cards/p/<slug>/` URL, and every navigation in scope goes through its own
 `shellAnswer`: a phone whose network verdict is "down" would be served the
 OLD FLAT PAGE over the new project URL, with the old page's queued edits
@@ -439,54 +439,219 @@ async def cards_close(request: Request) -> Response:
 
 # ------------------------------------------------------ the flat PWA surfaces
 
-KILL_SW = """\
-// CC Sync dashboard: the Timeline Cards page moved to /cards/p/<episode>/.
-// docs/CARDS_TWO_PROJECTS.md phase 1b. This worker's only job is to stop
-// being a worker: its scope is /cards/, so the copy installed before that
-// change intercepts every navigation into the new project URLs and, when its
-// own network verdict is "down", answers them with the OLD page. The browser
-// fetches this path on its periodic update check and on navigation, which is
-// what makes a kill switch the one thing that can reach it.
-//
-// dash-cards-4 (2026-09-18): it deletes ONLY the old flat page's shell caches.
-// CacheStorage is per ORIGIN, not per worker scope, so the unfiltered
-// `caches.keys()` sweep this replaces emptied the DASHBOARD PWA's own
-// `ccsync-<version>` precache too - the offline page and htmx_errors.js, which
-// DUI-2 precached precisely for a bad connection - and the dashboard's worker
-// does not re-run `install` until its own bytes change, so a phone stayed
-// without an offline page until the next dashboard release. It also took
-// `cards-media`, the clips an editor deliberately downloaded for an offline
-// session (the 2026-09-12 incident), which this worker has no business
-// touching: the stale PAGE is what is being killed, not the media.
-//
-// dash-cards-1 (2026-09-18b mediums): and the narrowed `cards-shell-` sweep
-// was narrowed to NOTHING, because that prefix is not the flat page's alone.
-// `page.render_sw()` bakes one `page_version()` per checkout, so every page
-// this container serves - the dead flat one and every live /cards/p/<slug>/
-// one - names its shell cache `cards-shell-<same VER>`, on one origin. The
-// filter therefore deleted the LIVE per-episode worker's shell, and only
-// `install` refills it (the navigation arm never caches a navigation), so an
-// installed episode app lost its offline shell until the next Cards
-// republish. This worker cannot tell the two apart - it does not know the
-// live VER - so it deletes no cache at all: unregistering and reloading the
-// clients is the whole act, and the per-episode worker's own `activate`
-// prunes stale `cards-shell-*` with an `n !== SHELL` guard already.
+# THE WORKER AT `/cards/sw.js` IS THE APP'S FRONT DOOR OFFLINE (2026-10-11,
+# Alex, boarding a plane: "Mobile timeline cards is stuck on this icon
+# loading. And I need it to work fully offline" / "the whole thing works end
+# to end launched from zero on an aeroplane, as long as you've opened it once
+# before getting on" / "you should be able to launch any project file which
+# has been downloaded").
+#
+# Until today this path served a KILL SWITCH (no fetch handler, unregister on
+# activate). That was right while `/cards/` was a page nobody launched into,
+# but 0.7.73 made `/cards/` the installed app's start_url, and nothing then
+# answered it without the server: the dashboard's own worker passes `/cards/`
+# through (static/sw.js PASS_THROUGH) and each episode's worker is scoped to
+# `/cards/p/<slug>/`. So a phone on a plane, or on a tailnet whose server is a
+# black hole, sat on the splash for as long as the connect took.
+#
+# What the kill switch was FOR still holds: the old flat page's worker shared
+# this script URL and this scope, so these bytes replace that worker, and
+# nothing here ever serves the old flat page. It answers three things only:
+#
+#   * `/cards/` itself: the network against an 8 s deadline (twice the episode
+#     worker's SHELL_MS: the vault scan behind this page is slower), and the last list it saw when the
+#     server does not answer. The saved copy is served with a `cards-offline`
+#     meta, which static/cards_offline.js reads to turn the page into the
+#     offline picker. A sign-out (the gate's redirect) deletes the saved copy:
+#     this page names who opened what, and a signed-out phone should not keep
+#     it.
+#   * the page's own assets (/static/, the icon, the manifest): cache first,
+#     refreshed behind. They are content-hashed (asset_url), so a hit is
+#     never stale; the cache is NOT rotated by version, because a saved page
+#     names the hashes it was drawn with and must still find them offline.
+#   * a navigation to `/cards/p/<slug>/` that reaches THIS worker, which only
+#     happens when that episode has no worker of its own on this phone (a
+#     longer scope always wins): the network, and the offline list instead of
+#     a hang when there is none.
+#
+# Everything else, `state.json` and every API route included, is untouched.
+# Media and each episode's shell are the episode worker's (the Cards repo's
+# page/sw.js); this worker deletes nothing but its own saved page.
+CARDS_SW = r"""// CC Sync dashboard: the Timeline Cards app's front door, offline.
+// cards_landing.py CARDS_SW has the reasoning. version: %VER%
+const LANDING = 'cards-landing';
+const PAGE = '/cards/';
+const NAV_MS = 8000;
+
 self.addEventListener('install', e => self.skipWaiting());
-self.addEventListener('activate', e => e.waitUntil((async () => {
-  try { await self.registration.unregister(); } catch (err) {}
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+
+function raced(p, ms) {
+  return new Promise((res, rej) => {
+    const t = setTimeout(() => rej(new Error('no answer in ' + ms + ' ms')), ms);
+    p.then(v => { clearTimeout(t); res(v); }, err => { clearTimeout(t); rej(err); });
+  });
+}
+
+function pageKey() { return new Request(new URL(PAGE, self.location.origin).href); }
+
+async function savePage(r) {
+  if (!r || !r.ok || r.type !== 'basic' || r.redirected) return;
+  if ((r.headers.get('Content-Type') || '').indexOf('text/html') < 0) return;
+  const body = await r.blob();
+  const cache = await caches.open(LANDING);
+  await cache.put(pageKey(), new Response(body, {headers: {
+    'Content-Type': 'text/html; charset=utf-8',
+    'X-Cards-Saved-At': String(Date.now())}}));
+}
+
+async function forgetPage() {
+  try { const c = await caches.open(LANDING); await c.delete(pageKey()); } catch (err) {}
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+}
+
+// The episodes whose page this phone can open with no network: every
+// episode worker files its shell under its own `/cards/p/<slug>/`.
+async function savedEpisodes() {
+  const out = [];
+  for (const name of await caches.keys()) {
+    if (name.indexOf('cards-shell-') !== 0) continue;
+    const c = await caches.open(name);
+    for (const req of await c.keys()) {
+      const m = /\/cards\/p\/([^/]+)\/$/.exec(new URL(req.url).pathname);
+      if (m && out.indexOf(m[1]) < 0) out.push(m[1]);
+    }
+  }
+  return out;
+}
+
+async function offlinePage() {
+  const cache = await caches.open(LANDING);
+  const hit = await cache.match(pageKey());
+  if (hit) {
+    const at = hit.headers.get('X-Cards-Saved-At') || '0';
+    const text = (await hit.text()).replace(/<head[^>]*>/i,
+      m => m + '<meta name="cards-offline" content="' + esc(at) + '">');
+    return new Response(text, {headers: {'Content-Type': 'text/html; charset=utf-8'}});
+  }
+  // never saved: still better than a splash screen
+  const slugs = await savedEpisodes();
+  const links = slugs.map(s => '<li><a style="color:#8ab4ff" href="/cards/p/' +
+    encodeURIComponent(s) + '/">' +
+    esc(s.replace(/-[0-9a-f]{8}$/, '').replace(/-/g, ' ')) + '</a></li>').join('');
+  return new Response('<!doctype html><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>Timeline Cards: offline</title>' +
+    '<body style="background:#15171c;color:#dde;font:16px system-ui;padding:24px">' +
+    '<h1 style="font-size:20px">The server cannot be reached</h1>' +
+    '<p>The episode list has not been saved on this phone yet. Open the app ' +
+    'once with a connection and it will be.</p>' +
+    (links ? '<p>Episodes this phone can open offline:</p><ul>' + links + '</ul>' : '') +
+    '<p><a style="color:#8ab4ff" href="/cards/">Try again</a></p>',
+    {headers: {'Content-Type': 'text/html; charset=utf-8'}});
+}
+
+async function navAnswer(e, url) {
+  const isPage = url.pathname === PAGE;
+  if (navigator.onLine === false) return offlinePage();
+  let r;
   try {
-    const all = await self.clients.matchAll({type: 'window'});
-    for (const c of all) c.navigate(c.url);
-  } catch (err) {}
-})()));
-// Nothing is intercepted in the meantime: no fetch handler at all means the
-// browser goes to the network, which is the behaviour this replaces.
+    r = await raced(fetch(e.request), NAV_MS);
+  } catch (err) {
+    return offlinePage();
+  }
+  // a dark TrueNAS app behind Tailscale Serve answers 502, not a timeout
+  if (r.status >= 500) return offlinePage();
+  if (isPage) {
+    if (r.type === 'opaqueredirect' || (r.redirected && /\/login/.test(r.url))) {
+      e.waitUntil(forgetPage());
+    } else if (!url.searchParams.has('want') && !url.searchParams.has('refused')) {
+      e.waitUntil(savePage(r.clone()).catch(() => null));
+    }
+  }
+  return r;
+}
+
+async function assetAnswer(e) {
+  const req = e.request;
+  const hit = await caches.match(req);
+  const live = fetch(req).then(async r => {
+    if (r && r.ok && r.type === 'basic') {
+      const c = await caches.open(LANDING);
+      await c.put(req, r.clone());
+    }
+    return r;
+  });
+  if (hit) {
+    e.waitUntil(live.catch(() => null));
+    return hit;
+  }
+  try {
+    return await live;
+  } catch (err) {
+    const loose = await caches.match(req, {ignoreSearch: true});
+    if (loose) return loose;
+    throw err;
+  }
+}
+
+function isAsset(url) {
+  return url.pathname.indexOf('/static/') === 0 || url.pathname === '/favicon.ico' ||
+    url.pathname === '/cards/icon.svg' || url.pathname === '/cards/manifest.webmanifest';
+}
+
+self.addEventListener('fetch', e => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  let url;
+  try { url = new URL(req.url); } catch (err) { return; }
+  if (url.origin !== self.location.origin) return;
+  if (req.mode === 'navigate') {
+    if (url.pathname === PAGE || url.pathname.indexOf('/cards/p/') === 0) {
+      e.respondWith(navAnswer(e, url));
+    }
+    return;
+  }
+  if (isAsset(url)) e.respondWith(assetAnswer(e));
+});
+
+// The first visit is drawn BEFORE this worker controls the page, so neither
+// the page nor its assets came through here: static/cards_offline.js hands
+// over what it loaded, and this saves it, so the very next launch can be
+// offline.
+self.addEventListener('message', e => {
+  const msg = e.data || {};
+  if (msg.type !== 'cards-landing-save') return;
+  e.waitUntil((async () => {
+    const cache = await caches.open(LANDING);
+    if (msg.page) {
+      try { await savePage(await fetch(PAGE, {credentials: 'same-origin'})); } catch (err) {}
+    }
+    for (const u of (msg.assets || [])) {
+      try {
+        const url = new URL(u, self.location.origin);
+        if (url.origin !== self.location.origin || !isAsset(url)) continue;
+        if (await cache.match(url.href)) continue;
+        const r = await fetch(url.href, {credentials: 'same-origin'});
+        if (r.ok && r.type === 'basic') await cache.put(url.href, r);
+      } catch (err) {}
+    }
+    if (e.source) e.source.postMessage({type: 'cards-landing-saved'});
+  })());
+});
 """
 
 
 @router.get("/cards/sw.js", include_in_schema=False)
 def cards_sw(request: Request) -> Response:
-    return Response(KILL_SW, media_type="text/javascript; charset=utf-8",
+    # The version in the bytes, so every release re-installs the worker.
+    from . import VERSION
+
+    return Response(CARDS_SW.replace("%VER%", VERSION),
+                    media_type="text/javascript; charset=utf-8",
                     headers={"cache-control": "no-cache"})
 
 
@@ -615,4 +780,4 @@ def remember(response: Response, slug: str, secure: bool) -> None:
                         httponly=True, samesite="lax", secure=secure)
 
 
-__all__ = ["router", "remember", "LAST_COOKIE", "KILL_SW"]
+__all__ = ["router", "remember", "LAST_COOKIE", "CARDS_SW"]

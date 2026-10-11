@@ -33,7 +33,7 @@ from . import (
     VERSION,
     ai_providers, api, assignments, auth, broll, cards, cards_exec, cards_tunnel,
     cli_tools, crash_report,
-    dashboard_update, db, internal_sftp, jobs, local_users, mount_status, music,
+    dashboard_update, db, gear_ai, internal_sftp, jobs, local_users, mount_status, music,
     notices,
     oidc, release_feed,
     secrets_boot, sessions, setup_api, setup_routes, site_store, ui, ytdl,
@@ -230,7 +230,10 @@ _CSRF_EXEMPT_EXACT = {"/login", "/api/v1/login", "/api/v1/logout", "/api/v1/repo
                       # phase 2). A POST because the question is a list, not
                       # because it writes anything: it reads nas_media and
                       # changes nothing here.
-                      "/api/v1/files/locate"}
+                      "/api/v1/files/locate",
+                      # the website's gear page asking what a photo shows
+                      # (gear_ai.py): a server with X-Gear-Token, no cookie.
+                      "/api/v1/gear/identify"}
 _CSRF_EXEMPT_PREFIXES = ("/api/v1/selection/", "/api/v1/admin/packages/",
                          "/broll/", "/music/", "/ytdl/")
 # The fleet job claim/heartbeat/result (phase 0, 2026-08-29). Bearer-token
@@ -1305,6 +1308,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 and _companion_token_ok(request))
             # the indexer pushing into the mounted b-roll app, token-gated
             or (path.startswith("/broll/api/ingest/") and _broll_ingest_token_ok(request))
+            # the website's gear page (thecreatorsclub.co/gear) asking the
+            # Claude Code CLI here what a photo shows: exact path, POST only,
+            # its own token (gear_ai.py), re-checked by the route
+            or (path == gear_ai.PATH and request.method == "POST"
+                and gear_ai.token_ok(settings, request.headers.get("x-gear-token", "")))
             # a CLIENT FOLDER's public viewer (docs/CLIENT_FOLDERS.md,
             # 2026-08-18): a prospective licensee opening the link an editor
             # sent them. No session by design -- the 128-bit token in the
@@ -1566,6 +1574,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # writes an executable or touches a credential, which is easier to audit
     # in one file (cli_tools.py).
     app.include_router(cli_tools.router)
+    # Gear identify (2026-10-11): the website's packing list asks the Claude
+    # Code CLI on this host what a photo shows; one CLI kept hot for an hour.
+    app.include_router(gear_ai.router)
     app.include_router(release_feed.router)
     # The dashboard's own code updates (ZERO_TOUCH_PLAN.md WP K): its own
     # module and its own router, beside the feed's, because it consumes the

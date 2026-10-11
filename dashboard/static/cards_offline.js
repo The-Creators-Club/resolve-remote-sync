@@ -179,7 +179,7 @@
       if (c.when) bits.push('saved ' + when(c.when));
       if (!c.slug) bits.push('its episode is not in this list');
       else if (!c.shell) bits.push('the episode page is not saved: open the episode once with a connection');
-      info.appendChild(el('div', 'meta', bits.join(' · ')));
+      info.appendChild(el('div', 'meta', bits.join(', ')));
       r.appendChild(info);
       var act = el('div', 'act');
       if (c.slug && c.shell) act.appendChild(copyButton(c));

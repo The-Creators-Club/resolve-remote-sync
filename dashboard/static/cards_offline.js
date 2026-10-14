@@ -31,24 +31,49 @@
   var offline = !!savedAt;
 
   // ------------------------------------------------------------- the worker
+  // Registers it, makes sure the phone is running THIS release's bytes, and
+  // hands over what this visit loaded. Three things the first draft got
+  // wrong, each found by driving a real Chrome (tools/cards_offline_launch.js):
+  //   * `register()` of a URL already registered does NOT look for new bytes,
+  //     so a phone still holding an older worker at /cards/sw.js kept it until
+  //     Chrome's own once-a-day check. `reg.update()` asks now.
+  //   * a fresh worker claims this page while `ready` is resolving, so the
+  //     old "was the page served by us?" test (`controller` is ours) was true
+  //     on the very first visit, nothing saved the PAGE, and the next launch
+  //     had assets and no page. Whether THIS document went through a worker
+  //     is on the navigation entry (workerStart), and the worker itself also
+  //     saves the page whenever it has none.
+  //   * a worker that takes the page over LATER (the update above) is not the
+  //     one that was messaged: `controllerchange` hands over again.
+  function handOver(reg) {
+    var to = navigator.serviceWorker.controller || (reg && reg.active);
+    if (!to) return;
+    var viaWorker = false;
+    try {
+      var nav = performance.getEntriesByType('navigation')[0];
+      viaWorker = !!(nav && nav.workerStart > 0);
+    } catch (e) { /* no timing API: the worker saves the page when it has none */ }
+    var assets = [];
+    try {
+      (performance.getEntriesByType('resource') || []).forEach(function (en) {
+        assets.push(en.name);
+      });
+    } catch (e) { /* no timing API: the tags below are enough */ }
+    document.querySelectorAll('link[href], script[src]').forEach(function (el) {
+      assets.push(el.href || el.src);
+    });
+    to.postMessage({type: 'cards-landing-save', page: !viaWorker, assets: assets});
+  }
   if (window.isSecureContext && 'serviceWorker' in navigator && !offline) {
+    var regd = null;
+    navigator.serviceWorker.addEventListener('controllerchange', function () { handOver(regd); });
     navigator.serviceWorker.register('/cards/sw.js', {scope: '/cards/'})
-      .then(function () { return navigator.serviceWorker.ready; })
       .then(function (reg) {
-        var ctl = navigator.serviceWorker.controller;
-        var ours = !!(ctl && /\/cards\/sw\.js/.test(ctl.scriptURL));
-        var assets = [];
-        try {
-          (performance.getEntriesByType('resource') || []).forEach(function (en) {
-            assets.push(en.name);
-          });
-        } catch (e) { /* no timing API: the tags below are enough */ }
-        document.querySelectorAll('link[href], script[src]').forEach(function (el) {
-          assets.push(el.href || el.src);
-        });
-        var to = (reg && reg.active) || ctl;
-        if (to) to.postMessage({type: 'cards-landing-save', page: !ours, assets: assets});
+        regd = reg;
+        try { reg.update().catch(function () { /* offline: nothing to learn */ }); } catch (e) { /* */ }
+        return navigator.serviceWorker.ready;
       })
+      .then(function (reg) { regd = reg; handOver(reg); })
       .catch(function () { /* no worker: the page still works online */ });
   }
 
@@ -169,6 +194,12 @@
     var body = el('div', 'body vstack');
     usable.concat(stranded).forEach(function (c) {
       var r = el('div', 'ep cl-ep-offline');
+      // .ep is a grid whose first column is the state icon (components.css):
+      // without one the name was squeezed into the 2ch icon column and
+      // wrapped a letter to a line on a phone.
+      var ico = el('span', 'ico cl-ico', '\u25AA');
+      ico.setAttribute('aria-hidden', 'true');
+      r.appendChild(ico);
       var info = el('div', 'cl-info');
       var nm = el('div', 'nmline');
       nm.appendChild(el('span', 'nm', (c.episode || 'unknown episode') + ': ' + (c.file || 'cut list')));

@@ -26,6 +26,7 @@ The properties defended, each of them a way this goes wrong live:
 """
 from __future__ import annotations
 
+from pathlib import Path
 import time
 import unicodedata
 
@@ -724,6 +725,34 @@ def test_the_front_door_serves_the_saved_list_when_the_server_is_dark():
     assert "NAV_MS = 8000" in js
     assert "r.status >= 500" in js
     assert 'name="cards-offline"' in js
+
+
+def test_the_front_door_saves_the_page_when_it_has_none():
+    """Driven in a real headless Chrome (tools/cards_offline/run.js): a fresh
+    worker claims the page while `ready` is resolving, so the page's "I was
+    not served by a worker" test said no, nothing saved the PAGE, and the
+    next launch had assets and no list. The worker decides for itself too."""
+    from ccsync_dashboard import cards_landing
+
+    js = cards_landing.CARDS_SW
+    assert "msg.page || !(await cache.match(pageKey()))" in js
+
+
+def test_the_picker_asks_for_new_worker_bytes_and_hands_over_again():
+    """`register()` of an already registered URL looks for no new bytes, so a
+    phone holding an older worker at /cards/sw.js kept it until Chrome's own
+    daily check, and the first online visit after a release saved nothing.
+    `update()` asks now, and the page hands over again when a new worker
+    takes it (`controllerchange`), because the one it messaged first is not
+    the one that is running."""
+    js = (Path(__file__).resolve().parents[1] / "static" / "cards_offline.js"
+          ).read_text(encoding="utf-8")
+    assert "reg.update()" in js
+    assert "'controllerchange'" in js
+    assert "workerStart" in js
+    # the "ON THIS DEVICE" rows are `.ep` grid rows, whose first column is the
+    # state icon: without one the name was squeezed into 2ch
+    assert "'ico cl-ico'" in js
 
 
 def test_the_landing_page_carries_what_the_offline_picker_needs(landing):

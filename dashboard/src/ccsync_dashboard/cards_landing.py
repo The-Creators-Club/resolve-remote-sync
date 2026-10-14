@@ -637,7 +637,10 @@ self.addEventListener('message', e => {
   if (msg.type !== 'cards-landing-save') return;
   e.waitUntil((async () => {
     const cache = await caches.open(LANDING);
-    if (msg.page) {
+    // `msg.page`: the page did not come through a worker. Also when there is
+    // no saved page at all, whatever the page believes (a stale worker, or a
+    // claim that raced the page's own test, left nothing saved).
+    if (msg.page || !(await cache.match(pageKey()))) {
       try { await savePage(await fetch(PAGE, {credentials: 'same-origin'})); } catch (err) {}
     }
     for (const u of (msg.assets || [])) {

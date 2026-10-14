@@ -33,7 +33,10 @@ def store(tmp_path):
     conn = dbmod.connect(str(path))
     dbmod.migrate(conn)
     conn.close()
-    s = sessmod.SessionStore(path)
+    # The 12 h idle / 7 d absolute clocks the seeded ages below are written
+    # against: the shipped default is 100 days now (2026-10-14), and what this
+    # file defends is the purge rule, not the number.
+    s = sessmod.SessionStore(path, idle_seconds=12 * HOUR, absolute_seconds=7 * 24 * HOUR)
     s.ensure_schema()
     return s
 

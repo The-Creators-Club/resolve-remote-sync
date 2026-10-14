@@ -23,6 +23,10 @@
   <link rel="icon" type="image/svg+xml" href="{{ asset_url('favicon.svg') }}">
   <link rel="alternate icon" type="image/png" href="{{ asset_url('favicon.png') }}">
   <meta name="csrf" content="{{ csrf_token or '' }}">
+  {# When this sign-in ends, unix seconds (Alex, 2026-10-14: a sign-in lasts
+     100 days and the page warns while online as it nears the end). Empty on
+     the sign-in page. cc/cc.js draws the banner from it. #}
+  <meta name="session-expires" content="{{ session_expires_epoch or '' }}">
   {# hud.css first: hud-common is the ONLY home of the HUD, dock and strip
      rules, and the page sheets never restate them (2.1). #}
   <link rel="stylesheet" href="{{ asset_url('cc/hud.css') }}">

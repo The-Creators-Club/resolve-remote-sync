@@ -297,8 +297,8 @@ The full annotated table, including the Synology-only rows, is in
 | `DASH_SHARED_REPORT_TOKEN_ENABLED` | `1` | Whether the one shared `DASH_REPORT_TOKEN` is still accepted alongside per-editor tokens. **Only an explicit `"0"` turns it off** — a typo must not disconnect the fleet. Turn it off once Settings ▸ Users stops naming machines on the shared credential |
 | `DASH_COOKIE_SECURE` | `auto` | `auto` = on for https. `1` forces it on **and refuses login over provable plain http**. Behind Tailscale Serve, use `1` |
 | `DASH_TRUSTED_PROXIES` | `127.0.0.1,::1` (**the deploy overrides this**) | Whose `X-Forwarded-*` is believed, and with it what `auth.client_ip` calls "the client". It used to be everyone's; then it was loopback only, **which the container never sees** — the stack publishes its port with compose `ports:`, so a request Tailscale Serve makes from the NAS host is NATed and arrives from the docker bridge gateway. The result was one shared client IP for the whole fleet: the login throttle's per-IP budget became one bucket, so one editor with caps lock on could `429` `/login` **and** `/api/v1/verify` for everybody (`trust-model-3`, 2026-08-21). `install_dashboard_app.py` has set it since — `[net] trusted_proxies`, else loopback + `[net] docker_bridge_cidr` + this node's tailnet address |
-| `DASH_SESSION_IDLE_SECONDS` | `43200` (12h) | Refreshed by activity |
-| `DASH_SESSION_ABSOLUTE_SECONDS` | `604800` (7d) | Never extended |
+| `DASH_SESSION_IDLE_SECONDS` | `8640000` (100d) | Refreshed by activity. Equal to the absolute lifetime on purpose (Alex, 2026-10-14): an offline phone makes no requests, so a shorter idle clock would sign it out for being offline |
+| `DASH_SESSION_ABSOLUTE_SECONDS` | `8640000` (100d) | Never extended. Reported on every signed-in response as `X-CCSync-Session-Expires` (unix seconds) and by `GET /api/v1/session`; the pages warn 14 days before; `/login?renew=1` mints a fresh one |
 | `DASH_OIDC_ISSUER` | `""` | **F**. Blank + method `oidc` is refused at boot rather than silently falling back to passwords |
 | `DASH_OIDC_CLIENT_ID` | `""` | **F** |
 | `DASH_OIDC_SCOPES` | `openid profile email` | **F** |

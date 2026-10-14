@@ -622,3 +622,95 @@
   document.addEventListener("visibilitychange", hiddenClass);
   hiddenClass();
 })();
+
+/* ---------------------------------------------------------------------------
+   The sign-in expiry banner (Alex, 2026-10-14: "you only need to be online
+   once every 100 days to log in once and it should warn you while online if
+   the login is about to expire").
+
+   The server stamps the end of the session in <meta name="session-expires">
+   (unix seconds; absent on the sign-in page). Within WARN_DAYS of it, and
+   only while online (the link is useless without a server), a non-blocking
+   note offers to sign in again NOW: /login?renew=1 shows the form with the
+   session still live and mints a fresh 100 days. A page that came out of the
+   offline cache carries an old meta, so when online the value is re-read from
+   GET /api/v1/session first; a 401 or a network failure just leaves the
+   banner as the meta had it. "Not now" hides it for the rest of the local day.
+   --------------------------------------------------------------------------- */
+(function () {
+  var WARN_DAYS = 14;
+  var KEY = "cc-session-banner-dismissed";
+  var meta = document.querySelector('meta[name="session-expires"]');
+  if (!meta || !meta.content) return;
+  var epoch = parseInt(meta.content, 10);
+  if (!epoch) return;
+
+  function today() {
+    var d = new Date();
+    return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate();
+  }
+  function dismissedToday() {
+    try { return localStorage.getItem(KEY) === today(); } catch (e) { return false; }
+  }
+  function words(days) {
+    if (days <= 1) return "less than a day";
+    return Math.ceil(days) + " days";
+  }
+  function render() {
+    var old = document.getElementById("cc-session-banner");
+    var days = (epoch * 1000 - Date.now()) / 86400000;
+    var show = days <= WARN_DAYS && navigator.onLine !== false && !dismissedToday();
+    if (!show) { if (old) old.remove(); return; }
+    var bar = old || document.createElement("div");
+    bar.id = "cc-session-banner";
+    bar.className = "note warn";
+    bar.setAttribute("role", "status");
+    bar.textContent = "";
+    var msg = document.createElement("span");
+    msg.className = "grow";
+    msg.textContent = "Your sign-in expires in " + words(days) +
+      ". Sign in again now so this phone/computer keeps working offline for another 100 days.";
+    var go = document.createElement("a");
+    go.className = "key primary sm";
+    go.href = "/login?renew=1&next=" +
+      encodeURIComponent(location.pathname + location.search + location.hash);
+    var t = document.createElement("span");
+    t.className = "t";
+    t.textContent = "Sign in again";
+    go.appendChild(t);
+    var no = document.createElement("button");
+    no.type = "button";
+    no.className = "key quiet sm";
+    no.title = "Hides this until tomorrow.";
+    var nt = document.createElement("span");
+    nt.className = "t";
+    nt.textContent = "Not now";
+    no.appendChild(nt);
+    no.addEventListener("click", function () {
+      try { localStorage.setItem(KEY, today()); } catch (e) {}
+      bar.remove();
+    });
+    bar.appendChild(msg);
+    bar.appendChild(go);
+    bar.appendChild(no);
+    if (!old) {
+      var shell = document.querySelector(".shell");
+      if (shell && shell.parentNode) shell.parentNode.insertBefore(bar, shell);
+      else document.body.insertBefore(bar, document.body.firstChild);
+    }
+  }
+  function start() {
+    render();
+    if (navigator.onLine === false || !window.fetch) return;
+    fetch("/api/v1/session", {credentials: "same-origin", headers: {"Accept": "application/json"}})
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (j && j.expires_epoch) { epoch = j.expires_epoch; render(); }
+      })
+      .catch(function () {});
+  }
+  window.addEventListener("online", start);
+  window.addEventListener("offline", render);
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();

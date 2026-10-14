@@ -462,9 +462,17 @@ async def cards_close(request: Request) -> Response:
 #     worker's SHELL_MS: the vault scan behind this page is slower), and the last list it saw when the
 #     server does not answer. The saved copy is served with a `cards-offline`
 #     meta, which static/cards_offline.js reads to turn the page into the
-#     offline picker. A sign-out (the gate's redirect) deletes the saved copy:
+#     offline picker. A REAL sign-out deletes the saved copy (see below):
 #     this page names who opened what, and a signed-out phone should not keep
-#     it.
+#     it. An EXPIRED sign-in does not (Alex, 2026-10-14: "everything should be
+#     able to run on device in offline mode", sign-in good for 100 days): the
+#     gate's redirect to /login while online just is not saved, and is served
+#     so the person signs in; the picker saved before is left alone for the
+#     next launch with no signal. What deletes it is the sign-out itself: POST
+#     /logout and /logout-everywhere land on /login?signed_out=1, whose page
+#     runs `caches.delete('cards-landing')` (ui.py, login.html). Not
+#     Clear-Site-Data: that would also wipe every episode's offline copy and
+#     its queued edits, which live on this same origin.
 #   * the page's own assets (/static/, the icon, the manifest): cache first,
 #     refreshed behind. They are content-hashed (asset_url), so a hit is
 #     never stale; the cache is NOT rotated by version, because a saved page
@@ -503,10 +511,6 @@ async function savePage(r) {
   await cache.put(pageKey(), new Response(body, {headers: {
     'Content-Type': 'text/html; charset=utf-8',
     'X-Cards-Saved-At': String(Date.now())}}));
-}
-
-async function forgetPage() {
-  try { const c = await caches.open(LANDING); await c.delete(pageKey()); } catch (err) {}
 }
 
 function esc(s) {
@@ -566,8 +570,14 @@ async function navAnswer(e, url) {
   // a dark TrueNAS app behind Tailscale Serve answers 502, not a timeout
   if (r.status >= 500) return offlinePage();
   if (isPage) {
+    // The gate's redirect to /login means the sign-in has lapsed (or never
+    // was), NOT that the person signed out: do not save the login page as the
+    // picker and do not delete the picker already saved, just serve what came
+    // back (savePage refuses a redirected response anyway; this keeps the
+    // intent in one place). The real sign-out clears the cache from the
+    // login page, see the header comment.
     if (r.type === 'opaqueredirect' || (r.redirected && /\/login/.test(r.url))) {
-      e.waitUntil(forgetPage());
+      // nothing to save, nothing to forget
     } else if (!url.searchParams.has('want') && !url.searchParams.has('refused')) {
       e.waitUntil(savePage(r.clone()).catch(() => null));
     }

@@ -64,8 +64,8 @@ Devices not named after a username render as `[ UNMAPPED ]`.
 | `DASH_SMB_HOST` | `""` | host for the SMB auth probe. **No default since 2026-08-17** -- see "Site identity" below |
 | `DASH_COOKIE_SECURE` | `auto` | `Secure` on the session cookie: `auto` = on for https, `1`/`0` force it. `1` also refuses to serve login over plain http |
 | `DASH_TRUSTED_PROXIES` | `127.0.0.1,::1` | csv IPs/CIDRs whose `X-Forwarded-Proto` is believed. Tailscale Serve and a compose sidecar arrive over loopback; a proxy on the *docker host* arrives from the bridge gateway (e.g. `172.17.0.0/16`) |
-| `DASH_SESSION_IDLE_SECONDS` | `43200` (12h) | inactivity after which a browser session ends |
-| `DASH_SESSION_ABSOLUTE_SECONDS` | `604800` (7d) | maximum session age; activity does not extend it |
+| `DASH_SESSION_IDLE_SECONDS` | `8640000` (100d) | inactivity after which a browser session ends (100 d since 2026-10-14, so a phone that is offline for weeks is not signed out for it) |
+| `DASH_SESSION_ABSOLUTE_SECONDS` | `8640000` (100d) | maximum session age; activity does not extend it. Every response to a signed-in browser carries `X-CCSync-Session-Expires`, `GET /api/v1/session` reports it, and the pages warn 14 days out |
 | `DASH_OIDC_ISSUER` | `""` | OIDC issuer URL (https, or http to loopback for a sidecar IdP); discovery at `<issuer>/.well-known/openid-configuration` |
 | `DASH_OIDC_CLIENT_ID` / `DASH_OIDC_CLIENT_SECRET` | `""` | the confidential client registered with the IdP |
 | `DASH_OIDC_SCOPES` | `openid profile email` | scopes requested |
@@ -106,8 +106,11 @@ holds nothing replayable. A cookie with no row is not a session. Therefore:
 `[ SIGN OUT EVERYWHERE ]` (in the menu drawer's foot since the 2026-08-18 nav
 redesign) signs the account out on every device; and an admin can
 revoke anyone's from **Settings ▸ Users ▸ SIGNED-IN BROWSERS**
-(`POST /partials/admin/sessions/revoke`). Lifetimes are 12h idle (refreshed by
-activity, at most one write per minute) and 7d absolute, both configurable.
+(`POST /partials/admin/sessions/revoke`). Lifetimes are 100 days idle (refreshed by
+activity, at most one write per minute) and 100 days absolute, both configurable
+(Alex, 2026-10-14: one online sign-in keeps an installed phone or computer working
+offline for 100 days). The pages warn within 14 days of the end, and
+`/login?renew=1` signs in again without signing out first.
 The companion's *identity* token is a separate credential and is not affected
 by any of this.
 

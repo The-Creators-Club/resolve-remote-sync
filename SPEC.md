@@ -137,8 +137,8 @@ and turned on per customer; the companion's `site.feature_enabled` fails closed.
 
 **Auth and fleet credentials (dashboard).** Browser sessions are server-side
 and revocable (`sessions.py`, `auth_sessions` keyed by HMAC(secret, cookie) —
-no row, no session; logout / log-out-everywhere / admin revoke are real; 12h
-idle / 7d absolute). `DASH_AUTH_METHOD` has two implementations: `smb` (the
+no row, no session; logout / log-out-everywhere / admin revoke are real; 100 d
+idle / 100 d absolute since 2026-10-14). `DASH_AUTH_METHOD` has two implementations: `smb` (the
 NAS session probe) and `oidc` (authorization code + PKCE, `oidc.py`,
 `/login?local=1` break-glass). Secrets are strength-checked at boot
 (`broll.check_ingest_token`'s rule) and a weak one refuses to start;

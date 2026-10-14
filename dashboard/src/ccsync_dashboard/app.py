@@ -1279,6 +1279,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _cards_json_re = re.compile(
         r"^/cards/p/[a-z0-9][a-z0-9-]{0,47}/(api/|audio|video|peaks)")
 
+    # (Alex, 2026-10-14: "it should warn you while online if the login is
+    # about to expire", for the whole dashboard and the Timeline Cards app
+    # mounted under it.) Every response to a request that carried a valid
+    # BROWSER session says when that session ends, as unix seconds, in
+    # X-CCSync-Session-Expires. The mounted apps (/cards/ and its
+    # /cards/p/<slug>/api/... JSON, /broll, /music, /ytdl) get it for free
+    # because they sit behind this same stack, and that is the point: the
+    # Cards page is another repo's JS and reads the header off its own
+    # fetches, with no new request. Same-origin, so no
+    # Access-Control-Expose-Headers. A companion's identity token is not a
+    # browser session (auth.session_expiry_epoch is None for it) and never
+    # gets the header.
+    #
+    # Defined BEFORE login_gate so it is INSIDE it: by the time call_next
+    # returns, login_gate has resolved the session and cached the expiry on
+    # request.state, so this costs nothing -- it never resolves a session
+    # itself, which is why the open paths (static files, /login) carry no
+    # header unless something on them already asked who the caller was.
+    @app.middleware("http")
+    async def session_expiry_header(request, call_next):
+        response = await call_next(request)
+        try:
+            if getattr(request.state, "ccsync_session", None) is not None:
+                end = auth.session_expiry_epoch(request)
+                if end is not None:
+                    response.headers[auth.SESSION_EXPIRES_HEADER] = str(int(end))
+        except Exception:  # noqa: BLE001 - a header must never fail a response
+            log.debug("could not stamp the session expiry header", exc_info=True)
+        return response
+
     @app.middleware("http")
     async def login_gate(request, call_next):
         path = request.url.path

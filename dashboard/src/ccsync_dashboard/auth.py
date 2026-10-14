@@ -58,7 +58,10 @@ from .settings import Settings
 log = logging.getLogger("ccsync.dashboard.auth")
 
 COOKIE_NAME = "ccsync_session"
-SESSION_TTL_SECONDS = 7 * 24 * 3600
+# 100 days (Alex, 2026-10-14; see sessions.DEFAULT_ABSOLUTE_SECONDS for why):
+# one online sign-in keeps an installed phone/computer working offline for
+# 100 days. A deployment can still set DASH_SESSION_ABSOLUTE_SECONDS.
+SESSION_TTL_SECONDS = 100 * 24 * 3600
 # A companion sign-in does NOT expire (CR-86, 2026-08-27). It used to hold
 # for 30 days, and the day it lapsed the editor's companion stopped its
 # sync lanes and vanished from the fleet grid behind one transient tray
@@ -644,10 +647,20 @@ def _resolve_session(request: Request) -> tuple[str | None, str | None, bool]:
     # a logout, which is the thing this accepts an old key to avoid.
     sid = session_id_for(used or secret, cookie)
     store = session_store(request)
+    # When this sign-in ends (Alex, 2026-10-14). The cookie's own signed
+    # expiry is the ceiling for every kind of session; the store row can only
+    # make it earlier (a shorter idle clock). Stashed on request.state beside
+    # the (user, sid, tracked) triple rather than inside it, because that
+    # three-tuple is unpacked and rebuilt in more places than this.
+    cookie_end = _cookie_expiry_epoch(cookie)
+    request.state.ccsync_session_expiry = cookie_end
     if store is None:
         return username, sid, False
-    live = store.validate(sid)
+    live, row_end = store.validate_ex(sid)
     if live is not None:
+        if row_end is not None:
+            request.state.ccsync_session_expiry = (
+                row_end if cookie_end is None else min(row_end, cookie_end))
         return live, sid, True
     # No row: revoked, expired, or minted before this deployment (or by a test
     # that hand-signed a cookie). The cookie is cryptographically ours either
@@ -657,6 +670,33 @@ def _resolve_session(request: Request) -> tuple[str | None, str | None, bool]:
     if dev_insecure(settings):
         return username, sid, False
     return None, None, False
+
+
+# The response header every signed-in browser request carries (app.py's
+# session_expiry_header middleware): unix seconds at which this session ends.
+SESSION_EXPIRES_HEADER = "X-CCSync-Session-Expires"
+# How many days before the end the banner starts nagging.
+SESSION_WARN_DAYS = 14
+
+
+def _cookie_expiry_epoch(cookie: str | None) -> float | None:
+    """The signed expiry (unix seconds) inside a session cookie whose
+    signature `_read_token_any` has ALREADY verified, or None. Both shapes
+    (five fields, six with the nonce) end `...<expires>.<signature>`."""
+    try:
+        return float(str(cookie).split(".")[-2])
+    except (ValueError, IndexError):
+        return None
+
+
+def session_expiry_epoch(request: Request) -> float | None:
+    """When the browser session on this request ends, as a unix epoch, or
+    None when the request carries no valid browser session. Companion
+    identity tokens never reach this (they are a different purpose and a
+    different header) and have no expiry to report."""
+    if get_session_user(request) is None:
+        return None
+    return getattr(request.state, "ccsync_session_expiry", None)
 
 
 def get_session_user(request: Request) -> str | None:
@@ -684,7 +724,7 @@ def start_session(request: Request, response: Response, username: str) -> str:
     settings: Settings = request.app.state.settings
     # The token's own expiry is the absolute lifetime, so a site that RAISES
     # DASH_SESSION_ABSOLUTE_SECONDS does not find its sessions ending at the
-    # module default seven days anyway.
+    # module default anyway.
     ttl = int(getattr(settings, "session_absolute_seconds", SESSION_TTL_SECONDS)
               or SESSION_TTL_SECONDS)
     cookie = make_session_cookie(settings.session_secret, username, ttl=ttl)
@@ -703,19 +743,21 @@ def start_session(request: Request, response: Response, username: str) -> str:
         secure=cookie_secure(settings, request), path="/",
     )
     request.state.ccsync_session = (username, sid, store is not None)
+    request.state.ccsync_session_expiry = time.time() + ttl
     return sid
 
 
 def end_session(request: Request, response: Response) -> None:
     """Log out: revoke the server-side record FIRST, then drop the cookie.
     Deleting the cookie alone (what logout used to do) left a stolen copy
-    valid for the rest of its seven days."""
+    valid for the rest of its lifetime."""
     sid = get_session_id(request)
     store = session_store(request)
     if sid and store is not None:
         store.revoke(sid, by="logout")
     response.delete_cookie(COOKIE_NAME, path="/")
     request.state.ccsync_session = (None, None, False)
+    request.state.ccsync_session_expiry = None
 
 
 # ------------------------------------------------------------------ CSRF

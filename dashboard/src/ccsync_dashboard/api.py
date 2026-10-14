@@ -9,6 +9,7 @@ also sets the DASH_DEV_INSECURE lab flag.
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import hmac
 import importlib
@@ -2490,6 +2491,28 @@ def api_me(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     user = auth.get_session_user(request)
     return {"user": user, "is_admin": auth.is_admin(settings, user)}
+
+
+@router.get("/session")
+def api_session(request: Request) -> dict[str, Any]:
+    """When the caller's browser sign-in ends (Alex, 2026-10-14: a sign-in
+    lasts 100 days and the person is warned while online as it nears its
+    end). Session-gated by login_gate like the rest of /api/, so a request
+    with no valid session never reaches here and gets the gate's JSON 401
+    ("Your sign-in has expired. Sign in again."); the check below is for a
+    caller who got past the gate some other way and keeps the answer honest."""
+    user = auth.get_session_user(request)
+    end = auth.session_expiry_epoch(request)
+    if user is None or end is None:
+        raise HTTPException(status_code=401,
+                            detail="Your sign-in has expired. Sign in again.")
+    return {
+        "user": user,
+        "expires_at": dt.datetime.fromtimestamp(end, dt.timezone.utc)
+                        .replace(microsecond=0).isoformat(),
+        "expires_epoch": int(end),
+        "days_left": round((end - time.time()) / 86400.0, 2),
+    }
 
 
 # ------------------------------------------------------------------ selection

@@ -278,7 +278,7 @@ The cookie is a versioned HMAC
 token *and* has a server-side row keyed by `HMAC(secret, cookie)` — a cookie
 with no row is not a session, which is what makes logout, "log out everywhere"
 and an admin's revoke button mean anything. `HttpOnly`, `SameSite=Lax`,
-`Secure` per `DASH_COOKIE_SECURE`. 12h idle / 7d absolute. Login is throttled
+`Secure` per `DASH_COOKIE_SECURE`. 100 d idle / 100 d absolute (2026-10-14: one online sign-in carries a device through offline use; `X-CCSync-Session-Expires` + `GET /api/v1/session` + the page banner say when to renew). Login is throttled
 per-username *and* per-IP, in SQLite so it survives the restart every deploy
 performs. State-changing requests carrying the cookie need a CSRF synchroniser
 token derived from the session id.

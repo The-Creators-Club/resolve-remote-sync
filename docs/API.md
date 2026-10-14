@@ -227,6 +227,20 @@ Revokes the server-side session, not just the browser's copy. Always
 reports who you are. It is open by EXACT match only: every `/api/v1/me/...`
 route (the account page's, §4a) needs a session.
 
+### `GET /api/v1/session`
+
+`{ "user": "…", "expires_at": "<ISO UTC>", "expires_epoch": 1234567890,
+"days_left": 97.31 }` for the caller's browser sign-in (2026-10-14: a sign-in
+lasts 100 days; the pages warn within 14 days of the end). Needs a session: with
+none it is the gate's JSON 401, `{"detail": "Your sign-in has expired. Sign in
+again.", "login": "/login"}`. A companion's identity token is not a browser
+session and has no expiry to report. The same instant rides on EVERY response to
+a request with a valid browser session, the mounted apps included (`/cards/`
+and `/cards/p/<slug>/api/...`), as `X-CCSync-Session-Expires: <unix seconds>`.
+To sign in again before it lapses, send the browser to
+`/login?renew=1&next=<path>`: the form is shown even while signed in, and a
+successful sign-in revokes the old session and mints a fresh one.
+
 ### `POST /api/v1/verify`
 
 Companion bootstrap: the same credential check as login, returning a long-lived

@@ -658,6 +658,10 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     user = auth.get_session_user(request)
     context.setdefault("session_user", user)
     context.setdefault("session_is_admin", auth.is_admin(settings, user))
+    # When this sign-in ends (Alex, 2026-10-14), for the expiry banner in
+    # shell.html / cc.js. None for the login page and any anonymous render.
+    end = auth.session_expiry_epoch(request) if user else None
+    context.setdefault("session_expires_epoch", int(end) if end else "")
     # Account page 2026-09-25 (ACCOUNT_PAGE_FEATURES.md 6.2): every render
     # carries the display-name map the `shown_as` filter reads, and the
     # topbar's own label. Only for a signed-in render: the login page names
@@ -957,7 +961,13 @@ def _login_context(request: Request, next_path: str, error: str | None,
 @router.get("/login")
 def page_login(request: Request):
     next_path = _safe_next(request.query_params.get("next", ""))
-    if auth.get_session_user(request):
+    # ?renew=1 (Alex, 2026-10-14: a sign-in lasts 100 days, the banner warns
+    # as it nears the end and offers to sign in again NOW): show the form even
+    # though there is a live session, because the whole point is to replace
+    # it with a fresh 100 days. Without the flag a signed-in visitor is still
+    # bounced to `next` as before.
+    renew = request.query_params.get("renew", "") == "1"
+    if auth.get_session_user(request) and not renew:
         return RedirectResponse(next_path, status_code=303)
     settings = request.app.state.settings
     if auth.refuse_plaintext_login(settings, request):
@@ -974,7 +984,13 @@ def page_login(request: Request):
                    "but you reached it over http. Use the https URL.",
         )
     local = request.query_params.get("local", "") == "1"
-    return _render(request, "login.html", _login_context(request, next_path, None, local))
+    context = _login_context(request, next_path, None, local)
+    context["renew"] = renew
+    # A real sign-out lands here (page_logout, page_logout_everywhere); the
+    # page then drops the Timeline Cards front door's saved list, see
+    # login.html and cards_landing.CARDS_SW.
+    context["signed_out"] = request.query_params.get("signed_out", "") == "1"
+    return _render(request, "login.html", context)
 
 
 MAX_LOGIN_BODY_BYTES = 8 * 1024   # generous for a username/password/next form
@@ -1008,6 +1024,7 @@ async def page_login_submit(request: Request):
     username = form.get("username", "").strip().lower()
     password = form.get("password", "")
     next_path = _safe_next(form.get("next", ""))
+    renew = form.get("renew", "") == "1"
     local = request.query_params.get("local", "") == "1" or form.get("local", "") == "1"
     sso = str(settings.auth_method or "").strip().lower() == "oidc"
     error = None
@@ -1070,20 +1087,38 @@ async def page_login_submit(request: Request):
                     except Exception:  # noqa: BLE001
                         pass
                 response = RedirectResponse(landing, status_code=303)
+                # The session this browser held BEFORE signing in again
+                # (renewing, or signing in as somebody else on top of one).
+                # Read before start_session overwrites the request's cached
+                # session; revoked after it, so the old row cannot outlive
+                # the cookie that named it.
+                old_sid = auth.get_session_id(request)
                 # Mints the cookie AND the revocable server-side session row;
                 # see auth.start_session (cookie flags: Secure per
                 # auth.cookie_secure, HttpOnly, SameSite=Lax).
-                auth.start_session(request, response, username)
+                new_sid = auth.start_session(request, response, username)
+                if old_sid and old_sid != new_sid:
+                    store = auth.session_store(request)
+                    if store is not None:
+                        store.revoke(old_sid, by="renewed" if renew else "replaced")
                 log.info("login for %r from %s", username, auth.client_ip(request))
                 return response
             auth.record_login_failure(request, username)
             error = _LOGIN_REFUSED
-    return _render(request, "login.html", _login_context(request, next_path, error, local))
+    context = _login_context(request, next_path, error, local)
+    context["renew"] = renew
+    return _render(request, "login.html", context)
 
 
 @router.post("/logout")
 def page_logout(request: Request):
-    response = RedirectResponse("/", status_code=303)
+    # /login?signed_out=1 rather than "/": the login page runs the one line of
+    # script that forgets the Timeline Cards front door's saved list on this
+    # device (Alex, 2026-10-14). The worker used to do that itself on any
+    # redirect to /login, which also fired for an EXPIRED sign-in and threw
+    # away the offline picker; only a real sign-out may. Not Clear-Site-Data:
+    # it would also wipe every episode's offline copy and queued edits.
+    response = RedirectResponse("/login?signed_out=1", status_code=303)
     # Revokes the server-side row too: deleting the browser's copy alone left
     # a stolen cookie valid for the rest of its lifetime (item 6 / H1).
     auth.end_session(request, response)
@@ -1100,7 +1135,7 @@ def page_logout_everywhere(request: Request):
     store = auth.session_store(request)
     revoked = store.revoke_user(user, by=f"self:{user}") if store else 0
     log.warning("%r revoked %d session(s) from every device", user, revoked)
-    response = RedirectResponse("/login", status_code=303)
+    response = RedirectResponse("/login?signed_out=1", status_code=303)
     response.delete_cookie(auth.COOKIE_NAME, path="/")
     return response
 

@@ -75,6 +75,9 @@ h2.sec::before { content: "\2f\2f"; content: "\2f\2f" / ""; color: var(--red); f
 .note.ok { border-left-color: var(--ok); background: rgb(58 255 110 / 0.05); }
 .note b { color: var(--text); }
 .note .grow { flex: 1; }
+/* The sign-in expiry banner (cc/cc.js, 2026-10-14): a note above the page,
+   wrapping on a phone, never a modal. */
+#cc-session-banner { margin: 8px 14px; flex-wrap: wrap; align-items: center; }
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 18px; font-size: 13px; }
 .kv dt { color: var(--muted); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; padding-top: 2px; }
 .kv dd { color: var(--text); margin: 0; overflow-wrap: anywhere; }

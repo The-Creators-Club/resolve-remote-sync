@@ -710,7 +710,11 @@ def test_the_front_door_deletes_no_cache_but_its_own_page():
 
     js = cards_landing.CARDS_SW
     assert "caches.delete" not in js
-    assert "c.delete(pageKey())" in js
+    # (Alex, 2026-10-14) ...and not even that: a redirect to /login is an
+    # EXPIRED sign-in as often as a sign-out, and deleting the saved list on
+    # it threw the offline picker away. The real sign-out clears it from the
+    # login page (test_session_100_days.py).
+    assert ".delete(" not in js
 
 
 def test_the_front_door_serves_the_saved_list_when_the_server_is_dark():
@@ -814,3 +818,24 @@ def test_the_landing_page_renders_the_confirm_and_the_last_in_line(landing):
     assert page.status_code == 200
     assert "owen was last in 22 min ago" in page.text
     assert "confirm(" in page.text
+
+
+def test_the_mounted_cards_app_carries_the_session_expiry(landing):
+    """(Alex, 2026-10-14) The Timeline Cards page, another repo's JS, reads
+    X-CCSync-Session-Expires off its own fetches, so the landing page, an
+    episode's page and its JSON api all carry it; a refusal with no session
+    does not."""
+    client, app, roots = landing
+    entry = open_episode(app, roots[0])
+    cookie = client.cookies.get(auth.COOKIE_NAME)
+    want = int(auth.make_session_cookie(SECRET, "owen").split(".")[-2])
+    for url in ("/cards/", f"/cards/p/{entry.slug}/",
+                f"/cards/p/{entry.slug}/api/state"):
+        resp = client.get(url)
+        assert resp.status_code == 200, url
+        assert abs(int(resp.headers["X-CCSync-Session-Expires"]) - want) < 120, url
+    client.cookies.clear()
+    gated = client.get(f"/cards/p/{entry.slug}/api/state")
+    assert gated.status_code == 401
+    assert "X-CCSync-Session-Expires" not in gated.headers
+    assert cookie

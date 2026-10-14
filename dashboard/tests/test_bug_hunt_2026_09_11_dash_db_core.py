@@ -274,20 +274,21 @@ def test_a_deliberately_set_eula_path_is_left_alone(monkeypatch, tmp_path):
 
 def test_a_zero_session_lifetime_falls_back_instead_of_bricking_sign_in(caplog):
     """The two readers disagreed about 0: start_session's `or` gave the
-    COOKIE the seven-day default while SessionStore stored 0.0 and deleted the
+    COOKIE the module default while SessionStore stored 0.0 and deleted the
     row on the next request, which reads as a revocation - sign in, then
     straight back to /login, with nothing logged."""
     with caplog.at_level(logging.ERROR):
         settings = Settings(session_secret="test-secret",
                             session_absolute_seconds=0, session_idle_seconds=0)
-    assert settings.session_absolute_seconds == 7 * 24 * 3600
-    assert settings.session_idle_seconds == 12 * 3600
+    # 100 days each since 2026-10-14 (was 7 d / 12 h; test_session_100_days.py)
+    assert settings.session_absolute_seconds == 100 * 24 * 3600
+    assert settings.session_idle_seconds == 100 * 24 * 3600
     assert "SESSION_ABSOLUTE_SECONDS" in caplog.text
 
 
 def test_a_negative_session_lifetime_is_treated_the_same():
     settings = Settings(session_secret="test-secret", session_absolute_seconds=-1)
-    assert settings.session_absolute_seconds == 7 * 24 * 3600
+    assert settings.session_absolute_seconds == 100 * 24 * 3600
 
 
 # --------------------------------------------------------------- dash-db-1

@@ -170,8 +170,19 @@ class Settings:
     trusted_proxies: str = "127.0.0.1,::1"
     # Server-side session lifetimes (seconds). Idle is refreshed by activity,
     # absolute never is. See sessions.py.
-    session_idle_seconds: float = 12 * 3600
-    session_absolute_seconds: float = 7 * 24 * 3600
+    #
+    # (Alex, 2026-10-14: "you only need to be online once every 100 days to
+    # log in once and it should warn you while online if the login is about
+    # to expire. Everything should be able to run on device in offline
+    # mode.") Both are 100 days now, for the whole dashboard. Idle is the
+    # same number ON PURPOSE: a phone that sits offline for three weeks makes
+    # no requests, so any idle timeout shorter than the absolute one signs
+    # that phone out for having been used offline, which is the opposite of
+    # the goal. The dashboard says when the sign-in is about to lapse
+    # (X-CCSync-Session-Expires, GET /api/v1/session, the banner) so the
+    # person renews while online instead of finding out in a field.
+    session_idle_seconds: float = 100 * 24 * 3600
+    session_absolute_seconds: float = 100 * 24 * 3600
     # THE test/dev escape hatch, and the only one. It turns off the boot-time
     # secret-strength refusal and the "an unknown session id is not a session"
     # rule, both of which the suite would otherwise trip on every hand-minted
@@ -671,15 +682,15 @@ class Settings:
         # dash-core-7 (2026-09-11): a non-positive session lifetime bricks
         # sign-in silently. The two readers disagreed about what 0 means -
         # auth.start_session takes `... or SESSION_TTL_SECONDS`, so the COOKIE
-        # got seven days, while SessionStore stored 0.0 literally and
+        # got the module default, while SessionStore stored 0.0 literally and
         # validate() deleted the row on the very next request, which reads as
         # a revocation: /login succeeds and the next page is /login again,
         # with nothing logged. An operator who writes 0 normally means "no
         # limit", and that is not a posture this dashboard offers, so the
         # value falls back to the shipped default and says so.
         for field_name, default in (
-            ("session_idle_seconds", 12 * 3600),
-            ("session_absolute_seconds", 7 * 24 * 3600),
+            ("session_idle_seconds", 100 * 24 * 3600),
+            ("session_absolute_seconds", 100 * 24 * 3600),
         ):
             given = getattr(self, field_name)
             try:
@@ -816,8 +827,8 @@ class Settings:
             ),
             cookie_secure=(env.get("DASH_COOKIE_SECURE", "").strip().lower() or "auto"),
             trusted_proxies=(env.get("DASH_TRUSTED_PROXIES", "").strip() or "127.0.0.1,::1"),
-            session_idle_seconds=num("DASH_SESSION_IDLE_SECONDS", 12 * 3600),
-            session_absolute_seconds=num("DASH_SESSION_ABSOLUTE_SECONDS", 7 * 24 * 3600),
+            session_idle_seconds=num("DASH_SESSION_IDLE_SECONDS", 100 * 24 * 3600),
+            session_absolute_seconds=num("DASH_SESSION_ABSOLUTE_SECONDS", 100 * 24 * 3600),
             dev_insecure=env.get("DASH_DEV_INSECURE", "") == "1",
             oidc_issuer=env.get("DASH_OIDC_ISSUER", "").strip().rstrip("/"),
             oidc_client_id=env.get("DASH_OIDC_CLIENT_ID", "").strip(),

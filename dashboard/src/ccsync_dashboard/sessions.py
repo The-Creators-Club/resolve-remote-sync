@@ -41,12 +41,27 @@ from . import db
 log = logging.getLogger("ccsync.dashboard.sessions")
 
 # Lifetimes (seconds). Idle = time since the last request on this session;
-# absolute = time since login, which no amount of activity extends. 12h idle
-# means an editor who leaves the dashboard open over lunch stays signed in and
-# one who leaves for the weekend does not; 7d absolute keeps the previous
-# ceiling, so this change shortens sessions, never lengthens them.
-DEFAULT_IDLE_SECONDS = 12 * 3600
-DEFAULT_ABSOLUTE_SECONDS = 7 * 24 * 3600
+# absolute = time since login, which no amount of activity extends.
+#
+# (Alex, 2026-10-14: "you only need to be online once every 100 days to log
+# in once ... Everything should be able to run on device in offline mode.")
+# Both are 100 days. They used to be 12 h idle / 7 d absolute (a deliberate
+# SHORTENING in 2026-09), which suited a dashboard people sit at and does not
+# suit an installed phone app that lives offline: a phone that is out of
+# signal for three weeks makes no requests, so ANY idle timeout shorter than
+# the absolute one signs it out for having been used offline. Idle therefore
+# equals absolute, and what keeps an old sign-in from lingering is that the
+# person is told as it nears its end (auth.session_expiry_epoch, the
+# X-CCSync-Session-Expires header, GET /api/v1/session, the banner) and can
+# renew in place (/login?renew=1). Revocation (logout, logout-everywhere,
+# an admin) is unchanged and is still the way a lost device is cut off.
+DEFAULT_IDLE_SECONDS = 100 * 24 * 3600
+DEFAULT_ABSOLUTE_SECONDS = 100 * 24 * 3600
+
+# How long a REVOKED row is kept for audit before prune drops it. Was
+# DEFAULT_ABSOLUTE_SECONDS (7 d) and stays 7 d: the lifetime went to 100 days
+# but "nobody is going to audit a sign-out from three months ago" did not.
+REVOKED_KEEP_SECONDS = 7 * 24 * 3600
 
 # Sliding refresh writes last_seen at most this often. Without it every htmx
 # poll (/partials/transfers every 2s, per open tab) would be a write to the
@@ -308,6 +323,17 @@ class SessionStore:
         """The username this session belongs to, or None when it is unknown,
         revoked, idle-expired or past its absolute lifetime. Slides last_seen
         (at most once per TOUCH_INTERVAL_SECONDS) as a side effect."""
+        return self.validate_ex(sid, now)[0]
+
+    def validate_ex(self, sid: str, now: str | None = None) -> tuple[str | None, float | None]:
+        """`validate` plus WHEN this session ends, as a unix epoch (Alex,
+        2026-10-14: the dashboard tells a person their sign-in is about to
+        lapse). The end is the earlier of created_at + absolute and
+        last_seen + idle, both measured from the row this call already read,
+        so it costs no second query. With idle == absolute (the 100-day
+        defaults) the first always wins; the min() is for a site that sets
+        DASH_SESSION_IDLE_SECONDS shorter, where the honest answer to "when
+        do I have to sign in again" is "if you stop now, then"."""
         now = now or db.utcnow_iso()
 
         def go(conn: sqlite3.Connection):
@@ -318,7 +344,7 @@ class SessionStore:
 
         row = self._run(go)
         if row is None or row["revoked"]:
-            return None
+            return None, None
         try:
             idle = db.age_seconds(row["last_seen"], now)
             age = db.age_seconds(row["created_at"], now)
@@ -329,7 +355,7 @@ class SessionStore:
             # answer here whatever the reason: raising out of `validate` makes
             # every request carrying that cookie a 500, including the one to
             # /login that would let the person out of it.
-            return None
+            return None, None
         if idle > self.idle_seconds or age > self.absolute_seconds:
             # Expired sessions are deleted rather than left to accumulate: the
             # row exists to be revocable, and an expired one is not. Best
@@ -340,13 +366,25 @@ class SessionStore:
                 conn.execute("DELETE FROM auth_sessions WHERE sid = ?", (sid,))
 
             self._best_effort_write(drop, "delete an expired session")
-            return None
+            return None, None
         if idle >= TOUCH_INTERVAL_SECONDS:
             def touch(conn: sqlite3.Connection) -> None:
                 conn.execute("UPDATE auth_sessions SET last_seen = ? WHERE sid = ?", (now, sid))
 
             self._best_effort_write(touch, "slide last_seen")
-        return row["username"]
+            idle = 0.0
+        # Seconds left on each clock, from "now". `idle` is 0 after a touch;
+        # when the touch was not due (under a minute) the sub-minute remainder
+        # is what is left of it, which is noise next to 100 days.
+        left = min(self.absolute_seconds - age, self.idle_seconds - idle)
+        try:
+            stamp = db.parse_iso(now)
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=dt.timezone.utc)
+            expires = stamp.timestamp() + left
+        except (ValueError, TypeError):
+            expires = None
+        return row["username"], expires
 
     def _best_effort_write(self, fn, what: str) -> bool:
         """bug-dash-auth-2 (2026-09-25): a write `validate` makes on the way
@@ -486,7 +524,7 @@ class SessionStore:
         or revoked long enough ago that nobody is going to audit them."""
         now = now or db.utcnow_iso()
         created_cutoff = _shift(now, -self.absolute_seconds)
-        revoked_cutoff = _shift(now, -DEFAULT_ABSOLUTE_SECONDS)
+        revoked_cutoff = _shift(now, -REVOKED_KEEP_SECONDS)
 
         def go(conn: sqlite3.Connection) -> int:
             return conn.execute(

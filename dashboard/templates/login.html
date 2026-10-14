@@ -4,7 +4,17 @@
    fields, same order of paths as classic (SSO first when configured, the
    password form as break-glass behind ?local=1). #}
 {% block title %}{{ brand_org | upper }}: SIGN IN{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ asset_url('cc/everyday.css') }}">{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset_url('cc/everyday.css') }}">
+{% if signed_out %}
+{# A real sign-out (POST /logout, /logout-everywhere) lands here with
+   ?signed_out=1 (Alex, 2026-10-14). The Timeline Cards front door keeps its
+   episode list in the `cards-landing` cache for offline launches; that list
+   names who opened what, so a signed-out device forgets it. The service
+   worker used to delete it on any redirect to /login, which also fired for an
+   EXPIRED sign-in and threw the offline picker away. Not Clear-Site-Data: it
+   would wipe every episode's offline copy and its queued edits too. #}
+<script>try { if (window.caches) caches.delete('cards-landing'); } catch (e) {}</script>
+{% endif %}{% endblock %}
 {% block hud %}{% endblock %}
 {% block layout %}
 <div class="page gate ev-gate">
@@ -19,10 +29,12 @@
       {% endif %}
       {% if show_password_form %}
         {% if sso_enabled %}<div class="or" title="A spare way in for an admin, for when the work account sign-in is not working.">admin sign-in</div>{% endif %}
+        {% if renew %}<p class="lede">Sign in again to keep this phone or computer working offline for another 100 days.</p>{% endif %}
         <p class="lede">Use the username and password your admin gave you.</p>
         <p class="lede">Your admin creates this account for you. If you do not have one yet, ask them before installing.</p>
         <form method="post" action="/login" class="ev-login-form">
           <input type="hidden" name="next" value="{{ next_path or '/' }}">
+          {% if renew %}<input type="hidden" name="renew" value="1">{% endif %}
           {% if sso_enabled %}<input type="hidden" name="local" value="1">{% endif %}
           {# Android capitalises a text field's first letter by default, so the
              username turns it off (2026-08-30, as classic). #}

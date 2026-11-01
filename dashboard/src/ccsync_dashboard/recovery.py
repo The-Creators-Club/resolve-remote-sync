@@ -1202,7 +1202,7 @@ def page_view(settings: Any, conn: sqlite3.Connection, problem_key: str = "",
         "snapshots": snapshots,
         "snapshots_why_not": snap_why,
         "projects": projects,
-        "protection": protection.page_view(conn),
+        "protection": protection.page_view(conn, settings),
         "restores": history(conn, RESTORES_META),
         "drills": history(conn, DRILLS_META),
     }

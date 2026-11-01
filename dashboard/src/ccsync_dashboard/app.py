@@ -31,7 +31,8 @@ from starlette.requests import ClientDisconnect
 
 from . import (
     VERSION,
-    ai_providers, api, assignments, auth, broll, cards, cards_exec, cards_tunnel,
+    ai_providers, api, appliance_config, assignments, auth, broll, cards, cards_exec,
+    cards_tunnel,
     cli_tools, crash_report,
     dashboard_update, db, gear_ai, internal_sftp, jobs, local_users, mount_status, music,
     notices,
@@ -519,7 +520,8 @@ def _log_shared_token_migration(conn, settings: Settings) -> None:
 
     Per-editor report tokens landed 2026-08-17 (COMMERCIAL_READINESS.md item
     15) and every companion in the field holds only the shared one, so
-    `DASH_SHARED_REPORT_TOKEN_ENABLED` defaults to true and this is the number
+    `DASH_SHARED_REPORT_TOKEN_ENABLED` is on only where a site says so (a NEW
+    site ships it off, CR-367 2026-10-07) and this is the number
     that says when it can be turned off. Without it the migration has no
     finish line an operator can see, and "one token for the whole fleet" stays
     forever. Best-effort: a database that cannot be read must never stop the
@@ -664,6 +666,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # deployment that already sets all five in its compose env (every
         # deployment today) -- see secrets_boot.ensure_secrets' docstring.
         boot_provenance = secrets_boot.ensure_secrets()
+        # CR-363 / GL-07 (2026-10-07): the values an appliance admin entered
+        # in the wizard, for any variable the environment leaves blank.
+        appliance_config.apply_overlay()
         settings = Settings.from_env()
 
     # Before the first thing that can refuse to start. Writes a JSON crash file
@@ -692,8 +697,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if boot_problems and not settings.dev_insecure:
         raise RuntimeError(
             "refusing to start: " + "; ".join(boot_problems)
-            + ". Generate secrets with `openssl rand -hex 24` and redeploy. "
-              "(A lab may set DASH_DEV_INSECURE=1 to bypass this; never do that "
+            # CR-362 (2026-10-07): the auth-method problem is not a weak
+            # secret; "generate secrets" would send a customer the wrong way.
+            + (". Generate secrets with `openssl rand -hex 24` and redeploy. "
+               if any("DASH_AUTH_METHOD" not in p for p in boot_problems)
+               else ". Fix it and redeploy. ")
+            + "(A lab may set DASH_DEV_INSECURE=1 to bypass this; never do that "
               "on a deployment.)"
         )
     if settings.dev_insecure:
@@ -737,6 +746,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # CR-369 / GL-21 (2026-10-07): a startup that hangs before the boot
+        # watchdog is armed is caught by this deadline (volume trees only).
+        try:
+            lifespan_deadline = dashboard_update.arm_lifespan_deadline(settings)
+        except Exception:  # noqa: BLE001
+            lifespan_deadline = None
         conn = db.connect(settings.db_path)
         db.migrate(conn)
         # A "report fields" record an OLDER build wrote is this build's to
@@ -770,6 +785,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             site_store.seed_from_env_once(conn, settings)
         except Exception:  # noqa: BLE001 - never block boot over the manifest
             log.exception("site_settings seed-from-env failed")
+        # GL-31 / CR-374 (2026-10-07): a studio site whose container lost
+        # DASH_STUDIO_CLI_PROVIDERS (an OTA bundle or an app-manager image swap
+        # keeps the OLD env) boots LOCKED with its CLI rows still stored.
+        # Say so loudly; the stored rows are never rewritten by this build.
+        try:
+            from . import build_flavor
+
+            if build_flavor.stranded_cli_rows(conn):
+                log.warning(
+                    "this dashboard is the LOCKED vendor build but this site has "
+                    "features.ai_cli_providers=1 stored: the Claude Code/Codex "
+                    "providers, CLI auto-update and the subscription path are OFF "
+                    "until the container env carries %s=1. Redeploy with "
+                    "server/install_dashboard_app.py after adding [studio] "
+                    "allow_cli_providers = true to the site.toml "
+                    "(docs/STUDIO_BUILD.md). Nothing stored was changed.",
+                    build_flavor.ENV_VAR)
+        except Exception:  # noqa: BLE001 - a boot nicety, never fatal
+            log.exception("could not check for stranded CLI rows")
         # The look switch was retired on 2026-09-25 (the CC Terminal look is
         # the only look): a `ui_terminal_groups` / `ui_preview` row an earlier
         # build stored is read by nothing now, and is removed so an export or
@@ -880,6 +914,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             dashboard_update.start_boot_watchdog(settings)
         except Exception:  # noqa: BLE001
             log.exception("could not arm the code-update boot watchdog")
+        if lifespan_deadline is not None:
+            lifespan_deadline.cancel()
         try:
             yield
         finally:
@@ -1834,6 +1870,7 @@ def run() -> None:
     import uvicorn
 
     provenance = secrets_boot.ensure_secrets()
+    appliance_config.apply_overlay()       # CR-363 / GL-07, see create_app
     settings = Settings.from_env()
     # DCORE-3: the same refusal on the console-script path. create_app is
     # handed a Settings here, so its own check sees no provenance.

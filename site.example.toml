@@ -40,14 +40,20 @@ host = "192.168.0.10"
 # `administrators` (SSH is admin-only there) with 2FA off. Env: TRUENAS_USER.
 # Its password is TRUENAS_PW, or SYNO_PW on a Synology site.
 admin_user = "truenas_admin"
-# Verify the NAS's TLS certificate on API calls. "0" trusts a self-signed one,
-# which is the out-of-the-box state of both platforms -- and is WARNED about on
-# every run since 2026-08-17, because these calls carry the admin password or
-# an account-creating API key (COMMERCIAL_READINESS.md item 6). Point it at a
-# CA bundle once the NAS has a real certificate:
-#   verify_ssl = "/etc/ssl/certs/nas-ca.pem"     # see docs/SERVER.md
-# Env: TRUENAS_VERIFY_SSL / SYNO_VERIFY_SSL.
-verify_ssl = "0"
+# Verify the NAS's TLS certificate on API calls (GL-18/GL-19, CR-368,
+# 2026-10-07: VERIFIED BY DEFAULT). Both platforms ship a self-signed cert, so
+# the default is a PIN: leave this UNSET and the first run, made with
+# --trust-host-key-on-first-use while you can see the box, records the
+# certificate's SHA-256 in ~/.ccsync/known_certs.json and prints the line to
+# paste here. A changed certificate is a refusal, never a re-trust. The values:
+#   verify_ssl = "sha256:<64 hex>"               # pin (openssl x509 -fingerprint -sha256)
+#   verify_ssl = "/etc/ssl/certs/nas-ca.pem"     # a CA bundle, once the NAS has a real cert
+#   verify_ssl = "1"                             # the system CA bundle
+#   verify_ssl = "0"                             # OFF -- warned about on every run, and
+#                                                # only for a site that already runs that way
+# The container gets the same value as TRUENAS_VERIFY_SSL. Env: TRUENAS_VERIFY_SSL /
+# SYNO_VERIFY_SSL. See docs/SERVER.md, "Verifying the NAS certificate".
+# verify_ssl = "sha256:..."
 # SSH host-key pin, in known_hosts form -- get it with
 #   ssh-keyscan -t ed25519 <host>
 # and paste the "<type> <base64>" half here. THIS IS NO LONGER OPTIONAL in
@@ -57,6 +63,10 @@ verify_ssl = "0"
 # with --trust-host-key-on-first-use (or $CCSYNC_SSH_TRUST_ON_FIRST_USE=1): the
 # key is recorded, printed, and every later run is checked against it -- a key
 # that CHANGES is a refusal. Also settable as --host-key / $CCSYNC_SSH_HOSTKEY.
+# The same key is carried to (GL-19, CR-368, 2026-10-07): the dashboard container's
+# DASH_NAS_SSH_HOSTKEY on a Synology, and the site manifest's `sftp_hostkey`, which
+# both editor installers write into rclone's known_hosts so the EDITOR lanes verify
+# the NAS too. A recorded first-use key is used when none is pinned here.
 # ssh_hostkey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."
 # The TCP port THE OPERATOR SCRIPTS reach the NAS's sshd on. Unset it falls
 # back to [net] sftp_port (the same sshd on every site this repo has met) and
@@ -151,8 +161,12 @@ sftp_port = "22"
 # real cap; anything under OpenSSH 8.5 has the same hole. 64Ki is measured
 # good (112 MiB/s down on 1 GbE) and is the required value for a Synology
 # site. See docs/synology-spikes-2026-08-17.md spike 6.
-sftp_chunk_size = "255Ki"      # Synology MUST set "64Ki"
-sftp_concurrency = 64          # Synology: 16
+# GL-10 / CR-364 (2026-10-07): COMMENTED OUT on purpose. Uncommented, this
+# template shipped the one value that truncates footage on a Synology site.
+# Leave both unset: a Synology site gets 64Ki / 16 by itself, every other NAS
+# the companion default (255Ki / 64). A Synology deploy REFUSES a larger value.
+# sftp_chunk_size = "64Ki"       # Synology: 64Ki, never above
+# sftp_concurrency = 16          # Synology: 16, never above
 # Where editors point lanes A/B. LEAVE UNSET on a dual-homed site (LAN +
 # tailnet): the wizard then uses the host of whichever dashboard URL the
 # editor reached the NAS by. Set it only to a name reachable from everywhere
@@ -219,6 +233,11 @@ device_id = ""
 # only a few characters fit; unset means "use org_name".
 org_name = "Your Studio"
 # org_short = "YS"
+# Where your editors and admins are told to send a problem (the Help page, the
+# Health header, every "send this to support" line, the tray's help text and the
+# installer's last step). Leave it unset to show the vendor's own support
+# address; set it if you resell this or run your own support desk.
+# support_contact = "help@yourstudio.example"
 # THE PRODUCT's name, not yours -- the one brand string here with a non-blank
 # default, because every deployment runs the same software. Set it only if you
 # are reselling this under your own name.
@@ -253,6 +272,10 @@ org_name = "Your Studio"
 # compromised host cannot install anything: every record is re-verified
 # against DASH_RELEASE_PUBKEYS, which is the offline release key's public
 # half baked into the deploy.
+# A customer takes the VENDOR's address (the vendor gives it to you; today it is
+# vendor_defaults.VENDOR_FEED_URL in the dashboard source, one value, GL-47) and
+# exports the vendor's public key as DASH_RELEASE_PUBKEYS (docs/INSTALL.md step 6).
+# Or export DASH_VENDOR_DEFAULTS=1 and leave this blank to use both baked values.
 # feed_url = "https://github.com/<org>/<releases-repo>/releases/download/ccsync-releases-v1/channel.json"
 #
 # manual  -- list what is available; an admin clicks Publish (the default)
@@ -396,17 +419,19 @@ group = "editors"
 editor_shell = "sftp-only"
 # Who can reach a project directory (docs/TENANCY.md):
 #
-#   "shared"       (DEFAULT, today's behaviour) one `editors` group, 2770
-#                  everywhere -- every editor can read, write and DELETE every
-#                  other editor's project.
-#   "per-project"  each project also gets a `proj-<slug>` group; the project
-#                  subtree belongs to it, and the directories above get the
-#                  sticky bit so one editor cannot remove another's project.
-#                  Membership follows the dashboard tick / --project.
+#   "per-project"  (DEFAULT for a new site since 2026-10-07, GL-19) each project
+#                  gets a `proj-<slug>` group; the project subtree belongs to
+#                  it, and the directories above get the sticky bit so one
+#                  editor cannot remove another's project. Membership is added
+#                  with `setup_editor_account.py --project <slug>` (the
+#                  dashboard tick does not add it yet).
+#   "shared"       one `editors` group, 2770 everywhere -- every editor can
+#                  read, write and DELETE every other editor's project. A site
+#                  that has always run this way keeps it by saying so here.
 #
 # Multi-ORG is NOT this switch: one customer = one dashboard container. See
-# docs/TENANCY.md before turning this on -- it changes an existing tree.
-project_acl = "shared"
+# docs/TENANCY.md before changing it on an existing tree.
+project_acl = "per-project"
 # HOW THE DASHBOARD CONTAINER GETS ITS CODE (docs/DOCKER.md):
 #
 #   "bind"   (DEFAULT, and what every deployment runs today) a stock, pinned
@@ -513,3 +538,33 @@ project_acl = "shared"
 # both origins can run side by side during the transition. Its secret is
 # $DASH_CARDS_TOKEN in the deploying shell, never in this file.
 # server_url = "http://truenas:8800"
+
+[security]
+# Whether the ONE shared fleet report token (DASH_REPORT_TOKEN) is still
+# accepted beside the per-computer tokens a sign-in mints (CR-367 / GL-15,
+# 2026-10-07). OFF by default, and a new site should leave it off: the shared
+# token identifies nobody and cannot be revoked for one person. Set true only
+# for a fleet whose companions all predate per-computer tokens (the studio's
+# own site.toml does) and turn it off once the dashboard's boot log stops
+# naming machines on the shared credential.
+# shared_report_token = false
+#
+# THE LEGACY SWITCHES for the NAS credentials and host keys (GL-18/GL-19, CR-368,
+# 2026-10-07). A new site leaves them out and gets every secure default; a
+# long-running site that must keep an older posture names it HERE, where it is
+# written down -- there is no flag or environment variable for any of them.
+#   allow_nas_password_in_container = true
+#       TrueNAS: the dashboard container holds the NAS admin PASSWORD instead of
+#       a scoped TRUENAS_API_KEY. Default: a key is MANDATORY (server/
+#       create_api_key.py --name ccsync-dashboard --username <service account>).
+#   allow_nas_admin_as_dashboard_admin = true
+#       DASH_ADMIN_USERS may name the NAS admin account (or be left unset to
+#       mean it). Default: the dashboard admin is a different account.
+#   skip_lane_host_key_pin = true
+#       Do not publish the NAS host key to editors (their rclone remotes are not
+#       pinned). Default: published, and both installers pin it.
+# The other legacy values live where they always did: [nas] verify_ssl = "0"
+# and [stack] project_acl = "shared".
+# allow_nas_password_in_container = false
+# allow_nas_admin_as_dashboard_admin = false
+# skip_lane_host_key_pin = false

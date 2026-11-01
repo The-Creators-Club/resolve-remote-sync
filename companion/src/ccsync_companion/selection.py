@@ -674,6 +674,56 @@ class SelectionClient:
             log.debug("untick: could not parse the dashboard's answer", exc_info=True)
             return True, "unticked", None, 200
 
+    def put_originals(self, slug: str, add: list, remove: list,
+                      via: str = "resolve") -> tuple[int, Any, str]:
+        """Record originals picks for THIS computer (SELECTIVE_ORIGINALS.md 12.3).
+
+        `PUT /api/v1/selection/<editor>/<slug>/originals?machine=<this host>`
+        with `{"add": [{"rel", "is_dir"}], "remove": [rel], "via"}`. Same auth
+        pair, same no-redirect opener (and so LG-4's CleartextGuard) as every
+        other selection call here. The machine is the reporter's own name
+        (_machine_name): a pick belongs to a computer, keyed like its tick.
+
+        Returns (http status, parsed body, error text); status 0 means the
+        dashboard could not be reached. A 409's body is returned parsed,
+        because its `detail` is the sentence the editor must read verbatim
+        (D9). Never raises. A success zeroes the plan TTL so the next read
+        carries the new `originals` list."""
+        if not self.enabled:
+            return 0, None, "dashboard_url is not configured"
+        editor = str(self._editor_name_fn() or "").strip().lower()
+        if not editor:
+            return 0, None, "no editor identity yet -- sign in first"
+        url = (
+            f"{self.dashboard_url.rstrip('/')}/api/v1/selection/"
+            f"{quote(editor, safe='')}/{quote(str(slug), safe='')}/originals"
+            f"?machine={quote(_machine_name(), safe='')}"
+        )
+        headers = self._headers()
+        headers["Content-Type"] = "application/json"
+        body = json.dumps({"add": list(add), "remove": list(remove), "via": via}).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers=headers, method="PUT")
+        try:
+            with upgrade_mod.build_no_redirect_opener().open(req, timeout=self.timeout) as resp:
+                status = int(getattr(resp, "status", 200) or 200)
+                raw = resp.read()
+        except urllib.error.HTTPError as exc:
+            try:
+                raw = exc.read()
+                parsed = json.loads(raw.decode("utf-8")) if raw else None
+            except Exception:
+                parsed = None
+            return int(exc.code), parsed, f"HTTP {exc.code}"
+        except Exception as exc:
+            return 0, None, f"dashboard unreachable: {exc}"
+        try:
+            parsed = json.loads(raw.decode("utf-8")) if raw else None
+        except Exception:
+            parsed = None
+        self._last_response_at = 0.0
+        self._last_failure_at = 0.0
+        return status, parsed, ""
+
     @classmethod
     def _removed_nothing(cls, view: Any, slug: str) -> bool:
         """Did a machine-scoped DELETE provably remove nothing, leaving the

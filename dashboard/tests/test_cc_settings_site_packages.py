@@ -250,7 +250,7 @@ def test_site_page_renders_in_the_terminal_look(env):
     assert re.search(r'src="/static/site_settings\.js', html) is None
     tree = _parse(html)
     tabs = [n for n in tree.nodes if n["attrs"].get("role") == "tab"]
-    assert len(tabs) == 5
+    assert len(tabs) == 6  # CR-376 / GL-33 (2026-10-07): + "sharing safety"
     ids = {n["attrs"].get("id") for n in tree.nodes}
     for t in tabs:
         assert t["attrs"]["aria-controls"] in ids
@@ -408,7 +408,13 @@ CLASSIC_SITE_ROUTES = {
 def test_cc_site_settings_js_writes_only_the_classic_routes():
     src = (ROOT / "static" / "cc" / "site_settings.js").read_text(encoding="utf-8")
     cc_routes = set(re.findall(r'"(/api/v1/[a-z0-9_/-]+)', src))
-    classic_routes = CLASSIC_SITE_ROUTES
+    # CR-374 / GL-31 round 2 (2026-10-07): on a build that hard-disables the
+    # CLI providers the page's only CLI control is the server check's path
+    # box, which writes through the EXISTING `PUT .../{name}/path` route
+    # (ai_providers.api_set_ai_cli_path, a route the per-provider panel
+    # already called) - not a new mutation path.
+    classic_routes = CLASSIC_SITE_ROUTES | {
+        "/api/v1/admin/ai-providers/claude_code/path"}
     assert cc_routes, "no routes found"
     assert cc_routes <= classic_routes | {"/api/v1/admin/site"}, cc_routes - classic_routes
     assert "site-ask" in src          # import and undo ask through the dialog

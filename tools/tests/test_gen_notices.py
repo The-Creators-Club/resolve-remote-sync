@@ -549,3 +549,26 @@ def test_the_committed_notices_render_the_same_with_no_venv_at_all():
         per_component, warnings, gen_notices.existing_hand_block(gen_notices.OUT_PATH))
     assert warnings == []
     assert rendered == gen_notices.OUT_PATH.read_text(encoding="utf-8")
+
+
+def test_lgpl3_text_is_in_both_licence_bundles():
+    """GL-32 / CR-375 (2026-10-07): psycopg2 is LGPL-3.0-or-later and the
+    wheel's own LICENSE only points at the text, so it ships on its own."""
+    repo = Path(__file__).resolve().parents[2]
+    assert "GNU LESSER GENERAL PUBLIC LICENSE" in (
+        repo / "tools" / "notices_extra" / "lgpl-3.0.txt").read_text(encoding="utf-8")
+    rows = {r[0]: r for r in gen_notices.FROZEN}
+    for label in ("companion", "onboarding"):
+        assert "lgpl-3.0.txt" in rows[label][3]
+        bundle = (repo / "docs" / "legal" / "licenses" / label /
+                  "THIRD_PARTY_LICENSES.txt").read_text(encoding="utf-8")
+        assert "GNU LESSER GENERAL PUBLIC LICENSE" in bundle
+        assert "Version 3, 29 June 2007" in bundle
+
+
+def test_product_repo_tool_is_retired():
+    """GL-35 / CR-375 (2026-10-07): no customer gets source."""
+    repo = Path(__file__).resolve().parents[2]
+    assert not (repo / "tools" / "make_product_repo.ps1").exists()
+    assert not (repo / "docs" / "PRODUCT_REPO.md").exists()
+    assert "git clone" not in (repo / "docs" / "INSTALL.md").read_text(encoding="utf-8")

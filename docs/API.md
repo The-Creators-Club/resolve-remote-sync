@@ -247,13 +247,19 @@ Companion bootstrap: the same credential check as login, returning a long-lived
 signed identity token.
 
 ```json
-{ "username": "…", "password": "…", "companion_version": "0.7.11", "platform": "windows" }
+{ "username": "…", "password": "…", "companion_version": "0.7.11", "platform": "windows", "machine": "HOSTNAME" }
 ```
+
+`machine` is optional (CR-367, 2026-10-07). With the shared fleet token off the
+reply carries a per-computer `cce1.` token; the same `machine` signing in again
+replaces its own earlier token, and at most 16 live sign-in tokens are kept per
+person (the least recently used is retired).
 ```json
 {
   "ok": true, "username": "…",
   "token": "v2.identity.…",
-  "report_token": "<the shared fleet token, or \"\">",
+  "report_token": "<the shared fleet token when it is on, else a minted per-computer cce1 token>",
+  "editor_report_token": "<the same cce1 token, present only when one was minted>",
   "role": "editor",
   "upgrade": { "...": "present only when a different build is current" }
 }
@@ -262,6 +268,11 @@ signed identity token.
 `role` is `base` for anyone in `DASH_ADMIN_USERS`, `editor` otherwise; the
 companion uses it to choose its sync behaviour instead of trusting a
 hand-edited local `mode`.
+
+`403` for a removed, suspended or disabled person, naming who can undo it.
+Revoke every identity token issued to a person with `POST
+/api/v1/admin/users/{username}/identity/revoke` (admin session + CSRF; the
+person's tokens older than now stop verifying, signing in again works).
 
 `403` if the account is not in the NAS `editors` group and not an admin — any
 account the NAS's SMB service accepts would otherwise come back with a valid

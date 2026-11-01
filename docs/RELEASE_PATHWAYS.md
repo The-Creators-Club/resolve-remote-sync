@@ -78,6 +78,23 @@ missing later commits. Dispatch a **fresh** run after the bump lands and
 publish that. (Two different trees must never both call themselves 0.9.x —
 that is the drift RELEASE.md opens with.)
 
+**One command for a customer release (GL-24, CR-371, 2026-10-07):**
+`python tools/release_customers.py` (`--dry-run` first). From ONE green commit
+it verifies `ci.yml` plus the three release workflows on that exact commit,
+tags `v<VERSION>`, waits for `image.yml` (smoke test, then the
+`customer-release` environment approval), publishes the dashboard bundle with
+`--make-current --set-image <tag>@<digest>` in a single channel write, then the
+companion and both installers through `publish_latest.py --sha`, and pins
+`compose.appliance.yaml` by digest. `publish_latest.py` on its own now also
+refuses a commit with no green `ci.yml` run (`--allow-red-ci` for a hotfix) and
+stamps the downgrade floor from `tools/release_floor.json` (see RELEASE.md).
+`tools/check_feed_freshness.py` (nightly, `feed-freshness.yml`) fails when the
+customer channel trails main. The beta ships UNSIGNED binaries (GL-26 is
+deferred): nothing here refuses that, but the record signature with the
+offline key stays mandatory. One-time repo setup the owner does in GitHub:
+create the `customer-release` environment with a required reviewer, and (for
+the freshness check) a `FEED_READ_TOKEN` secret.
+
 **What B deliberately does not sweep:** the dashboard bundle. That release
 stays a two-step (`build_dashboard_bundle.py` → `publish_feed.py --kind
 dashboard --runtime-id …`) because the runtime id must be read out of the
@@ -101,6 +118,85 @@ soak (REL-1) → make-current machinery interactively. One command:
 
 (`-Resume` continues a ship the soak gate stopped; the journal is
 `tools\.ship-state.json`.)
+
+## First delivery of the CLI lock to the studio (GL-31 / CR-374, 2026-10-07)
+
+The CR-374 dashboard boots with the Claude Code and Codex providers LOCKED
+unless the container environment carries `DASH_STUDIO_CLI_PROVIDERS=1`. An
+over-the-air bundle, the vendor feed, Settings > Packages "Update now" and
+`policy = current` all keep the container's OLD environment, so the first
+CR-374 build to arrive that way would strand the studio: Timeline Cards' AI
+(no API key here), the YouTube downloader's AI and the server check go dark.
+Do this first, once: put `[studio] allow_cli_providers = true` in the
+studio's site.toml and deploy through `server/install_dashboard_app.py`
+(`tools\ship.cmd`), and only then let any OTA path carry the build (hold it
+off `--make-current` until then). If it happens anyway, the dashboard says so:
+the notice `cli_lock_stranded` (PROBLEMS THE SERVER FOUND) names the fix.
+Details: `docs/STUDIO_BUILD.md`.
+
+## The studio reads the customer channel too (GL-24 / CR-371, 2026-10-07)
+
+`ship.cmd` publishes to the studio's own dashboard only, which is how the
+studio never exercised the channel customers read (COM-H8, PRAC-9). The move
+is configuration, not code: point the studio's own dashboard at the vendor
+feed so every build it runs reached it the way a customer's does.
+
+1. The feed half is already in place on the live studio: its `site.toml` has
+   `[releases] feed_url` at the vendor feed (`vendor_defaults.VENDOR_FEED_URL`),
+   `policy = "current"` and the vendor public key. A new studio does the same
+   (`DASH_RELEASE_PUBKEYS` = the key customers trust) and deploys through
+   `server/install_dashboard_app.py`. What is left is the soak route below.
+2. What policy moves. Companion and onboard records reach the studio through
+   `_apply_policy`. The DASHBOARD bundle also arrives over the air:
+   `check_now` calls `apply_dashboard_policy`, and on an image-mode site with
+   `policy = "current"` it applies the bundle the channel's signed current
+   pointer names once `soak_minutes` has passed (pinned by
+   `test_release_feed.py`; see the CR-374 section above). So the studio can
+   run a release by the same road a customer does.
+   The soak is earned there: `release_customers.py`'s soak check runs BEFORE it
+   tags and publishes, and needs the studio's health `code.commit` to equal the
+   release sha for `--soak-hours`. The live studio is IMAGE mode (`[stack] mode
+   = "image"`, image pinned by digest), so `ship.cmd` / `-DashboardOnly`
+   deploys NO dashboard code there ("image mode: nothing to deploy from here"):
+   do not use it for this. Routes that work in image mode:
+   a. Publish the dashboard bundle STAGED to the vendor feed
+      (`publish_feed.py --kind dashboard`, no `--make-current`; the CI gate does
+      not block a staged publish) and apply it on the studio with Settings >
+      Packages > Update now. Let it run 24 h, then `release_customers.py`.
+      The bundle MUST be the exact CI artefact: `gh run download <the
+      release-dashboard.yml run for the release commit> -n
+      ccsync-dashboard-bundle`. Its manifest carries `built_at`, so a local
+      build, or the same workflow re-run afterwards, has other bytes, and
+      `release_customers.py` refuses (before tagging) when the channel already
+      holds that version with different bytes. Do not re-run the workflow.
+   b. Or set `[stack] image` to image.yml's `:<short-sha>` build of the release
+      commit and re-run `install_dashboard_app.py` (`--container-image` /
+      `$CCSYNC_IMAGE` win over it if set).
+   If the release needs a NEW RUNTIME (image contents, not just code), route a
+   cannot work: a bundle cannot be applied over the air onto an older runtime,
+   and the `v*` tag that builds the customer image is only pushed by
+   `release_customers.py` AFTER the soak. Use route b for those. Without a
+   soaked studio the gate refuses and only `--allow-no-soak` gets past it;
+   that is the habit the soak exists to prevent.
+3. `ship.cmd -Publish -MakeCurrent` conflicts with `policy = "current"`: on
+   the next poll the studio sees the feed's current companion version in its
+   store but not marked current and makes it current again, undoing every
+   local ship. Pick one. Either leave the studio on `policy = "stage"` (it
+   stages the feed's records and a human or ship.cmd decides what is current),
+   or, on `current`, do not use `ship.cmd` for the dashboard at all (in image
+   mode `-DashboardOnly` deploys nothing, see step 2: use route a or b there)
+   and let the feed move the companion pointer.
+   Route b soaks the `:<short-sha>` image from the push to main; the `v*` tag
+   rebuilds the same commit, so the digest customers are pinned to is a
+   sibling build, not the very digest the studio ran (same base digest and
+   hash-locked deps, but not byte-identical).
+4. Keep the live studio working through the change: do it on a quiet day,
+   confirm Packages shows the feed as checked with no error, and only then
+   rely on it for the soak.
+
+Not done by code: changing the live studio's config is the owner's act (it
+alters what the studio fleet is offered). The companions follow the studio
+dashboard's current package, so they move with step 1.
 
 ## Neither pathway is "the dashboard's own code"
 

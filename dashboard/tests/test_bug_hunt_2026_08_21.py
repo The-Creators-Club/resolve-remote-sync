@@ -86,9 +86,22 @@ def test_verify_stops_handing_it_out_once_it_is_retired(tmp_path):
     with TestClient(app) as client:
         body = client.post("/api/v1/verify",
                            json={"username": "jsmith", "password": "right"}).json()
-        assert body["report_token"] == ""
+        # CR-367 / GL-15 (2026-10-07): it no longer answers "" and an
+        # instruction to ask the admin. With the shared token off, the sign-in
+        # hands back the computer's OWN per-editor token, which every route
+        # accepts -- dash-core-2's invariant (never hand out a credential the
+        # next report 401s on) holds with a credential that works.
+        assert body["report_token"] != TOKEN
+        assert body["report_token"].startswith("cce1.")
         assert body["report_token_kind"] == "editor"
-        # ...and the token it did not hand out really is refused everywhere.
+        conn = dbmod.connect(app.state.settings.db_path)
+        try:
+            assert api.resolve_companion_credential(
+                app.state.settings, conn, body["report_token"]) == (
+                    api.AUTH_EDITOR, "jsmith")
+        finally:
+            conn.close()
+        # ...and the shared one it did not hand out really is refused everywhere.
         assert api.resolve_companion_credential(
             app.state.settings, None, TOKEN)[0] == api.AUTH_NONE
 

@@ -454,7 +454,7 @@ two, L is a work package.
 | 35 | UX-3 / SYNC-10 | "was here last pass, now gone" is an error, not idle; stray-project scan | M | high |
 | 36 | UX-6 / OPS-8 / UX-23 | `classify_p_target` before the grade swap unmap; shared `Get-DriveMapping` in the uninstaller | S | high |
 | 37 | UX-7 | detect and list `*.sync-conflict-*` | S | high |
-| 38 | APP-2 / RES-12 / UX-4 | Scan whole project clears the ignore tracker; counts reported; persisted "leave this folder alone" | M | high |
+| 38 | APP-2 / RES-12 / UX-4 | Scan whole project clears the ignore tracker; counts reported; persisted "leave this folder alone" (the folder rule was REMOVED 2026-09-30, CR-356: it hid a folder created after it was set) | M | high |
 | 39 | SYS-11 / DASH-8 | `fleet_audit` table + recent plan changes with UNDO | S | med |
 | 40 | SYS-9 | continuous invariant checker (start with invariants 1, 3, 5, 9) | L | high |
 | 41 | SYS-8 | weekly fleet report + four alerts through a pluggable sink | M | high |

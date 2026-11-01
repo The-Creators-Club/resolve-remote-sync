@@ -58,7 +58,10 @@ Syncthing folders reach which machine), not an *access control* mechanism. An
 editor who mounts `P:` over SMB sees everything.
 
 For a single studio whose editors are colleagues, that is a reasonable and
-deliberate posture, and it stays the default: `project_acl = "shared"`.
+deliberate posture -- and it was the default until 2026-10-07 (GL-19, CR-368). A
+**new** site now defaults to `per-project` (below); a site that has always run
+shared keeps it by setting `project_acl = "shared"` in its own `site.toml`, as
+this studio's does.
 
 ### What you can turn on
 
@@ -110,8 +113,31 @@ prints a note and does nothing, so a runbook can carry it either way.
 
 The dashboard's Users section ticks the same projects; when `per-project` is
 on, a tick should mean "in the group" as well as "share the Syncthing folder".
-*(Operator TODO: the dashboard provisioner does not yet add group membership
-itself — do it with `--project` from the base rig until it does.)*
+**Built (CR-368 follow-up, 2026-10-07), TrueNAS only.** A deploy passes
+`DASH_PROJECT_ACL` (this site's mode) and `DASH_NAS_PROJECTS_ROOT` to the
+dashboard. When the mode is `per-project`, the collector's enforce cycle runs
+`project_groups.reconcile` after every pass (a tick nudges one): each known
+editor's membership of the `proj-<slug>` groups of registered projects is made
+equal to what they have ticked on any computer, in either sync mode, and groups
+the dashboard did not derive from a registered slug are never touched. A
+project created through `/project-setup` is made `2770 <owner>:proj-<slug>` at
+once, so it starts private. All of it is best-effort and inert on `shared`
+sites (the studio) and on DSM, where per-project stays PARTIAL. The
+`--project` flag remains the way to do it from a base rig, and the dashboard
+never revokes it: reconcile removes only a group it added itself (its ledger,
+`meta.project_group_ledger`), so a hand-made or `--project` membership with no
+tick behind it stays, even when the editor later ticks and unticks the same
+project (the ledger holds only groups the dashboard itself added). Archiving a
+project takes the NAS membership back while it is archived (ticks and grants are
+kept, so unarchive restores it). The creator of a `/project-setup` project is
+granted it at creation. A WIRED editor cannot tick (the API answers 409, they work
+on the NAS directly), so an admin grants one a project explicitly:
+`PUT /api/v1/projects/<slug>/access/<editor>` (`DELETE` revokes, `GET` lists;
+stored in `meta.project_group_grants`). The create path makes only the project
+leaf (its parent must already exist), so container directories are sealed
+(sticky 3770) by `setup_tree.py`, not by `/project-setup`. The APPLIANCE
+(compose.appliance.yaml, SFTP sidecar) is still `shared`: per-editor bind views
+are not built (sftp/README.md). Not yet verified against a live NAS.
 
 ### What this does NOT protect against
 
@@ -215,6 +241,12 @@ That covers lanes A and B and (with `--lock`) SMB and the dashboard login.
 **Lane C is separate**: unshare their Syncthing device on the dashboard too,
 or their machine keeps receiving every folder it already has.
 
+The dashboard has its own leaver controls (CR-367 / GL-15, 2026-10-07):
+**Delete** (a durable tombstone: their computers are refused and never
+re-registered), **Suspend**/**Disable**, and `POST
+/api/v1/admin/users/{u}/identity/revoke` to cancel every computer sign-in
+issued so far. See `docs/SERVER.md` Offboarding.
+
 Rotation is the same command followed by a fresh key through the normal
 onboarding path.
 
@@ -225,7 +257,7 @@ onboarding path.
 | Key | Default | Turns on |
 |---|---|---|
 | `[stack] editor_shell` | `"sftp-only"` | nologin + `ForceCommand internal-sftp`; forces `sftp_shell_type=none` in the manifest |
-| `[stack] project_acl` | `"shared"` | `proj-<slug>` groups + sticky containers |
+| `[stack] project_acl` | `"per-project"` (new sites) | `proj-<slug>` groups + sticky containers; `"shared"` is the explicit legacy |
 | `[syncthing] gui_bind` | unset (every interface) | publishes Syncthing's admin GUI on one address |
 | `[nas] ssh_hostkey` | unset | pins the NAS host key (an unknown key is refused either way) |
 | `TRUENAS_API_KEY` | unset | a scoped key replaces the admin password in the container |

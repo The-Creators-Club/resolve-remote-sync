@@ -1,0 +1,1135 @@
+{
+ "pass": "commercial",
+ "date": "2026-10-06",
+ "head": "08b40eb+working tree",
+ "raw_findings": 159,
+ "distinct": 96,
+ "verifier": {
+  "verified": 68,
+  "confirmed": 23,
+  "downgraded": 45,
+  "refuted": 0
+ },
+ "items": [
+  {
+   "id": "COM-H1",
+   "sources": [
+    "com-thirdparty-tos-1",
+    "com-legal-13",
+    "com-privacy-telemetry-3",
+    "com-product-surface-5",
+    "com-thirdparty-tos-2"
+   ],
+   "severity": "high",
+   "verdict": "DOWNGRADED",
+   "title": "Claude Code/Codex subscription path relays claude.ai sign-in and stores the OAuth token (Anthropic third-party policy); notice understates what it carries",
+   "where": "dashboard/src/ccsync_dashboard/cli_tools.py; ai_providers.py; cards_ai.py; triage.py; docs/legal/YOUTUBE_FEATURE_NOTICE.md",
+   "recommendation": "Remove the claude.ai relay and setup-token capture from the commercial build; Console login or API key only; triage on a passed ANTHROPIC_API_KEY; rewrite notice per tool; owner accepts Anthropic Commercial Terms and turns the flag off on the studio dashboard"
+  },
+  {
+   "id": "COM-H2",
+   "sources": [
+    "com-thirdparty-tos-3"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "Every TrueNAS integration uses REST v2.0, removed in TrueNAS 26",
+   "where": "server/common.py; server/backends/truenas.py; server/install_*; dashboard/src/ccsync_dashboard/nas/truenas.py",
+   "recommendation": "Version gate with a named refusal now; port to JSON-RPC 2.0 WebSocket; supported-versions statement in the order form (merge with resilience res-deps-3)"
+  },
+  {
+   "id": "COM-H3",
+   "sources": [
+    "com-oss-3"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "psycopg2 (LGPL-3.0+) frozen in the one-file companion: LGPL-3.0 text missing, 'replaceable' premise untrue",
+   "where": "companion/build.spec; tools/license_allowlist.toml; docs/legal/THIRD_PARTY_NOTICES.md",
+   "recommendation": "Add LGPL-3.0 text; user-replaceable override dir or ship outside the exe or s4(d)(0) archive; counsel re-review with the one-file fact"
+  },
+  {
+   "id": "COM-H4",
+   "sources": [
+    "com-security-1",
+    "com-release-7",
+    "com-ops-at-scale-7"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "One plaintext release key on the agent-running rig signs code every customer runs; no revocation or compromise runbook",
+   "where": "tools/release_key.py; ~/.ccsync-release/release.key; companion release_pubkey.py; docs/RELEASE.md",
+   "recommendation": "New key on hardware/offline signer, overlap-rotate, bake a cold recovery key, compromise runbook, no agents on the signing machine"
+  },
+  {
+   "id": "COM-H5",
+   "sources": [
+    "com-security-6"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "Container holds a NAS root-equivalent credential by default; dashboard admin defaults to the NAS admin",
+   "where": "server/install_dashboard_app.py:5269,5306-5335; docs/INSTALL.md",
+   "recommendation": "Mandatory TRUENAS_API_KEY on TrueNAS; separate dashboard admin from NAS admin; pin NAS cert; restrict CLI paths; DSM service account and documented residual risk"
+  },
+  {
+   "id": "COM-H6",
+   "sources": [
+    "com-release-1",
+    "com-product-surface-9",
+    "com-customer-experience-3",
+    "com-quality-gates-6",
+    "com-thirdparty-tos-11",
+    "com-ops-at-scale-15",
+    "com-licensing-billing-10"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "Every binary is OS-unsigned (no Authenticode, no Developer ID/notarisation, no version resource); installer teaches 'Run anyway'",
+   "where": "feed/channel.json; dashboard/templates/installer.html:37; companion/build.spec; onboarding/*.spec; KNOWN_BUGS CR-6",
+   "recommendation": "Owner: entity, D-U-N-S, OV/EV Authenticode (cloud HSM), Apple Developer ID + notarytool; VSVersionInfo in both specs; drop the Run-anyway text once signed"
+  },
+  {
+   "id": "COM-H7",
+   "sources": [
+    "com-release-2"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "The CI + publish_latest pathway cannot produce a signed build even with certificates",
+   "where": "tools/publish_latest.py; tools/publish_feed.py; .github/workflows/release-windows.yml; release-macos.yml",
+   "recommendation": "Decide where signing happens (cloud HSM CI env or rig re-sign), implement for all four artefacts, unsigned refusal in publish_latest, rig verifies signatures itself"
+  },
+  {
+   "id": "COM-H8",
+   "sources": [
+    "com-release-3",
+    "com-ops-at-scale-3",
+    "com-quality-gates-1"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "Customer channel a month stale: dashboard 0.7.44 / :1 at v0.7.44 with a draft EULA, companion newer than dashboard",
+   "where": "feed/channel.json; git tags; .github/workflows/image.yml; compose.appliance.yaml; RELEASE_PATHWAYS.md",
+   "recommendation": "One gated customer release from one RC commit (tag, bundle, image, companion, installers, current together); fresh-install verify; feed-lag CI check; studio on the customer channel"
+  },
+  {
+   "id": "COM-H9",
+   "sources": [
+    "com-release-4",
+    "com-ops-at-scale-1"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "A new appliance has no vendor public key and no feed URL: no installer, OTA or recalls",
+   "where": "dashboard/deploy/compose.appliance.yaml; settings.py:429,438,910-916; setup_engine.py:1476-1545; app.py:866",
+   "recommendation": "Bake vendor feed URL and pubkeys into the image as overridable defaults; fix compose comment and wizard copy; test"
+  },
+  {
+   "id": "COM-H10",
+   "sources": [
+    "com-release-6",
+    "com-quality-gates-3",
+    "com-security-2"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "Image :1 and dashboard bundles publish with no test gate, through tag-pinned actions, cosign identity '.*'",
+   "where": ".github/workflows/image.yml; release-dashboard.yml; ci.yml; tools/build_dashboard_bundle.py; tools/publish_feed.py; tools/ship.ps1; docs/DOCKER.md",
+   "recommendation": "CI + reviewer gate on tags, SHA-pinned actions, container smoke, full-green requirement for bundles, nightly, exact cosign identity, digests in the signed channel, provenance, CVE scanning, client SBOMs"
+  },
+  {
+   "id": "COM-H11",
+   "sources": [
+    "com-ops-at-scale-2",
+    "com-product-surface-7"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "INSTALL.md has the customer mint and bake their own release key, cutting them off from the vendor feed",
+   "where": "docs/INSTALL.md:210-236; setup_engine._check_release_key; docs/APPLIANCE_INSTALL.md",
+   "recommendation": "Owner: v1 = vendor builds via the vendor feed; rewrite Step 6 as 'pin the vendor key'; key generation vendor-only; cut the product repo"
+  },
+  {
+   "id": "COM-H12",
+   "sources": [
+    "com-licensing-billing-5",
+    "com-customer-experience-1",
+    "com-legal-9",
+    "com-ops-at-scale-8"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "EULA defers to an order/support plan that does not exist; no support channel in the product",
+   "where": "docs/legal/EULA.md s1-2,8,10,13; PRIVACY.md:103-113; notices.py; health_diagnostics.html",
+   "recommendation": "Owner+counsel: price list, order form, support/SLA terms, DPA; accountant: invoicing/VAT; engineering: vendor support_url/email shown everywhere 'support' is mentioned"
+  },
+  {
+   "id": "COM-H13",
+   "sources": [
+    "com-ops-at-scale-8",
+    "com-release-9",
+    "com-ops-at-scale-10",
+    "com-product-surface-10"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "Bus factor of one; vendor org/feed/registry under the studio name with no continuity plan",
+   "where": "tools/ship.ps1; tools/load_secrets.ps1; tools/publish_latest.py:46; compose.appliance.yaml; docs/SECRETS.md",
+   "recommendation": "Named second operator with tested key/org access, escrow terms, transfer org/GHCR/releases to the entity with two owners, vendor-owned feed domain and registry, rig-rebuild drill"
+  },
+  {
+   "id": "COM-H14",
+   "sources": [
+    "com-quality-gates-7",
+    "com-ops-at-scale-13"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "No new-customer install run end to end; no staging site",
+   "where": "docs/APPLIANCE_INSTALL.md; KNOWN_BUGS WPK-3; docs/CI.md",
+   "recommendation": "Vendor-owned TrueNAS/DSM + editor VMs; scripted install-acceptance per RC; CI compose-up + headless /setup + stub report"
+  },
+  {
+   "id": "COM-H15",
+   "sources": [
+    "com-quality-gates-13",
+    "com-security-12"
+   ],
+   "severity": "high",
+   "verdict": "CONFIRMED",
+   "title": "Open trust-model items and insecure defaults: shared token on with unrevocable identity tokens, no NAS host-key pinning, NAS TLS verify off, Postgres DaVinci, project_acl shared",
+   "where": "settings.py:135,804; auth.py; nas/truenas.py:54-60; compose.yaml:751-776; KNOWN_BUGS CR-66 and listed ids",
+   "recommendation": "Owner decision per open id; new-site defaults: shared token off + revocable identity tokens, host-key pinning, TLS verify, read-only canonical_prefix, per-project ACL, random PG password, tailnet policy template; run the proxy live-attach proof"
+  },
+  {
+   "id": "COM-M1",
+   "sources": [
+    "com-legal-1",
+    "com-privacy-telemetry-8"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "TELEMETRY.md no longer matches the wire",
+   "where": "docs/legal/TELEMETRY.md; reporter.py; companion/tests/test_telemetry_disclosure.py",
+   "recommendation": "Fix statements, add rows, test that every pinned key is named in the doc"
+  },
+  {
+   "id": "COM-M2",
+   "sources": [
+    "com-legal-2"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Legal docs edited after clearance; counsel list open; no version bump",
+   "where": "docs/legal/*; LEGAL_GAP_FEATURES_PLAN 8.7; KNOWN_BUGS CR-5",
+   "recommendation": "Dated counsel sign-off naming jurisdictions; bump to 1.1 with change log; fix three lines; update CR-5"
+  },
+  {
+   "id": "COM-M3",
+   "sources": [
+    "com-legal-3",
+    "com-legal-6",
+    "com-oss-4",
+    "com-tenancy-8",
+    "com-thirdparty-tos-8",
+    "com-licensing-billing-9",
+    "com-customer-experience-12"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "LICENSE draft with placeholder licensor; no IP assignment; ytdl grant owed",
+   "where": "LICENSE; ytdl/web/ytdlweb/vendor/PROVENANCE.md; tools/make_product_repo.ps1; Dockerfile labels",
+   "recommendation": "Signed IP assignment to the Ltd; upstream licence + re-vendor; final LICENSE; tenant-marker and NOTICE fixes; real OCI labels"
+  },
+  {
+   "id": "COM-M4",
+   "sources": [
+    "com-legal-4",
+    "com-privacy-telemetry-4"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "No DPA, transfer mechanism or sub-processor list; 'no sub-processor' claim untrue",
+   "where": "docs/legal/PRIVACY.md s3,s9,s11",
+   "recommendation": "Counsel: DPA + SCC Module 2 + UK Addendum + sub-processor list; owner: support-data procedure; fix PRIVACY"
+  },
+  {
+   "id": "COM-M5",
+   "sources": [
+    "com-legal-5",
+    "com-security-10"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "No disclosure policy, security contact, pen test or IR/breach procedure; CRA Art.14 for EU sales",
+   "where": "repo root (no SECURITY.md); EULA.md; PRIVACY.md",
+   "recommendation": "SECURITY.md + security.txt + security@; IR/breach/ENISA runbook; support period; pen test budget; feed advisory field"
+  },
+  {
+   "id": "COM-M6",
+   "sources": [
+    "com-legal-7",
+    "com-thirdparty-tos-7"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Reverse-engineered Resolve internals with no Blackmagic licence review",
+   "where": "companion library.py; resolve_prefs.py; bpg.py; EULA s5",
+   "recommendation": "Counsel reads the Resolve Studio licence; version gate with API fallback"
+  },
+  {
+   "id": "COM-M7",
+   "sources": [
+    "com-legal-8",
+    "com-thirdparty-tos-4",
+    "com-product-surface-3",
+    "com-thirdparty-tos-12"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "YouTube downloader legal exposure; solver options run without unblock flag",
+   "where": "dashboard/deploy/requirements.lock; ytdl vendor downloader.py, ytsearch.py; run.sh; YOUTUBE_FEATURE_NOTICE.md",
+   "recommendation": "US/DE/TW counsel opinion; owner SKU decision and SLA exclusion; gate solver options on unblock_enabled()"
+  },
+  {
+   "id": "COM-M8",
+   "sources": [
+    "com-legal-10"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "EULA formation/forum: employees accept as Customer, no B2B-only clause, Taiwan forum",
+   "where": "docs/legal/EULA.md",
+   "recommendation": "Counsel: org acceptance via order form, B2B-only clause, arbitration outside Taiwan (EULA 1.2)"
+  },
+  {
+   "id": "COM-M9",
+   "sources": [
+    "com-legal-11"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Organisation EULA acceptance records no person, org or text digest",
+   "where": "setup_engine.py:433-490; setup_routes.py",
+   "recommendation": "Record sha256, org_name, admin, source; re-prompt on sha change"
+  },
+  {
+   "id": "COM-M10",
+   "sources": [
+    "com-customer-experience-2"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "New EULA version stops sync until each editor clicks",
+   "where": "companion eula.py; app.py",
+   "recommendation": "Block only at first install; grace notice and material-change flag; org-level acceptance via counsel"
+  },
+  {
+   "id": "COM-M11",
+   "sources": [
+    "com-legal-18",
+    "com-thirdparty-tos-9",
+    "com-customer-experience-6"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "No trademark clearance; inconsistent naming (CCSync vs CC Sync); brand owner is not the licensor",
+   "where": "EULA; companion strings; onboarding/steps.py; CR-25",
+   "recommendation": "Owner naming decision; clearance search and filing; marks clause; string sweep + scan test"
+  },
+  {
+   "id": "COM-M12",
+   "sources": [
+    "com-legal-15"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Monitoring guidance is EU-only",
+   "where": "PRIVACY.md s6,s8; TELEMETRY.md",
+   "recommendation": "Per-jurisdiction annex, staff notice template, DPIA starter"
+  },
+  {
+   "id": "COM-M13",
+   "sources": [
+    "com-privacy-telemetry-1"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Idle switch leaks user_active via capabilities.jobs_gate",
+   "where": "capabilities.py; jobs_runner.py:729-749; telemetry_fields.py",
+   "recommendation": "Neutralise user_active when input_idle withheld, both sides; table rows; test"
+  },
+  {
+   "id": "COM-M14",
+   "sources": [
+    "com-privacy-telemetry-2"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Triage sends the whole fleet's monitoring data to the AI provider",
+   "where": "dashboard triage.py:273-375; PRIVACY s5",
+   "recommendation": "Allow-list bundle; correct PRIVACY s5"
+  },
+  {
+   "id": "COM-M15",
+   "sources": [
+    "com-legal-14",
+    "com-privacy-telemetry-5"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Interview transcripts to AI providers and kept indefinitely in AI stores",
+   "where": "cards_ai.py; CLI session store; PRIVACY s2,s4,s5,s7",
+   "recommendation": "Prune cards_sessions; no-session-persistence; per-site Cards AI flag; disclose and counsel decision item"
+  },
+  {
+   "id": "COM-M16",
+   "sources": [
+    "com-legal-16",
+    "com-privacy-telemetry-7",
+    "com-privacy-telemetry-9"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Indefinite retention stores; retention not shortenable; invasive defaults",
+   "where": "ytdl db.py; dashboard db.py retention constants; companion config.py report_* defaults",
+   "recommendation": "LG-10/LG-18 as settings; shorten-only overrides; owner/counsel set periods"
+  },
+  {
+   "id": "COM-M17",
+   "sources": [
+    "com-privacy-telemetry-6"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "IP addresses collected but not disclosed",
+   "where": "schema.sql devices.address; sessions.py; auth.py",
+   "recommendation": "Disclose per store; clear devices.address after 30 days"
+  },
+  {
+   "id": "COM-M18",
+   "sources": [
+    "com-legal-17",
+    "com-thirdparty-tos-15"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Syncthing public relays/discovery on by default",
+   "where": "PRIVACY s5; server/accept_device.py; companion app.py:7195",
+   "recommendation": "Owner default decision; LG-7 private mode"
+  },
+  {
+   "id": "COM-M19",
+   "sources": [
+    "com-customer-experience-4",
+    "com-privacy-telemetry-12"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Uninstall leaves fleet token, SSH key, rclone remote, Google session",
+   "where": "installer/windows_uninstall.ps1; macos_uninstall.sh",
+   "recommendation": "Remove credentials by default; -Full removes key and rclone stanza; leaver runbook"
+  },
+  {
+   "id": "COM-M20",
+   "sources": [
+    "com-oss-1",
+    "com-oss-9"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Container images: GPL OS packages with no notice/offer; no dashboard licence-text bundle",
+   "where": ".github/workflows/image.yml; Dockerfiles; THIRD_PARTY_NOTICES.md",
+   "recommendation": "Per-digest OS notice from SBOM, source retention, labels, dashboard THIRD_PARTY_LICENSES; counsel written offer"
+  },
+  {
+   "id": "COM-M21",
+   "sources": [
+    "com-oss-2"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "CLAP audio tower on the feed with no licence/NOTICE",
+   "where": "docs/RELEASE.md:166-170; music_models.py; music/web/data/audio_encoder/",
+   "recommendation": "LICENSE/NOTICE assets, inventory row, one licence string"
+  },
+  {
+   "id": "COM-M22",
+   "sources": [
+    "com-oss-5"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Editor yt-dlp.exe is GPL-3.0+ nightly, notices say Unlicense/stable",
+   "where": "companion ytdlp_manager.py; THIRD_PARTY_NOTICES",
+   "recommendation": "Correct the row; disclose nightly"
+  },
+  {
+   "id": "COM-M23",
+   "sources": [
+    "com-oss-6"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "llama.cpp/Qwen/NVIDIA CUDA on editor machines contrary to notices",
+   "where": "broll_vlm_sidecar.py; broll_vlm/local_models.py; THIRD_PARTY_NOTICES",
+   "recommendation": "Rewrite row, NVIDIA CUDA EULA row, counsel check"
+  },
+  {
+   "id": "COM-M24",
+   "sources": [
+    "com-oss-7"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Cards ships outside licence docs; OpenCC unattributed; Google Fonts fetch",
+   "where": "install_dashboard_app.py; MulticamPipeline zh_fold_table.py, 10-look.js",
+   "recommendation": "Scope decision (COM-M48); NOTICE, self-hosted fonts, EULA definition"
+  },
+  {
+   "id": "COM-M25",
+   "sources": [
+    "com-security-3"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "No MFA; OIDC unproven, refuses Entra/Google claims",
+   "where": "auth.py; oidc.py:280-312; api.py /verify",
+   "recommendation": "TOTP for admins; tested claim mappings; key on sub; companion browser sign-in"
+  },
+  {
+   "id": "COM-M26",
+   "sources": [
+    "com-security-4"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Offboarding at NAS/IdP does not stop a computer",
+   "where": "api.py _account_refusal; auth.py; SERVER.md; TENANCY.md",
+   "recommendation": "Leaver procedure on DELETE/SUSPEND; absent-from-NAS/IdP alert; revocable tokens"
+  },
+  {
+   "id": "COM-M27",
+   "sources": [
+    "com-security-5"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Plain HTTP on the LAN for LAN-only sites; /verify not gated",
+   "where": "install_dashboard_app.py:2401; auth.py",
+   "recommendation": "LAN TLS by default; refuse /verify and /login from non-TLS non-tailnet peers"
+  },
+  {
+   "id": "COM-M28",
+   "sources": [
+    "com-security-7"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "CSRF-exempt prefixes skip Origin check for session-admin routes",
+   "where": "dashboard app.py:222-235; api.py roll-fleet-back, current",
+   "recommendation": "Exemption follows the credential, not the path"
+  },
+  {
+   "id": "COM-M29",
+   "sources": [
+    "com-security-8"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "No security response headers",
+   "where": "dashboard, broll, music, ytdl apps; routes_share.py",
+   "recommendation": "One header middleware; strictest on /broll/share"
+  },
+  {
+   "id": "COM-M30",
+   "sources": [
+    "com-security-9",
+    "com-privacy-telemetry-10"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Audit trail gaps, mutable, unexported; admin views unlogged",
+   "where": "api.py; db.py fleet_audit; oidc.py",
+   "recommendation": "Audit logins, roles, tokens, AI settings, views; export and sink; retention"
+  },
+  {
+   "id": "COM-M31",
+   "sources": [
+    "com-security-11"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Public share link served by the fleet process with no rate limit",
+   "where": "app.py:1309-1316; routes_share.py",
+   "recommendation": "Separate process or per-IP/token limits and stream cap"
+  },
+  {
+   "id": "COM-M32",
+   "sources": [
+    "com-thirdparty-tos-13",
+    "com-release-11"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "yt-dlp nightly executed at runtime with integrity-only checks",
+   "where": "run.sh:353-407; ytdlp_nightly.py; ytdlp_manager.py",
+   "recommendation": "Stable pin or isolated container; verify GPG sig; disclosed opt-in"
+  },
+  {
+   "id": "COM-M33",
+   "sources": [
+    "com-release-8"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "No downgrade floor ever set; no channel freshness check",
+   "where": "feed/channel.json; upgrade.py; release_feed.py:874",
+   "recommendation": "Publish a security baseline min_version; refuse older channels"
+  },
+  {
+   "id": "COM-M34",
+   "sources": [
+    "com-licensing-billing-1",
+    "com-licensing-billing-3",
+    "com-licensing-billing-4",
+    "com-ops-at-scale-11"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "No licence, seats, entitlement, trial, install id or update entitlement",
+   "where": "whole tree; EULA s2,s12; release_feed._apply_policy",
+   "recommendation": "Owner model decision; offline signed licence file, install_id, LICENCE panel, soft enrolment gate, updates_until"
+  },
+  {
+   "id": "COM-M35",
+   "sources": [
+    "com-licensing-billing-2",
+    "com-legal-12",
+    "com-thirdparty-tos-10"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Product publicly downloadable with full source under a 'confidential' LICENSE; EULA s8 overstates verification",
+   "where": "docs/DOCKER.md; RELEASE_FEED.md; release_feed.py; EULA s8",
+   "recommendation": "Owner: source-available or per-customer tokens; counsel aligns LICENSE/EULA; mirror"
+  },
+  {
+   "id": "COM-M36",
+   "sources": [
+    "com-licensing-billing-6"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Feature flags are not vendor entitlements",
+   "where": "site_store.py",
+   "recommendation": "Tier decision; licence.features AND-term"
+  },
+  {
+   "id": "COM-M37",
+   "sources": [
+    "com-licensing-billing-7"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "No seat or usage statement to invoice from",
+   "where": "db.py upsert_machine, machine_eula_map",
+   "recommendation": "Seat definition, panel count, signed usage statement"
+  },
+  {
+   "id": "COM-M38",
+   "sources": [
+    "com-licensing-billing-8"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "AI spend uncapped, unmetered, unattributed",
+   "where": "cards_ai.py; ai_providers.py; ai_backend.py",
+   "recommendation": "ai_usage table, cost view, soft cap, model allow-list; order form wording"
+  },
+  {
+   "id": "COM-M39",
+   "sources": [
+    "com-thirdparty-tos-5"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Tailscale free tier is non-commercial; Funnel is capped beta",
+   "where": "docs/APPLIANCE_INSTALL.md:35; CLIENT_FOLDERS.md",
+   "recommendation": "Fix doc; Tailscale Standard+ in pricing; label Funnel beta"
+  },
+  {
+   "id": "COM-M40",
+   "sources": [
+    "com-thirdparty-tos-6"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Cloudflare tunnel proxy route likely breaches CDN terms",
+   "where": "docs/CONFIG.md:585-660; rclone_lane.py",
+   "recommendation": "Studio-only/unsupported until confirmed"
+  },
+  {
+   "id": "COM-M41",
+   "sources": [
+    "com-tenancy-1"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Tree layout hard-coded to the first studio's",
+   "where": "settings.py; lane_guard.py; fixer.py; TREE_LAYOUT_PLAN.md",
+   "recommendation": "Written layout requirement and qualification question; WP1-5 later"
+  },
+  {
+   "id": "COM-M42",
+   "sources": [
+    "com-tenancy-3"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Product-repo export cannot produce a clean repo",
+   "where": "tools/make_product_repo.ps1",
+   "recommendation": "Allow-list docs, more markers, escaped-path regex, CI scan"
+  },
+  {
+   "id": "COM-M43",
+   "sources": [
+    "com-tenancy-4"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Interviewee names and catalogue in tracked fixtures/eval data",
+   "where": "broll/eval; broll/docs/prototypes; tests",
+   "recommendation": "Synthetic names; move eval data to private/"
+  },
+  {
+   "id": "COM-M44",
+   "sources": [
+    "com-tenancy-5"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Own-footage archive folder is Creators_Club for every customer",
+   "where": "broll/web/app/config.py; ingest_batches.py; build_archive.py",
+   "recommendation": "Neutral default, site_store key, indexer reads it"
+  },
+  {
+   "id": "COM-M45",
+   "sources": [
+    "com-tenancy-6"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "TrueNAS container uid/gid 3000:3001 unchecked",
+   "where": "install_dashboard_app.py; backends/truenas.py; compose.appliance.yaml",
+   "recommendation": "Resolve ids via API; refuse mismatch; wizard writes APP_UID/GID"
+  },
+  {
+   "id": "COM-M46",
+   "sources": [
+    "com-tenancy-7"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "YouTube search expands into Taiwan Chinese by default",
+   "where": "ytdl claude_cli.py:566-628",
+   "recommendation": "Site-level expansion language list"
+  },
+  {
+   "id": "COM-M47",
+   "sources": [
+    "com-product-surface-1"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "No defined v1 and no preview labelling",
+   "where": "site.example.toml; ui.py; topbar.html; EULA",
+   "recommendation": "Owner v1 feature sheet; preview marking; hard-disable CUT features"
+  },
+  {
+   "id": "COM-M48",
+   "sources": [
+    "com-product-surface-2",
+    "com-ops-at-scale-12",
+    "com-quality-gates-15",
+    "com-tenancy-10"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Cards/whisper jobs depend on an ungated second repo; JOBS UI shown everywhere",
+   "where": "cards.py; CARDS_DEPLOY.md; companion config.py; ui.py:267; tray.py",
+   "recommendation": "Owner scope decision; hide JOBS/volunteer unless configured; if kept, CI + signed artefact + live handshake + CR-137"
+  },
+  {
+   "id": "COM-M49",
+   "sources": [
+    "com-product-surface-4"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Client folders let any editor publish any clip, incl. YouTube shares",
+   "where": "broll routes_client_folders.py; client_folders.py",
+   "recommendation": "Admin-allowed collections, provenance shown, default expiry, EULA wording"
+  },
+  {
+   "id": "COM-M50",
+   "sources": [
+    "com-product-surface-6"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Android app is a per-customer build",
+   "where": "docs/ANDROID.md; android.yml",
+   "recommendation": "PWA only in v1; hide ANDROID settings"
+  },
+  {
+   "id": "COM-M51",
+   "sources": [
+    "com-release-5",
+    "com-quality-gates-2"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Ordering/arch feed checks off; REQUIRES_DASHBOARD stale",
+   "where": "sign_release.py; publish_latest.py; companion config.py:174",
+   "recommendation": "Emit kind extras; raise REQUIRES_DASHBOARD with a test"
+  },
+  {
+   "id": "COM-M52",
+   "sources": [
+    "com-product-surface-8",
+    "com-quality-gates-9",
+    "com-release-13"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "No platform support matrix or version checks; Mac lags Windows",
+   "where": "INSTALL.md; resolve_prefs.py; release_macos.sh; feed/channel.json onboard/macos",
+   "recommendation": "SUPPORTED_PLATFORMS page; GetVersion check; x86_64 refusal; Mac wizard parity; CR-280 verify; MACOS_FIRST_RUN"
+  },
+  {
+   "id": "COM-M53",
+   "sources": [
+    "com-product-surface-11",
+    "com-customer-experience-11",
+    "com-ops-at-scale-14"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "No release candidate; 0.x versions; no changelog or compatibility table",
+   "where": "config.py VERSION; dashboard __init__; RELEASE.md",
+   "recommendation": "Freeze a v1 RC; customer release identity; curated notes and advisories"
+  },
+  {
+   "id": "COM-M54",
+   "sources": [
+    "com-release-10"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "No managed-deployment path (MSI/pkg/silent)",
+   "where": "installer/; %LOCALAPPDATA% install",
+   "recommendation": "Owner decision; signed MSI/pkg or 'unmanaged only'"
+  },
+  {
+   "id": "COM-M55",
+   "sources": [
+    "com-customer-experience-7"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Customer-shipped docs are internal runbooks; no admin guide",
+   "where": "published_docs.py; EDITOR_SETUP.md; INSTALL.md",
+   "recommendation": "Editor quick start, admin guide, FAQ; link test"
+  },
+  {
+   "id": "COM-M56",
+   "sources": [
+    "com-customer-experience-8"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Install blocks every inbound SMB share on the PC without disclosure",
+   "where": "installer/windows_bootstrap.ps1:1406-1430",
+   "recommendation": "Scope the rule or disclose with an opt-out"
+  },
+  {
+   "id": "COM-M57",
+   "sources": [
+    "com-customer-experience-9"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "No offboarding path for a departing customer",
+   "where": "EULA s12; server/",
+   "recommendation": "Leaving guide, decommission script, EULA alignment"
+  },
+  {
+   "id": "COM-M58",
+   "sources": [
+    "com-customer-experience-10"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "net.exe output decoded as UTF-8 instead of OEM codepage",
+   "where": "companion paths.py; drive_swap.py",
+   "recommendation": "Decode with GetOEMCP or UTF-16 APIs; cp950 test"
+  },
+  {
+   "id": "COM-M59",
+   "sources": [
+    "com-customer-experience-5"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Apps & features: customer as Publisher, frozen version; no About",
+   "where": "installer/windows_bootstrap.ps1",
+   "recommendation": "Publisher = entity, refresh DisplayVersion, HelpLink, About row"
+  },
+  {
+   "id": "COM-M60",
+   "sources": [
+    "com-ops-at-scale-4",
+    "com-quality-gates-8",
+    "com-release-12"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Soak gate manual per customer and crash-only; no rings or beta channel",
+   "where": "release_feed.py; package_store.py; db.py:4691",
+   "recommendation": "Vendor soak attestation/policy, broader canary criteria, early channel, docs"
+  },
+  {
+   "id": "COM-M61",
+   "sources": [
+    "com-ops-at-scale-5"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Installs are vendor-performed with customer NAS admin credentials",
+   "where": "APPLIANCE_INSTALL.md; INSTALL.md; ZERO_TOUCH_PLAN.md",
+   "recommendation": "Finish WP B/F/G or written vendor-install policy with credential custody"
+  },
+  {
+   "id": "COM-M62",
+   "sources": [
+    "com-ops-at-scale-6"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "Vendor has no view of its install base",
+   "where": "release_feed.py; RELEASE.md",
+   "recommendation": "Release-compatibility policy, customer registry, later WP G/opt-in heartbeat"
+  },
+  {
+   "id": "COM-M63",
+   "sources": [
+    "com-ops-at-scale-9"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Recall takes up to a day and does not stop the bad build",
+   "where": "release_feed.py:499-523; settings.py:463; alerts.py",
+   "recommendation": "Hourly poll, auto-rollback, signed advisories, contact list"
+  },
+  {
+   "id": "COM-M64",
+   "sources": [
+    "com-quality-gates-4"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "~10 highs per hunt; no release exit criteria",
+   "where": "docs/bug-hunt-*.md",
+   "recommendation": "RC freeze with written exit criteria and soak"
+  },
+  {
+   "id": "COM-M65",
+   "sources": [
+    "com-quality-gates-5"
+   ],
+   "severity": "medium",
+   "verdict": "DOWNGRADED",
+   "title": "No code review or change approval; single account, AI co-authored",
+   "where": "git log; tools/publish_latest.py",
+   "recommendation": "Branch protection, CODEOWNERS with human reviewer, SDLC statement"
+  },
+  {
+   "id": "COM-M66",
+   "sources": [
+    "com-quality-gates-10"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Linux CI near its timeout; no per-test timeout",
+   "where": ".github/workflows/ci.yml",
+   "recommendation": "pytest-timeout, matrix split, durations budget"
+  },
+  {
+   "id": "COM-M67",
+   "sources": [
+    "com-quality-gates-11"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "Skipped tests leave CI green (CLAP, rclone, ffmpeg)",
+   "where": ".github/workflows/ci.yml; music/web/tests/test_text_encoder.py",
+   "recommendation": "Require binaries, skip baseline, CLAP gate decision"
+  },
+  {
+   "id": "COM-M68",
+   "sources": [
+    "com-quality-gates-12"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "KNOWN_BUGS.md cannot show what is open",
+   "where": "KNOWN_BUGS.md",
+   "recommendation": "Structured tracker or generated status table; triage pass"
+  },
+  {
+   "id": "COM-M69",
+   "sources": [
+    "com-quality-gates-14"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "~1,050 lines of incident fixes uncommitted; versions out of step",
+   "where": "git status; companion config.py; dashboard __init__",
+   "recommendation": "Commit in units with version bumps; full gate; no-uncommitted-tree rule"
+  },
+  {
+   "id": "COM-M70",
+   "sources": [
+    "com-quality-gates-16"
+   ],
+   "severity": "medium",
+   "verdict": "NOT_VERIFIED",
+   "title": "No release checklist, coverage or version-skew tests",
+   "where": "docs/RELEASE.md; workflows",
+   "recommendation": "RELEASE_CHECKLIST.md, coverage floors, payload replay corpus, skew policy"
+  },
+  {
+   "id": "COM-L1",
+   "sources": [
+    "com-tenancy-2"
+   ],
+   "severity": "low",
+   "verdict": "DOWNGRADED",
+   "title": "Staff/machine/tailnet names in shipped comments and docstrings",
+   "where": "dashboard/src; companion/src; Dockerfile",
+   "recommendation": "CI marker scan over build outputs; role words; optimize=2"
+  },
+  {
+   "id": "COM-L2",
+   "sources": [
+    "com-oss-8"
+   ],
+   "severity": "low",
+   "verdict": "NOT_VERIFIED",
+   "title": "Notices inventory drift, ungated",
+   "where": "THIRD_PARTY_NOTICES.md; installers; cli_tools.py",
+   "recommendation": "Fix rows; pin-vs-notices test"
+  },
+  {
+   "id": "COM-L3",
+   "sources": [
+    "com-oss-10"
+   ],
+   "severity": "low",
+   "verdict": "NOT_VERIFIED",
+   "title": "Android APK has no licence/notice coverage",
+   "where": ".github/workflows/android.yml",
+   "recommendation": "APK row and licences link"
+  },
+  {
+   "id": "COM-L4",
+   "sources": [
+    "com-thirdparty-tos-14"
+   ],
+   "severity": "low",
+   "verdict": "NOT_VERIFIED",
+   "title": "DeepSeek offered with no jurisdiction label",
+   "where": "ai_providers.py:140-143",
+   "recommendation": "Jurisdiction note and vendor-build hide switch"
+  },
+  {
+   "id": "COM-L5",
+   "sources": [
+    "com-security-13"
+   ],
+   "severity": "low",
+   "verdict": "NOT_VERIFIED",
+   "title": "Local password policy length-only",
+   "where": "auth.py; local_users.py",
+   "recommendation": "Common/breached password list"
+  },
+  {
+   "id": "COM-L6",
+   "sources": [
+    "com-security-14"
+   ],
+   "severity": "low",
+   "verdict": "NOT_VERIFIED",
+   "title": "Triage email replies drive admin actions on email auth alone",
+   "where": "triage_mail.py; triage_actions.py",
+   "recommendation": "Off in vendor build; document; reversible only; audit"
+  },
+  {
+   "id": "COM-L7",
+   "sources": [
+    "com-tenancy-9"
+   ],
+   "severity": "low",
+   "verdict": "NOT_VERIFIED",
+   "title": "Templates and help use the first studio's values",
+   "where": "site.example.toml; config.example.toml; docs",
+   "recommendation": "Neutral placeholders"
+  },
+  {
+   "id": "COM-L8",
+   "sources": [
+    "com-tenancy-11"
+   ],
+   "severity": "low",
+   "verdict": "NOT_VERIFIED",
+   "title": "TrueNAS homes fallback to the first fleet's dataset",
+   "where": "nas/truenas.py:36-44",
+   "recommendation": "Refuse with a named setting"
+  },
+  {
+   "id": "COM-L9",
+   "sources": [
+    "com-customer-experience-13"
+   ],
+   "severity": "low",
+   "verdict": "NOT_VERIFIED",
+   "title": "No accessibility statement; Tk dialogs invisible to screen readers",
+   "where": "popup.py; settings_window.py",
+   "recommendation": "Statement, dashboard route to modals, VPAT on request"
+  },
+  {
+   "id": "COM-L10",
+   "sources": [
+    "com-privacy-telemetry-11"
+   ],
+   "severity": "low",
+   "verdict": "NOT_VERIFIED",
+   "title": "Syncthing crash reports, CLI telemetry, Cloudflare route not in PRIVACY s5",
+   "where": "cli_tools.py:547-558; rclone_lane.py",
+   "recommendation": "Disable or disclose"
+  },
+  {
+   "id": "COM-L11",
+   "sources": [
+    "com-product-surface-12"
+   ],
+   "severity": "low",
+   "verdict": "NOT_VERIFIED",
+   "title": "Music search tuned on one 376-track library",
+   "where": "music/; KNOWN_BUGS MUSIC-ING-1..4",
+   "recommendation": "Label beta; second-library eval; fix MUSIC-ING-1"
+  }
+ ]
+}

@@ -56,6 +56,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import platform
 import threading
 import time
 import urllib.error
@@ -305,6 +306,10 @@ def verify_credentials(
         # Mac signing in was offered the arm64 build. A dashboard that has
         # not declared the field on VerifyIn ignores it (pydantic's default).
         "arch": upgrade_mod.arch_key(),
+        # CR-367 / GL-15 (2026-10-07): lets a dashboard with the shared fleet
+        # token off replace THIS computer's earlier sign-in token instead of
+        # stacking one per sign-in. Older dashboards ignore the field.
+        "machine": platform.node(),
     }
     try:
         resp = http_post(url, payload, headers, timeout)

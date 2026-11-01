@@ -16,13 +16,46 @@ shared folder instead, **copy `onboard.exe` to your Desktop first, then run
 it from there** — never run it straight off the share (it locks the file
 for everyone, and the installer refuses to run that way).
 
-**Windows will say "Windows protected your PC" the first time you run it.**
-That is SmartScreen, and it says that about any program it has not seen many
-copies of yet: this installer is not code-signed. Click **More info**, then
-**Run anyway**. If you or your IT would rather check the file first, the
-dashboard's installer page prints its sha256 beside the download, and
+**The beta is not code-signed, on Windows or on a Mac** (CR-373, GL-30,
+2026-10-07). There is no paid signing certificate behind the free open beta,
+so neither operating system can tell who published the installer. That is
+expected, and it is not a sign the file was tampered with. Nothing here asks
+you to turn a protection off, except the one case named below.
+
+*Windows: "Windows protected your PC" (SmartScreen).* Windows says that about
+any program it has not seen many copies of, and lists the publisher as
+unknown.
+
+1. Run `onboard.exe`.
+2. On the blue window click **More info**.
+3. Click **Run anyway**.
+
+If there is no **Run anyway** button: right-click the downloaded file, choose
+**Properties**, tick **Unblock** at the bottom of the General tab, click
+**OK**, and run it again. If Windows 11 says **Smart App Control blocked part
+of this app**, that setting refuses every unsigned program with no override;
+turn it off under Windows Security -> App & browser control -> Smart App
+Control (it cannot be switched back on without reinstalling Windows), or ask
+your IT. If you or your IT would rather check the file first, the dashboard's
+installer page prints its sha256 beside the download, and
 `Get-FileHash .\onboard.exe` prints the same value for the copy you have.
-Nothing here asks you to turn SmartScreen off.
+
+*macOS: "cannot be opened because Apple cannot check it for malicious
+software" (Gatekeeper).* The Mac installer is not notarised by Apple.
+
+1. Open the installer once. When macOS refuses, click **Done** (not Move to
+   Trash).
+2. Open **System Settings**, then **Privacy & Security**, and scroll down to
+   the **Security** section.
+3. Next to the installer's name click **Open Anyway** and enter your Mac
+   password or use Touch ID.
+4. Open the installer again and click **Open**.
+
+macOS may ask again after the companion updates itself, because an update is
+a new, un-notarised file. Repeat the same four steps; Open Anyway only shows
+for about an hour after the refusal, so retry the open first if it is missing.
+A Mac running a macOS older than 15 (Sequoia) also offers **Open** on a
+right-click of the file; Sequoia removed that shortcut, so use Open Anyway there.
 
 The licence agreement is in this folder as `EULA.md` if you would rather read
 it before running anything — the wizard shows you the same document and will
@@ -71,8 +104,9 @@ If you'd rather do it by hand, follow the manual steps below instead.
 your Mac and click `[ INSTALLER ]`: it downloads
 `ccsync-onboard-<version>.zip`, which unzips to **CCSync Onboarding.app**.
 Double-click it and follow the pages exactly as above. macOS will say the app
-was downloaded from the internet: right-click the app and choose **Open** the
-first time, which is the one-click version of clearing the quarantine flag.
+was downloaded from the internet and, because it is not notarised, refuses
+it the first time: follow the **Open Anyway** steps near the top of this file
+(System Settings, Privacy & Security, Open Anyway).
 Everything after that — the menu-bar app, automatic upload, the out-of-tree
 popup, dashboard reporting, one-click updates — works the same as on Windows.
 
@@ -256,7 +290,13 @@ script with it, or the app can't report status or follow your ticks.)
    - Host: `<nas-host>`
    - Username: `postgres`
    - Password: *(your admin sends this separately)*
-3. Open the shared project. Set **Playback → Proxy Handling → Prefer Proxies**.
+3. **Resolve → Preferences → System → General → External scripting using: Local**,
+   then Save and restart Resolve. The installer sets this for you when Resolve
+   is closed while it runs; if it was open, or this is the free edition of
+   Resolve, it is not set. Without it (and without **Studio**, the paid
+   edition) the watcher, fixer, popup and Send to Resolve do nothing, and the
+   tray says why instead of asking you to restart Resolve forever.
+4. Open the shared project. Set **Playback → Proxy Handling → Prefer Proxies**.
 
    The CC Sync app reads this same library directly, with Resolve's own
    credentials, to work out which clips your timeline uses. That is why it no
@@ -266,7 +306,7 @@ script with it, or the app can't report status or follow your ticks.)
    `library_db_host` (and `library_db_name` / `library_db_user` /
    `library_db_password` if yours differ) in `~/.ccsync/config.toml` to point
    it at the right place, or `library_walk = false` to turn it off.
-4. **macOS only:** the installer already set Resolve's **Mapped Mount**
+5. **macOS only:** the installer already set Resolve's **Mapped Mount**
    (your project prefix, `P:\` by default, → your sync folder) for you. Check it under Preferences → Media
    Storage. If step 2 said it couldn't — because Resolve was open, or had
    never been launched on this Mac — quit Resolve, then run

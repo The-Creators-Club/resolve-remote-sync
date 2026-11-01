@@ -211,7 +211,8 @@ def test_admin_names_the_backend_the_admins_live_on(conn):
 def test_admin_todo_when_nobody_can_administer_a_nas_auth_site(conn):
     state = setup_engine.run_check(ctx(conn, Settings()), "admin")
     assert state.status == "todo"
-    assert "DASH_ADMIN_USERS" in state.detail
+    # CR-363 / GL-07: the remedy is the form on the row, not an env var.
+    assert "box on this row" in state.detail and "DASH_ADMIN_USERS" not in state.detail
 
 
 def test_admin_todo_when_oidc_has_only_a_claim(conn):
@@ -222,7 +223,7 @@ def test_admin_todo_when_oidc_has_only_a_claim(conn):
                         oidc_admin_values=frozenset({"ccsync-admins"}))
     state = setup_engine.run_check(ctx(conn, settings), "admin")
     assert state.status == "todo"
-    assert "DASH_ADMIN_USERS" in state.detail and "groups" in state.detail
+    assert "box on this row" in state.detail and "groups" in state.detail
 
 
 def test_admin_under_local_login_reads_the_accounts_table(conn):
@@ -555,14 +556,34 @@ def tailnet_check(conn, settings, monkeypatch, raw):
 
 
 def test_tailnet_ok_when_the_bundled_node_is_signed_in(conn, monkeypatch):
+    """CR-363 / GL-04 (2026-10-07): signed in is NOT enough. This test used to
+    pin the defect (a green tick on `Running` alone, with the dashboard still
+    on the NAS loopback). Green needs Serve, or a tailnet dashboard_url."""
+    from ccsync_dashboard import tailnet_serve
+
+    monkeypatch.setattr(tailnet_serve, "read_serve",
+                        lambda *a, **k: tailnet_serve.build_config("ccsync-studio.tail1234.ts.net"))
     state = tailnet_check(conn, Settings(), monkeypatch, {
         "BackendState": "Running",
         "AuthURL": "",
+        "CertDomains": ["ccsync-studio.tail1234.ts.net"],
         "Self": {"DNSName": "ccsync-studio.tail1234.ts.net."},
         "TailscaleIPs": ["100.101.102.103"],
     })
     assert state.status == "ok"
     assert "ccsync-studio.tail1234.ts.net" in state.detail
+
+
+def test_tailnet_signed_in_but_unpublished_is_todo(conn, monkeypatch):
+    from ccsync_dashboard import tailnet_serve
+
+    monkeypatch.setattr(tailnet_serve, "read_serve", lambda *a, **k: {})
+    state = tailnet_check(conn, Settings(), monkeypatch, {
+        "BackendState": "Running", "AuthURL": "",
+        "Self": {"DNSName": "ccsync-studio.tail1234.ts.net."},
+        "TailscaleIPs": ["100.101.102.103"],
+    })
+    assert state.status == "todo"
 
 
 def test_tailnet_todo_shows_the_sign_in_link(conn, monkeypatch):
@@ -624,10 +645,15 @@ def test_a_node_already_signed_in_is_never_asked_to_log_in_again(conn, monkeypat
     nobody asked for."""
     monkeypatch.setattr(tailscale_local, "socket_present", lambda *a, **k: True)
     monkeypatch.setattr(tailscale_local, "status", lambda *a, **k: {
-        "BackendState": "Running", "AuthURL": "",
+        "BackendState": "Running", "AuthURL": "", "CertDomains": ["ccsync.tail1234.ts.net"],
         "Self": {"DNSName": "ccsync.tail1234.ts.net."}, "TailscaleIPs": []})
     monkeypatch.setattr(setup_engine, "_localapi_post",
                         lambda *a, **k: pytest.fail("a signed-in node must not be posted to"))
+    # CR-363 / GL-04: the button now also publishes through Serve (a different
+    # call from the login one), and green needs that to be in place.
+    from ccsync_dashboard import tailnet_serve
+    monkeypatch.setattr(tailnet_serve, "read_serve",
+                        lambda *a, **k: tailnet_serve.build_config("ccsync.tail1234.ts.net"))
 
     state = setup_engine.get("tailnet").run(ctx(conn, Settings()))
     assert state.status == "ok"
@@ -660,7 +686,7 @@ def test_with_no_bundled_node_the_button_is_the_ordinary_check(conn, monkeypatch
 
 
 def test_the_button_says_what_it_is_about_to_do(conn):
-    assert setup_engine.get("tailnet").run_label == "GET A SIGN-IN LINK"
+    assert setup_engine.get("tailnet").run_label == "SIGN IN OR PUBLISH"
 
 
 def test_tailnet_todo_when_the_published_url_is_not_a_tailnet_address(conn, monkeypatch):
@@ -733,14 +759,15 @@ def truenas_settings(fake, **extra):
 def test_nas_connect_todo_names_the_truenas_key(conn):
     state = setup_engine.run_check(ctx(conn, Settings()), "nas_connect")
     assert state.status == "todo"
-    assert "DASH_NAS_HOST" in state.detail
-    assert "TRUENAS_API_KEY" in state.detail
+    # CR-363 / GL-07: a form on the row, not an environment variable.
+    assert "NAS address" in state.detail
+    assert "API key" in state.detail and "DASH_NAS" not in state.detail
 
 
 def test_nas_connect_todo_names_the_dsm_key(conn):
     state = setup_engine.run_check(ctx(conn, Settings(nas_kind="synology")), "nas_connect")
     assert state.status == "todo"
-    assert "DASH_NAS_PW" in state.detail
+    assert "admin password" in state.detail and "DASH_NAS" not in state.detail
 
 
 def test_nas_connect_ok_reports_kind_version_and_hostname(conn, truenas):
@@ -907,7 +934,7 @@ def test_software_run_says_so_when_no_feed_is_configured(conn):
     publish(conn, "macos", "0.9.0")
     state = setup_engine.run_do_it(ctx(conn, Settings()), "software")
     assert state.status == "ok"
-    assert "DASH_RELEASE_FEED_URL" in state.detail
+    assert "no vendor update feed address is set" in state.detail   # CR-363 / GL-07
 
 
 def test_software_run_checks_the_vendor_feed(conn, monkeypatch):
@@ -1086,7 +1113,8 @@ def test_alerts_can_be_skipped_and_is_shown_as_skipped(conn, tmp_path):
 def test_release_key_is_todo_with_no_key_configured(conn, tmp_path):
     state = setup_engine.run_check(ctx(conn, gate_settings(tmp_path)), "release_key")
     assert state.status == "todo"
-    assert "DASH_RELEASE_PUBKEYS" in state.detail
+    assert "vendor's public signing key" in state.detail   # CR-363 / GL-07: a form, not an env var
+    assert "DASH_RELEASE_PUBKEYS" not in state.detail
 
 
 def test_release_key_is_ok_with_a_key_and_never_prints_it(conn, tmp_path):

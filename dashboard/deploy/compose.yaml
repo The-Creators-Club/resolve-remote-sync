@@ -105,8 +105,11 @@ services:
       # holds only the shared one; the dashboard names the machines still using
       # it at every boot, and once that list is empty this becomes "0" -- which
       # is the point of the per-editor tokens: revocable per person, not one
-      # leak away from the whole fleet. Only an explicit "0" turns it off.
-      DASH_SHARED_REPORT_TOKEN_ENABLED: "1"
+      # leak away from the whole fleet. "0" for a NEW site (CR-367 / GL-15,
+      # 2026-10-07: /verify then mints each computer its own revocable token);
+      # a site that still lives on the shared token keeps its explicit "1"
+      # (server/install_dashboard_app.py reads site.toml [security]).
+      DASH_SHARED_REPORT_TOKEN_ENABLED: "{{DASH_SHARED_REPORT_TOKEN_ENABLED}}"
       # Login sessions: any stable random string; keep it the same across
       # redeploys or everyone is logged out. SMB auth verifies TrueNAS
       # passwords (the only method that works for non-admin users on 25.10).
@@ -358,6 +361,11 @@ services:
       # was ours; the flag only decides whether we will run one already
       # there, on the customer's own subscription and their own say-so.
       DASH_SITE_AI_CLI_PROVIDERS: "0"
+      # GL-31 / CR-374 (2026-10-07): the BUILD-level lock on the CLI providers
+      # (dashboard build_flavor.py). "0" is the vendor build and makes the
+      # flag above inert; only the studio's own site.toml `[studio]
+      # allow_cli_providers = true` deploys "1" (docs/STUDIO_BUILD.md).
+      DASH_STUDIO_CLI_PROVIDERS: "0"
       # Unattended updates (2026-08-18, docs/MULTI_MACHINE_PLAN.md §9). "0"
       # is the vendor build: companions offer a new build in their tray and
       # an admin can push one machine at a time from Settings, Packages. "1"
@@ -376,7 +384,11 @@ services:
       # made by a key that exists on no server. UNSET = publishing is refused
       # (503); everything else keeps working. `python tools/release_key.py
       # pubkey` prints the value.
-      DASH_RELEASE_PUBKEYS: ""
+      DASH_RELEASE_PUBKEYS: "{{RELEASE_PUBKEYS}}"
+      # "1" only when the deploying shell set DASH_VENDOR_DEFAULTS=1: the
+      # vendor holds the release key, so the Protection page does not ask
+      # a customer to back it up (CR-362 / GL-02, 2026-10-07).
+      DASH_VENDOR_CUSTOMER: "{{VENDOR_CUSTOMER}}"
       # THE VENDOR RELEASE FEED (ZERO_TOUCH_PLAN.md WP E; wired into the
       # deploy 2026-08-18 -- WP E shipped the client and nothing ever set
       # the URL, so the feature was dark on every deployment). Blank = off:
@@ -432,11 +444,22 @@ services:
       # leaves this empty and keeps using DASH_NAS_PW.
       TRUENAS_API_KEY: "${TRUENAS_API_KEY:-}"
       DASH_NAS_API_KEY: "${TRUENAS_API_KEY:-}"
+      # CR-365 / GL-11 (2026-10-07): the JSON-RPC login names the account the
+      # key was minted FOR (create_api_key.py --username), not the admin above;
+      # blank = the key is the admin's own. DASH_NAS_API_TRANSPORT is the
+      # rollback switch (auto | jsonrpc | rest; blank = auto): `rest` pins the
+      # pre-26 REST API on a 25.x NAS if the JSON-RPC path misbehaves.
+      TRUENAS_API_KEY_USER: "${TRUENAS_API_KEY_USER:-}"
+      DASH_NAS_API_KEY_USER: "${TRUENAS_API_KEY_USER:-}"
+      DASH_NAS_API_TRANSPORT: "${TRUENAS_API_TRANSPORT:-}"
       # TLS verification for those TrueNAS API calls (they carry the API key
       # or TRUENAS_PW). "0" = trust the NAS's self-signed cert, as before. Set
       # "1", or a CA bundle path inside the container (docs/SERVER.md,
       # "Verifying the NAS certificate"), once the NAS has a trusted cert.
-      TRUENAS_VERIFY_SSL: "0"
+      # GL-18/GL-19 (CR-368, 2026-10-07): the deploy writes a `sha256:<fingerprint>`
+      # pin of the NAS certificate here for a new site; "0" (off) is the legacy
+      # value a site keeps by saying so in its own site.toml [nas] verify_ssl.
+      TRUENAS_VERIFY_SSL: "{{NAS_VERIFY_SSL}}"
       # --- what GET /api/v1/site serves ------------------------------------
       # The facts a client needs BEFORE it has any credentials: the companion
       # reads smb_unc into server_p_unc instead of deriving it, both installers
@@ -459,6 +482,8 @@ services:
       # "CC Sync"; the dashboard applies those defaults, so a blank must reach
       # it as a blank (2026-08-17, COMMERCIAL_READINESS.md item 10).
       DASH_SITE_ORG_SHORT: "{{SITE_ORG_SHORT}}"
+      # GL-34 / CR-374: blank = the vendor default address.
+      DASH_SITE_SUPPORT_CONTACT: "{{SITE_SUPPORT_CONTACT}}"
       DASH_SITE_PRODUCT_NAME: "{{SITE_PRODUCT_NAME}}"
       # The CUSTOMER'S LOGO for the companion's tray and window title
       # (2026-08-18). Item 10 de-branded the tray to a neutral product mark
@@ -482,6 +507,13 @@ services:
       DASH_SITE_SMB_UNC: '{{SITE_SMB_UNC}}'
       DASH_SITE_SFTP_HOST: "{{SITE_SFTP_HOST}}"
       DASH_SITE_SFTP_PORT: "{{SITE_SFTP_PORT}}"
+      # The NAS sshd's host key, which both editor installers pin in rclone's
+      # known_hosts (GL-19, CR-368, 2026-10-07). Blank = none published.
+      DASH_SITE_SFTP_HOSTKEY: "{{SITE_SFTP_HOSTKEY}}"
+      # per-project access: the mode, and where Projects is on the NAS
+      # (CR-368 follow-up, 2026-10-07; dashboard/src/.../project_groups.py).
+      DASH_PROJECT_ACL: "{{PROJECT_ACL}}"
+      DASH_NAS_PROJECTS_ROOT: "{{NAS_PROJECTS_ROOT}}"
       DASH_SITE_SFTP_CHUNK_SIZE: "{{SITE_SFTP_CHUNK_SIZE}}"
       DASH_SITE_SFTP_CONCURRENCY: "{{SITE_SFTP_CONCURRENCY}}"
       DASH_SITE_SFTP_SHELL_TYPE: "{{SITE_SFTP_SHELL_TYPE}}"
@@ -765,13 +797,39 @@ services:
     image: postgres:13
     environment:
       POSTGRES_USER: "postgres"
-      # Resolve's default project-server password. Change it here AND in every
-      # editor's Resolve database entry, or nobody can open a project.
-      POSTGRES_PASSWORD: "${PG_PASSWORD:-DaVinci}"
+      # NO default (CR-368, 2026-10-07). The deploy writes a random one into the
+      # 0600 .env; type it into every editor's Resolve database entry once.
+      POSTGRES_PASSWORD: "${PG_PASSWORD:-}"
     volumes:
       - {{NAS_APPS_ROOT}}/postgres:/var/lib/postgresql/data
+    # LAN + tailnet addresses ONLY, the same two the dashboard binds, never
+    # 0.0.0.0 (GL-19, CR-368, 2026-10-07): a published 5432 on every interface
+    # was a LAN-wide superuser. DASH_PG_PORT stays the host-port knob.
     ports:
-      - "${DASH_PG_PORT:-5432}:5432"
+{{PG_PORT_BINDS}}
+    # Refuse the two ways this container used to be a free superuser
+    # (bug-server-8 / PL-RES-27, CR-368, 2026-10-07): Resolve's well-known
+    # password, and no password at all. The deploy writes a random PG_PASSWORD
+    # into the 0600 .env (server/common.project_server_password); with nothing
+    # set the stack still parses and this service refuses to start, loudly.
+    command:
+      - "sh"
+      - "-c"
+      # A block scalar so the quoting stays readable. POSTGRES_PASSWORD is read
+      # by initdb ONLY on an empty data directory, so a cluster a site started
+      # under the old 'DaVinci' default would keep that superuser password
+      # forever while the deploy told the admin to type the new one (CR-368
+      # follow-up, 2026-10-07). On an initialised volume, set the role to the
+      # configured value in single-user mode BEFORE the server starts, and
+      # refuse to start if that fails: never leave the database holding a
+      # password the admin was not told.
+      - |
+        case "$$POSTGRES_PASSWORD" in ""|DaVinci|davinci) echo "refusing to start: set PG_PASSWORD to a long random value, never the Resolve default (docs/TAILNET_POLICY.md)" >&2; exit 1;; esac
+        if [ -s "$${PGDATA:-/var/lib/postgresql/data}/PG_VERSION" ]; then
+          q=$$(printf %s "$$POSTGRES_PASSWORD" | sed "s/'/''/g")
+          printf "ALTER ROLE postgres WITH PASSWORD '%s';\n" "$$q" | gosu postgres postgres --single -D "$${PGDATA:-/var/lib/postgresql/data}" postgres >/dev/null || { echo "refusing to start: could not set the project-server password on the existing database" >&2; exit 1; }
+        fi
+        exec docker-entrypoint.sh postgres
     restart: unless-stopped
     # The same 100 MB stdout cap the dashboard service carries above, and for
     # the same reason (ops-efficiency-7, 2026-08-21): json-file has no default

@@ -105,6 +105,13 @@ SUPPORTED_PLATFORMS = ("win32", "darwin")
 # Spelled here and there (this module imports nothing of the companion's);
 # the suite pins the two spellings equal.
 MARKER_EXITING_KEY = "exiting"
+# GL-22 (CR-370, 2026-10-07): the run marker says whether this process was the
+# first start of a build the machine had not run before (`fresh_build`) and
+# whether it has finished starting (`booted`, set by crash_report.mark_booted
+# just before the main loop). A fresh build that dies BEFORE booted is a failed
+# start whatever its exit code was.
+MARKER_FRESH_KEY = "fresh_build"
+MARKER_BOOTED_KEY = "booted"
 # Written by the supervisor into the crash directory just before it relaunches;
 # read (and removed) by crash_report.install_native on the relaunched
 # companion's start, so the relaunch reaches the log and the crash report.
@@ -175,6 +182,24 @@ def decide(exit_code: Optional[int], marker: Optional[dict[str, Any]],
     if marker_pid != supervised_pid:
         return Decision(False, f"the run marker names pid {marker_pid}, not {supervised_pid}: "
                                "this companion was replaced (self-upgrade or a start by hand)")
+    startup_death = bool(marker.get(MARKER_FRESH_KEY)) and not marker.get(MARKER_BOOTED_KEY)
+    if startup_death and (exit_code is None or exit_code in (1,) or marker.get(MARKER_EXITING_KEY)):
+        # GL-22: exit 1 ("a Python-level failure") and the macOS atexit stamp
+        # are normally respected as deliberate. Not for a just-upgraded build
+        # that never finished starting: nobody Quit it, and leaving it dead is
+        # the machine that syncs nothing until a human renames a file. Still
+        # bounded by the three-an-hour ceiling below, and the relaunched
+        # copies count as starts, so the third restores the previous build.
+        if not exe_exists:
+            return Decision(False, "the companion exe is no longer on disk: nothing to relaunch")
+        recent = [t for t in history if abs(now - t) <= RELAUNCH_WINDOW_SECONDS]
+        if len(recent) >= MAX_RELAUNCHES:
+            return Decision(False, f"already relaunched {len(recent)} times in the last "
+                                   f"{RELAUNCH_WINDOW_SECONDS / 60:.0f} minutes: this build "
+                                   "cannot stay up, leaving it to the logon autostart and the admin")
+        return Decision(True, f"pid {supervised_pid} was a just-upgraded build that died with exit "
+                              f"code {_fmt_code(exit_code)} before it finished starting "
+                              f"(relaunch {len(recent) + 1} of {MAX_RELAUNCHES} this hour)")
     if marker.get(MARKER_EXITING_KEY):
         # macOS's only view of a deliberate exit (no exit status for a
         # non-parent); on Windows the same exits are already codes 0/1.

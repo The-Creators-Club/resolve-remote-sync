@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import posixpath
 import re
 import subprocess
@@ -45,6 +46,10 @@ from urllib.parse import urlparse
 # companion/src importable; see tests/conftest.py and build_onboard.spec.
 from ccsync_companion import config as config_mod
 from ccsync_companion import identity as identity_mod
+# CR-373 / GL-29 (2026-10-07): Resolve's preference files and install probe.
+# Stdlib only, and the ONLY Resolve code the wizard takes: nothing here may
+# ever call scriptapp() (CR-68; that lives in resolve_bridge.connect).
+from ccsync_companion import resolve_prefs as resolve_prefs_mod
 from ccsync_companion import site as site_mod
 # LG-4 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.4, 2026-09-25): the companion's own
 # address table, so the wizard and the companion's guard can never disagree
@@ -145,7 +150,9 @@ from ccsync_companion import upgrade as upgrade_mod
 # CCSYNC_CANONICAL_PREFIX/CCSYNC_TREE_NAME) so one failed fetch cannot map
 # one letter while config.toml names another. Both bootstraps changed, so
 # the shared number moves.
-INSTALLER_VERSION = "1.0.46"
+# 1.0.47 (2026-10-07): CR-373 Resolve scripting step, CR-374 support line;
+# both bootstraps changed too (CR-368, CR-372, CR-373).
+INSTALLER_VERSION = "1.0.47"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every
@@ -221,6 +228,15 @@ DEFAULT_DRIVE_LETTER = "P"
 # to the default rather than inventing one (the bootstrap's refusal is the
 # one that matters; a wizard guess would only mask it).
 _CANONICAL_PREFIX_RE = re.compile(r"^([A-Za-z]):[\\/]*$")
+
+
+def support_line(site: Optional[dict] = None) -> str:
+    """The wizard's "who to tell" sentence for the Done page (GL-34 / CR-374,
+    2026-10-07). From the manifest this run fetched, else the cached one, else
+    the vendor default - never blank."""
+    if site is None:
+        site = site_mod.cached_site()
+    return f"Problems? Contact {site_mod.support_contact(site if isinstance(site, dict) else {})}"
 
 
 def site_drive_letter(site: Optional[dict] = None) -> str:
@@ -643,6 +659,122 @@ def resolve_mapping_warning(bootstrap_output: str,
     return template.format(drive=drive)
 
 
+# -- Connect Resolve (CR-373 / GL-29, 2026-10-07) ----------------------------
+#
+# The wizard used to say DONE while an editor still had to add the PostgreSQL
+# project library and switch on External scripting (Resolve's default is None,
+# which silently disables the watcher, fixer, popup and Send to Resolve), and
+# the only mention was lines 4-6 of the bootstrap banner inside a scrolling log
+# box. The install now (a) writes the scripting preference while Resolve is
+# closed, (b) records what it found, and (c) both finish pages carry a short
+# checklist with the library host from the site manifest. No part of this
+# touches Resolve's scripting API.
+
+_SCRIPTING_NOTES = {
+    resolve_prefs_mod.OK: None,
+    resolve_prefs_mod.ALREADY: None,
+    resolve_prefs_mod.RESOLVE_RUNNING: (
+        "DaVinci Resolve was open, so its External scripting setting could "
+        "not be changed. Quit Resolve, then in Resolve open Preferences > "
+        "System > General and set 'External scripting using' to Local."),
+    resolve_prefs_mod.CONFIG_MISSING: (
+        "DaVinci Resolve has not been opened on this computer yet, so its "
+        "External scripting setting could not be changed. After its first "
+        "launch, open Preferences > System > General and set 'External "
+        "scripting using' to Local."),
+    resolve_prefs_mod.FORMAT_UNRECOGNISED: (
+        "Resolve's preference files are not complete yet (it has not saved "
+        "its preferences from the Preferences window), so the External "
+        "scripting setting could not be checked. In Resolve open Preferences "
+        "> System > General, set 'External scripting using' to Local and "
+        "click Save."),
+}
+_SCRIPTING_NOTE_DEFAULT = (
+    "Resolve's External scripting setting could not be changed (see the "
+    "install log). Open Preferences > System > General and set 'External "
+    "scripting using' to Local.")
+
+
+def enable_resolve_scripting() -> dict[str, Any]:
+    """Write 'External scripting using = Local' while Resolve is closed.
+
+    Returns {"status", "installed", "version", "note"}; `note` is the
+    sentence the finish page shows when the preference still needs the
+    editor's hand, else None. Never raises. A machine with no Resolve at all
+    gets the install note and no write.
+    """
+    try:
+        found = resolve_prefs_mod.detect_resolve()
+    except Exception:
+        found = {"installed": None, "version": ""}
+    result: dict[str, Any] = {
+        "status": "skipped", "installed": found.get("installed"),
+        "version": found.get("version") or "", "note": None}
+    # CR-373 round 2: "not found at the usual place" must not stop the write
+    # when Resolve's preference files exist (it has been run here, wherever it
+    # is installed); enable_scripting refuses CONFIG_MISSING by itself.
+    if found.get("installed") is False and not found.get("prefs_found"):
+        result["note"] = (
+            "Could not find DaVinci Resolve on this computer. CC Sync's "
+            "Resolve features need Resolve Studio, the paid edition (the "
+            "free edition has no scripting). Install Studio, open it once, "
+            "quit it, then run this installer again.")
+        return result
+    status = resolve_prefs_mod.enable_scripting()
+    result["status"] = status
+    result["note"] = _SCRIPTING_NOTES.get(status, _SCRIPTING_NOTE_DEFAULT)
+    if found.get("edition") == "studio" and result["note"]:
+        result["note"] = result["note"] + " (Resolve Studio licence found.)"
+    return result
+
+
+def resolve_library_host(site: Optional[dict] = None,
+                         dashboard_url: str = "") -> str:
+    """The host an editor types into Resolve's 'Add Project Library'.
+
+    The site manifest's own `sftp_host` first, since that is the NAS's
+    address as the site published it; the dashboard URL's host only as the
+    fallback (same order run_bootstrap uses). Empty when neither is known:
+    the page then says to ask the admin rather than inventing one."""
+    if isinstance(site, dict):
+        host = str(site.get("sftp_host") or "").strip()
+        if host:
+            return host
+    raw = str(dashboard_url or "").strip()
+    if raw:
+        parsed = urlparse(raw if "://" in raw else f"//{raw}")
+        return parsed.hostname or ""
+    return ""
+
+
+def resolve_finish_lines(site: Optional[dict] = None, dashboard_url: str = "",
+                         scripting: Optional[dict] = None) -> list[str]:
+    """The 'connect Resolve' checklist for both finish pages, as plain lines.
+
+    Always shown (a green install is exactly when an editor believes they
+    are finished); a step the install already did says so."""
+    host = resolve_library_host(site, dashboard_url)
+    scripting = scripting or {}
+    status = scripting.get("status")
+    lines = ["BEFORE YOU OPEN A PROJECT, CONNECT RESOLVE (needs DaVinci Resolve Studio):"]
+    lines.append(
+        "1. In Resolve: Project Manager > Add Project Library > PostgreSQL, "
+        + (f"Host: {host}" if host else "Host: ask your admin")
+        + ". The user name and password come from your admin.")
+    if status in (resolve_prefs_mod.OK, resolve_prefs_mod.ALREADY):
+        lines.append(
+            "2. External scripting is already set to Local. If Resolve was "
+            "open during this install, quit and reopen it once.")
+    else:
+        lines.append(
+            "2. Preferences > System > General > External scripting using: "
+            "Local, then Save and restart Resolve. "
+            + str(scripting.get("note") or ""))
+    lines.append(
+        "3. Open the shared project. Playback > Proxy Handling > Prefer Proxies.")
+    return [ln.strip() for ln in lines]
+
+
 # -- EULA acceptance (the wizard's first page) ---------------------------------
 #
 # 2026-08-17, docs/COMMERCIAL_READINESS.md item 3. The wizard is the only
@@ -954,7 +1086,11 @@ def verify_account(
 
     url = f"{dashboard_url.rstrip('/')}/api/v1/verify"
     headers = {"Content-Type": "application/json"}
-    payload = {"username": username, "password": password}
+    # CR-367 / GL-15 round 2 (2026-10-07): name this computer, as the tray
+    # sign-in does, so a wizard re-run REPLACES its own minted token instead
+    # of stacking one per run. Older dashboards ignore the field.
+    payload = {"username": username, "password": password,
+               "machine": platform.node()}
     try:
         resp = http_post(url, payload, headers, timeout)
     except urllib.error.HTTPError as exc:

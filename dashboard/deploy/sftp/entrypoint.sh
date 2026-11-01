@@ -64,6 +64,16 @@ fi
 chmod 700 /etc/ssh/keys
 chmod 600 /etc/ssh/keys/ssh_host_ed25519_key /etc/ssh/keys/ssh_host_rsa_key
 
+# Publish the PUBLIC half for the dashboard (GL-19 follow-up, CR-368,
+# 2026-10-07): /api/v1/site's sftp_hostkey is what both editor bootstraps pin
+# rclone to, and on an appliance nothing else knows this sidecar's key. A
+# separate directory, mounted read-only into the dashboard, so the PRIVATE keys
+# next to it are never reachable from that container. Best-effort: a missing
+# mount only means editors stay unpinned, never that the sidecar fails to boot.
+if [ -d /etc/ssh/pub ]; then
+    ssh-keygen -y -f /etc/ssh/keys/ssh_host_ed25519_key > /etc/ssh/pub/ssh_host_ed25519_key.pub.tmp 2>/dev/null         && mv /etc/ssh/pub/ssh_host_ed25519_key.pub.tmp /etc/ssh/pub/ssh_host_ed25519_key.pub         || echo "entrypoint: could not publish the ed25519 host key for the dashboard (editors stay unpinned)"
+fi
+
 # sshd itself needs /run for its pid file / privsep dir; Alpine's package
 # does not pre-create it.
 mkdir -p /run/sshd
@@ -86,7 +96,32 @@ chmod 755 /jail
 # for group membership (see that script's own comment).
 APP_GID="${APP_GID:-3001}"
 if ! getent group editors >/dev/null 2>&1; then
-    addgroup -g "$APP_GID" editors
+    # CR-364 (GL-06, 2026-10-07): shadow's groupadd/groupmod (installed by the
+    # Dockerfile), NOT BusyBox addgroup, which refuses a gid already in
+    # /etc/group. A Synology customer sets APP_GID to the gid of their DSM
+    # account's primary group, normally 100, and Alpine's own `users` group
+    # owns 100: addgroup aborted under `set -eu` and the sidecar restart-looped.
+    # A duplicate gid is NOT harmless: sshd turns each gid back into a name
+    # with getgrgid(), which returns the FIRST row for that gid (Alpine's
+    # `users`), so `Match Group editors` would never match and every editor
+    # would fall out of the chroot (CR-364 round 2, GL-06). So when another
+    # group already owns APP_GID, rename it to `editors` instead of adding a
+    # second row behind it. Nothing in this image uses `users` by name.
+    OWNER="$(getent group "$APP_GID" | cut -d: -f1 | head -n 1 || true)"
+    if [ -n "$OWNER" ]; then
+        # Never rename a group this image uses BY NAME (CR-364 round 2, GL-06,
+        # 2026-10-07): `sftpkeys` is 1000:1000 from the Dockerfile and this
+        # script runs `chown root:sftpkeys` / `chown root:root` on every boot,
+        # so a rename survives in /etc/group and restart-loops the container.
+        case "$OWNER" in
+            root|sftpkeys|sshd)
+                echo "entrypoint: APP_GID=$APP_GID is the gid of the image's own '$OWNER' group; set APP_GID to your account's primary gid (Synology 100, default 3001), not 0 or 1000" >&2
+                exit 1 ;;
+        esac
+        groupmod -n editors "$OWNER"
+    else
+        groupadd -g "$APP_GID" editors
+    fi
 fi
 
 # One synchronous pass before sshd opens its listener, so the very first

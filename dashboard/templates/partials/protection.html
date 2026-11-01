@@ -22,7 +22,7 @@
           {% if row.state != 'ok' %}<div class="cq">{{ row.consequence }}</div>{% endif %}
           {% if row.detail %}<div class="dt">{{ row.detail }}</div>{% endif %}
           {% for s in row.subjects %}<div class="subj">{{ s.subject }}{% if s.detail %}: {{ s.detail }}{% endif %}</div>{% endfor %}
-          {% if row.state != 'ok' %}<div class="fix">{{ row.fix }}</div>{% endif %}
+          {% if row.state != 'ok' %}<div class="fix">{{ row.fix | with_support }}</div>{% endif %}
         </div>
       </div>
     {% endfor %}
@@ -34,9 +34,13 @@
   <section class="win" data-win="acks" id="acks">
     <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold what only you can confirm"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">{{ "what_only_you_can_confirm" | cc_title }}</h2><span class="bar-rule"></span></div>
     <div class="body lede">This server cannot see a key on your workstation or a restore you did by hand. Record it here and the lines above turn green.</div>
+    {# PL-RES-30 (CR-362, 2026-10-07): a vendor-build site holds no private key, so the row is not offered. #}
+    {# A plain literal list, skipped inside the loop: the label matcher in
+       test_copy_sweep_phase7 reads a literal list only (gate fix, 2026-10-07). #}
     {% for key, question, button, tip in [
          ('release_key_backup', 'The release signing key is backed up, on', 'I have backed it up', 'The signing key is the one file that makes the seal on every update. It lives on one workstation, so it needs a backup copy.'),
          ('restore_drill', 'A restore from a backup was tried, on', 'Record a restore', 'A restore drill is a practice run: bringing something back from a snapshot to prove the backups work.')] %}
+    {% if not (key == 'release_key_backup' and protection.show_key_ack is false) %}
     {% set a = protection.acks[key] if protection.acks and key in protection.acks else None %}
     <form class="ack" hx-post="/partials/admin/protection/ack" hx-target="#protection" hx-swap="outerHTML">
       <input type="hidden" name="key" value="{{ key }}">
@@ -45,6 +49,7 @@
       <input class="inp" type="date" name="date" id="ack-{{ key }}" value="">
       <button class="key" type="submit" title="Records that you did this on that date, under your name. The line above turns green."><span class="t">{{ button }}</span></button>
     </form>
+    {% endif %}
     {% endfor %}
   </section>
 </div>

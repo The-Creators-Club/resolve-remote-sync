@@ -272,6 +272,8 @@
       var payload = {
         email: form.email.value.trim(),
         webhook: form.webhook.value.trim(),
+        // CR-363 / GL-09: the daily still-here message (PL-RES-52).
+        heartbeat: !!(form.heartbeat && form.heartbeat.checked),
       };
       api("/api/v1/setup/alerts", {method: "POST", body: JSON.stringify(payload)})
         .then(function (state) {
@@ -341,10 +343,17 @@
           "(you chose to skip this on " + task.skip_recorded_at.slice(0, 10) + ")"));
       }
       if (task.id === "done") renderDoneLinks(tdDetail, data.outstanding_for_done || []);
+      // CR-363 / GL-07: a step that used to say "set an environment variable
+      // and redeploy" is a form on its own row.
+      if (task.fields && task.fields.length && task.status !== "ok") renderConfigForm(tdDetail, task);
       var actions = el("td", "task-actions");
       actions.setAttribute("data-label", "");
       var wrap = el("div", "inline");
       actions.appendChild(wrap);
+      if (task.restartable && /RESTART SERVER/.test(task.detail || "")) {
+        wrap.appendChild(actionButton("restart server", "Restarts this server so what was just generated takes effect. The page comes back by itself.",
+          function () { return restartServer(); }));
+      }
       wrap.appendChild(actionButton("check", "Looks again at how this step stands. Changes nothing.",
         function (btn) { return taskAction(task.id, "check", btn); }));
       if (task.can_run) {
@@ -361,6 +370,91 @@
       tbody.appendChild(tr);
     });
     paintSteps(data.tasks);
+  }
+
+  // ------------------------------------------- settings entered in the wizard
+
+  // After a save or a restart request the server exits and comes back (exit
+  // 75, which the container restarts). Poll health, then reload.
+  function waitForServer() {
+    var tries = 0;
+    function poll() {
+      tries += 1;
+      fetch("/api/v1/health", {cache: "no-store"}).then(function (resp) {
+        if (resp.ok && tries > 2) { window.location.reload(); return; }
+        setTimeout(poll, 1500);
+      }).catch(function () { setTimeout(poll, 1500); });
+    }
+    setTimeout(poll, 2500);
+  }
+
+  function restartServer() {
+    return api("/api/v1/setup/restart", {method: "POST"}).then(function () {
+      var main = document.getElementById("setup-main");
+      if (main) main.insertBefore(el("div", "note", "The server is restarting. This page reloads by itself."), main.firstChild);
+      waitForServer();
+    }).catch(function (err) { showError("could not restart: " + err.message, document.getElementById("setup-tasks-table")); });
+  }
+
+  function renderConfigForm(cell, task) {
+    var form = el("form", "form sp-gap");
+    form.setAttribute("data-task-form", task.id);
+    task.fields.forEach(function (f) {
+      var row = el("div", "form-row");
+      var id = "setup-cfg-" + task.id + "-" + f.env;
+      var lbl = el("label", "lbl", f.label);
+      lbl.setAttribute("for", id);
+      var inp;
+      if (f.choices && f.choices.length) {
+        inp = el("select", "inp");
+        f.choices.forEach(function (c) {
+          var opt = el("option", "", c);
+          opt.value = c;
+          if (f.value === c) opt.selected = true;
+          inp.appendChild(opt);
+        });
+      } else {
+        inp = el("input", "inp");
+        inp.type = f.secret ? "password" : "text";
+        inp.setAttribute("autocomplete", "off");
+        if (f.secret && f.set) inp.placeholder = "set; leave blank to keep it";
+        else if (f.placeholder) inp.placeholder = f.placeholder;
+        if (!f.secret && f.value) inp.value = f.value;
+      }
+      inp.id = id; inp.name = f.env;
+      if (f.hint) inp.title = f.hint;
+      row.appendChild(lbl); row.appendChild(inp);
+      form.appendChild(row);
+    });
+    var go = el("div", "form-row");
+    go.appendChild(el("span"));
+    var btn = el("button", "key primary");
+    btn.type = "submit";
+    btn.title = "Saves these and restarts the server, which takes a few seconds.";
+    btn.appendChild(el("span", "t", "save and restart"));
+    go.appendChild(btn);
+    form.appendChild(go);
+    form.addEventListener("submit", function (evt) {
+      evt.preventDefault();
+      var values = {};
+      task.fields.forEach(function (f) { values[f.env] = form.elements[f.env].value; });
+      btn.disabled = true;
+      api("/api/v1/setup/config/" + encodeURIComponent(task.id),
+          {method: "POST", body: JSON.stringify({values: values})})
+        .then(function () {
+          clearErrors();
+          form.appendChild(el("div", "note", "Saved. The server is restarting and this page reloads by itself."));
+          waitForServer();
+        })
+        .catch(function (err) { btn.disabled = false; showError("could not save: " + err.message, form); });
+    });
+    cell.appendChild(form);
+    if (task.operator_note) {
+      var fold = el("details", "sp-small");
+      fold.appendChild(el("summary", "", "for an operator"));
+      fold.appendChild(el("div", "muted", "Container settings for these values: " + task.operator_note));
+      cell.appendChild(fold);
+    }
   }
 
   // Done names what it is waiting for, each name a link to its row (SYS-18).

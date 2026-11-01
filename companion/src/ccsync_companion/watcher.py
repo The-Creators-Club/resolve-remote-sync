@@ -126,6 +126,7 @@ class TimelineWatcher:
         on_moved_clip: Optional[Callable[[dict[str, Any], dict[str, Any]], None]] = None,
         archive_exempt_fn: Optional[Callable[[str], bool]] = None,
         proxy_held_fn: Optional[Callable[[str], bool]] = None,
+        on_timeline_scanned: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> None:
         self.local_root = local_root
         self.canonical_prefix = canonical_prefix
@@ -185,6 +186,11 @@ class TimelineWatcher:
         # as one. Remembered with the same TTL and cap as the archive answer.
         # None = the default rule below; tests inject.
         self._proxy_held_fn = proxy_held_fn
+        # CR-380 (2026-11-01): every successful poll's whole answer, for the
+        # VP9 guard. Called inline, so the consumer must only snapshot and
+        # hand off (vp9_guard.observe does no I/O); anything slow belongs on
+        # a thread of its own, never on this one.
+        self._on_timeline_scanned = on_timeline_scanned
         self._proxy_memo: dict[str, tuple[float, bool]] = {}
         # Last NON-None project name seen -- deliberately NOT cleared when
         # the bridge flaps to None (Resolve restarting, transient failure),
@@ -549,6 +555,12 @@ class TimelineWatcher:
                 self._on_non_canonical(new_non_canonical)
             except Exception:
                 log.exception("on_non_canonical callback failed")
+
+        if self._on_timeline_scanned is not None:
+            try:
+                self._on_timeline_scanned(result)
+            except Exception:
+                log.exception("on_timeline_scanned callback failed")
 
         self._note_scan(total_out_of_tree, total_bad_prefix, len(missing_now))
         return {

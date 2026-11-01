@@ -33,13 +33,17 @@
 # unset compose variable used to do here before this file existed.
 #
 # NOTHING ELSE ON THIS FILE IS A SECRET, AND NONE OF IT SHOULD BE EDITED.
-# `DASH_RELEASE_PUBKEYS`, `SYNCTHING_API_KEY`, `CCSYNC_INTERNAL_TOKEN` and
-# every other credential `dashboard/deploy/compose.yaml` still asks an
-# operator to type by hand (as `REPLACE_ME`) do not appear here at all: the
-# dashboard generates them into `${CCSYNC_DATA}/data/secrets/` the first time
-# it boots (ZERO_TOUCH_PLAN.md 3.2's SetupEngine, WP D -- not yet built; see
-# "secrets-init" below for what stands in for that generation TODAY, in
-# WP A). The customer never sees one.
+# `SYNCTHING_API_KEY`, `CCSYNC_INTERNAL_TOKEN` and every other credential
+# `dashboard/deploy/compose.yaml` still asks an operator to type by hand (as
+# `REPLACE_ME`) do not appear here at all: the dashboard generates them into
+# `${CCSYNC_DATA}/data/secrets/` the first time it boots (see "secrets-init"
+# below). The customer never sees one. The release key is different and is
+# NOT generated: `DASH_RELEASE_PUBKEYS` is the vendor's PUBLIC key, baked
+# into the image together with the vendor feed address (CR-362 / GL-02,
+# 2026-10-07; `DASH_VENDOR_DEFAULTS` on the dashboard service). An earlier
+# version of this comment said the key was generated on first boot. It never
+# was, which left every new customer unable to install an editor or receive
+# an update.
 #
 # WHAT COMPOSE VERSION THIS TARGETS. Synology's Container Manager on the
 # DS423+ this was verified against ships Docker Compose v2.20.1
@@ -70,13 +74,18 @@
 #
 # uid:gid. `${APP_UID:-3000}:${APP_GID:-3001}` is this fleet's existing
 # convention (`broll:editors` on the current TrueNAS site) and works
-# unchanged on TrueNAS SCALE. On Synology, DSM assigns uids >= 1026 and will
-# not let an app pick 3000 -- the wizard's "Your studio" step reads the
-# REAL uid/gid of the account Container Manager actually used and writes it
-# back as `APP_UID`/`APP_GID` (compose environment or the same `.env`), which
-# is why every `user:` line below is a variable, never a literal. Until the
-# wizard exists (WP D), set them by hand from `id <the DSM account>` before
-# the first `up` on Synology; TrueNAS SCALE's default is already right.
+# unchanged on TrueNAS SCALE only if that box really has those ids. On
+# Synology, DSM assigns uids >= 1026 and has no uid 3000, so the containers
+# would write the DSM-owned tree as a user that does not exist.
+# GL-06 / CR-364 (2026-10-07): NOTHING writes these two variables back. An
+# earlier version of this comment promised that the wizard would, and no code
+# does or could (a container cannot edit the project that runs it). The step is
+# by hand, once, before the first `up`: create a dedicated account for CC Sync
+# on the NAS, give it read/write on the shared folder, read its numbers with
+# `id <account>`, and set APP_UID and APP_GID to them (docs/APPLIANCE_INSTALL.md
+# step 2). If it is skipped, the wizard's Storage check fails and names this
+# cause. Every `user:` line below is a variable, never a literal, for that
+# reason.
 
 services:
   # --- one-shot: makes sure syncthing/sftp have a real .env before they
@@ -130,9 +139,50 @@ services:
         # in it at all.
         chown ${APP_UID:-3000}:${APP_GID:-3001} /data
         chmod 750 /data
+        # GL-05 / CR-363 (2026-10-07; PRAC-7, PRAC-15). Docker creates a
+        # missing bind-mount SOURCE as root:root 755, and the syncthing
+        # service runs as APP_UID, so on the first `up` it could not create
+        # its certificate or config.xml and restart-looped for ever (lane C
+        # never started; the cure was an SSH chown the docs never named).
+        # This is the other half of the reason this service is root: it makes
+        # and owns the one directory Syncthing writes to. Recursive on purpose
+        # (it holds a handful of small files, and a previous failed start may
+        # have left root-owned ones in it); `|| echo` because a NAS that
+        # refuses a chown (DSM ACLs) must not stop the stack from coming up -
+        # the wizard's Storage check names the cause if it matters.
+        # GL-04 / GL-09 (CR-363 round 2, 2026-10-07): tailscaled runs as
+        # APP_UID too (see the tailscale service), so its state folder and the
+        # shared socket volume must be APP_UID's before it starts. Without
+        # that the daemon is root and the dashboard (APP_UID, no passwd entry
+        # in that container) is a READ-ONLY LocalAPI peer: every Serve POST
+        # and the sign-in POST answer 403.
+        mkdir -p /tailscale-state
+        chown -R ${APP_UID:-3000}:${APP_GID:-3001} /tailscale-state /tailscale-sock || echo "secrets-init: could not chown the tailnet node's folders"
+        chmod 700 /tailscale-state || true
+        mkdir -p /syncthing-config
+        chown -R ${APP_UID:-3000}:${APP_GID:-3001} /syncthing-config || echo "secrets-init: could not chown the sync engine's config folder"
+        chmod 700 /syncthing-config || true
+        # The three tree folders, the same way and for the same reason: left
+        # to Docker they are root-owned and the only symptom is a probe-write
+        # failure on the Storage step. ONLY a folder created here is chowned.
+        # One that already exists is the customer's own data and its owner is
+        # theirs to decide, so it is never touched.
+        # (`Assets` is listed before its two children so a missing parent is
+        # made and owned by us too, and an existing one is never chowned.)
+        for rel in "Projects" "Assets" "Assets/B-roll Archive" "Assets/Music"; do
+          if [ ! -d "/tree/$$rel" ]; then
+            mkdir "/tree/$$rel" || { echo "secrets-init: could not create /tree/$$rel"; continue; }
+            chown ${APP_UID:-3000}:${APP_GID:-3001} "/tree/$$rel" || echo "secrets-init: could not chown /tree/$$rel"
+            echo "secrets-init: created $$rel"
+          fi
+        done
         echo "secrets-init: done"
     volumes:
       - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/data:/data
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/syncthing-config:/syncthing-config
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/tailscale:/tailscale-state
+      - tailscale-sock:/tailscale-sock
+      - ${CCSYNC_TREE:?set CCSYNC_TREE to the shared folder your projects live in, e.g. /volume1/Projects}:/tree
     restart: "no"
     # The same 100 MB stdout cap the dashboard service carries
     # (ops-efficiency-7, 2026-08-21): json-file has no default limit and
@@ -157,6 +207,32 @@ services:
       DASH_PORT: "8480"
       DASH_PROJECTS_DIR: "/projects"
       DASH_CRASH_DIR: "/data/crashes"
+      # CR-362 / GL-00 (2026-10-07, STOP-SHIP): sign-in is accounts THIS
+      # dashboard keeps. The default is `smb` (a NAS login), and with no NAS
+      # address on this path the setup page sent a new customer to a login no
+      # password could pass while the create-the-first-admin window stayed
+      # shut. `local` is what opens that window (setup_routes.first_run_open).
+      DASH_AUTH_METHOD: "local"
+      # CR-362 / GL-01: where the dashboard finds ITS Syncthing. The syncthing
+      # service shares the tailscale service's network namespace
+      # (network_mode below), so its GUI is reachable at the service name
+      # `tailscale`, never on a published port. Without this the wizard's
+      # required "Sync engine" step could never pass. The API key comes from
+      # secrets-init's syncthing.env, which the dashboard adopts.
+      SYNCTHING_GUI_URL: "http://tailscale:8384"
+      # CR-362 / GL-02: this is a VENDOR build. With this on, an absent
+      # DASH_RELEASE_FEED_URL / DASH_RELEASE_PUBKEYS fall back to the vendor's
+      # feed and public key baked into the IMAGE (vendor_defaults.py), so a new
+      # customer can install an editor and receive updates and recalls with
+      # nothing typed. An operator who sets either variable still wins.
+      DASH_VENDOR_DEFAULTS: "1"
+      # CR-365 / GL-11 (2026-10-07): the NAS API transport, auto | jsonrpc | rest
+      # (blank = auto: JSON-RPC, REST only where the NAS has none). The
+      # rollback switch for a NAS where JSON-RPC misbehaves; set
+      # DASH_NAS_API_TRANSPORT=rest in the stack's .env and `up -d`. The
+      # account the NAS API key was made for is the wizard's "NAS API key
+      # account" field (DASH_NAS_API_KEY_USER), stored with the key.
+      DASH_NAS_API_TRANSPORT: "${DASH_NAS_API_TRANSPORT:-}"
       # site.toml stops being a customer artefact on this path
       # (ZERO_TOUCH_PLAN.md 3.2): everything that used to be a `{{ }}`
       # template value here -- org name, tree name, NAS kind, the SFTP/
@@ -168,11 +244,19 @@ services:
       #
       # No REPLACE_ME anywhere below this line, and none of
       # SYNCTHING_API_KEY / DASH_REPORT_TOKEN / DASH_SESSION_SECRET /
-      # BROLL_INGEST_TOKEN / DASH_RELEASE_PUBKEYS / TRUENAS_PW appear at
-      # all: those are generated into ${CCSYNC_DATA}/data/secrets/ on first
-      # boot (WP D) and read from there, not from compose environment.
+      # BROLL_INGEST_TOKEN / TRUENAS_PW appear at all: those are generated
+      # into ${CCSYNC_DATA}/data/secrets/ on first boot and read from there,
+      # not from compose environment. DASH_RELEASE_PUBKEYS is NOT generated
+      # (a signing key cannot be): it is the VENDOR's PUBLIC key, baked into
+      # the image (DASH_VENDOR_DEFAULTS above). The private half never
+      # reaches a customer's machine.
     volumes:
       - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/data:/data
+      # The sftp sidecar's PUBLIC host key only (never sftp-hostkeys itself,
+      # which holds the private keys). The dashboard publishes it as
+      # /api/v1/site sftp_hostkey so editors pin rclone to it (GL-19, CR-368
+      # follow-up, 2026-10-07). DASH_SFTP_HOSTKEY_FILE names the file.
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/sftp-hostkey-pub:/sftp-hostkey-pub:ro
       # ${CCSYNC_TREE} is the ROOT that holds Projects/, Assets/B-roll
       # Archive/ and Assets/Music/ -- the same NAS_TREE_ROOT shape
       # dashboard/deploy/compose.yaml already documents, not a folder named
@@ -184,13 +268,18 @@ services:
       - "${CCSYNC_TREE:?set CCSYNC_TREE to the shared folder your projects live in, e.g. /volume1/Projects}/Assets/Music:/music-share:rw"
       # How the dashboard (WP B, not yet built) drives the tailnet login AND
       # sets Serve -- NOT a config file. `docs/spikes/zero-touch-spikes-2026-08-17.md`
-      # S1c proved a second, unrelated container can open this same socket
-      # with nothing but Python's stdlib and get real answers from `PATCH
-      # /localapi/v0/prefs`, `POST /localapi/v0/login-interactive`, `GET
-      # /localapi/v0/status` and (once `BackendState=="Running"`) `POST
-      # /localapi/v0/serve-config` -- see the `tailscale` service below for
-      # why containerboot's `TS_SERVE_CONFIG` file was dropped in favour of
-      # this.
+      # S1c proved a second container can OPEN this socket and READ from it
+      # (`GET /localapi/v0/status`). It does NOT prove a WRITE as this
+      # service's uid: that spike's client ran as ROOT. tailscaled decides
+      # read/write per connection from the peer's uid (ipn/ipnauth), and a
+      # `POST /serve-config` or `POST /login-interactive` from a uid that is
+      # neither root, the daemon's own uid nor a local admin answers 403
+      # "serve config denied". So the `tailscale` service below runs
+      # tailscaled as the SAME ${APP_UID}:${APP_GID} as this service (CR-363
+      # round 2, GL-04): "same non-root uid as the daemon" is the rule that
+      # grants write. Live proof is on the GL-60 checklist ("LocalAPI write
+      # as APP_UID"). See the `tailscale` service for why containerboot's
+      # `TS_SERVE_CONFIG` file was dropped.
       - tailscale-sock:/var/run/tailscale
     # 127.0.0.1 ONLY -- everything a customer or an editor actually reaches
     # goes through the `tailscale` service's Serve config
@@ -199,6 +288,11 @@ services:
     # so the NAS's own admin can reach the wizard from the NAS host itself
     # (an SSH tunnel, or the box's own browser) before the tailnet node has
     # even been signed in -- there is no other way in until it has been.
+    # GL-04 / CR-363 (2026-10-07): once the node is signed in, the wizard's
+    # tailnet task publishes this container through Serve itself
+    # (tailnet_serve.py), and a collector watchdog puts it back if it is lost.
+    # Nothing in this stack is reachable from the tailnet until that has
+    # happened, and the task no longer turns green before it has.
     ports:
       - "127.0.0.1:8480:8480"
     restart: unless-stopped
@@ -269,9 +363,16 @@ services:
     # Shares the tailnet node's network namespace -- :22000 (sync protocol)
     # and :21027 (local discovery) become reachable on the NODE's tailnet
     # IP, with NOTHING published on the NAS host at all. The GUI
-    # (STGUIADDRESS above) is deliberately never exposed anywhere outside
-    # this namespace -- the dashboard is Syncthing's only admin surface,
-    # same posture as compose.yaml's own bundled-syncthing profile.
+    # (STGUIADDRESS above) must listen on the container's address because the
+    # dashboard reaches it at `tailscale:8384` over the compose network, and
+    # tailscaled's userspace networking forwards inbound TAILNET TCP to any
+    # listener in this namespace, loopback or not -- so "never exposed outside
+    # this namespace" was NOT true: any peer on the tailnet could open :8384
+    # with no password (GL-08 / CR-363, 2026-10-07; bug-server-3, PRAC-18).
+    # The fix is a login, not a bind: the dashboard sets a GUI user and a
+    # random password on its first collector cycle
+    # (syncthing_gui_guard.py, stored 0600 in ${CCSYNC_DATA}/data/secrets/
+    # syncthing_gui_password). The API key the dashboard uses is unaffected.
     # CONFIRMED on this same box (S5): the two containers share one eth0 and
     # :8480 on 127.0.0.1 inside tailscale's netns reached a service in this
     # position; the orphaned-netns caveat above is the ONE thing that does
@@ -332,7 +433,9 @@ services:
       # 2026-08-21): both bootstraps write the rclone sftp stanza with NO
       # known_hosts_file and the companion passes no --sftp-known-hosts-file,
       # so rclone accepts ANY host key, and /api/v1/site publishes none for it
-      # to check against. Lanes A and B authenticate the editor TO the NAS and
+      # to check against. (Since 2026-10-07, GL-19: the sidecar publishes its
+      # public key under sftp-hostkey-pub and the dashboard serves it as
+      # sftp_hostkey, which both bootstraps now pin.) Lanes A and B authenticate the editor TO the NAS and
       # never the NAS to the editor; inside the tailnet WireGuard authenticates
       # the peer, which is the only reason this has not bitten.
       #
@@ -341,6 +444,8 @@ services:
       # NOT verify the NAS host key" has the four-part shape of that fix) --
       # but nothing on an editor machine notices today.
       - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/sftp-hostkeys:/etc/ssh/keys
+      # The public half, published for the dashboard (entrypoint.sh).
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/sftp-hostkey-pub:/etc/ssh/pub
     # :22 becomes reachable on the tailnet node's own IP, same as
     # Syncthing's :22000 above -- no host port for this either.
     network_mode: service:tailscale
@@ -362,6 +467,16 @@ services:
     # security-sensitive edge (dashboard/deploy/Dockerfile's own comment).
     image: "tailscale/tailscale:v1.102.2@sha256:321ce041508c19079b57a28b6666c8d81ab0b08accc0a2585b3ab663d557ac24"
     hostname: ccsync
+    # tailscaled runs as the dashboard's own uid (GL-04 / GL-09, CR-363 round
+    # 2, 2026-10-07). As root, the stock image made the dashboard a read-only
+    # LocalAPI peer and neither Serve publishing, the watchdog's repair nor
+    # the sign-in POST could ever succeed. Userspace networking needs no root;
+    # secrets-init chowns the state folder and the socket volume to this uid.
+    # A test pins this line equal to the dashboard's.
+    user: "${APP_UID:-3000}:${APP_GID:-3001}"
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
     # NO containerboot. The stock entrypoint's `tailscale up` gives up after
     # 60 SECONDS if nobody has visited the login link yet, SIGTERMs
     # tailscaled and exits -- with `restart: unless-stopped` that is a
@@ -462,7 +577,8 @@ services:
 # tailscale) still reaches tailscaled's LocalAPI over the unix socket file --
 # a network namespace only matters for TCP/UDP, not for a socket FILE two
 # containers both have mounted (proven with a THIRD, unrelated image reading
-# it in docs/spikes/zero-touch-spikes-2026-08-17.md S1c). syncthing/sftp get
+# it in docs/spikes/zero-touch-spikes-2026-08-17.md S1c, which proved READ
+# only: the write rule is the same-uid one on the tailscale service). syncthing/sftp get
 # the same socket via their `network_mode: service:tailscale` instead; they
 # do not need this volume listed separately.
 volumes:

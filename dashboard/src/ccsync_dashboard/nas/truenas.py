@@ -30,6 +30,8 @@ import logging
 
 import requests
 
+from . import tls_pin
+from . import truenas_rpc
 from .base import EDITORS_GROUP, NasError, is_valid_username
 
 log = logging.getLogger(__name__)
@@ -51,16 +53,24 @@ HOME_PARENT = "/mnt/tank/TheCreatorsPool/homes"
 # Only reached when a caller builds this client WITHOUT passing verify_ssl --
 # nas.factory always passes settings.nas_verify_ssl. TRUENAS_VERIFY_SSL is the
 # name the deployed compose.yaml still uses, kept for one release (WP1).
+#
+# UNSET IS NOW "VERIFY" (PR-GL19 / GL-18, CR-368, 2026-10-07): a new site's
+# deploy always writes an explicit value (a `sha256:` certificate pin by
+# default), and a container with nothing set must not fall back to trusting
+# whatever answers. A site that really wants it off says "0" in its site.toml,
+# which is what the studio's own manifest does.
 def _verify_setting() -> bool | str:
     raw = (os.environ.get("DASH_NAS_VERIFY_SSL", "").strip()
            or os.environ.get("TRUENAS_VERIFY_SSL", "").strip())
     if not raw:
+        # No pin supplied (an appliance install has no base-rig deploy): record
+        # the NAS's certificate on first use, refuse a different one after.
+        return tls_pin.TOFU
+    if raw.lower() in ("0", "false", "no"):
         return False
-    if raw in ("0", "false", "no"):
-        return False
-    if raw in ("1", "true", "yes"):
+    if raw.lower() in ("1", "true", "yes"):
         return True
-    return raw  # a CA bundle path
+    return raw  # a CA bundle path, or a `sha256:` certificate pin (nas/tls_pin.py)
 
 # Accounts below this uid are system/builtin (root, truenas_admin, apps...)
 # and must never be touched by the "create editor" flow.
@@ -100,6 +110,31 @@ class TrueNASClient:
     # `Authorization: Bearer <key>` on every /api/v2.0 route.
     api_key: str = field(default_factory=lambda: os.environ.get(
         "DASH_NAS_API_KEY", "").strip() or os.environ.get("TRUENAS_API_KEY", "").strip())
+    # CR-365 / GL-11 / GL-46 (2026-10-07): auto | jsonrpc | rest. TrueNAS 26
+    # removed /api/v2.0, so "auto" speaks JSON-RPC over the websocket at
+    # /api/current (25.04+) and falls back to REST only when the NAS has no
+    # such endpoint. A client built with base_url (the tests' plain-http fake)
+    # is always REST: base_url is a REST address.
+    transport: str = field(default_factory=truenas_rpc.transport_setting)
+    ws_url: str | None = None
+    # The account the API key was minted for (create_api_key.py --username),
+    # which is NOT DASH_NAS_USER (the admin): JSON-RPC's API_KEY_PLAIN login
+    # names it. Blank means the key is the admin's own (CR-365 overseer 1,
+    # 2026-10-07).
+    api_key_user: str = field(default_factory=lambda: os.environ.get(
+        "DASH_NAS_API_KEY_USER", "").strip() or os.environ.get(
+        "TRUENAS_API_KEY_USER", "").strip())
+
+    def __post_init__(self) -> None:
+        # A `sha256:` pin becomes a pinned https adapter on THIS client's
+        # session; `_verify_arg` is what every request passes as verify=.
+        # A malformed pin raises here, at construction, never as "off".
+        # CR-368 follow-up (2026-10-07): an UNSET setting is first-use pinning,
+        # resolved here to a `sha256:` pin (a plain-http test fake has no cert).
+        if self.verify_ssl == tls_pin.TOFU:
+            self.verify_ssl = (True if self.base_url else
+                               tls_pin.resolve_first_use(self.host, self.verify_ssl, 443))
+        self._verify_arg = tls_pin.apply_verify(self.session, self.verify_ssl)
 
     def _homes_parent(self) -> str:
         if self.homes_parent:
@@ -110,6 +145,31 @@ class TrueNASClient:
 
     def _request(self, method: str, path: str, json_body: Any = None,
                   params: dict[str, Any] | None = None) -> requests.Response:
+        if (not self.base_url and self.transport != "rest"
+                and not truenas_rpc.rest_only(self.host)):
+            try:
+                return truenas_rpc.rest_call(
+                    self.host, method, path, json_body, params, user=self.user,
+                    password=self.password, api_key=self.api_key,
+                    api_key_user=self.api_key_user,
+                    verify=self.verify_ssl, timeout=self.timeout, url=self.ws_url)
+            except truenas_rpc.RpcUnavailable as exc:
+                if self.transport == "jsonrpc":
+                    raise TrueNASError(
+                        f"{method} {path}: the NAS has no JSON-RPC API ({exc}; TrueNAS "
+                        "25.04 or later has one) and the transport is pinned to "
+                        "jsonrpc") from None
+                truenas_rpc.mark_rest_only(self.host)
+                log.warning("the NAS serves no JSON-RPC API (%s): using REST /api/v2.0, "
+                            "which TrueNAS 26 no longer has", exc)
+            except truenas_rpc.UnmappedRoute as exc:
+                # A route nobody mapped (CR-365 overseer 4): REST still answers on
+                # 25.x, so use it there rather than refuse a call that works.
+                if self.transport == "jsonrpc":
+                    raise TrueNASError(f"{method} {path}: {exc}") from exc
+                log.warning("no JSON-RPC mapping for %s %s: using REST", method, path)
+            except (truenas_rpc.RpcTransportError, truenas_rpc.RpcAuthError) as exc:
+                raise TrueNASError(f"{method} {path}: {exc}") from exc
         base = self.base_url or f"https://{self.host}/api/v2.0"
         url = f"{base}{path}"
         # Bearer key when the site has one, basic auth otherwise. Never both:
@@ -120,7 +180,7 @@ class TrueNASClient:
         try:
             response = self.session.request(
                 method, url, json=json_body, params=params, headers=headers,
-                auth=auth, verify=self.verify_ssl, timeout=self.timeout,
+                auth=auth, verify=self._verify_arg, timeout=self.timeout,
                 allow_redirects=False,
             )
         except requests.RequestException as exc:
@@ -135,6 +195,18 @@ class TrueNASClient:
                 f"{response.headers.get('Location', '(no Location)')!r}. Nothing was sent on. "
                 "Point DASH_NAS_BASE_URL at the API address the NAS actually serves"
             )
+        if (response.status_code == 404 and not self.base_url
+                and truenas_rpc.rest_only(self.host)):
+            # REST after a JSON-RPC fallback answered 404: a release that
+            # removed /api/v2.0 (TrueNAS 26, upgraded under a running dashboard)
+            # or a legitimately absent object. Forget the REST-only memory so
+            # the next call retries JSON-RPC, and for a route that never 404s
+            # on its own name the likely cause (res-deps-3, 2026-10-07).
+            truenas_rpc.clear_rest_only(self.host)
+            if "/id/" not in path:
+                log.warning("%s %s answered 404 over REST: if this NAS runs TrueNAS 26 "
+                            "or later, REST is gone and JSON-RPC at /api/current must be "
+                            "reachable (docs/SERVER.md, supported versions)", method, path)
         return response
 
     @staticmethod
@@ -336,6 +408,83 @@ class TrueNASClient:
 
         return {"created": created, "username": username, "home_ok": home_ok, "warnings": warnings}
 
+    # ----------------------------------------------- per-project groups
+    # GL-19 / COM-H15 (CR-368 follow-up, 2026-10-07). Under project_acl =
+    # per-project a project directory is 2770 <owner>:proj-<slug> and a tick
+    # means membership of that group. Optional capabilities, reached through
+    # nas.capability() (project_groups.py): DSM has no scriptable answer.
+
+    def project_groups_index(self, prefix: str = "proj-") -> dict[str, dict[str, Any]]:
+        """{group name: {"id", "gid"}} for every group named `prefix`*."""
+        resp = self.get("/group")
+        if not ok(resp):
+            raise TrueNASError(f"GET /group failed: HTTP {resp.status_code} {resp.text}")
+        return {g["group"]: {"id": g["id"], "gid": g["gid"]}
+                for g in self._json(resp, "GET /group")
+                if str(g.get("group", "")).startswith(prefix)}
+
+    def ensure_project_group(self, name: str) -> dict[str, Any]:
+        """The group `name` (a proj-<slug>), created if missing. Refuses any name
+        that is not a proj- group: this is not a general group-creation door."""
+        if not name.startswith("proj-"):
+            raise TrueNASError(f"{name!r} is not a project group")
+        existing = self.find_group(name)
+        if existing:
+            return {"id": existing["id"], "gid": existing["gid"]}
+        resp = self.post("/group", {"name": name, "smb": False})
+        if not ok(resp):
+            raise TrueNASError(f"create group {name} failed: HTTP {resp.status_code} {resp.text}")
+        fresh = self.find_group(name)
+        if fresh is None:
+            raise TrueNASError(f"group {name} created but not found on re-read")
+        return {"id": fresh["id"], "gid": fresh["gid"]}
+
+    def set_editor_project_groups(self, username: str, desired: set[str],
+                                  managed: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+        """Make `username`'s membership of the groups in `managed` (name -> ids)
+        exactly `desired`; every other group the user is in is left alone.
+
+        Same refusals as create_or_update_editor: never a system account, never
+        an account that is not already an editor. Returns {"added": [...],
+        "removed": [...]} (empty when nothing changed)."""
+        user = self.find_user(username)
+        if user is None:
+            return {"added": [], "removed": []}
+        uid = user.get("uid")
+        if uid is not None and int(uid) < MIN_EDITOR_UID:
+            raise TrueNASError(f"{username!r} is a system account: refusing to modify it")
+        egid, _ = self.ensure_editors_group()
+        if not self._in_editors_group(user, egid):
+            raise TrueNASError(f"{username!r} is not in the {EDITORS_GROUP!r} group: refusing")
+        current = set(user.get("groups") or [])
+        managed_ids = {meta["id"] for meta in managed.values()}
+        want_ids = {managed[n]["id"] for n in desired if n in managed}
+        new = (current - managed_ids) | want_ids
+        if new == current:
+            return {"added": [], "removed": []}
+        by_id = {meta["id"]: n for n, meta in managed.items()}
+        resp = self.put(f"/user/id/{user['id']}", {"groups": sorted(new)})
+        if not ok(resp):
+            raise TrueNASError(f"update groups for {username} failed: HTTP {resp.status_code} {resp.text}")
+        return {"added": sorted(by_id[i] for i in new - current if i in by_id),
+                "removed": sorted(by_id[i] for i in current - new if i in by_id)}
+
+    def close_project_dir(self, path: str, group: str) -> bool:
+        """chgrp `path` to `group` and set it 2770 (setgid, no access for others),
+        owner unchanged. Recursive: only ever called for a directory this
+        dashboard has just created, so the walk is a handful of template folders."""
+        if not path or path in ("/", "/mnt"):
+            return False
+        meta = self.ensure_project_group(group)
+        resp = self.post("/filesystem/setperm", {
+            "path": path, "mode": "2770", "gid": meta["gid"],
+            "options": {"stripacl": True, "recursive": True, "traverse": False},
+        })
+        if not ok(resp):
+            return False
+        state, _error = self._wait_for_job(self._json(resp, "filesystem/setperm"))
+        return state == "SUCCESS"
+
     def _fix_home_permissions(self, home: str, uid: int, unix_gid: int) -> bool:
         if not home or home in ("/", "/nonexistent", "/var/empty"):
             return False
@@ -389,9 +538,13 @@ class TrueNASClient:
         info = self._json(resp, "GET /system/info")
         if not isinstance(info, dict):
             raise TrueNASError("GET /system/info: expected an object")
+        version = str(info.get("version") or "")
         return {
-            "version": str(info.get("version") or ""),
+            "version": version,
             "hostname": str(info.get("hostname") or ""),
+            # "" = a release this build supports; otherwise a sentence that
+            # names why not (GL-11's "refuse with a named reason" half).
+            "support_note": truenas_rpc.version_note(version),
         }
 
     def list_snapshot_tasks(self) -> list[dict[str, Any]]:

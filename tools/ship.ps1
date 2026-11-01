@@ -621,6 +621,32 @@ if (-not $DashboardOnly) {
     }
 }
 
+# GL-17 / CR-378 (2026-10-07): the release key is passphrase-protected. A ship
+# is several processes (sign_release, publish_feed, build_editor_package), so
+# ask ONCE here and let the children inherit it for this run only. A wrong
+# passphrase stops the ship now, before anything is deployed. A plaintext key
+# still works and each signing process warns loudly. Never echoed, never logged.
+$relKeyFile = Join-Path $env:USERPROFILE ".ccsync-release\release.key"
+if ($env:CCSYNC_RELEASE_KEY) { $relKeyFile = $env:CCSYNC_RELEASE_KEY }
+if (-not $DashboardOnly -and (Test-Path -LiteralPath $relKeyFile)) {
+    $relKeyState = (& python (Join-Path $PSScriptRoot "release_key.py") --path $relKeyFile status 2>$null)
+    if ($relKeyState -eq "encrypted" -and -not $env:CCSYNC_RELEASE_KEY_PASSPHRASE) {
+        $secPass = Read-Host "Release key passphrase (asked once for this ship)" -AsSecureString
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPass)
+        try { $env:CCSYNC_RELEASE_KEY_PASSPHRASE = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+        # K1 round 2: actually decrypt now, so a typo stops the ship BEFORE step 1 deploys.
+        & python (Join-Path $PSScriptRoot "release_key.py") --path $relKeyFile check 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Remove-Item Env:\CCSYNC_RELEASE_KEY_PASSPHRASE -ErrorAction SilentlyContinue
+            Write-Error "the release key passphrase is wrong (or the key cannot be read); nothing was deployed."
+            exit 1
+        }
+    } elseif ($relKeyState -eq "plaintext") {
+        Write-Host "[ship] WARNING: the release key is UNENCRYPTED. Protect it:  python tools\release_key.py encrypt" -ForegroundColor Yellow
+    }
+}
+
 # REL-14: one line, never a refusal. The signing key is 32 bytes on one profile
 # on one computer, and losing it ends every fleet's ability to take another
 # build. Nothing in the ship, publish_latest or the drift check had ever asked
@@ -732,9 +758,33 @@ elseif (-not $SkipTests) {
         Write-Fail "onboarding tests exited $obRc -- nothing has been deployed or published"
         exit 1
     }
+
+    # GL-25 (CR-371, 2026-10-07): the DASHBOARD suite runs BEFORE step 1 now.
+    # Until today step 1 deployed the dashboard to the live NAS and the only
+    # dashboard suite in this script ran afterwards, inside release.ps1 (step
+    # 2a), so a red suite could be discovered with the code already live. The
+    # companion suite stays where it is: it gates what 2a builds, and nothing
+    # before 2b makes a companion current.
+    Write-Step "--- step 0c: dashboard tests (step 1 deploys this code to the live NAS) ---"
+    $dashPy = Join-Path $RepoRoot "dashboard\.venv\Scripts\python.exe"
+    if (Test-Path $dashPy) {
+        Push-Location (Join-Path $RepoRoot "dashboard")
+        $global:LASTEXITCODE = 9999
+        & $dashPy -m pytest tests -q
+        $dashRc = $LASTEXITCODE
+        Pop-Location
+        if ($dashRc -ne 0) {
+            Write-Fail "dashboard tests exited $dashRc -- nothing has been deployed or published"
+            exit 1
+        }
+    }
+    else {
+        Write-Fail "no dashboard venv at $dashPy -- the dashboard suite cannot run, and step 1 would deploy untested code (re-run with -SkipTests if you accept that)"
+        exit 1
+    }
 }
 else {
-    Write-Step "server + onboarding tests skipped (-SkipTests)"
+    Write-Step "server + onboarding + dashboard tests skipped (-SkipTests)"
 }
 Save-ShipStep -Step "gates" -Version $CompanionVersion -InstallerVersion $InstallerVersion
 
@@ -1035,7 +1085,17 @@ if ($PublishFeed) {
                       "--make-current", "--github-upload")
         if ($env:CCSYNC_RELEASE_NOTES) { $feedArgs += @("--notes", $env:CCSYNC_RELEASE_NOTES) }
         if ($item.Manifest) { $feedArgs += @("--manifest", (Join-Path $RepoRoot $item.Manifest)) }
-        else { $feedArgs += @("--platform", "windows", "--version", $item.Version) }
+        else {
+            # No manifest carries a commit for the wizard, so name the one it was
+            # built from. publish_feed.py's CI gate (GL-25, CR-371 round 2,
+            # 2026-10-07) refuses a --make-current upload whose commit has no
+            # green ci.yml run, is dirty, or is not on main: this route used to
+            # reach customers with none of that checked.
+            $headSha = (git -C $RepoRoot rev-parse HEAD).Trim()
+            $dirty = if ((git -C $RepoRoot status --porcelain) ) { "1" } else { "0" }
+            $feedArgs += @("--platform", "windows", "--version", $item.Version,
+                           "--git-sha", $headSha, "--git-dirty", $dirty)
+        }
         python @feedArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[ship] WARNING: publish_feed.py exited $LASTEXITCODE for $($item.Kind) -- the feed does NOT have this build" -ForegroundColor Yellow
@@ -1171,4 +1231,5 @@ if (-not $rolloutPrinted) {
     Write-Step "NOTE: could not read the rollout numbers (a dashboard older than 2026-09-04 does not report them)."
 }
 Write-Step "follow it: .\tools\check_deploy_drift.ps1 -AdminUser $AdminUser -Watch  (names who is behind, re-reads every 60 s)"
+Remove-Item Env:\CCSYNC_RELEASE_KEY_PASSPHRASE -ErrorAction SilentlyContinue
 exit 0

@@ -124,6 +124,49 @@ def package_filename(kind: str, platform: str, version: str, head: bytes = b"") 
     return f"ccsync-companion-{version}" + (".exe" if platform == "windows" else "")
 
 
+# GL-25b / bug-comp-trust-2 (CR-371, 2026-10-07): the downgrade floor is a
+# TRACKED value, read by every signer, not a thing an operator remembers to
+# type. Every record ever published carries 0.0.0, which let any older signed
+# build (a since-fixed hole) be made current by a replayed channel or a
+# compromised admin session. tools/release_floor.json holds the per-kind/
+# platform floor; it is raised at launch and at every security release, and it
+# must TRAIL the build that is current (a floor equal to the release disables
+# that release's own rollback, PL-RES-96 -- publish_feed refuses it).
+FLOOR_KINDS = ("companion", "onboard")
+FLOOR_FILE = Path(__file__).resolve().with_name("release_floor.json")
+# CCSYNC_RELEASE_FLOOR_FILE points the signers at another file (the tests, and a
+# partner running their own feed with their own floors).
+FLOOR_FILE_ENV = "CCSYNC_RELEASE_FLOOR_FILE"
+
+
+def tracked_floor(kind: str, platform: str, path: Path | None = None) -> str:
+    """The floor tools/release_floor.json names for (kind, platform), or ""."""
+    try:
+        chosen = path or Path(os.environ.get(FLOOR_FILE_ENV, "").strip() or FLOOR_FILE)
+        data = json.loads(chosen.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    value = str(((data.get(kind) or {}) if isinstance(data, dict) else {}).get(platform) or "")
+    return value if version_tuple(value) else ""
+
+
+def resolve_min_version(kind: str, platform: str, explicit: str | None,
+                        allow_no_floor: bool = False) -> str:
+    """The floor to stamp: the explicit value, else the tracked one. A
+    companion/onboard record that would carry 0.0.0 is refused unless
+    --allow-no-floor says it is meant."""
+    chosen = (explicit or "").strip() or tracked_floor(kind, platform) or "0.0.0"
+    if (kind in FLOOR_KINDS and version_tuple(chosen) <= (0, 0, 0)
+            and not allow_no_floor):
+        raise SystemExit(
+            f"a {kind}/{platform} record would carry min_version {chosen}, i.e. NO downgrade "
+            "floor: any older signed build could then be made current by a replayed channel "
+            "or a compromised admin session. Add the platform to tools/release_floor.json, "
+            "pass --min-version, or pass --allow-no-floor if a floorless record is really "
+            "meant (GL-25b).")
+    return chosen
+
+
 # The floor comparison, byte for byte the rule the dashboard enforces in
 # release_trust.min_version_exceeds_version and the companion in
 # upgrade._min_version_above_own. THREE copies on purpose: the signing rig
@@ -278,12 +321,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--platform", required=True, choices=PLATFORMS)
     ap.add_argument("--version", required=True)
     ap.add_argument(
-        "--min-version", default="0.0.0",
-        help="the OLDEST build the fleet may be rolled back to from here. "
+        "--min-version", default=None,
+        help="(default: tools/release_floor.json for this kind/platform) the OLDEST build the fleet may be rolled back to from here. "
              "Companions remember the highest value they have ever accepted "
              "and refuse anything below it -- raise it whenever a release "
              "fixes something a downgrade would reintroduce.",
     )
+    ap.add_argument("--allow-no-floor", action="store_true",
+                    help="sign a companion/onboard record whose min_version is 0.0.0 "
+                         "(refused by default, GL-25b)")
     ap.add_argument("--published-at", default="", help="UTC ISO8601; default now")
     ap.add_argument("--signed-binary", action="store_true",
                     help="the artifact carries a real Authenticode / Developer ID "
@@ -335,6 +381,10 @@ def main(argv: list[str] | None = None) -> int:
     artifact = Path(args.artifact).expanduser()
     if not artifact.is_file():
         raise SystemExit(f"no artifact at {artifact}")
+    args.min_version = resolve_min_version(
+        args.kind, args.platform, args.min_version, args.allow_no_floor)
+    print(f"[sign-release] min_version (downgrade floor) stamped: {args.min_version}",
+          file=sys.stderr)
     if not args.min_version.replace(".", "").isdigit() or not args.min_version:
         raise SystemExit(f"--min-version must be dotted-numeric, got {args.min_version!r}")
     # CR-52 / CR-67 item 3: never MAKE a record that refuses itself. Checked

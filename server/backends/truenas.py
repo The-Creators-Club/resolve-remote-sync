@@ -384,17 +384,52 @@ class TrueNASBackend:
               f"host path {host_path} -> container mount {container_mount}")
         print(f"Next: fetch the GUI's API key (TrueNAS UI > Apps > {app_name} > Web UI, or the app's "
               f"config file) and pass it to setup_syncthing_folder.py / accept_device.py / check_health.py.")
+        # CR-363 / GL-08 (2026-10-07; bug-server-3): this used to PRINT "run the
+        # secure step yourself" and leave the GUI an unauthenticated admin
+        # surface over every folder in the fleet, on every interface, until
+        # somebody did. It runs the step itself when it has what it needs (the
+        # GUI's API key and address), and otherwise says the dashboard will:
+        # syncthing_gui_guard.py sets a login on its first cycle once it holds
+        # the key, whichever way the app was installed.
+        if self._secure_gui_now(gui_port):
+            return 0
         if not gui_bind:
             print(f"WARNING: the Syncthing GUI is published on EVERY interface of this NAS "
-                  f"(port {gui_port}) and ships with no password. It can add devices and "
-                  f"re-point folders across the whole fleet. Set [syncthing] gui_bind in "
-                  f"site.toml, and run:\n"
-                  f"    SYNCTHING_API_KEY=... python server/secure_syncthing_gui.py",
+                  f"(port {gui_port}) and has no password yet. The dashboard sets one on its "
+                  f"first cycle once it is given SYNCTHING_GUI_URL and the API key; to do it "
+                  f"now run:\n"
+                  f"    SYNCTHING_API_KEY=... python server/secure_syncthing_gui.py\n"
+                  f"and set [syncthing] gui_bind in site.toml to narrow it further.",
                   file=sys.stderr)
         else:
             print(f"Then: SYNCTHING_API_KEY=... python server/secure_syncthing_gui.py "
-                  f"-- the GUI has no password until you do.")
+                  f"-- the GUI has no password until you do (or until the dashboard, once it "
+                  f"holds the key, sets one itself).")
         return 0
+
+    @staticmethod
+    def _secure_gui_now(gui_port) -> bool:
+        """Put a login on the GUI right now, if the key and address are known.
+        True only when it is done (or already had one). Never raises."""
+        import os
+
+        api_key = os.environ.get("SYNCTHING_API_KEY", "").strip()
+        gui_url = (os.environ.get("SYNCTHING_GUI_URL", "").strip()
+                   or common.site_value("syncthing", "gui_url") or "")
+        if not api_key or not gui_url:
+            return False
+        try:
+            import secure_syncthing_gui
+
+            done, message, password = secure_syncthing_gui.secure_gui(gui_url, api_key)
+        except Exception as exc:                                       # noqa: BLE001
+            print(f"NOTE: could not secure the Syncthing GUI yet ({exc}).", file=sys.stderr)
+            return False
+        print(("Syncthing GUI: " if done else "WARNING: Syncthing GUI not secured: ") + message,
+              file=None if done else sys.stderr)
+        if done and password:
+            print("  (the generated password is in the credentials file named above; it is not printed here)")
+        return done
 
     # ----------------------------------------------------------------------
     # Identity: the editors group and the editor accounts

@@ -435,11 +435,14 @@ def get_shares() -> list[dict]:
     return config.parse_shares()
 
 
-# How deep the Creators_Club tree mirrors a share's real folders. Three levels
-# below the share is what the deepest meaningful structure actually is
-# (`Whisky/Interviews/黃培峻 Huang Pei-jun`); anything past that is camera-roll
-# noise that would split a folder across branches for no benefit.
-SHOOT_TREE_DEPTH = 3
+# How deep the Creators_Club tree mirrors a share's real folders. Three was
+# enough for ff3/ff4 (`Whisky/Interviews/黃培峻 Huang Pei-jun`), but a season
+# share nests episode / Footage / B-roll / <event> / <camera>, and at three
+# the owner could not find Pride March at all (`FF2 E7 - Weimingtang/Footage/
+# B-roll` swallowed it, 2026-09-30). Five, measured on the live archive that
+# day: ff3 66 -> 96 nodes, ff4 106 -> 138, ff2 4 -> 14, and six adds one more.
+# Past that is camera-roll noise that would split a folder for no benefit.
+SHOOT_TREE_DEPTH = 5
 
 
 def _shoot_tree(conn: sqlite3.Connection, creators: list[str]) -> list[dict]:

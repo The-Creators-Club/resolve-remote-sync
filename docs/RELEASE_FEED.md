@@ -231,7 +231,8 @@ files says so.
 A compromised or malicious feed host can, at absolute worst: serve nothing
 (the dashboard just never sees an update — no different from not checking),
 serve a stale channel forever (visible as `last_channel_generated_at` never
-advancing), or serve garbage that fails every check above and is logged and
+advancing; a REPLAYED older channel is refused outright since CR-371, see
+section 5), or serve garbage that fails every check above and is logged and
 discarded. **It can never make a dashboard install a binary the offline
 release key did not sign.**
 
@@ -500,8 +501,16 @@ click sufficient — see the plan's §3.4.
 - **The feed host is UNTRUSTED.** It is a CDN, a bucket, a GitHub Releases
   page — no server-side logic, no authentication, nothing secret ever
   stored there. Its only two jobs are "serve these bytes" and "don't serve
-  stale bytes forever" (the latter is not even security-critical: a stale
-  channel just means no update is offered, not a wrong one). Every
+  stale bytes forever". A stale channel is NOT harmless: it can hold back a
+  recall and, under `policy = current`, roll a fleet back to an older signed
+  build. Since CR-371 (2026-10-07) a dashboard remembers the newest
+  `generated_at` it ever accepted (`feed_state.last_channel_generated_at`) and
+  refuses any older channel, leaving what it already offers untouched.
+  Clock-skew caveat: that high-water mark is a timestamp, so a publish from a
+  machine whose clock runs ahead would make every genuine later publish look
+  like a replay. `publish_feed.py` therefore stamps `max(now, previous
+  generated_at + 1 s)` and warns when the previous stamp is more than a minute
+  ahead; there is no admin override on the dashboard. Every
   consumer treats it exactly as it would treat a network attacker who
   fully controls it: fetch is capped, https-only, and nothing is acted on
   until it verifies.
@@ -525,7 +534,9 @@ click sufficient — see the plan's §3.4.
   of these rules.
 - **Compromise of the feed host** lets an attacker: withhold updates,
   replay an old (but still validly signed, and still floor-checked via
-  `min_version`) channel, or serve garbage that is discarded. It does NOT
+  `min_version`) channel, which a dashboard that has already accepted a newer
+  one now REFUSES (it is not merely floor-checked; a first-ever fetch has no
+  high-water mark to compare with), or serve garbage that is discarded. It does NOT
   let them get an unsigned or relabelled binary installed anywhere — the
   three-layer verify in §2.3 sits between the feed and
   `companion_packages` regardless of entry point.

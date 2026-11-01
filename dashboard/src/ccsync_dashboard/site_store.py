@@ -35,9 +35,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 from typing import Any, Iterable, Mapping
 
+from . import build_flavor
 from . import settings as settings_mod
 
 log = logging.getLogger("ccsync.dashboard.site_store")
@@ -55,9 +57,17 @@ TABLE = "site_settings"
 # not report/session secrets (secrets_boot.py's job, never this table: a
 # database backup must not be a working fleet credential any more than
 # editor_report_tokens is, see db.py SCHEMA_V15).
+# GL-34 / CR-374 (2026-10-07): the address a site with no `support_contact`
+# of its own shows. Owner-confirmed 2026-10-07 (round-2 answers).
+DEFAULT_SUPPORT_CONTACT = "support@thecreatorsclub.co"
+
 KEYS: dict[str, str] = {
     "org_name": "str",
     "org_short": "str",
+    # GL-34 / CR-374 (2026-10-07): where an admin or editor sends a problem.
+    # Blank resolves to the VENDOR's address (DEFAULT_SUPPORT_CONTACT), so a
+    # reseller overrides it and nobody has to set it.
+    "support_contact": "str",
     "product_name": "str",
     # The tray/window mark every editor in this fleet wears -- a bare asset
     # name the companion build ships, or an absolute path on the editor's
@@ -207,6 +217,55 @@ class SiteValidationError(ValueError):
     def __init__(self, key: str, message: str) -> None:
         super().__init__(f"{key}: {message}")
         self.key = key
+
+
+class SiteLockedError(SiteValidationError):
+    """A write refused because the key is read-only right now (the tree keys
+    once computers exist). A SiteValidationError so every route that already
+    turns one into a 422 turns this into one too."""
+
+
+# The env escape hatch for the one deliberate case: the owner is moving the
+# tree on purpose and has a plan for every computer. Never set by a deploy.
+TREE_UNLOCK_ENV = "DASH_SITE_TREE_KEYS_UNLOCKED"
+
+
+def tree_keys_locked(conn: sqlite3.Connection) -> bool:
+    """True once any computer has registered or reported (PR-GL19 / data-model-8,
+    CR-368, 2026-10-07). `canonical_prefix`, `tree_name` and `remote_root` are
+    install-time constants: both installers, both uninstallers and every
+    companion read them from the manifest and build paths from them, and a
+    live edit re-points machines at a tree that is not there. Before any
+    computer exists (the setup wizard, a first deploy) the keys stay editable."""
+    import os
+
+    if os.environ.get(TREE_UNLOCK_ENV, "").strip() == "1":
+        return False
+    for table in ("machines", "machine_state"):
+        try:
+            if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None:
+                return True
+        except sqlite3.Error:
+            continue   # an absent table is "no computers here", not "locked"
+    return False
+
+
+def check_tree_lock(conn: sqlite3.Connection, settings: Any,
+                    normalized: Mapping[str, str]) -> None:
+    """Raise SiteLockedError if `normalized` CHANGES a tree key while the keys
+    are locked. Saving the value a key already has is not a change, so a
+    full-form save of an unmodified page still goes through."""
+    tree_values = {k: v for k, v in normalized.items() if k in TREE_KEYS}
+    if not tree_values or not tree_keys_locked(conn):
+        return
+    changed = [c["key"] for c in diff_against_current(conn, settings, tree_values)]
+    if changed:
+        raise SiteLockedError(
+            changed[0],
+            f"{', '.join(changed)} cannot be changed once computers have registered: every "
+            "installer and companion builds its paths from it. To move the tree on purpose, "
+            f"set {TREE_UNLOCK_ENV}=1 for the change, plan every computer's move first, and "
+            "see docs/TREE_LAYOUT_AGNOSTICISM.md")
 
 
 def _validate_canonical_prefix(value: str) -> str:
@@ -489,6 +548,36 @@ def validate_many(values: Mapping[str, str]) -> dict[str, str]:
     return normalized
 
 
+def check_sftp_transport(
+    conn: sqlite3.Connection, normalized: Mapping[str, str], settings: Any = None,
+) -> None:
+    """GL-10 / CR-364 (2026-10-07): refuse a save, import or undo that would
+    leave a NAS whose own sshd truncates big downloads with an SFTP window it
+    cannot serve. Judged on the RESULT (the incoming values over what is
+    stored over Settings), because `nas_kind` may be saved separately from the
+    chunk size and either order has to be caught. Raises
+    `SiteValidationError`, which every writer already turns into a 422."""
+    if not any(k in normalized for k in ("sftp_chunk_size", "sftp_concurrency", "nas_kind")):
+        return
+    from . import sftp_transport
+
+    stored = get_all(conn)
+
+    def eff(key: str) -> str:
+        if key in normalized:
+            return normalized[key]
+        if key in stored:
+            return stored[key]
+        return _settings_fallback(key, settings) if settings is not None else ""
+
+    why = sftp_transport.problem(
+        eff("nas_kind"), eff("sftp_chunk_size"), eff("sftp_concurrency") or 0,
+        bool(getattr(settings, "vendor_defaults", False)))
+    if why:
+        key = "sftp_concurrency" if "sftp_concurrency" in why and "chunk" not in why             else "sftp_chunk_size"
+        raise SiteValidationError(key, why + ". Use 64Ki and 16, or leave both blank.")
+
+
 def set_many(
     conn: sqlite3.Connection, values: Mapping[str, str], updated_by: str,
     *, settings: Any = None,
@@ -510,6 +599,18 @@ def set_many(
     stand in, which can only under-withhold until the boot-time pass in
     `seed_from_env_once` runs."""
     normalized = validate_many(values)
+    # CR-368 (GL-19) follow-up, 2026-10-07: the boot seed is exempt. It runs with
+    # settings=None (diff_against_current dereferenced it and the seed never ran
+    # on any install that already had a computer) and it only writes into an
+    # EMPTY site_settings table, i.e. it records what the env already says.
+    if updated_by != "seed:env":
+        check_tree_lock(conn, settings, normalized)    # tree keys read-only once machines exist
+    # CR-364 follow-up (GL-10, 2026-10-07): the one-time boot seed is exempt. An
+    # old deploy's DASH_SITE_SFTP_CHUNK_SIZE=255Ki would otherwise veto the
+    # WHOLE seed (org name, tree, URL). `_shape` serves the derived 64Ki / 16
+    # on the wire and the sftp_transport_unsafe alert names the stored row.
+    if updated_by != "seed:env":
+        check_sftp_transport(conn, normalized, settings)
     now = None
     from . import db as dbmod
 
@@ -663,6 +764,7 @@ def _seed_from_env_once(conn: sqlite3.Connection, settings: Any) -> bool:
     values = {
         "org_name": settings.site_org_name,
         "org_short": settings.site_org_short,
+        "support_contact": getattr(settings, "site_support_contact", ""),
         "product_name": settings.site_product_name,
         "brand_logo": settings.site_brand_logo,
         "tree_name": settings.site_tree_name,
@@ -724,7 +826,7 @@ def _shape(db_values: Mapping[str, str], settings: Any) -> dict[str, Any]:
     unreadable -- can still produce the same shape from `settings` alone
     instead of raising through a page render.
     """
-    from . import provision
+    from . import provision, sftp_transport
 
     def pick(key: str) -> str:
         if key in db_values:
@@ -763,6 +865,7 @@ def _shape(db_values: Mapping[str, str], settings: Any) -> dict[str, Any]:
     return {
         "org_name": pick("org_name"),
         "org_short": pick("org_short"),
+        "support_contact": pick("support_contact").strip() or DEFAULT_SUPPORT_CONTACT,
         "product_name": pick("product_name") or "CC Sync",
         "brand_logo": pick("brand_logo"),
         "tree_name": pick("tree_name"),
@@ -771,8 +874,16 @@ def _shape(db_values: Mapping[str, str], settings: Any) -> dict[str, Any]:
         "smb_unc": pick("smb_unc"),
         "sftp_host": pick("sftp_host"),
         "sftp_port": as_int("sftp_port", 22),
-        "sftp_chunk_size": pick("sftp_chunk_size"),
-        "sftp_concurrency": as_int("sftp_concurrency", 0),
+        # GL-10 / CR-364 (2026-10-07): on a NAS whose own sshd truncates big
+        # downloads, a blank is published as the safe 64Ki / 16 and an unsafe
+        # stored value is lowered to it on the wire (the Settings page and
+        # the alert still see the stored value through `_sftp_transport_problem`).
+        "sftp_chunk_size": sftp_transport.derive(
+            pick("nas_kind"), pick("sftp_chunk_size"), as_int("sftp_concurrency", 0),
+            bool(getattr(settings, "vendor_defaults", False)))[0],
+        "sftp_concurrency": sftp_transport.derive(
+            pick("nas_kind"), pick("sftp_chunk_size"), as_int("sftp_concurrency", 0),
+            bool(getattr(settings, "vendor_defaults", False)))[1],
         "sftp_shell_type": pick("sftp_shell_type"),
         "rclone_remote": pick("rclone_remote"),
         "nas_syncthing_id": pick("nas_syncthing_id"),
@@ -783,8 +894,10 @@ def _shape(db_values: Mapping[str, str], settings: Any) -> dict[str, Any]:
         "features": {
             "youtube_download": as_bool("features.youtube_download"),
             "youtube_unblock": as_bool("features.youtube_unblock"),
-            "ai_cli_providers": as_bool("features.ai_cli_providers"),
-            "ai_cli_auto_update": as_bool("features.ai_cli_auto_update"),
+            "ai_cli_providers": (as_bool("features.ai_cli_providers")
+                                 and not build_flavor.cli_feature_locked("ai_cli_providers")),
+            "ai_cli_auto_update": (as_bool("features.ai_cli_auto_update")
+                                   and not build_flavor.cli_feature_locked("ai_cli_auto_update")),
             "auto_update": as_bool("features.auto_update"),
         },
         # A NEW top-level object (2026-08-18), not another flat key -- same
@@ -826,6 +939,9 @@ def _shape(db_values: Mapping[str, str], settings: Any) -> dict[str, Any]:
         # For the Settings page: which fields the DB actually overrides,
         # vs. which are still falling through to Settings/defaults.
         "_from_db": sorted(k for k in KEYS if k in db_values),
+        "_sftp_transport_problem": sftp_transport.problem(
+            pick("nas_kind"), pick("sftp_chunk_size"), as_int("sftp_concurrency", 0),
+            bool(getattr(settings, "vendor_defaults", False))),
     }
 
 
@@ -847,6 +963,54 @@ FEATURE_SETTINGS_ATTRS = {
 }
 
 
+def raw_support_contact(conn: sqlite3.Connection, settings: Any) -> str:
+    """What THIS site stored or was deployed with for `support_contact`:
+    blank when unset. The Settings box and the export show this, never the
+    resolved vendor default, so a plain Save cannot pin the vendor's
+    (provisional) address into a site's database (GL-34 / CR-374, 2026-10-07).
+    """
+    try:
+        db_values = get_all(conn)
+    except sqlite3.Error:
+        db_values = {}
+    return str(db_values.get("support_contact",
+                             _settings_fallback("support_contact", settings)) or "").strip()
+
+
+_SEND_TO_SUPPORT_RE = re.compile(r"\bsend us\b|\bto (?:us|support)\b", re.IGNORECASE)
+
+
+def with_support_text(text: Any, contact: str) -> str:
+    """Append the support address to a fix line that says "send us"/"to
+    support" (GL-34 / CR-374, 2026-10-07). Lives here so the mail path
+    (`alerts._transmit`) and the HTML filter (`ui`) share one rule. Never
+    doubles the address."""
+    raw = "" if text is None else str(text)
+    contact = (contact or "").strip()
+    if not raw or not contact or contact in raw or not _SEND_TO_SUPPORT_RE.search(raw):
+        return raw
+    return raw.rstrip() + f" Support: {contact}"
+
+
+def support_contact_for(conn: sqlite3.Connection, settings: Any) -> str:
+    """The address to show: this site's own, else the vendor default."""
+    return raw_support_contact(conn, settings) or DEFAULT_SUPPORT_CONTACT
+
+
+def _raw_feature(conn: sqlite3.Connection, settings: Any, name: str) -> bool:
+    """`feature_enabled` minus the build lock: what the site itself stored."""
+    attr = FEATURE_SETTINGS_ATTRS.get(name)
+    try:
+        row = conn.execute(
+            f"SELECT value FROM {TABLE} WHERE key = ?", (f"features.{name}",)
+        ).fetchone()
+    except sqlite3.Error:
+        row = None
+    if row is not None:
+        return str(row["value"]).strip() == "1"
+    return bool(getattr(settings, attr, False)) if attr else False
+
+
 def feature_enabled(conn: sqlite3.Connection, settings: Any, name: str) -> bool:
     """Whether this site turned `[features] <name>` on.
 
@@ -860,6 +1024,9 @@ def feature_enabled(conn: sqlite3.Connection, settings: Any, name: str) -> bool:
     """
     attr = FEATURE_SETTINGS_ATTRS.get(str(name or "").strip())
     if attr is None:
+        return False
+    # GL-31 / CR-374 (2026-10-07): the build decides, before any row or env.
+    if build_flavor.cli_feature_locked(name):
         return False
     try:
         row = conn.execute(
@@ -1008,6 +1175,7 @@ def _settings_fallback(key: str, settings: Any) -> str:
     mapping = {
         "org_name": settings.site_org_name,
         "org_short": settings.site_org_short,
+        "support_contact": getattr(settings, "site_support_contact", ""),
         "product_name": settings.site_product_name,
         "brand_logo": settings.site_brand_logo,
         "tree_name": settings.site_tree_name,
@@ -1070,7 +1238,7 @@ _SECTIONS: list[tuple[str, list[str]]] = [
     ("net", ["dashboard_url", "sftp_host", "sftp_port", "sftp_chunk_size",
              "sftp_concurrency", "sftp_shell_type", "rclone_remote"]),
     ("syncthing", ["nas_syncthing_id"]),
-    ("site", ["org_name", "org_short", "product_name", "brand_logo",
+    ("site", ["org_name", "org_short", "support_contact", "product_name", "brand_logo",
               "canonical_prefix"]),
     ("features", ["features.youtube_download", "features.youtube_unblock",
                   "features.ai_cli_providers", "features.ai_cli_auto_update",
@@ -1140,13 +1308,20 @@ def export_toml(conn: sqlite3.Connection, settings: Any) -> str:
         "nas_syncthing_id": manifest["nas_syncthing_id"],
         "org_name": manifest["org_name"],
         "org_short": manifest["org_short"],
+        # Defect 4 (CR-374 overseer): the RAW value, blank when unset. The
+        # resolved vendor default must never be written into an export, or
+        # an export-then-import pins today's placeholder into that site.
+        "support_contact": raw_support_contact(conn, settings),
         "product_name": manifest["product_name"],
         "brand_logo": manifest["brand_logo"],
         "canonical_prefix": manifest["canonical_prefix"],
         "features.youtube_download": manifest["features"]["youtube_download"],
         "features.youtube_unblock": manifest["features"]["youtube_unblock"],
-        "features.ai_cli_providers": manifest["features"]["ai_cli_providers"],
-        "features.ai_cli_auto_update": manifest["features"]["ai_cli_auto_update"],
+        # CR-374 overseer (2026-10-07): the RAW stored flags, not the locked
+        # manifest's forced false, so a stranded studio's export-then-import
+        # into its corrected deploy keeps its own switches.
+        "features.ai_cli_providers": _raw_feature(conn, settings, "ai_cli_providers"),
+        "features.ai_cli_auto_update": _raw_feature(conn, settings, "ai_cli_auto_update"),
         "features.auto_update": manifest["features"]["auto_update"],
         "indexer_model_tier": manifest["indexer"]["model_tier"],
         "android.package_name": manifest["android"]["package_name"],

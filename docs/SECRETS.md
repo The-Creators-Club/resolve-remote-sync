@@ -158,6 +158,22 @@ Worth knowing, because it is the part that is already careful:
   Windows bootstrap and `windows_upgrade.ps1` run `icacls /inheritance:r` on
   them too (they used to inherit the profile's ACL and set nothing).
 
+## The release signing key's passphrase (CR-378, 2026-10-07)
+
+The offline release key (`%USERPROFILE%\.ccsync-release\release.key`) is a
+passphrase-protected file (`python tools\release_key.py encrypt`, procedure and
+backups in `RELEASE.md`, "Encrypting the release key"). The passphrase is NOT
+one of the five server secrets and is not in `load_secrets.ps1`'s store.
+
+- Interactive: `tools\ship.cmd` / `tools\publish_latest.py` ask once with a
+  hidden prompt and give it to their signing children through the process
+  environment variable `CCSYNC_RELEASE_KEY_PASSPHRASE`, which dies with the run.
+- Unattended on this rig only: set that variable in the shell for the run
+  (never `setx`, same reason as above). The tools never print it, never put it
+  on a command line, and the encrypted file is useless without it.
+- Write the passphrase on paper and keep it apart from the two USB copies of
+  the file. There is no recovery.
+
 ## Still owed
 
 - **All five server secrets sit in the TrueNAS/DSM app's compose environment

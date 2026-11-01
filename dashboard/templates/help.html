@@ -15,6 +15,7 @@
     <div>
       <h1><span><span class="prompt" aria-hidden="true">&gt;</span> HELP</span></h1>
       <div class="sub">{% if help_missing %}not available on this server{% else %}{{ help_current or "HOW_IT_WORKS.md" }}{% endif %}</div>
+      <div class="sub" id="help-support">Need a person? Contact <b>{{ support_contact }}</b></div>
     </div>
   </div>
 

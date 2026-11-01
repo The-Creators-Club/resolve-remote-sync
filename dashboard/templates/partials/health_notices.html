@@ -25,7 +25,7 @@
       <span class="title">{{ n.subject }}<span class="who" title="The name of the check that found it.">{{ n.kind }}</span></span>
       <span class="when">last seen {{ n.last_seen | ago }}</span>
       <div class="what">{{ n.body }}</div>
-      <div class="todo">{% if n.fix %}<span class="cmd">{{ n.fix }}</span>{% endif %}<span class="keys">
+      <div class="todo">{% if n.fix %}<span class="cmd">{{ n.fix | with_support }}</span>{% endif %}<span class="keys">
         {% if n.href %}<a class="key sm" href="{{ n.href }}"><span class="t">{{ n.href_label | cc_unbracket }}</span><span class="vh">: {{ n.subject }}</span></a>{% endif %}
         <form class="inline" hx-post="/partials/health-notices/{{ n.id }}/dismiss"
               hx-target="#health-notices-body" hx-swap="innerHTML"

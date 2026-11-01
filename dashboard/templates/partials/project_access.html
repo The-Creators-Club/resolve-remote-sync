@@ -1,0 +1,47 @@
+{# The project page's access window body (2026-10-07, CR-368 follow-up).
+   Admin only; rendered by ui._project_access_answer into #project-access,
+   innerHTML, on load and after its own two forms. Grants are the explicit
+   per-project list in project_groups (the only way in for a wired editor on
+   a per-project site); a person who ticks the project gets in by the tick
+   and needs no grant. #}
+{% if not per_project %}
+<div class="allclear">Every editor can open every project on this server (project access is set to shared). People you add here are remembered, and take effect if the server is switched to per-project access.</div>
+{% endif %}
+{% if access_error %}<div class="note err error-banner"><span class="grow">{{ access_error }}</span></div>{% endif %}
+{% if access_done and access_done.changed %}
+<div class="note ok result-banner"><span class="tag ok"><span class="w">{{ 'access given' if access_done.give else 'access removed' }}</span></span><span class="grow">{{ access_done.editor | shown_as }} {{ 'can now open this project. The server applies it within a minute.' if access_done.give else 'no longer has access through this list. Someone who ticks the project still gets in by the tick.' }}</span></div>
+{% endif %}
+
+<h3 class="sec">given access by an admin</h3>
+{% if granted %}
+<ul class="link-list">
+{% for e in granted %}
+  <li><span class="num">{{ e | shown_as }}</span>{% if e in ticked %} <span class="dim">(also ticks it)</span>{% endif %}
+    <form class="inline" hx-post="/partials/project/{{ slug }}/access" hx-target="#project-access" hx-swap="innerHTML"
+          hx-confirm="Remove {{ e | shown_as }}'s access to this project? Nothing on disk is deleted.">
+      <input type="hidden" name="editor" value="{{ e }}">
+      <input type="hidden" name="action" value="revoke">
+      <button class="key quiet sm" type="submit" title="Take this person off the list. If they tick the project they still get in."><span class="t">Remove</span></button>
+    </form></li>
+{% endfor %}
+</ul>
+{% else %}
+<div class="allclear">Nobody yet. People who tick this project get in by the tick.</div>
+{% endif %}
+
+{% if ticked %}
+<h3 class="sec">in by their tick</h3>
+<div class="dim">{% for e in ticked %}{{ e | shown_as }}{{ ', ' if not loop.last }}{% endfor %}</div>
+{% endif %}
+
+{% if candidates %}
+<form class="strip" hx-post="/partials/project/{{ slug }}/access" hx-target="#project-access" hx-swap="innerHTML">
+  <input type="hidden" name="action" value="grant">
+  <label class="field grow"><span>person</span>
+    <select name="editor" class="sel" title="Someone who works on the server directly (a wired editor), or anyone else who should open this project without ticking it.">
+      <option value="">choose a person</option>
+      {% for e in candidates %}<option value="{{ e }}">{{ e | shown_as }}{% if e != (e | shown_as) %} ({{ e }}){% endif %}</option>{% endfor %}
+    </select></label>
+  <button class="key" type="submit" title="Lets this person open the project's folder on the server."><span class="t">Give access</span></button>
+</form>
+{% endif %}

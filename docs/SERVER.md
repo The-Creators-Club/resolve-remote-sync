@@ -161,25 +161,100 @@ re-keyed (update the pin deliberately, or
 `ssh-keygen -R <host> -f ~/.ccsync/known_hosts`) or something is answering in
 its place. Nothing is sent either way.
 
+### Which TrueNAS versions, and which API (CR-365, GL-11/GL-46, 2026-10-07)
+
+TrueNAS removed the REST API (`/api/v2.0`) in 26. Every NAS call this product
+makes (the dashboard's Users section, setup wizard checks, the deploy, account
+and snapshot scripts, API-key minting) is a TrueNAS **JSON-RPC 2.0 call over
+the websocket at `/api/current`**, which exists from 25.04. `truenas_rpc.py`
+(two identical copies: `server/` and the dashboard's `nas/`) maps each former
+REST route onto its method.
+
+| TrueNAS | API used | Status |
+|---|---|---|
+| 26.x | JSON-RPC only | supported from launch (the shape is tested against an in-process peer; the first live 26 run is still owed) |
+| 25.04, 25.10 | JSON-RPC (REST also answers) | supported |
+| 24.10 and older | REST (no `/api/current`; auto falls back) | works, not supported: upgrade |
+
+`TRUENAS_API_TRANSPORT` / `DASH_NAS_API_TRANSPORT` = `auto` (default),
+`jsonrpc` or `rest` pins it. An API key is only ever sent over `wss://`: TrueNAS
+revokes a key used on a plaintext connection, so the client refuses `ws://` to
+any non-loopback host. The setup wizard's "Connect to your NAS" line names a
+TrueNAS release outside the table above.
+
+Operational details (CR-365 overseer round, 2026-10-07):
+
+- **The key's own account.** The JSON-RPC login names the account the key was
+  minted *for* (`create_api_key.py --username`), which is not the admin in
+  `TRUENAS_USER` / `DASH_NAS_USER`. `create_api_key.py` prints
+  `export TRUENAS_API_KEY_USER=<account>`; the deploy writes it to the
+  container as `DASH_NAS_API_KEY_USER` (the appliance wizard's "NAS API key
+  account" field). Blank works only for the server scripts, where `TRUENAS_USER` is the key's account; the appliance requires it. Without it a
+  key-only site on 26 cannot log in, and the error says so by name.
+- **Rollback switch.** `TRUENAS_API_TRANSPORT=rest` (or `DASH_NAS_API_TRANSPORT`
+  in the appliance's `.env`), then redeploy, pins the old REST API on a 25.x
+  NAS. Blank is `auto`. It reaches the container through all three compose
+  templates.
+- **One session, reused.** Each process holds one authenticated websocket per
+  target and reuses it (a job wait polls every 2 s; a login per poll trips
+  TrueNAS's auth rate limit). A write is never replayed on a fresh connection
+  after its request was sent.
+- **No schema pin (CR-365 round 2, 2026-10-07).** The client connects to
+  `/api/current`, the release the NAS itself runs. An earlier build pinned
+  `/api/v25.04.2`, which would have moved the studio's live 25.10 NAS onto
+  method models its payloads (user home, the Syncthing chart) were never
+  verified against. `TRUENAS_API_PATH` / `DASH_NAS_API_PATH` names a versioned
+  path (`v26.04.0`) to pin by hand.
+- **A key needs its account named.** `DASH_NAS_API_KEY_USER` (the
+  `create_api_key.py --username` account) is required with a TrueNAS key: 26
+  has only `auth.login_ex`, which logs a key in by name. The appliance wizard
+  refuses to save a key without it.
+- **Server scripts print a version note** once per run
+  (`install_dashboard_app.py`, `setup_editor_account.py`) for a release outside
+  25.04 and later.
+- **REST fallback.** Any HTTP answer other than the websocket upgrade at the
+  endpoint (404, a UI catch-all 200, 400, 405, 301) reads as "no JSON-RPC here"
+  and REST is used, for five minutes, then JSON-RPC is tried again; a REST 404
+  after a fallback also clears the memory (a NAS upgraded to 26 under a running
+  dashboard). A route with no JSON-RPC mapping uses REST where REST still
+  answers.
+
 ### Verifying the NAS certificate
 
-Both platforms ship a self-signed certificate, so `verify_ssl = "0"` is still
-allowed — but it is now **warned about on every run**, because those calls
-carry the admin password or an account-creating API key.
-
-To turn it on, export the NAS's own CA once and point at the file:
+**Verified by default since 2026-10-07 (GL-18/GL-19, CR-368).** Both platforms
+ship a self-signed certificate, so "verified" means *pinned*: the SHA-256
+fingerprint of the certificate you saw at install. Leave `[nas] verify_ssl`
+unset and the first run, made while you can see the NAS, records it:
 
 ```powershell
-# TrueNAS: System > Certificates > <the CA> > Download, or from the base rig:
-openssl s_client -showcerts -connect <nas>:443 </nul 2>$null |
-    openssl x509 -outform PEM > nas-ca.pem
-$env:TRUENAS_VERIFY_SSL = "C:\keys\nas-ca.pem"      # or [nas] verify_ssl
+python server/install_dashboard_app.py --trust-host-key-on-first-use
+# -> TRUSTED ON FIRST USE: the NAS API certificate at <host>:443 (sha256 ...) is
+#    recorded in ~/.ccsync/known_certs.json ...
+#      verify_ssl = "sha256:<64 hex>"        <- paste this into site.toml [nas]
 ```
 
-For the **container**, the same value must name a path *inside* the container:
-ship the PEM into `<apps root>/certs/` (it is mounted read-only with the rest
-of the app tree) and set `TRUENAS_VERIFY_SSL=/app/certs/nas-ca.pem` before the
-deploy. `docs/SERVER-SYNOLOGY.md` has the DSM equivalent.
+Without the first-use flag and without a recorded or configured value, the
+scripts **refuse** and say how to proceed -- the same rule as the SSH host key.
+A certificate that later *changes* is a refusal, never a re-trust (if the NAS
+was rebuilt on purpose, replace the pin deliberately). The container receives
+the same value as `TRUENAS_VERIFY_SSL=sha256:...` and checks it on its REST and
+JSON-RPC calls (`nas/tls_pin.py`, `truenas_rpc.py`). The accepted values:
+
+| `[nas] verify_ssl` / `TRUENAS_VERIFY_SSL` | Meaning |
+|---|---|
+| unset | pin to the recorded certificate, or refuse (above) |
+| `sha256:<64 hex>` | exactly that certificate (colons and case are ignored) |
+| `1` | the system CA bundle |
+| a file path | that CA bundle; **inside the container** it must name a path in the container: ship the PEM into `<apps root>/certs/` and use `/app/certs/nas-ca.pem` |
+| `0` | **off**, warned about on every run. Only a site that already runs that way says it: this studio's own `site.toml` does |
+
+To read a fingerprint yourself:
+
+```powershell
+openssl s_client -connect <nas>:443 </nul 2>$null | openssl x509 -noout -fingerprint -sha256
+```
+
+`docs/SERVER-SYNOLOGY.md` has the DSM equivalent (port 5001).
 
 ### Scoped API key — the password stops living in the container
 
@@ -200,18 +275,37 @@ $env:TRUENAS_API_KEY = "1-..."        # shown ONCE
 tools\ship.cmd -DashboardOnly
 ```
 
+- **A key is mandatory on TrueNAS** since 2026-10-07 (COM-H5, CR-368): the
+  deploy refuses to start without `TRUENAS_API_KEY`, and the NAS admin password
+  is then used only for deploy-time SSH, never written into the container. The
+  one exception is a site that names `[security] allow_nas_password_in_container
+  = true` in its own `site.toml` (this studio's legacy).
+- The **dashboard admin must be a different account from the NAS admin**: the
+  deploy refuses an unset `DASH_ADMIN_USERS`, and one that names the NAS admin,
+  unless `[security] allow_nas_admin_as_dashboard_admin = true`. Dashboard admin
+  is a NAS-privileged role (it creates editor accounts and installs their SSH
+  keys), so treat whoever holds it accordingly.
 - On **TrueNAS ≥ 24.10** a key acts *as an account* and inherits its roles, so
   least privilege is a dedicated non-shell account (Credentials > Local Users)
   holding a privilege with only `ACCOUNT_WRITE` and `FILESYSTEM_ATTRS_WRITE`
-  (Credentials > Privileges). `--username` names it. Without `--username` the
-  key acts as the admin — better than a password only in that it can be
-  revoked without changing the login.
+  (Credentials > Privileges). `--username` names it and is **required**: the
+  script refuses a key for the admin account unless you pass
+  `--allow-admin-key`.
+- **Residual risk, stated plainly (bug-server-9).** `ACCOUNT_WRITE` can reset
+  any account's password and SSH keys, the admin's included, and
+  `FILESYSTEM_ATTRS_WRITE` can change permissions anywhere. A scoped key keeps
+  the admin *password* out of `docker inspect` and can be revoked by name, but
+  code execution inside the dashboard container can still be turned into NAS
+  control. The mitigations are the tailnet-only perimeter
+  (`docs/TAILNET_POLICY.md`), the read-only code mounts, and not giving the
+  dashboard to people you would not give the NAS.
 - On **TrueNAS ≤ 24.04** the key carries its own allow-list; the script sends
   the seven entries above. **Verify the shape against the live version** — the
   script tries the newer body first, prints what the middleware said if it is
   refused, and stops rather than guessing a third shape.
 - With a key set, the deploy writes **no** `TRUENAS_PW`/`DASH_NAS_PW` into the
-  container and says so; without one it warns and names this command.
+  container and says so; without one (and without the legacy flag) it refuses
+  and names this command.
 - Rotate by minting a new `--name` and deleting the old key in
   Credentials > API Keys.
 
@@ -225,39 +319,60 @@ site keeps it apart from the SSH login password. Unset, it is the login
 password — which is what both platforms' out-of-the-box admin account wants,
 so this is a seam rather than a promise.
 
-### Editor lanes do NOT verify the NAS host key (open, trust-model-4)
+### The optional Postgres project server (`project-server` profile)
 
-The base rig refuses an unpinned NAS host key (above). **Editors' lanes A and B
-do not check one at all**, and it is worth knowing that before debugging a key
-rotation:
+Until 2026-10-07 the profile published `postgres` / `DaVinci` (Resolve's
+well-known password) on **every interface**, which handed a superuser, and with
+`COPY ... PROGRAM` a shell in the container, to anyone on the LAN
+(bug-server-8, PL-RES-27). Now:
 
-- both bootstraps write the rclone `sftp` stanza with host/user/port/key_file/
-  shell_type and **no `known_hosts_file`**; rclone's sftp backend accepts any
-  host key unless that option is set, and the companion adds no
-  `--sftp-known-hosts-file` flag either;
-- `GET /api/v1/site` publishes no host key, even though `[nas] ssh_hostkey`
-  exists and this package pins it for the base rig;
-- `dashboard/deploy/compose.appliance.yaml` used to carry a comment claiming
-  "a changed host key makes every editor's rclone refuse the NAS on its next
-  connection". **That is not what happens** -- nothing on an editor machine
-  will notice. Corrected in place 2026-08-21 (CR-67): the comment now states
-  the claim it retracts, why persisting the host keys still matters, and
-  points here.
+- **The password is generated.** The deploy creates a random one once, keeps it
+  in `~/.ccsync/pg_password` (0600) so a redeploy renders the same secret, and
+  writes it to the stack's 0600 `.env` as `PG_PASSWORD` (Synology; on TrueNAS the
+  dict deploy has no Postgres service, so export `PG_PASSWORD` before pasting the
+  compose file yourself). `PG_PASSWORD` in the environment wins. Resolve's
+  default is refused from either source, and the compose service itself refuses
+  to start with an empty or well-known password.
+- **The port is bound to the LAN and tailnet addresses only** (`DASH_BIND_LAN`,
+  `DASH_BIND_TAILNET`, the same two as the dashboard), with `DASH_PG_PORT` still
+  the host-port knob. The tailnet grant is in `docs/TAILNET_POLICY.md`.
+- **Type the password into Resolve once per editor** (Project Manager >
+  Network, user `postgres`); the companion's own project-library reader takes it
+  from `library_db_password` in `~/.ccsync/config.toml` (it defaults to the old
+  value only for a library that was never changed).
+- An **existing** data volume keeps the password it was initialised with; the
+  environment value only applies at first initialisation. Change an initialised
+  volume's password with `ALTER USER postgres PASSWORD '...'` inside the
+  container, then set the same value in `PG_PASSWORD`.
+- This database holds every timeline. It is **not** in the dashboard's backup
+  story: dump it (`pg_dumpall`) into a snapshotted dataset yourself
+  (`docs/BACKUP_RESTORE.md`).
 
-So lanes A and B authenticate the editor *to* the NAS (ed25519 key) and never
-the NAS to the editor. Inside the tailnet WireGuard already authenticates the
-peer, which is why this has not bitten. A site that sets `[net] sftp_host` to a
-LAN address, or a compromised tailnet node answering at the NAS's address, has
-no such cover: it receives uploads and can feed arbitrary files into lane B's
-download scope, which is the "the NAS stops looking like the tree" shape
-`lane_guard` exists to park.
+### Editor lanes pin the NAS host key (GL-19, CR-368, 2026-10-07)
 
-Closing it is a client-side change and is deliberately **not** done here: it
-needs the key published in `/api/v1/site`, both bootstraps writing a
-`~/.ccsync/known_hosts` plus `known_hosts_file =` into the stanza, and the
-companion refusing a lane start on a mismatch as a tray line rather than an
-rclone error. A wrong move on any of those stops every editor's lanes A and B,
-so it wants its own change, not a bug-hunt patch.
+The base rig refuses an unpinned NAS host key (above), and so do editors' lanes
+A and B now. The chain:
+
+- the deploy puts the NAS sshd's host key -- `[nas] ssh_hostkey`, else the key
+  this toolchain recorded in `~/.ccsync/known_hosts` -- into the dashboard's
+  `GET /api/v1/site` as `sftp_hostkey` (`DASH_SITE_SFTP_HOSTKEY`);
+- both bootstraps write it to `~/.ccsync/nas_known_hosts` (`<host> <type> <key>`,
+  `[host]:port` for a non-default port) and add `known_hosts_file = ...` to the
+  rclone `sftp` stanza. **rclone verifies nothing unless that option is set**, so
+  before this a machine answering at the NAS's address received the editor's
+  uploads and could feed lane B;
+- a stanza written before the site published a key is **rewritten** when the
+  installer is re-run (a missing pin is a mismatch, like a wrong host or user);
+- a site that publishes nothing leaves rclone exactly as it was, and the
+  installer says so. **`[security] skip_lane_host_key_pin = true`** is that
+  choice, made explicitly: this studio's editors predate pinning.
+
+If the NAS is reinstalled its host key changes and every pinned editor's lanes A
+and B stop (rclone refuses the key). Update `[nas] ssh_hostkey`, redeploy the
+dashboard, and re-run the installer on each machine -- or restore the NAS's host
+keys from backup, which is the better answer. Refusing a lane start as a tray
+line instead of an rclone error is still open; the log carries rclone's own
+"host key mismatch" message.
 
 ### Who the dashboard believes about the client IP (`DASH_TRUSTED_PROXIES`)
 
@@ -377,6 +492,24 @@ python server/setup_editor_account.py --name jsmith --revoke-key --apply --lock
 
 Then unshare their Syncthing device on the dashboard: lane C is a separate
 trust path and is not covered by the key.
+
+The dashboard side (CR-367 / GL-15, 2026-10-07) has three controls, none of
+which touches the NAS key above:
+
+- **Delete** the person on the Users page: a durable tombstone, so their next
+  report is refused ("this account was removed") and is NOT re-registered, on
+  smb and oidc sites too. Only an admin creating or approving them again lifts it.
+- **Suspend** or **disable**: their computers are turned away and come straight
+  back on re-enable.
+- **Revoke sign-ins**, `POST /api/v1/admin/users/{u}/identity/revoke` (admin,
+  API only for now): every computer identity token issued to them before now
+  stops working; they sign in again at the tray. Use it for a lost laptop.
+
+With the shared fleet token off (the default for a new site) each sign-in also
+holds its own per-computer `cce1.` report token, listed and revocable on the
+Users page. Leaver on a site that still has the shared token on: that token
+stays valid for the routes that carry no identity, so retiring it is the
+complete answer (`docs/CONFIG.md`, `[security] shared_report_token`).
 
 ## Securing the Syncthing GUI
 

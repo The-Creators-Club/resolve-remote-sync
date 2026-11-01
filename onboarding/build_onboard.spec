@@ -167,6 +167,16 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 # bundled windows_bootstrap.ps1 and the ccsync_companion modules) is packed
 # into the exe and extracted to sys._MEIPASS at launch, which
 # steps.find_bootstrap_script() already looks in.
+# CR-373 / GL-30 (2026-10-07): VERSIONINFO resource, see tools/winversion.py.
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+import winversion  # noqa: E402
+_version_file = winversion.write(
+    SPEC_DIR / "build" / "version_info.txt",
+    version=winversion.read_assigned_version(SPEC_DIR / "steps.py", "INSTALLER_VERSION"),
+    file_description="CC Sync setup wizard",
+    internal_name="onboard",
+    original_filename="onboard.exe")
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -186,4 +196,5 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,  # GUI app -- no console window
     icon=str(COMPANION_SRC / "ccsync_companion" / "assets" / "icon.ico"),
+    version=_version_file,
 )

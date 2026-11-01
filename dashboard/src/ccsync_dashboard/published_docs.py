@@ -52,6 +52,18 @@ PUBLISHED_TREES: tuple[str, ...] = (
     "legal",
 )
 
+# Drafts inside a published tree that must NOT be readable by customers or
+# editors until counsel clears them (CR-377 round 2, 2026-10-07, owner's
+# round-2 answer). They still travel in the legal tree (the shippers copy
+# whole trees) but is_published() is False and help.py refuses them to
+# EVERYONE, admins included, because a customer's admin is a customer. Remove a name here when
+# counsel clears that document.
+UNPUBLISHED_DRAFTS: tuple[str, ...] = (
+    "legal/BETA_AGREEMENT.md",
+    "legal/DPA.md",
+    "legal/SUPPORT_DATA_PROCEDURE.md",
+)
+
 # The repository's top-level documents (README / SPEC / KNOWN_BUGS /
 # CLAUDE.md) travelled under `_root/` until 2026-09-11. NONE of them ship
 # now: KNOWN_BUGS.md and CLAUDE.md are the two worst documents in the tree to
@@ -99,6 +111,14 @@ def is_licence_text(rel: str) -> bool:
     return rel.startswith(TEXT_TREE + "/") and ".." not in rel.split("/")
 
 
+def is_unpublished_draft(rel: str) -> bool:
+    """Is `rel` a counsel-pending draft? Casefolded and normalised, so a
+    case-insensitive filesystem cannot serve `legal/dpa.md` (CR-377 r2)."""
+    rel = (rel or "").strip().replace("\\", "/").lstrip("/")
+    rel = posixpath.normpath(rel).casefold()
+    return rel in {d.casefold() for d in UNPUBLISHED_DRAFTS}
+
+
 def is_published(rel: str) -> bool:
     """Is `rel` (a browser path under the docs root) customer-facing?
 
@@ -114,6 +134,8 @@ def is_published(rel: str) -> bool:
         return False
     if rel in PUBLISHED_DOCS:
         return True
+    if is_unpublished_draft(rel):
+        return False
     head = rel.split("/", 1)[0]
     return "/" in rel and head in PUBLISHED_TREES
 

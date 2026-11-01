@@ -183,6 +183,7 @@ def _lane_advisories(guard: dict, skip_blocked: bool = False) -> list[tuple[str,
         # machine that quietly resumes doing what a safety latch stopped.
         (BLOCKING, tray_mod._persist_failed_line),
         (WARNING, tray_mod._skipped_exists_line),
+        (WARNING, tray_mod._future_dated_line),
         (BLOCKING, tray_mod._unfiltered_line),
         (WARNING, tray_mod._conflicts_line),
         # comp-sync-4 (2026-09-11): beside the other lane C advisory, which
@@ -374,19 +375,6 @@ def action_restart(app: "CompanionApp") -> None:
         restart(app)
         return
     action_restart_now(app)
-
-
-def _ignored_folders(app: "CompanionApp") -> list[dict]:
-    """The persisted "always leave this folder alone" entries (RES-12).
-
-    Read through the app rather than the file so the window shows what the
-    running tracker is actually honouring. Never raises: an unreadable
-    ignore list must cost the [ FORGET ] buttons, not the whole window."""
-    try:
-        return list(app.ignore_tracker.folders())
-    except Exception:
-        log.exception("settings: could not read the leave-alone folder list")
-        return []
 
 
 def _role_label(role: str) -> str:
@@ -606,25 +594,6 @@ def action_repair_machine_id(app: "CompanionApp") -> None:
             tray_mod._notify(app, "CCSync did not change this computer's id. "
                                   f"{ui_copy.DIAGNOSTICS}.")
     tray_mod._spawn(app, "Repair this computer id", _do)
-
-
-def action_forget_ignored_folder(app: "CompanionApp", folder: str) -> None:
-    """[ FORGET ] one persisted folder ignore (RES-12). The clips in it are
-    offered again from the next poll, which is the point of the button."""
-    def _do() -> None:
-        try:
-            forgotten = app.ignore_tracker.forget_folder(folder)
-        except Exception:
-            log.exception("settings: could not forget the folder ignore %s", folder)
-            tray_mod._notify(app, f"CCSync could not undo that. {ui_copy.DIAGNOSTICS}.")
-            return
-        if forgotten:
-            tray_mod._notify(app, f"CCSync will offer clips in {folder} again.")
-        else:
-            # "Could not check" must never render as "done": the entry was
-            # already gone, and saying so is cheaper than a second click.
-            tray_mod._notify(app, f"{folder} was not on the leave-alone list.")
-    tray_mod._spawn(app, "Forget folder ignore", _do)
 
 
 def _help_url(app: "CompanionApp", anchor: str = "") -> str:
@@ -1849,15 +1818,9 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
             "uploads and downloads are still running.", style="warning"))
         advanced_items.append(Button(
             f"REPAIR {letter} NOW", lambda: action_repair_p_mapping(app)))
-    for entry in _ignored_folders(app):
-        folder = str(entry.get("folder") or "")
-        reason = str(entry.get("reason") or "")
-        advanced_items.append(Line(
-            f"Leaving clips in {folder} alone"
-            + (f" ({reason})" if reason else ""), style="muted"))
-        advanced_items.append(Button(
-            f"FORGET: {folder}",
-            (lambda folder=folder: action_forget_ignored_folder(app, folder))))
+    # CR-356 (2026-09-30): the "Leaving clips in <folder> alone" lines and
+    # their [ FORGET ] buttons went with the popup button that set them; the
+    # persisted folder list is retired and nothing honours it any more.
     if snap.get("p_swap_available"):
         # SYNC-103 (sweep 2026-09-04): the letter is site data, and these
         # two labels are what ui_copy.finish_grading() quotes back at the
@@ -1906,6 +1869,8 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
             lambda: tray_mod.action_update_now(app)))
     # LG-12: the texts the notices promise travel with the binary.
     help_items.append(Button("OPEN-SOURCE LICENCES", lambda: action_open_licences(app)))
+    # GL-34 / CR-374: the one place an editor is told where to send a problem.
+    help_items.append(Line(f"Support: {site_mod.support_contact()}", style="muted"))
     help_items.append(Line(f"ccsync-companion v{config_mod.VERSION}", style="muted"))
     sections.append(Section("HELP", help_items))
 

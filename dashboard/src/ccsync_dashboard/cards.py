@@ -770,7 +770,7 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
                     "continues without it", type(e).__name__, e)
         return _detail(ABSENT, f"the checkout did not import ({type(e).__name__}: {e})")
 
-    from . import cards_ai, cards_landing, cards_wsgi
+    from . import cards_ai, cards_app, cards_landing, cards_wsgi
 
     try:
         from a2wsgi import WSGIMiddleware
@@ -825,6 +825,8 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
     # added, which is the same reason cards_tunnel's router is registered
     # ahead of this (app.py).
     app.include_router(cards_landing.router)
+    # the apps' own updates, /cards/app/ (cards_app.py, 2026-10-22)
+    app.include_router(cards_app.router)
     dispatch = CardsDispatch(pool, CardsGate)
     # dash-cards-5 (2026-09-18): the pool is built before the dispatcher (it is
     # the dispatcher's argument), so the eviction hook is wired here rather

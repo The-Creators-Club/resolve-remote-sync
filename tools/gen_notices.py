@@ -851,12 +851,12 @@ FROZEN: list[tuple[str, Path, callable, tuple[str, ...], tuple[str, ...]]] = [
     ("companion", REPO / "companion" / "requirements.lock",
      lambda: _pyproject_roots(REPO / "companion" / "pyproject.toml", ("tray",)),
      ("pyinstaller-bootloader.txt", "cpython.txt", "tcl-tk.txt",
-      "openssl.txt", "libpq.txt"),
+      "openssl.txt", "libpq.txt", "lgpl-3.0.txt"),
      ()),
     ("onboarding", REPO / "onboarding" / "requirements.lock",
      lambda: set(),
      ("pyinstaller-bootloader.txt", "cpython.txt", "tcl-tk.txt",
-      "openssl.txt", "libpq.txt"),
+      "openssl.txt", "libpq.txt", "lgpl-3.0.txt"),
      ("companion",)),
 ]
 

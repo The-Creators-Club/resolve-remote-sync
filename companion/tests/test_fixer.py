@@ -4,6 +4,7 @@ resolve_bridge / copy_fn — never touches a real Resolve instance)."""
 
 from __future__ import annotations
 
+import json
 import logging
 
 import os
@@ -30,6 +31,10 @@ from ccsync_companion import fixer
         ("loop.flac", "Audio/Music"),
         ("voiceover.m4a", "Audio/Music"),
         ("sfx.ogg", "Audio/Music"),
+        # CR-358: stock-music libraries hand out raw .aac.
+        ("9106_03_-_The_City_of_Hope_-16-44.1-.aac", "Audio/Music"),
+        ("cue.AAC", "Audio/Music"),
+        ("voice.opus", "Audio/Music"),
         ("still.png", "B-roll/Stills"),
         ("still.JPG", "B-roll/Stills"),
         ("still.jpeg", "B-roll/Stills"),
@@ -209,53 +214,65 @@ def test_ignore_tracker_clear():
     assert tracker.is_ignored("clip.mov") is False
 
 
-# -- persisted folder ignores + the skip ledger (RES-12 / UX-4) ------------
+# -- the skip ledger (UX-4), and RES-12's folder layer retired (CR-356) ----
 
 
-def test_a_folder_ignore_is_honoured_and_survives_a_restart(tmp_path):
-    """RES-12: an editor who keeps a personal stock-footage folder outside
-    the tree was offered the same clips at every start for ever, because the
-    ignore set died with the process."""
+def _write_retired_folder_list(state, folder):
+    """What a companion before 0.9.85 wrote when the editor pressed
+    [ ALWAYS LEAVE THIS FOLDER ALONE ON THIS COMPUTER ]."""
+    state.mkdir(parents=True, exist_ok=True)
+    (state / fixer.FIXER_IGNORES_FILENAME).write_text(json.dumps({"folders": [
+        {"folder": str(folder), "reason": "the editor chose it in the fixer",
+         "when": "2026-09-28T10:00:00+00:00"}]}), encoding="utf-8")
+
+
+def test_a_folder_saved_by_an_older_build_no_longer_hides_a_clip_under_it(tmp_path, caplog):
+    """CR-356 (2026-09-30): Ruskin's Desktop rule, set for one .srt, matched
+    recursively and hid 30 music tracks downloaded into Desktop/Music Docs the
+    next day. Upgrading must lift it: the clip is offered, and the file is
+    renamed aside (retire, do not delete) with what it held logged once."""
     state = tmp_path / "state"
-    tracker = fixer.IgnoreTracker(state)
-    assert tracker.ignore_folder(str(tmp_path / "stock"), reason="my own library")
-    assert tracker.is_ignored(str(tmp_path / "stock" / "sunset.mov")) is True
+    desktop = tmp_path / "Desktop"
+    _write_retired_folder_list(state, desktop)
 
-    # A "restart": a brand new tracker over the same state dir.
-    restarted = fixer.IgnoreTracker(state)
-    assert restarted.is_ignored(str(tmp_path / "stock" / "sunset.mov")) is True
-    assert restarted.folder_count() == 1
-    assert restarted.folders()[0]["reason"] == "my own library"
-    assert restarted.folders()[0]["when"]
+    with caplog.at_level(logging.INFO, logger="ccsync.fixer"):
+        tracker = fixer.IgnoreTracker(state)
+
+    assert tracker.is_ignored(str(desktop / "Music Docs" / "track01.aac")) is False
+    assert tracker.is_ignored(str(desktop / "framing formosa.en.srt")) is False
+    assert not (state / fixer.FIXER_IGNORES_FILENAME).exists()
+    retired = state / (fixer.FIXER_IGNORES_FILENAME + fixer.FIXER_IGNORES_RETIRED_SUFFIX)
+    assert json.loads(retired.read_text(encoding="utf-8"))["folders"][0]["folder"] == str(desktop)
+    lines = [r.getMessage() for r in caplog.records if "CR-356" in r.getMessage()]
+    assert len(lines) == 1 and str(desktop) in lines[0]
+
+    # A restart finds nothing to retire and says nothing.
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="ccsync.fixer"):
+        fixer.IgnoreTracker(state)
+    assert not [r for r in caplog.records if "CR-356" in r.getMessage()]
+    assert retired.exists()
 
 
-def test_a_folder_ignore_does_not_catch_a_sibling_with_the_same_prefix(tmp_path):
-    """canon._is_under's separator rule: "stock_extra" is not inside
-    "stock"."""
-    tracker = fixer.IgnoreTracker(tmp_path / "state")
-    tracker.ignore_folder(str(tmp_path / "stock"))
-    assert tracker.is_ignored(str(tmp_path / "stock_extra" / "clip.mov")) is False
-
-
-def test_forget_folder_brings_the_clips_back(tmp_path):
+def test_a_second_retired_list_does_not_overwrite_the_first(tmp_path):
+    """A machine rolled back and forward again writes a second list; the
+    first record of what was hidden must survive the second rename."""
     state = tmp_path / "state"
-    tracker = fixer.IgnoreTracker(state)
-    tracker.ignore_folder(str(tmp_path / "stock"))
-    assert tracker.forget_folder(str(tmp_path / "stock")) is True
-    assert tracker.is_ignored(str(tmp_path / "stock" / "sunset.mov")) is False
-    assert fixer.IgnoreTracker(state).folder_count() == 0
-    # A second [ FORGET ] on the same entry says so rather than reporting a
-    # success it did not have.
-    assert tracker.forget_folder(str(tmp_path / "stock")) is False
+    _write_retired_folder_list(state, tmp_path / "first")
+    fixer.IgnoreTracker(state)
+    _write_retired_folder_list(state, tmp_path / "second")
+    fixer.IgnoreTracker(state)
+    held = sorted(json.loads(p.read_text(encoding="utf-8"))["folders"][0]["folder"]
+                  for p in state.glob(fixer.FIXER_IGNORES_FILENAME + ".retired-cr356*"))
+    assert held == sorted([str(tmp_path / "first"), str(tmp_path / "second")])
 
 
-def test_a_folder_ignore_that_cannot_be_persisted_is_refused(tmp_path, monkeypatch):
-    """"Always" that lasts until the next restart is worse than no button:
-    the caller is told, so the editor can be."""
-    tracker = fixer.IgnoreTracker(tmp_path / "state")
-    monkeypatch.setattr(fixer, "_write_json_atomic", lambda *a, **k: False)
-    assert tracker.ignore_folder(str(tmp_path / "stock")) is False
-    assert tracker.folder_count() == 0
+def test_the_folder_layer_api_is_gone():
+    """CR-356: nothing may set a folder rule again by the back door."""
+    tracker = fixer.IgnoreTracker()
+    for name in ("ignore_folder", "forget_folder", "folders", "folder_count",
+                 "_folder_ignored_locked"):
+        assert not hasattr(tracker, name), name
 
 
 def test_a_tracker_with_no_state_dir_is_the_old_session_only_behaviour():
@@ -263,7 +280,6 @@ def test_a_tracker_with_no_state_dir_is_the_old_session_only_behaviour():
     tracker.ignore("clip.mov")
     assert tracker.is_ignored("clip.mov") is True
     assert tracker.skipped_count() == 0
-    assert tracker.ignore_folder("anywhere") is False
 
 
 def test_skipped_clips_are_recorded_across_a_restart(tmp_path):
@@ -290,27 +306,25 @@ def test_the_skip_ledger_records_how_the_clip_was_skipped(tmp_path):
     assert [v["how"] for v in written.values()] == ["headless"]
 
 
-def test_clear_forgets_the_session_but_not_the_folders(tmp_path):
-    """APP-2 clears dismissals; RES-12's standing decisions stay."""
+def test_clear_forgets_the_session_but_keeps_the_ledger(tmp_path):
+    """APP-2 clears dismissals; the UX-4 ledger is a record and stays."""
     tracker = fixer.IgnoreTracker(tmp_path / "state")
     tracker.ignore("/raw/a.mov")
-    tracker.ignore_folder("/stock")
     tracker.clear()
     assert tracker.is_ignored("/raw/a.mov") is False
-    assert tracker.is_ignored("/stock/b.mov") is True
     assert tracker.session_count() == 0
     # Cleared from the SESSION, still counted in the ledger: the clip is
     # still not syncing, whatever the tray now offers.
     assert tracker.skipped_count() == 1
 
 
-def test_a_corrupt_ignore_file_fails_towards_showing_the_clips(tmp_path):
+def test_a_corrupt_retired_ignore_file_is_still_moved_aside(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
     (state / fixer.FIXER_IGNORES_FILENAME).write_text("{not json", encoding="utf-8")
     tracker = fixer.IgnoreTracker(state)
-    assert tracker.folder_count() == 0
     assert tracker.is_ignored("/anything/clip.mov") is False
+    assert not (state / fixer.FIXER_IGNORES_FILENAME).exists()
 
 
 def test_the_skip_ledger_is_bounded(tmp_path, monkeypatch):

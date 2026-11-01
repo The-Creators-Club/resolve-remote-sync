@@ -268,7 +268,8 @@ def document_groups(is_admin: bool = False) -> list[dict]:
         return copy.deepcopy(cached[1])
     stamp = _root_stamp(root)
     rels = [r for r in _iter_markdown(root)
-            if is_admin or published_docs.is_published(r)]
+            if (is_admin or published_docs.is_published(r))
+            and not published_docs.is_unpublished_draft(r)]
     for name in ROOT_FILES:
         rel = f"{ROOT_DIR_NAME}/{name}"
         if rel not in rels and resolve_document(rel, is_admin) is not None:
@@ -372,6 +373,10 @@ def resolve_document(rel: str, is_admin: bool = False) -> Path | None:
     if root is None:
         return None
     if not is_admin and not published_docs.is_published(rel):
+        return None
+    # CR-377 r2 (2026-10-07): counsel-pending drafts are refused to admins
+    # too; on a customer's server an admin is a customer.
+    if published_docs.is_unpublished_draft(rel):
         return None
     rel = (rel or "").strip().replace("\\", "/")
     # LG-12 (2026-09-25): markdown, or a licence text under legal/licenses/

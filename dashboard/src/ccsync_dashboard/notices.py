@@ -180,6 +180,8 @@ def run_checks(
         # CR-309 (2026-09-24): the unattended Claude Code updater's last
         # outcome. Registered in db.NOTICE_KINDS with this writer.
         _check_ai_cli_update,
+        # GL-31 / CR-374 round 2 (2026-10-07): the studio stranded by the lock.
+        _check_cli_lock_stranded,
         # CR-320 (2026-09-24): the event-shaped kinds, which no pass above
         # re-asserts or clears, closed when `RESOLVE_RULES` says they are over.
         # LAST on purpose: it only ever reads what the checks above have
@@ -339,11 +341,13 @@ def _check_collector_alarms(conn, settings, now: str) -> None:
             conn, "enforce_refusal", "error", "share removals",
             body=(f"{refusal['count']} project share(s) would have been taken away from "
                   f"computers in one pass, which is more than the safety limit "
-                  f"({refusal.get('limit')}), so NONE of them were. Every untick made "
-                  f"since is sitting unapplied. Folders involved: {folders or 'unknown'}."),
+                  f"({refusal.get('limit')}), so these were held back. Removals an admin "
+                  f"caused on purpose (suspend, archive, an audited untick, approved ones) "
+                  f"still apply; the rest wait. Folders involved: {folders or 'unknown'}."),
             fix=("Check that no editor's computer has just been renamed or removed. "
-                 "If the removals are genuine, raise DASH_ENFORCE_MAX_REMOVALS and "
-                 "redeploy, or untick fewer projects at a time."),
+                 "If the removals are genuine, press Apply these removals on the "
+                 "fleet page, or raise the per-computer allowance under Settings, then Sharing safety. "
+                 "(DASH_ENFORCE_MAX_REMOVALS is still the flat floor.)"),
             now=now)
         # The inverse of SYS-9 invariant 1 ("every full-tick selection has a
         # Syncthing folder shared with that machine's device id"), computed
@@ -1181,6 +1185,77 @@ def _check_ai_cli_update(conn, settings, now: str) -> None:
         fix=("Open Settings, AI providers and press UPDATE beside Claude Code. The "
              "server tries again by itself tomorrow."),
         now=now)
+
+
+def _check_cli_lock_stranded(conn, settings, now: str) -> None:
+    """A locked build over a site that stored `features.ai_cli_providers = 1`
+    (GL-31 / CR-374 round 2, 2026-10-07): the studio's container lost
+    DASH_STUDIO_CLI_PROVIDERS, so Timeline Cards, the YouTube downloader's AI
+    (without an API key) and the server check have gone dark. A boot log line
+    was the first answer and CLAUDE.md says a diagnosis belongs in notices.
+    Closes itself the moment the env var is back (or the row is gone), and
+    ALSO once a CLAUDE API provider resolves: a customer site gets the inert row by
+    importing a site.toml or by the installer's env seed, and for them the
+    row costs nothing, so it must not sit as a permanent error. The fix text
+    deliberately does not teach the studio-only override (docs/STUDIO_BUILD.md
+    carries it)."""
+    from . import ai_providers, build_flavor
+
+    if not build_flavor.stranded_cli_rows(conn):
+        db.clear_notices_of_kind(conn, "cli_lock_stranded", (), now=now)
+        return
+    has_claude_key = False
+    try:
+        # Clear only on what the dark features need: Timeline Cards and the
+        # locked triage gate both want a CLAUDE provider, so an OpenAI-only
+        # site is still stranded (round 2 overseer, 2026-10-07).
+        from . import cards_ai
+
+        res = ai_providers.resolved(conn, settings, probe=False)
+        if res.ok and res.name in cards_ai.CLAUDE_PROVIDERS:
+            db.clear_notices_of_kind(conn, "cli_lock_stranded", (), now=now)
+            return
+        has_claude_key = bool(
+            ai_providers.read_key(settings, ai_providers.ANTHROPIC_API)[0])
+    except Exception:  # noqa: BLE001 - cannot tell: keep raising the notice
+        pass
+    head = ("This site has Claude Code or Codex switched on, but this build "
+            "does not include them, ")
+    tail = " Nothing stored was changed."
+    imp = (" If you imported ai_cli_providers = true in a site.toml, import "
+           "it as false. If this is the studio's own dashboard, see "
+           "docs/STUDIO_BUILD.md.")
+    if has_claude_key:
+        # CR-374 round 3 (2026-10-07): the key is there; a pin hides it.
+        body = (head + "and the AI provider pinned under Settings, AI "
+                "providers is not Claude, so Timeline Cards' AI does not "
+                "run even though a Claude API key is set up." + tail)
+        fix = ("Open Settings, AI providers and set the preference to Claude "
+               "(Anthropic API) or to automatic." + imp)
+    elif res_name_other(conn, settings):
+        body = (head + "and the only AI API key is not a Claude one, so "
+                "Timeline Cards' AI and the server check do not run (the "
+                "YouTube downloader's AI still does)." + tail)
+        fix = ("Add a Claude API key under Settings, AI providers (an OpenAI "
+               "or DeepSeek key does not run these)." + imp)
+    else:
+        body = (head + "and no AI API key is set up, so Timeline Cards' AI, "
+                "the YouTube downloader's AI and the server check do not "
+                "run." + tail)
+        fix = "Add a Claude API key under Settings, AI providers." + imp
+    db.notice(conn, "cli_lock_stranded", "error", "Claude Code / Codex",
+              body=body, fix=fix, now=now)
+
+
+def res_name_other(conn, settings) -> bool:
+    """True when some non-Claude API provider is what resolves (CR-374)."""
+    try:
+        from . import ai_providers
+
+        res = ai_providers.resolved(conn, settings, probe=False)
+        return bool(res.ok and res.name)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ---------------------------------------------------------------- accounts

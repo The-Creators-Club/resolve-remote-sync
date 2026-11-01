@@ -72,3 +72,12 @@ project_acl = "shared"
 # unless asked for), so check_health.py skips the Postgres probe instead of
 # failing forever.
 project_server = "false"
+
+# The fixture is the STUDIO's legacy site (GL-18/GL-19, CR-368, 2026-10-07): a new
+# site gets the secure defaults, so every legacy posture is named here, the way
+# the studio's own site.toml names it. Tests that want the NEW-site defaults
+# remove these (see test_secure_defaults.py).
+[security]
+allow_nas_password_in_container = true
+allow_nas_admin_as_dashboard_admin = true
+skip_lane_host_key_pin = true

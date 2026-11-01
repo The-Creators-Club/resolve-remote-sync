@@ -68,6 +68,17 @@ else
     bad "nothing in macos_bootstrap.sh calls print_first_setup_steps"
 fi
 
+# --- CR-372 / GL-28 / PL-RES-42: pinned download before brew --------------------
+for tool in rclone syncthing; do
+    pin=$(grep -n "verify_sha256 \"\$ZIP_PATH\" \"\$$(echo $tool | tr a-z A-Z)_SHA256\"" "$SCRIPT" | head -n1 | cut -d: -f1)
+    brew=$(grep -n "^[[:space:]]*\(brew install $tool\|if brew install $tool\)" "$SCRIPT" | head -n1 | cut -d: -f1)
+    if [ -n "$pin" ] && [ -n "$brew" ] && [ "$pin" -lt "$brew" ]; then
+        ok "$tool: the pinned verified download runs before brew"
+    else
+        bad "$tool: brew install is not behind the pinned download (pin=$pin brew=$brew)"
+    fi
+done
+
 echo ""
 if [ "$fail" -gt 0 ]; then
     echo "$fail FAILED"

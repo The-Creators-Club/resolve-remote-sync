@@ -112,6 +112,13 @@ def preflight() -> None:
         fail(f"no release key at {key} -- this rig cannot sign.\n"
              "  If it moved, restore it. Do NOT run `release_key.py new`: a new key is "
              "trusted by no companion in the field (docs/RELEASE.md, key rotation).")
+    # GL-17 / CR-378 (2026-10-07): the key may be passphrase-protected. Ask once
+    # here, fail before any download or upload on a wrong one, and let the
+    # signing children inherit it for this run only.
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    sys.path.insert(0, str(REPO_ROOT / "companion" / "src"))
+    import release_key  # noqa: E402
+    release_key.unlock_for_run(key)
 
 
 def published_channel() -> dict:
@@ -233,17 +240,48 @@ def move_pointer(kind: str, platform: str, version: str, dry_run: bool,
         fail(f"publish_feed.py --set-current exited {rc}")
 
 
-def latest_green_run(workflow: str) -> dict | None:
+def latest_green_run(workflow: str, sha: str = "") -> dict | None:
     # --branch: a green run of THIS workflow on a feature branch is a build,
-    # not a release (release-pipeline-7).
-    rc, out, err = run(["gh", "run", "list", "--workflow", workflow,
-                        "--branch", RELEASE_BRANCH,
-                        "--status", "success", "--limit", "1",
-                        "--json", "databaseId,headSha,displayTitle,createdAt"])
+    # not a release (release-pipeline-7). `sha` (GL-24, CR-371, 2026-10-07) pins
+    # the run to ONE commit, which is how a customer release builds every
+    # artefact from the same green commit instead of "newest of each".
+    cmd = ["gh", "run", "list", "--workflow", workflow,
+           "--branch", RELEASE_BRANCH,
+           "--status", "success", "--limit", "1",
+           "--json", "databaseId,headSha,displayTitle,createdAt"]
+    if sha:
+        cmd += ["--commit", sha]
+    rc, out, err = run(cmd)
     if rc != 0:
         fail(f"gh run list failed for {workflow}: {err.strip()}")
     runs = json.loads(out or "[]")
     return runs[0] if runs else None
+
+
+CI_WORKFLOW = "ci.yml"
+
+
+def ci_green_for(sha: str) -> bool:
+    """True when ci.yml (the FULL suite gate) succeeded for exactly `sha`.
+
+    GL-25 / bug-tools-ci-3 (CR-371, 2026-10-07): "green" used to mean the
+    release workflow itself succeeded, which runs none of the installer
+    suites, the CRLF gate, the licence and notices checks or four component
+    suites. A bootstrap change that turned ci.yml red still produced a green
+    release-windows run, and the rig signed it. Not being able to ASK counts
+    as not green (fail closed): the caller refuses."""
+    if not sha:
+        return False
+    rc, out, _err = run(["gh", "run", "list", "--workflow", CI_WORKFLOW,
+                         "--commit", sha, "--status", "success", "--limit", "1",
+                         "--json", "databaseId,headSha"])
+    if rc != 0:
+        return False
+    try:
+        runs = json.loads(out or "[]")
+    except ValueError:
+        return False
+    return any(str(r.get("headSha") or "") == sha for r in runs)
 
 
 def remote_head_sha() -> str:
@@ -395,6 +433,22 @@ def main() -> int:
                          "stage it and never offer it (SYS-2), and their fleet would "
                          "look up to date while it stopped updating. Only checked when "
                          "CCSYNC_EMIT_KIND_EXTRAS=1 signs the field into the record")
+    ap.add_argument("--allow-red-ci", action="store_true",
+                    help="publish a build whose commit has no successful ci.yml run. The "
+                         "release workflows skip most suites, so this is the only gate "
+                         "that says the whole tree was green (GL-25). An emergency hotfix "
+                         "override, never a habit")
+    ap.add_argument("--sha", default="",
+                    help="only publish the artefacts built from THIS commit (full sha). "
+                         "A run on any other commit is a refusal, not a skip: one customer "
+                         "release must come from one green commit (GL-24)")
+    ap.add_argument("--allow-no-floor", action="store_true",
+                    help="allow a companion/onboard record with min_version 0.0.0 "
+                         "(refused by default; the floor comes from tools/release_floor.json, "
+                         "GL-25b)")
+    ap.add_argument("--allow-floor-above-current", action="store_true",
+                    help="allow a min_version above the build currently CURRENT (that "
+                         "floor disables its own rollback, PL-RES-96)")
     ap.add_argument("--allow-key-rotation", action="store_true",
                     help="publish even though the signing key is not baked into the build "
                          "that is CURRENT for that platform. Every machine on the current "
@@ -423,6 +477,14 @@ def main() -> int:
         extra.append("--make-current")
     if args.allow_key_rotation:
         extra.append("--allow-key-rotation")
+    if args.allow_no_floor:
+        extra.append("--allow-no-floor")
+    if args.allow_floor_above_current:
+        extra.append("--allow-floor-above-current")
+    if args.allow_red_ci:
+        # publish_feed carries its own copy of the CI gate now (every route
+        # to the vendor feed converges there); one flag lifts both.
+        extra.append("--allow-red-ci")
 
     wanted = [s for s in SOURCES
               if (args.kind is None or s["kind"] == args.kind)
@@ -432,12 +494,17 @@ def main() -> int:
 
     published, skipped = [], []
     recalls: list[list[str]] = []
+    ci_checked: dict[str, bool] = {}
     with tempfile.TemporaryDirectory(prefix="ccsync-publish-") as tmp:
         downloaded: dict[str, Path] = {}
         for src in wanted:
             wf, kind, plat = src["workflow"], src["kind"], src["platform"]
             step(f"--- {kind}/{plat} ({wf}) ---")
-            run_info = latest_green_run(wf)
+            run_info = latest_green_run(wf, args.sha) if args.sha else latest_green_run(wf)
+            if run_info is None and args.sha:
+                fail(f"{wf} has no successful run for commit {args.sha[:7]}: dispatch it on "
+                     "that commit and wait for it (a customer release is built from ONE "
+                     "green commit, GL-24)")
             if run_info is None:
                 step(f"no successful {wf} run yet -- skipping")
                 skipped.append(f"{kind}/{plat}: no green run")
@@ -454,6 +521,22 @@ def main() -> int:
                      f"has it RIGHT NOW ({branch_tip[:7]}) -- refusing to sign a build the "
                      "release branch does not contain. A force-push can remove a commit CI "
                      "went green on; merge it again, or re-run the workflow on the tip.")
+
+            # GL-25 (CR-371, 2026-10-07): the release workflow being green is
+            # not the tree being green. Memoised per sha: one gh call per commit.
+            ci_ok = ci_checked.get(run_info["headSha"])
+            if ci_ok is None:
+                ci_ok = ci_checked[run_info["headSha"]] = ci_green_for(run_info["headSha"])
+            if not ci_ok:
+                if not args.allow_red_ci:
+                    fail(f"{wf} run {run_info['databaseId']} is at {run_info['headSha'][:7]}, "
+                         f"which has no successful {CI_WORKFLOW} run (or it could not be "
+                         "read). The release workflows skip the installer suites, the CRLF "
+                         "gate, the licence and notices checks and four component suites, so "
+                         "their green says nothing about the whole tree. Get ci.yml green on "
+                         "that commit, or pass --allow-red-ci for a deliberate hotfix.")
+                step(f"WARNING: --allow-red-ci: {run_info['headSha'][:7]} has no green "
+                     f"{CI_WORKFLOW} run")
 
             # One download per RUN, not per (kind, platform): the companion
             # and the onboard package for a platform come out of the same
@@ -617,6 +700,14 @@ def main() -> int:
                      f"{kind}/{plat}/<version> (docs/RELEASE.md).")
 
             cur = current_published(channel, kind, plat)
+            if kind == "dashboard" and args.make_current and not args.dry_run:
+                # CR-374 round 2 (2026-10-07): said BEFORE the pointer moves,
+                # because a studio on policy=current can take the bundle at once.
+                step("WARNING: moving the dashboard pointer. If this is the first "
+                     "bundle with the CR-374 CLI lock, the studio must already have "
+                     "[studio] allow_cli_providers = true and be redeployed through "
+                     "install_dashboard_app.py (docs/STUDIO_BUILD.md); an OTA "
+                     "delivery boots it LOCKED and Cards' AI goes dark.")
             publish(meta, artifact, manifest_path, kind, args.dry_run, extra)
             published.append(f"{kind}/{plat} v{version}")
             recalls.append(recall_argv(
@@ -649,6 +740,13 @@ def main() -> int:
                  "build no computer there has run is staged until one has.")
             step("  Sites on `manual` need Settings > Packages > \"Check now\" > "
                  "\"Publish\".")
+            # GL-31 / CR-374 round 2 (2026-10-07): a dashboard bundle keeps the
+            # container's OLD environment, so the first CR-374 bundle boots
+            # LOCKED on the studio and takes Cards' AI down.
+            step("  The FIRST dashboard bundle with CR-374 (the CLI lock) must reach "
+                 "the studio through server/install_dashboard_app.py with [studio] "
+                 "allow_cli_providers = true in its site.toml, never over the air: "
+                 "see docs/STUDIO_BUILD.md.")
         else:
             step("published and STAGED: the channel's `current` pointer was NOT moved, "
                  "so nobody is offered this yet, on any policy. Re-run with "

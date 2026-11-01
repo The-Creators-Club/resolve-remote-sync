@@ -382,15 +382,8 @@
         {% endfor %}
 
         {% if feed.image.tag %}
-          {% if nas_kind == "synology" %}
-            {% set nas_hint = "Container Manager > Project ccsync > Build" %}
-          {% elif nas_kind == "truenas" %}
-            {% set nas_hint = "Apps > ccsync > Update" %}
-          {% else %}
-            {% set nas_hint = "your NAS's app or container manager's Update action" %}
-          {% endif %}
           <div class="note"><span class="grow">Image <b>{{ feed.image.tag }}</b> available
-            (running <b>{{ feed.image.current_running_version }}</b>). Update it in your NAS's own UI: <b>{{ nas_hint }}</b>.</span></div>
+            (running <b>{{ feed.image.current_running_version }}</b>). To apply it: <b>{{ feed.image.update_hint }}</b></span></div>
         {% endif %}
       {% endif %}
     </div>

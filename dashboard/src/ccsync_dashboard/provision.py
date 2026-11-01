@@ -482,6 +482,37 @@ def scan_project_dirs(projects_dir: Path, max_depth: int = 8) -> list[tuple[str,
     return found
 
 
+def scan_unregistered_dirs(projects_dir: Path, max_depth: int = 3) -> list[str]:
+    """Rel paths of folders under Projects/ that are NOT projects, are not
+    inside one, and hold none: the folders someone could still make into a
+    project (CR-379). Descent is pruned at every marker, so a project's own
+    media tree is never walked; containers of projects are dropped after the
+    walk. Hidden dirs are skipped. Raises OSError only when the root itself
+    cannot be listed -- the caller treats that as "cannot tell"."""
+    import os as _os
+
+    projects_dir = Path(projects_dir)
+    _os.listdir(projects_dir)  # the one failure the caller must hear about
+    unmarked: list[str] = []
+    marked: list[str] = []
+    for dirpath, dirnames, filenames in _os.walk(projects_dir):
+        rel = Path(dirpath).relative_to(projects_dir)
+        parts = () if rel == Path(".") else rel.parts
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if len(parts) >= max_depth:
+            dirnames[:] = []
+        if not parts:
+            continue
+        if MARKER_FILENAME in filenames:
+            marked.append(rel.as_posix())
+            dirnames[:] = []
+            continue
+        unmarked.append(rel.as_posix())
+    prefixes = {"/".join(m.split("/")[:i]) for m in marked
+                for i in range(1, m.count("/") + 1)}
+    return sorted(u for u in unmarked if u not in prefixes)
+
+
 def build_folder_config(
     slug: str, rel: str, data_prefix: str, device_ids: list[str]
 ) -> dict:

@@ -377,7 +377,22 @@ def _single_instance_slot_is_free(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_resolve_bridge_session():
+def _no_real_resolve_menu_install(monkeypatch):
+    """CompanionApp.start() installs the originals menu scripts into Resolve's
+    per-user Scripts folder (SELECTIVE_ORIGINALS.md 12.1). On Windows that is
+    under %APPDATA%, which _isolate_ccsync_home does not redirect, so any test
+    that starts an app would write into the developer's REAL Resolve install.
+    The app's starter is stubbed; resolve_menu_install itself is untouched, so
+    its own tests (which pass a root) still exercise it."""
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod.CompanionApp, "_start_resolve_menu_install",
+                        lambda self: None)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _fresh_resolve_bridge_session(monkeypatch, tmp_path):
     """Start every test with a bridge that has never connected.
 
     resolve_bridge records "has the Resolve bridge connected THIS SESSION?"
@@ -400,6 +415,10 @@ def _fresh_resolve_bridge_session():
     """
     from ccsync_companion import resolve_bridge
 
+    # CR-373 / GL-29 (2026-10-07): the machine-level "ever connected" marker is
+    # a file under ~/.ccsync/state; never let a test read or write the real one.
+    monkeypatch.setattr(resolve_bridge, "_EVER_MARKER_OVERRIDE",
+                        tmp_path / "resolve_ever_connected")
     resolve_bridge.reset_session_state()
     resolve_bridge.reset_timeline_cache()
     resolve_bridge.reset_library_state()

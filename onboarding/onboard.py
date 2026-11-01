@@ -1693,6 +1693,17 @@ class OnboardWizard:
                     "warning(s) -- this machine is NOT ready to sync yet."
                 )
 
+            # CR-373 / GL-29 (2026-10-07): switch Resolve's External scripting
+            # on now, while Resolve is (normally) closed; what could not be
+            # done goes on the finish page's checklist. Never fatal.
+            try:
+                self.resolve_scripting = steps.enable_resolve_scripting()
+                self._append_log(
+                    "Resolve scripting preference: "
+                    f"{self.resolve_scripting.get('status')}")
+            except Exception:
+                log.exception("resolve scripting step failed")
+
             self.device_id = steps.parse_device_id(output)
             self._safe_after(self.show_finish)
         except Exception as exc:
@@ -1834,8 +1845,21 @@ class OnboardWizard:
         _label(frame, copy["send"], fg=theme.AMBER, font=theme.mono(10, bold=True),
                wraplength=560).pack(anchor="w", pady=(10, 0))
 
+        self._finish_resolve_checklist(frame)
         self._finish_log_note(frame)
         self._finish_nav(frame)
+
+    def _finish_resolve_checklist(self, frame) -> None:
+        """The 'connect Resolve' steps (CR-373 / GL-29, 2026-10-07), on both
+        finish pages: they used to live only in the log box."""
+        lines = steps.resolve_finish_lines(
+            self._site(), self.dashboard_url_var.get().strip(),
+            getattr(self, "resolve_scripting", None))
+        _label(frame, lines[0], fg=theme.AMBER, font=theme.mono(9, bold=True),
+               wraplength=560).pack(anchor="w", pady=(10, 2))
+        for line in lines[1:]:
+            _label(frame, line, fg=theme.MUTED, font=theme.mono(9),
+                   wraplength=560).pack(anchor="w", pady=(0, 2))
 
     def _finish_nav(self, frame) -> None:
         """CLOSE, plus a COPY LOG of its own (ui-onboarding-5, 2026-09-25).
@@ -1877,10 +1901,20 @@ class OnboardWizard:
         _button(win, "CLOSE", win.destroy, primary=True).pack(
             side="right", padx=12, pady=(0, 12))
 
+    def _finish_support_note(self, frame) -> None:
+        """GL-34 / CR-374: both Done pages name where to send a problem."""
+        try:
+            text = steps.support_line(self._site())
+        except Exception:
+            return
+        _label(frame, text, fg=theme.MUTED, font=theme.mono(9),
+               wraplength=560).pack(anchor="w", pady=(10, 0))
+
     def _finish_log_note(self, frame) -> None:
         """Name the install log on the way out (OPS-5). This window is about
         to be closed and everything it showed goes with it; the file is what
         the admin can be asked for a week later."""
+        self._finish_support_note(frame)
         path = steps.install_log_path()
         if path is None:
             return
@@ -1913,6 +1947,7 @@ class OnboardWizard:
         _label(frame, f"dashboard: {self.dashboard_url_var.get().strip()}",
                fg=theme.MUTED, font=theme.mono(10)).pack(anchor="w", pady=(0, 10))
 
+        self._finish_resolve_checklist(frame)
         self._finish_log_note(frame)
         self._finish_nav(frame)
 

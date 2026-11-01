@@ -208,7 +208,8 @@ def test_a_discovery_document_naming_another_issuer_is_refused(tmp_path, idp):
 def test_the_routes_are_inert_without_oidc_configured(tmp_path):
     """Always mounted, never active: a 503 naming the missing variable beats a
     404 that looks like an old build."""
-    settings = Settings(db_path=str(tmp_path / "off.db"), session_secret=STRONG)
+    settings = Settings(db_path=str(tmp_path / "off.db"), session_secret=STRONG,
+                        smb_host="nas.test")  # CR-362: SMB login needs a host
     with TestClient(create_app(settings)) as c:
         resp = c.get("/auth/oidc/login", follow_redirects=False)
         assert resp.status_code == 503 and "DASH_OIDC_ISSUER" in resp.json()["detail"]

@@ -320,6 +320,11 @@ class Sequencer:
         self.lane_b = lane_b
         self.admin = admin
         self.selection = selection
+        # Originals on request (docs/SELECTIVE_ORIGINALS.md 4.2, 2026-10-31):
+        # handed every selection this sequencer reads, so the originals lane
+        # wakes on a pick change. A hook and not a lane in the turn: a 40 GB
+        # original inside the joined A+B turn is the CR-347 shape.
+        self.on_selection: Optional[Any] = None
         self.cfg = cfg
         self.local_root = cfg.get("local_root", "")
         # The fleet-wide asset libraries (the LUT library). Not part of the
@@ -901,6 +906,37 @@ class Sequencer:
         """The slugs ticked upload-only in the current selection."""
         with self._lock:
             return set(self._upload_only_slugs)
+
+    def is_upload_only_subpath(self, subpath: Optional[str]) -> bool:
+        """True when `subpath` (lane A's `Projects/<rel>`, or anything under
+        it) is a project ticked upload-only on this computer.
+
+        GL-13 (CR-366, 2026-10-07): the question lane A asks to decide whether
+        to carry every file rather than video only. Answered from the
+        selection this sequencer already holds -- no network -- and compared
+        NFC, case-folded and slash-normalised (CR-90). Anything it cannot
+        place is False: the narrow video-only rules."""
+        if not subpath:
+            return False
+
+        def _norm(text: str) -> str:
+            import unicodedata
+            return unicodedata.normalize(
+                "NFC", str(text).replace("\\", "/")).strip("/").lower()
+
+        want = _norm(subpath)
+        with self._lock:
+            rels = [
+                _item_rel(self._slug_to_item[slug])
+                for slug in self._upload_only_slugs if slug in self._slug_to_item
+            ]
+        for rel in rels:
+            if not rel:
+                continue
+            root = _norm(f"{PROJECTS_PREFIX}{rel}")
+            if want == root or want.startswith(root + "/"):
+                return True
+        return False
 
     def unconfirmed_slugs(self) -> list[str]:
         """Selected slugs whose .stignore is NOT known to be in place, so
@@ -1524,6 +1560,12 @@ class Sequencer:
         (once per pass, once per project)."""
         result = self.selection.get()
         self._selection_cache = (self._now(), result[0], result[1])
+        hook = self.on_selection
+        if hook is not None and result[0] is not None:
+            try:
+                hook(result[0])
+            except Exception:
+                log.exception("sequencer: the on_selection hook failed")
         return result
 
     def _selection_get_throttled(self) -> tuple[Any, str]:

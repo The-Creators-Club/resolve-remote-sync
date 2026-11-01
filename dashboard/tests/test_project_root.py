@@ -68,35 +68,36 @@ def test_match_project_label_ignores_trivial_numeric_tokens():
     assert f("Season 1 Recap", labels) == "2026/Creator Profiles/Season 1"
 
 
-def test_confident_match_needs_two_tokens_or_an_exact_name():
-    """The live 2026-07-25 miss: 'Nuclear Family Reunion' auto-mapped itself
-    permanently into '2025/FF4/Nuclear' on the single shared word 'nuclear',
-    and every frame that editor shot then had a destination inside an
-    unrelated project. One word is a coincidence, not a match."""
+def test_confident_match_needs_the_exact_name():
+    """2026-07-25: one shared word ('Nuclear Family Reunion' -> 2025/FF4/
+    Nuclear). 2026-10-31 (CR-379): two shared words ('Beyond Nights LUSTY'
+    -> 2026/Beyond Nights). Only the project's own name may auto-map."""
     f = dbmod.match_project_label_confident
-    labels = ["2025/FF4/Nuclear", "2026/Creator Profiles/Season 1"]
+    labels = ["2025/FF4/Nuclear", "2026/Creator Profiles/Season 1", "2026/Beyond Nights"]
 
-    # the incident itself, and its shape in general
+    # partial overlaps, one word or several, never map
     assert dbmod.match_project_label("Nuclear Family Reunion", labels) == "2025/FF4/Nuclear"
     assert f("Nuclear Family Reunion", labels) is None
-    assert f("Season 1 Recap", labels) is None          # one token: 'season'
-    assert f("Profiles of Nobody", labels) is None
+    assert f("CCT Creator Profiles", labels) is None
+    assert f("FF4 Nuclear Cut", labels) is None
+    assert f("Beyond Nights LUSTY", labels) is None
+    assert f("Season 1 Recap", labels) is None
 
-    # (a) two or more shared non-trivial tokens
-    assert f("CCT Creator Profiles", labels) == "2026/Creator Profiles/Season 1"
-    assert f("FF4 Nuclear Cut", labels) == "2025/FF4/Nuclear"
-
-    # (b) the name IS the project: final path segment, or the whole label
+    # the name IS the project: final segment or whole label, case, spacing,
+    # '-' and '_' aside
     assert f("Nuclear", labels) == "2025/FF4/Nuclear"
     assert f("  nuclear  ", labels) == "2025/FF4/Nuclear"
     assert f("Season 1", labels) == "2026/Creator Profiles/Season 1"
     assert f("2025/FF4/Nuclear", labels) == "2025/FF4/Nuclear"
+    assert f("beyond-nights", labels) == "2026/Beyond Nights"
+    assert f("Season 2", labels) is None
 
-    # ...and everything match_project_label already refused stays refused
+    # two folders with that name: a human picks
+    assert f("Shinto", ["2025/FF4/Shinto", "2026/FF5/Shinto"]) is None
+
     assert f("Totally Unrelated", labels) is None
     assert f("2026", labels) is None
     assert f("", labels) is None
-
 
 def test_report_does_not_sticky_map_a_single_token_match(env):
     client, conn = env
@@ -137,10 +138,10 @@ def test_first_match_is_sticky(env):
     headers = report_headers()
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))  # login gate
     assert client.post("/api/v1/report", headers=headers,
-                       json=report("CCT Creator Profiles")).status_code == 200
+                       json=report("Season 1")).status_code == 200
     roots = client.get("/api/v1/project-roots").json()["project_roots"]
     assert roots == [{
-        "resolve_project": "CCT Creator Profiles",
+        "resolve_project": "Season 1",
         "slug": "2026-creator-profiles-season-1",
         "rel_path": "2026/Creator Profiles/Season 1",
         "source": "auto", "updated_by": "auto", "updated_at": roots[0]["updated_at"],
@@ -148,10 +149,10 @@ def test_first_match_is_sticky(env):
 
     # A later report cannot change the stored mapping, even if matching would
     # now produce something else (rename the tree label to force a difference).
-    dbmod.upsert_project(conn, "2025-ff4-nuclear", "2025/CCT Creator Profiles/Nuclear",
+    dbmod.upsert_project(conn, "2025-ff4-nuclear", "2025/Season 1/Nuclear",
                          "/x", dbmod.utcnow_iso())
     conn.commit()
-    client.post("/api/v1/report", headers=headers, json=report("CCT Creator Profiles"))
+    client.post("/api/v1/report", headers=headers, json=report("Season 1"))
     roots = client.get("/api/v1/project-roots").json()["project_roots"]
     assert roots[0]["slug"] == "2026-creator-profiles-season-1"
     assert roots[0]["source"] == "auto"
@@ -164,9 +165,9 @@ def test_first_match_is_sticky(env):
 def test_admin_only_changes(env):
     client, _ = env
     headers = report_headers()
-    client.post("/api/v1/report", headers=headers, json=report("CCT Creator Profiles"))
+    client.post("/api/v1/report", headers=headers, json=report("Season 1"))
 
-    body = {"resolve_project": "CCT Creator Profiles", "slug": "2025-ff4-nuclear"}
+    body = {"resolve_project": "Season 1", "slug": "2025-ff4-nuclear"}
     assert client.put("/api/v1/project-roots", json=body).status_code == 401
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
     assert client.put("/api/v1/project-roots", json=body).status_code == 403
@@ -180,10 +181,10 @@ def test_admin_only_changes(env):
 
     # unknown slug rejected; remove -> re-detected on next report
     assert client.put("/api/v1/project-roots",
-                      json={"resolve_project": "CCT Creator Profiles", "slug": "nope"}
+                      json={"resolve_project": "Season 1", "slug": "nope"}
                       ).status_code == 404
     client.put("/api/v1/project-roots",
-               json={"resolve_project": "CCT Creator Profiles", "slug": None})
+               json={"resolve_project": "Season 1", "slug": None})
     assert client.get("/api/v1/project-roots").json()["project_roots"] == []
 
 
@@ -216,11 +217,11 @@ def test_unmatched_projects_surface_for_admin(env):
 def test_queue_shows_fixed_root_read_only(env):
     client, _ = env
     headers = report_headers()
-    client.post("/api/v1/report", headers=headers, json=report("CCT Creator Profiles"))
+    client.post("/api/v1/report", headers=headers, json=report("Season 1"))
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
     page = client.get("/")
     assert "open in Resolve:" in page.text
-    assert "CCT Creator Profiles" in page.text
+    assert "Season 1" in page.text
     assert "matched by itself, then kept" in page.text
     # read-only for a non-admin: no form that changes the root on home
     assert 'hx-post="/partials/project-roots"' not in page.text
@@ -284,3 +285,83 @@ def test_root_rel_validation(browse_env):
         "resolve_project": "Doc", "root_rel": "../escape"}).status_code == 422
     assert client.post("/partials/project-roots", data={
         "resolve_project": "Doc", "root_rel": "2026/Nope"}).status_code == 404
+
+
+# --- CR-379 (2026-10-31): an unregistered folder that matches as well blocks
+# the sticky auto-map. "Beyond Nights LUSTY" was mapped permanently into the
+# registered "2026/Beyond Nights" while its own folder, "2026/Beyond Night
+# LUSTY" (no marker yet), scored just as well and was never consulted.
+
+def test_unregistered_rival_blocks_a_same_name_match():
+    f = dbmod.unregistered_rivals
+    assert f("Shinto", "2025/FF4/Shinto", ["2026", "2026/FF5", "2026/FF5/Shinto"]) == [
+        "2026/FF5/Shinto"]
+    assert f("Shinto", "2025/FF4/Shinto", ["2026/FF5/Shinto Recut"]) == []
+    # a container of the match is never a rival
+    assert f("FF4", "2025/FF4", ["2025"]) == []
+
+def _marker(directory, slug):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / ".ccsync-project").write_text('{"slug": "%s"}' % slug, encoding="utf-8")
+
+
+def test_scan_unregistered_dirs_skips_projects_and_containers(tmp_path):
+    from ccsync_dashboard import provision
+    _marker(tmp_path / "2026" / "Beyond Nights", "2026-beyond-nights")
+    (tmp_path / "2026" / "Beyond Nights" / "Footage").mkdir()
+    (tmp_path / "2026" / "Beyond Night LUSTY").mkdir()
+    (tmp_path / "2026" / ".hidden").mkdir()
+    (tmp_path / "Loose").mkdir()
+    assert provision.scan_unregistered_dirs(tmp_path) == [
+        "2026/Beyond Night LUSTY", "Loose"]
+
+
+@pytest.fixture
+def tree_env(tmp_path):
+    projects = tmp_path / "Projects"
+    _marker(projects / "2026" / "Beyond Nights", "2026-beyond-nights")
+    (projects / "2026" / "Beyond Night LUSTY").mkdir(parents=True)
+    settings = Settings(db_path=str(tmp_path / "r.db"), session_secret=SECRET,
+                        report_token=TOKEN, admin_users=frozenset({"owen"}),
+                        projects_dir=str(projects))
+    app = create_app(settings)
+    with TestClient(app) as client:
+        conn = dbmod.connect(tmp_path / "r.db")
+        dbmod.upsert_project(conn, "2026-beyond-nights", "2026/Beyond Nights", "/x",
+                             dbmod.utcnow_iso())
+        conn.commit()
+        yield client, conn, projects
+        conn.close()
+
+
+def test_report_asks_for_a_partial_name(tree_env):
+    """The live case: 'Beyond Nights LUSTY' must never land in Beyond Nights."""
+    client, conn, _ = tree_env
+    resp = client.post("/api/v1/report", headers=report_headers(),
+                       json=report("Beyond Nights LUSTY"))
+    assert resp.status_code == 200
+    assert resp.json()["resolve_project_unmapped"] == "Beyond Nights LUSTY"
+    assert conn.execute("SELECT COUNT(*) c FROM project_roots").fetchone()["c"] == 0
+
+
+def test_report_asks_when_an_unregistered_folder_has_the_same_name(tree_env):
+    client, conn, projects = tree_env
+    (projects / "2025" / "Beyond Nights").mkdir(parents=True)
+    from ccsync_dashboard import api as apimod
+    apimod._UNREGISTERED_CACHE.clear()
+    resp = client.post("/api/v1/report", headers=report_headers(),
+                       json=report("Beyond Nights"))
+    assert resp.json()["resolve_project_unmapped"] == "Beyond Nights"
+    assert conn.execute("SELECT COUNT(*) c FROM project_roots").fetchone()["c"] == 0
+
+
+def test_report_still_auto_maps_the_exact_name(tree_env):
+    client, conn, _ = tree_env
+    from ccsync_dashboard import api as apimod
+    apimod._UNREGISTERED_CACHE.clear()
+    resp = client.post("/api/v1/report", headers=report_headers(),
+                       json=report("Beyond Nights"))
+    assert "resolve_project_unmapped" not in resp.json()
+    row = conn.execute("SELECT project_slug FROM project_roots WHERE resolve_project=?",
+                       ("Beyond Nights",)).fetchone()
+    assert row["project_slug"] == "2026-beyond-nights"

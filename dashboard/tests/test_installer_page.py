@@ -78,9 +78,10 @@ def test_the_windows_pick_prepares_the_editor_for_smartscreen(env):
     assert sha[:16] in windows
 
 
-def test_the_mac_pick_does_not_carry_the_windows_warning(env):
-    """macOS meets Gatekeeper, not SmartScreen, and START_HERE.md is where
-    that one is explained."""
+def test_the_mac_pick_walks_through_gatekeeper_not_smartscreen(env):
+    """CR-373 / GL-30 (2026-10-07): the beta is unsigned on both platforms.
+    macOS meets Gatekeeper, not SmartScreen, and the page says where Open
+    Anyway lives instead of leaving a Mac editor at a refusal."""
     client, _conn, _settings = env
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     _publish(client, platform="macos", body=b"mac-installer")
@@ -88,6 +89,21 @@ def test_the_mac_pick_does_not_carry_the_windows_warning(env):
     page = _page(client)
     macos = page.split('id="win-installer-macos"', 1)[1]
     # The Mac package really is drawn in that window (not the empty state),
-    # so the absence below is about the warning, not about an empty window.
+    # so the assertions below are about the note, not about an empty window.
     assert "Download for macOS" in macos
     assert "Windows protected your PC" not in macos
+    for needle in ("not notarised", "System Settings", "Privacy &amp; Security",
+                   "Open Anyway"):
+        assert needle in macos, needle
+
+
+def test_the_windows_pick_says_unsigned_and_gives_the_steps(env):
+    client, _conn, _settings = env
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
+    _publish(client)
+    page = _page(client)
+    windows = page.split('id="win-installer-windows"', 1)[1].split(
+        'id="win-installer-macos"', 1)[0]
+    for needle in ("not code-signed", "no verified publisher", "Unblock",
+                   "Smart App Control", "Run anyway"):
+        assert needle in windows, needle

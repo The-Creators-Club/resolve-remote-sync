@@ -79,6 +79,7 @@ VENV_DIR = Path(os.environ.get("CCSYNC_VENV_DIR") or "/venv")
 CODE_DIR = DATA_DIR / "code"
 CURRENT_JSON = CODE_DIR / "current.json"
 BOOT_ATTEMPTS = CODE_DIR / "boot_attempts.json"
+NO_AUTO_APPLY = CODE_DIR / "no_auto_apply.json"
 RUNTIME_ID_FILE = VENV_DIR / ".runtime-id"
 
 # MUST match dashboard_update.MAX_BOOT_ATTEMPTS. Two files, one number, and no
@@ -186,6 +187,31 @@ def release_pubkeys() -> tuple[str, ...]:
     means the image boots -- exactly as an unconfigured dashboard refuses
     every publish (release_trust.verify_record's own rule)."""
     raw = os.environ.get("DASH_RELEASE_PUBKEYS", "")
+    # CR-362 / GL-02 (2026-10-07): the appliance carries no key in its compose
+    # and the image holds the vendor's (vendor_defaults.py, stdlib-only so it
+    # loads before the app does). Same present-wins rule as Settings.from_env:
+    # a studio deploy that sets the variable, even empty, is untouched.
+    if not raw.strip():
+        # CR-363 / GL-07 round 2 (2026-10-07): a key pasted into the wizard is
+        # stored in <data>/secrets/appliance_config.json and applied to the
+        # app's environment at app boot (appliance_config.apply_overlay), which
+        # is AFTER this script runs. Read the same file here (stdlib JSON, env
+        # wins) or a verified bundle would be accepted by the app and refused
+        # by the boot-time verifier for ever.
+        try:
+            stored = json.loads((DATA_DIR / "secrets" / "appliance_config.json")
+                                .read_text(encoding="utf-8"))
+            if isinstance(stored, dict):
+                raw = str(stored.get("DASH_RELEASE_PUBKEYS") or "")
+        except (OSError, ValueError):
+            raw = ""
+    if not raw.strip() and "DASH_RELEASE_PUBKEYS" not in os.environ:
+        try:
+            sys.path.insert(0, str(APP_ROOT / "src"))
+            from ccsync_dashboard import vendor_defaults
+            raw = vendor_defaults.pubkeys_raw(os.environ)
+        except Exception:                                             # noqa: BLE001
+            raw = ""
     return tuple(k.strip() for k in raw.replace(",", " ").split() if k.strip())
 
 
@@ -438,6 +464,33 @@ def revert(current: dict, reason: str) -> None:
         "reverted_reason": reason,
     })
     write_json(BOOT_ATTEMPTS, {"version": "", "attempts": 0})
+    # CR-369 / GL-20 (2026-10-07): the durable "do not auto-apply this again"
+    # note. current.json's reverted_from says the same thing but is rewritten
+    # by the next apply or rollback; this file is read by the release-feed
+    # poller (release_feed._dashboard_auto_apply_reason), which used to see a
+    # clean "done" step, a soaked bundle and re-applied the crash-looping
+    # version 10 s after every revert, for ever. Cleared by an admin's own
+    # APPLY (dashboard_update.start_apply); a different (newer) offered
+    # version simply does not match it.
+    failed = str(current.get("version") or "")
+    if failed:
+        from datetime import datetime, timezone
+        # Per-version map, ADDED to (CR-369 round 2): a second revert or an
+        # admin rollback must not forget the first crash-looping version.
+        old = read_json(NO_AUTO_APPLY)
+        entries = {}
+        if str(old.get("version") or ""):
+            entries[str(old["version"])] = {"reason": str(old.get("reason") or ""),
+                                            "at": str(old.get("at") or "")}
+        if isinstance(old.get("versions"), dict):
+            for v, e in old["versions"].items():
+                e = e if isinstance(e, dict) else {}
+                entries[str(v)] = {"reason": str(e.get("reason") or ""),
+                                   "at": str(e.get("at") or "")}
+        entry = {"reason": reason,
+                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        entries[failed] = entry
+        write_json(NO_AUTO_APPLY, {"versions": entries, "version": failed, **entry})
     say(f"REVERTED to {previous or 'the image'}: {reason}")
 
 

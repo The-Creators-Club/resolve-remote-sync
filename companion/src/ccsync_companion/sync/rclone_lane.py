@@ -938,8 +938,56 @@ def _is_same_local_path(a: Optional[Path], b: Optional[Path]) -> bool:
         return False
 
 
-def build_filter_rules_up(exclude_paths: Optional[Iterable[str]] = None) -> list[str]:
+# GL-13 (CR-366, 2026-10-07): the names an upload-only tick's lane A still
+# refuses even though it now carries every other file. Each is either a
+# half-written file (a `.partial`/`.tmp`/`.lock`/`.part`/`.ytdl`, which
+# `--ignore-existing` would make the permanent NAS copy) or already excluded
+# for the video lane (AppleDouble, file-move staging, ytdl work files).
+# Anything else in the folder is carried; anything here is named, never
+# silently deleted, by the removal gate.
+CARRY_ALL_NAME_EXCLUDE_RULES = [
+    *IN_PROGRESS_EXCLUDE_RULES, "- *.part", "- *.ytdl",
+    # CR-366 round 2 (2026-10-07): a half-copied file the fixer left behind
+    # and a yt-dlp fragment would otherwise become the permanent NAS copy.
+    "- *.ccsync-tmp", "- *.part-Frag*",
+]
+# Files nobody authored: not worth an override prompt. Compared lower-case.
+LOCAL_IGNORABLE_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+# CR-366 round 2 (GL-13, 2026-10-07): the carry-all lane must agree with
+# scan_local_tree that OS litter is nobody's work. Without these rules lane A
+# uploaded a Finder-rewritten .DS_Store and the strict size check flagged it
+# as a same-name/different-size file, blocking almost every Mac removal and
+# teaching the editor to type the override. Unanchored, so any depth;
+# --ignore-case makes them case-insensitive like LOCAL_IGNORABLE_NAMES.
+CARRY_ALL_LITTER_RULES = ["- .DS_Store", "- Thumbs.db", "- desktop.ini"]
+# Syncthing's own folder state. A project that WAS a full tick holds
+# .stfolder/, .stignore and .stversions/ (editor folders carry 30-day
+# versioning); switched to upload-only, carry-all would push them into the
+# server's own versioning tree. Both root and nested forms, because rclone's
+# `**/` needs a leading component.
+CARRY_ALL_SYNCTHING_RULES = [
+    "- .stversions/**", "- **/.stversions/**",
+    "- .stfolder/**", "- **/.stfolder/**",
+    "- .stignore",
+]
+SYNCTHING_STATE_DIRS = frozenset({".stversions", ".stfolder"})
+# GL-12: a camera clock this far ahead of the machine's own is "in the
+# future". 300 s clears ordinary skew; a timezone slip (30 min to 15 h) and a
+# reset-to-a-future-year camera are far beyond it.
+FUTURE_DATED_TOLERANCE_SECONDS = 300
+
+
+def build_filter_rules_up(
+    exclude_paths: Optional[Iterable[str]] = None, carry_all: bool = False,
+) -> list[str]:
     """Lane A: video files anywhere EXCEPT under a Proxy/ dir, nothing else.
+
+    `carry_all` (GL-13, CR-366, 2026-10-07; docs/UPLOAD_ONLY_TICK.md section
+    5): an upload-only tick has no lane C, so lane A is the only door its
+    files have. For that project's runs the `+ *<video ext>` list becomes
+    `+ *` and every file goes up except the junk and half-written names in
+    CARRY_ALL_NAME_EXCLUDE_RULES. Proxy/ stays out: it is lane B's, and the
+    server makes proxies itself.
 
     Both the nested (`**/Proxy/**`) and root-level (`/Proxy/**`) forms are
     needed: rclone's `**/` requires at least one leading path component, so
@@ -969,7 +1017,14 @@ def build_filter_rules_up(exclude_paths: Optional[Iterable[str]] = None) -> list
     rules += ["- **/Proxy/**", "- /Proxy/**"]
     rules += YTDL_WORK_EXCLUDE_RULES
     rules.append(MOVE_STAGING_EXCLUDE_RULE)
-    rules += [f"+ *{ext}" for ext in VIDEO_EXTS]
+    if carry_all:
+        rules.append(TRASH_EXCLUDE_RULE)
+        rules += CARRY_ALL_NAME_EXCLUDE_RULES
+        rules += CARRY_ALL_LITTER_RULES
+        rules += CARRY_ALL_SYNCTHING_RULES
+        rules.append("+ *")
+    else:
+        rules += [f"+ *{ext}" for ext in VIDEO_EXTS]
     rules.append("- **")
     return rules
 
@@ -1810,8 +1865,14 @@ def scan_pending_uploads(
     in a dialog asking the editor to go and check the dashboard themselves.
 
     Built from build_up_command so the ANSWER MATCHES THE LANE: same filter
-    rules, same --min-age/--min-size floors, same --ignore-existing. A file
-    the lane would never upload must not block a removal.
+    rules, same --min-size floor, same --ignore-existing. A file the lane
+    would never upload must not block a removal.
+
+    EXCEPT --min-age (GL-12, CR-366, 2026-10-07). It is dropped here: the
+    lane's age floor only says "not yet", and a file under two minutes old
+    (a card ingest still landing) or dated in the future by a wrong camera
+    clock (which the floor refuses for ever) has not reached the server
+    either way. Reading it as "nothing pending" deleted that footage.
 
     Returns {"count", "samples"} or None when the probe failed -- and None is
     load-bearing: the caller must refuse the removal on it, because "I could
@@ -1821,7 +1882,7 @@ def scan_pending_uploads(
         return None
     cmd = build_up_command(
         rclone_path, local_root, remote, remote_root, filter_file,
-        transfers=1, subpath=subpath, tuning=tuning,
+        transfers=1, subpath=subpath, tuning=tuning, apply_min_age=False,
     ) + ["--dry-run"]
     runner = run_fn or _run_capture
     try:
@@ -1911,6 +1972,286 @@ def scan_size_mismatches(
         return None
     names = [line.strip() for line in output.splitlines() if line.strip()]
     return {"count": len(names), "samples": names[:max_samples]}
+
+
+# Stderr lines `rclone check --one-way --combined -` prints for the answers
+# the strict scan below understands. Measured against the bundled 1.74.4
+# (2026-10-07): a name the NAS holds at another size is "ERROR : <name>:
+# sizes differ", one it lacks is "ERROR : <name>: file not in <remote>", a
+# destination directory that does not exist yet is "ERROR : <remote>: error
+# reading destination root directory: directory not found" (exit 3), and an
+# unreachable server is a CRITICAL with exit 1 and nothing on stdout -- which
+# is why exit codes alone cannot be trusted here.
+_CHECK_BENIGN_ERRORS = (
+    "sizes differ", ": file not in ",
+    "error reading destination root directory: directory not found",
+)
+
+
+def scan_size_mismatches_strict(
+    rclone_path: str,
+    local_root: str,
+    remote: str,
+    remote_root: str,
+    filter_file: Path,
+    subpath: Optional[str] = None,
+    run_fn: Optional[Callable[[list[str], float], Optional[tuple[int, str, str]]]] = None,
+    timeout: float = 600.0,
+    max_samples: int = 20,
+) -> Optional[dict]:
+    """scan_size_mismatches for the REMOVAL GATE: same question (which local
+    files share a name with a NAS file of another size, so lane A's
+    --ignore-existing will never upload them), but it returns None -- "could
+    not tell" -- unless the check demonstrably ran.
+
+    GL-14 (CR-366, 2026-10-07; PL-RES-02). The advisory scan treats an empty
+    answer as zero, and its own docstring says that is why it must not gate
+    anything destructive. This one reads `--combined -` (a `* name` line is a
+    size difference) and refuses to answer when any stderr ERROR line is not
+    one of the shapes in _CHECK_BENIGN_ERRORS, when a CRITICAL is present, or
+    when the exit code is not 0/1/3.
+
+    Returns {"count", "samples"} or None."""
+    if not remote or not remote_root:
+        return None
+    validate_filter_file(filter_file)
+    local_sub = _local_subpath(subpath)
+    local_side = str(Path(local_root) / local_sub) if local_sub else str(local_root)
+    remote_side = f"{remote}:{_join_remote_path(remote_root, subpath or '')}"
+    cmd = [
+        rclone_path, "check", local_side, remote_side,
+        "--filter-from", str(filter_file),
+        "--ignore-case",
+        "--size-only",
+        "--one-way",
+        "--combined", "-",
+        *_transport_flags(),
+    ]
+    runner = run_fn or _run_check_strict
+    try:
+        result = runner(cmd, timeout)
+    except Exception as exc:
+        log.warning("strict size-mismatch check failed for %s: %s", subpath, exc)
+        return None
+    if result is None:
+        return None
+    returncode, stdout_text, stderr_text = result
+    if returncode not in (0, 1, 3):
+        return None
+    for line in str(stderr_text).splitlines():
+        if "CRITICAL" in line:
+            return None
+        if " ERROR " in line and not any(tok in line for tok in _CHECK_BENIGN_ERRORS):
+            return None
+    if returncode == 3 and "error reading destination root directory" not in str(stderr_text):
+        return None
+    names = [
+        line[2:].strip() for line in str(stdout_text).splitlines()
+        if line.startswith("* ") and line[2:].strip()
+    ]
+    return {"count": len(names), "samples": names[:max_samples]}
+
+
+def _run_check_strict(cmd: list[str], timeout: float) -> Optional[tuple[int, str, str]]:
+    """(returncode, stdout, stderr) of an `rclone check`, never judged here."""
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        timeout=timeout,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_win_creationflags(),
+    )
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+# Names a FULL tick's lane C will not carry (syncthing_admin.STIGNORE_LINES
+# minus the video extensions and Proxy, which are handled by their own tests).
+_LANE_C_IGNORED_SUFFIXES = (".part", ".ytdl", ".ccsync-tmp")
+
+
+def _dry_run_names(
+    cmd: list[str], timeout: float,
+    run_fn: Optional[Callable[[list[str], float], tuple[int, str]]],
+) -> Optional[set[str]]:
+    """Every file a dry-run `copy` says it would transfer, or None when the
+    probe did not demonstrably run (non-zero exit, exception)."""
+    runner = run_fn or _run_capture
+    try:
+        returncode, stderr_text = runner(cmd, timeout)
+    except Exception as exc:
+        log.warning("dry-run probe failed: %s", exc)
+        return None
+    if returncode != 0:
+        log.warning("dry-run probe exited %s: %s", returncode, _stderr_for_log(stderr_text))
+        return None
+    names: set[str] = set()
+    for line in stderr_text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if _DRY_RUN_SKIP in str(record.get("msg", "")).lower():
+            obj = str(record.get("object") or "")
+            if obj:
+                names.add(obj)
+    return names
+
+
+def scan_edited_since_upload(
+    rclone_path: str,
+    local_root: str,
+    remote: str,
+    remote_root: str,
+    filter_file: Path,
+    subpath: Optional[str] = None,
+    run_fn: Optional[Callable[[list[str], float], tuple[int, str]]] = None,
+    timeout: float = 300.0,
+    max_samples: int = 20,
+    tuning: Optional["RcloneTuning"] = None,
+) -> Optional[dict]:
+    """Files the server holds at the SAME size whose local copy is NEWER.
+
+    GL-13 round 2 (CR-366, 2026-10-07). Lane A is `copy --ignore-existing`:
+    once a name is on the server an edit never goes up. For video that is a
+    re-export (a size change the strict check sees); for the documents,
+    project files and WAVs an upload-only tick now carries, a same-size edit
+    (a gain-normalised WAV, a fixed-size project file) is invisible to a size
+    comparison. rclone's `copy --update` skips only files whose destination is
+    NEWER, so a dry run of it lists the missing files, the size changes and the
+    locally-newer ones; subtracting what the ignore-existing dry run lists
+    (missing files, already pending) leaves the edits. Lane A sets the
+    modification time on upload, so an untouched file matches.
+
+    Returns {"count", "samples"} or None ("could not tell"; fail closed)."""
+    if not remote or not remote_root:
+        return None
+    base = build_up_command(
+        rclone_path, local_root, remote, remote_root, filter_file,
+        transfers=1, subpath=subpath, tuning=tuning, apply_min_age=False,
+    ) + ["--dry-run"]
+    update_cmd = ["--update" if arg == "--ignore-existing" else arg for arg in base]
+    if "--update" not in update_cmd:
+        return None
+    would_update = _dry_run_names(update_cmd, timeout, run_fn)
+    if would_update is None:
+        return None
+    pending = _dry_run_names(base, timeout, run_fn)
+    if pending is None:
+        return None
+    names = sorted(would_update - pending)
+    return {"count": len(names), "samples": names[:max_samples]}
+
+
+def _carry_all_name_ok(basename: str) -> bool:
+    """True when an upload-only run's lane A would carry a file by this name
+    (the name half of build_filter_rules_up(carry_all=True))."""
+    if basename.startswith("._") or basename.startswith(MOVE_STAGING_PREFIX):
+        return False
+    if any(rx.match(basename) for rx in YTDL_WORK_EXCLUDE_RES):
+        return False
+    return not any(rx.match(basename) for rx in CARRY_ALL_NAME_EXCLUDE_RES)
+
+
+def scan_local_tree(
+    local_root: str,
+    subpath: Optional[str],
+    carry_all: bool,
+    now: Optional[float] = None,
+    max_samples: int = 20,
+) -> dict:
+    """What is on THIS disk under `subpath` that lane A will not carry, and
+    what it carries but dated in the future. Local only: no rclone, no NAS.
+
+    GL-12 / GL-13 (CR-366, 2026-10-07). Two things the removal gate needs
+    that no remote listing can give it:
+
+      * `uncarried` -- files no lane carries. Upload-only (`carry_all`): a
+        name lane A still refuses (a half-written `.tmp`, a ytdl work file).
+        Full tick: lane C carries non-video files except the in-progress
+        suffixes STIGNORE_LINES ignores, and lane A carries video except what
+        path_matches_lane_a_filter refuses (ytdl work files, move staging);
+        lane C ignores every video extension, so a refused video name is
+        carried by nobody and is named here too. Proxy/ is lane B's, regenerated by the
+        server, and OS litter (`.DS_Store`, AppleDouble `._*`, Thumbs.db,
+        `.partial`) is nobody's work: neither counts. A 0-byte file holds
+        nothing and the lane's --min-size would never move it either.
+      * `future` -- files lane A WOULD carry whose modification time is more
+        than FUTURE_DATED_TOLERANCE_SECONDS ahead of this machine's clock.
+        rclone's --min-age floor is `now - mtime >= 120 s`, so these never
+        become old enough and never upload (a camera still on another
+        timezone, or reset to a future year).
+
+    A directory that does not exist yields zeros (nothing to lose). A read
+    error RAISES: the caller fails closed."""
+    now = time.time() if now is None else float(now)
+    local_sub = _local_subpath(subpath)
+    base = Path(local_root) / local_sub if local_sub else Path(local_root)
+    out = {
+        "uncarried": {"count": 0, "samples": []},
+        "future": {"count": 0, "samples": []},
+        # The first future-dated file's modification time (epoch seconds), so
+        # the tray line can name its date. Kept out of "future" so that
+        # bucket stays {count, samples} like the other.
+        "future_first_mtime": None,
+    }
+    if not base.is_dir():
+        return out
+
+    def _raise(exc: OSError) -> None:
+        raise exc
+
+    for dirpath, dirnames, filenames in os.walk(base, onerror=_raise):
+        dirnames[:] = [
+            d for d in dirnames
+            if d.lower() != "proxy" and d != TRASH_DIR_NAME
+            and d.lower() not in SYNCTHING_STATE_DIRS
+        ]
+        rel_dir = os.path.relpath(dirpath, base)
+        for name in filenames:
+            rel = name if rel_dir == "." else f"{rel_dir}/{name}".replace("\\", "/")
+            lowered = name.lower()
+            if (lowered in LOCAL_IGNORABLE_NAMES or name.startswith("._")
+                    or lowered.endswith(PARTIAL_SUFFIX) or lowered == ".stignore"):
+                continue
+            st = os.stat(os.path.join(dirpath, name))
+            if st.st_size <= 0:
+                continue
+            # Who carries this name? Upload-only: lane A, every name but the
+            # refused ones. Full tick: lane A for video (path_matches_lane_a_
+            # filter, which refuses ytdl work files and move staging), lane C
+            # for everything else except what STIGNORE_LINES ignores (.part,
+            # .ytdl, .ccsync-tmp, .part-Frag*). A refused VIDEO name is the
+            # hole round 2 closed: lane C ignores every video extension, so
+            # `Interview.original.mov` was carried by nobody on a full tick.
+            if carry_all:
+                lane_a = _carry_all_name_ok(name)
+                uncarried = not lane_a
+            elif os.path.splitext(name)[1].lower() in VIDEO_EXTS:
+                lane_a = path_matches_lane_a_filter(rel)
+                uncarried = not lane_a
+            else:
+                lane_a = False
+                uncarried = lowered.endswith(_LANE_C_IGNORED_SUFFIXES) or ".part-frag" in lowered
+            if uncarried:
+                bucket = out["uncarried"]
+                bucket["count"] += 1
+                if len(bucket["samples"]) < max_samples:
+                    bucket["samples"].append(rel)
+                continue
+            if not lane_a:
+                continue
+            if st.st_mtime - now > FUTURE_DATED_TOLERANCE_SECONDS:
+                bucket = out["future"]
+                if out["future_first_mtime"] is None:
+                    out["future_first_mtime"] = float(st.st_mtime)
+                bucket["count"] += 1
+                if len(bucket["samples"]) < max_samples:
+                    bucket["samples"].append(rel)
+    return out
 
 
 def _run_check(cmd: list[str], timeout: float) -> Optional[str]:
@@ -2014,10 +2355,19 @@ def build_up_command(
     max_duration_seconds: float | None = None,
     tuning: Optional[RcloneTuning] = None,
     partial_suffix: str | None = None,
+    apply_min_age: bool = True,
 ) -> list[str]:
     """`partial_suffix` is given only while a handed-off run of this lane is
     still writing (see HANDOFF_PARTIAL_SUFFIX_FMT); otherwise rclone's own
-    default applies and the argv is what it always was."""
+    default applies and the argv is what it always was.
+
+    `apply_min_age=False` drops --min-age and ONLY that. Just the removal
+    gate's dry run asks for it (GL-12, CR-366, 2026-10-07): the age floor
+    decides what the lane uploads NOW, and a file it will not touch yet
+    (under two minutes old, or dated in the future by a wrong camera clock)
+    is exactly a file that has not reached the server. --min-size stays: a
+    0-byte file holds nothing to lose and the lane never uploads it. A run
+    that moves bytes never passes the flag."""
     validate_filter_file(filter_file)
     tuning = tuning if tuning is not None else RcloneTuning()
     local_sub = _local_subpath(subpath)
@@ -2025,6 +2375,13 @@ def build_up_command(
     remote_side = (
         f"{remote}:{_join_remote_path(remote_root, subpath)}" if subpath else f"{remote}:{remote_root}"
     )
+    min_age_flags: list[str] = []
+    if apply_min_age:
+        # LANE_A_MIN_AGE is 120s, not SPEC's 30s -- see the constant. rclone
+        # does catch a mid-write read (hash mismatch, .partial removed), but
+        # only after wasting the whole transfer upstream and painting the
+        # lane red with "corrupted on transfer" (AUDIT_2 L-14).
+        min_age_flags = ["--min-age", LANE_A_MIN_AGE]
     cmd = [
         rclone_path,
         "copy",
@@ -2035,11 +2392,7 @@ def build_up_command(
         "--ignore-case",  # rclone filters are case-sensitive by default;
         # without this, uppercase camera extensions (CLIP.MOV) and a
         # lowercase-cased "proxy/" dir slip past the filter rules entirely.
-        # LANE_A_MIN_AGE is 120s, not SPEC's 30s -- see the constant. rclone
-        # does catch a mid-write read (hash mismatch, .partial removed), but
-        # only after wasting the whole transfer upstream and painting the
-        # lane red with "corrupted on transfer" (AUDIT_2 L-14).
-        "--min-age", LANE_A_MIN_AGE,
+        *min_age_flags,
         # COMP-GUARD-1 (2026-08-14): --ignore-existing above is what makes an
         # empty upload PERMANENT -- the first version of a name to land on the
         # NAS is the only one that will, so a 0-byte final stranded by a hard
@@ -2095,6 +2448,9 @@ def _basename_rule_regex(rule: str) -> "re.Pattern[str]":
 # Compiled once: this runs on every watchdog event, thousands a minute during
 # a card ingest.
 YTDL_WORK_EXCLUDE_RES = [_basename_rule_regex(rule) for rule in YTDL_WORK_EXCLUDE_RULES]
+CARRY_ALL_NAME_EXCLUDE_RES = [
+    _basename_rule_regex(rule) for rule in CARRY_ALL_NAME_EXCLUDE_RULES
+]
 
 
 def path_matches_lane_a_filter(path: str) -> bool:
@@ -2867,6 +3223,7 @@ class RcloneLane(LaneAdapter):
         disk_floor: Optional["lane_guard.DiskFloorLatch"] = None,
         remote_list_fn: Optional[Callable[[list[str], float], Optional[str]]] = None,
         extra_excludes_fn: Optional[Callable[[Optional[str]], list[str]]] = None,
+        carry_all_fn: Optional[Callable[[Optional[str]], bool]] = None,
         locator: Optional["server_locate.ServerLocator"] = None,
         project_rel_fn: Optional[Callable[[str], Optional[str]]] = None,
         on_relocated: Optional[Callable[[str, str], None]] = None,
@@ -2879,6 +3236,12 @@ class RcloneLane(LaneAdapter):
         # still sitting at the old path re-uploads itself on the next pass,
         # undoing the admin's move (docs/FILE_MOVES.md, 2026-08-27).
         self.extra_excludes_fn = extra_excludes_fn
+        # GL-13 (CR-366, 2026-10-07): "is this subpath an UPLOAD-ONLY project
+        # on this computer?" -- for which lane A carries every file, not just
+        # video, because that tick has no lane C (docs/UPLOAD_ONLY_TICK.md
+        # section 5). Unset / raising / False all mean the video-only rules
+        # every lane A has always used.
+        self.carry_all_fn = carry_all_fn
         self.name = "lane_a_video_up" if direction == DIRECTION_UP else "lane_b_proxy_down"
         self.local_root = local_root
         self.remote = remote
@@ -2983,6 +3346,10 @@ class RcloneLane(LaneAdapter):
 
         self._state_dir = state_dir or (Path.home() / ".ccsync" / "state")
         self._filter_file = self._state_dir / f"filter_{direction}.txt"
+        # A SEPARATE file for the carry-all rules (GL-13): the video-only
+        # file's content must never flip under a run that is about to parse
+        # it, and rclone reads --filter-from once, at startup.
+        self._filter_file_all = self._state_dir / f"filter_{direction}_all.txt"
         self._project_dirs_file = self._state_dir / PROJECT_DIRS_FILENAME
 
         # -- lane B circuit breaker (COMMERCIAL_READINESS.md item 9) ------
@@ -3029,6 +3396,8 @@ class RcloneLane(LaneAdapter):
         # will never upload (see scan_size_mismatches). Refreshed on the
         # orphan-scan cadence, reported and surfaced -- never acted on.
         self._size_mismatches: Optional[dict] = None
+        # GL-12: files lane A would carry but whose mtime is in the future.
+        self._future_dated_by_sub: dict[str, dict] = {}
         # UX-3: project dirs this lane has actually run against, so a source
         # that vanishes is told apart from one that was never here. On disk
         # (state_dir/project_dirs.json), not in memory: the restart that
@@ -3228,13 +3597,33 @@ class RcloneLane(LaneAdapter):
         }
 
     # -- filter file -------------------------------------------------
-    def _ensure_filter_file(self, exclude_paths: Optional[Iterable[str]] = None) -> Path:
+    def carries_everything(self, subpath: Optional[str]) -> bool:
+        """True when lane A carries EVERY file under `subpath`, not only
+        video (GL-13): the project is an upload-only tick on this computer.
+        Lane A only; a failing question reads False, the narrow rules."""
+        if self.direction != DIRECTION_UP or self.carry_all_fn is None or not subpath:
+            return False
+        try:
+            return bool(self.carry_all_fn(subpath))
+        except Exception:
+            log.exception("%s: carry_all_fn failed -- using the video-only rules", self.name)
+            return False
+
+    def _ensure_filter_file(
+        self, exclude_paths: Optional[Iterable[str]] = None,
+        subpath: Optional[str] = None, carry_all: bool = False,
+    ) -> Path:
+        # A caller that already knows the project is an upload-only tick (the
+        # removal gate) passes it: the answer widens, never narrows (CR-366
+        # round 2, GL-13), because the sequencer's own view can lag.
+        carry_all = bool(carry_all) or self.carries_everything(subpath)
         rules = (
-            build_filter_rules_up(exclude_paths)
+            build_filter_rules_up(exclude_paths, carry_all=carry_all)
             if self.direction == DIRECTION_UP
             else build_filter_rules_down()
         )
-        return write_filter_file(rules, self._filter_file)
+        return write_filter_file(
+            rules, self._filter_file_all if carry_all else self._filter_file)
 
     def express_inflight_paths(self) -> list[str]:
         """Snapshot of what the express lane is uploading right now
@@ -3381,7 +3770,7 @@ class RcloneLane(LaneAdapter):
                         self.name, len(moved_away),
                     )
                     excludes += moved_away
-            filter_file = self._ensure_filter_file(excludes)
+            filter_file = self._ensure_filter_file(excludes, subpath)
             transfers = self.transfers
             partial_suffix = None
             if handoffs:
@@ -3761,6 +4150,7 @@ class RcloneLane(LaneAdapter):
         with self._lock:
             self._orphans = report
         self._refresh_size_mismatches(subpath)
+        self._refresh_future_dated(subpath)
         # SYNC-10 (sweep 2026-08-28): local-only, so it costs no NAS listing
         # at all -- but it belongs on this cadence because it is the same kind
         # of answer (a leftover nobody is going to delete) and a per-pass tree
@@ -3808,7 +4198,7 @@ class RcloneLane(LaneAdapter):
         try:
             report = scan_size_mismatches(
                 self.rclone_path, self.local_root, self.remote, self.remote_root,
-                self._ensure_filter_file(), subpath,
+                self._ensure_filter_file(subpath=subpath), subpath,
             )
         except Exception:
             log.debug("%s: size-mismatch scan failed", self.name, exc_info=True)
@@ -3874,7 +4264,8 @@ class RcloneLane(LaneAdapter):
             out.append({"path": rel, "local_size": local_size, "server_size": None})
         return out
 
-    def pending_uploads(self, subpath: Optional[str] = None) -> Optional[dict]:
+    def pending_uploads(self, subpath: Optional[str] = None,
+                        carry_all: bool = False) -> Optional[dict]:
         """What lane A still owes the NAS for `subpath` -- the gate on
         "Remove from this machine" (item 9). None means "could not tell",
         which the caller MUST treat as "do not delete". Never raises."""
@@ -3883,11 +4274,139 @@ class RcloneLane(LaneAdapter):
         try:
             return scan_pending_uploads(
                 self.rclone_path, self.local_root, self.remote, self.remote_root,
-                self._ensure_filter_file(), subpath, tuning=self.tuning,
+                self._ensure_filter_file(subpath=subpath, carry_all=carry_all),
+                subpath, tuning=self.tuning,
             )
         except Exception:
             log.exception("%s: pending-upload probe failed", self.name)
             return None
+
+    def strict_size_mismatches(self, subpath: Optional[str] = None,
+                               carry_all: bool = False) -> Optional[dict]:
+        """The removal gate's "same name, different size" question (GL-14,
+        CR-366): {"count", "samples"} or None for "could not tell", which the
+        caller MUST read as "do not delete". Fresh every call (never the
+        cached advisory report) and never raises."""
+        if self.direction != DIRECTION_UP:
+            return None
+        try:
+            return scan_size_mismatches_strict(
+                self.rclone_path, self.local_root, self.remote, self.remote_root,
+                self._ensure_filter_file(subpath=subpath, carry_all=carry_all),
+                subpath,
+            )
+        except Exception:
+            log.exception("%s: strict size-mismatch probe failed", self.name)
+            return None
+
+    def edited_since_upload(self, subpath: Optional[str] = None,
+                            carry_all: bool = False) -> Optional[dict]:
+        """The removal gate's "edited after it went up" question (GL-13 round
+        2, CR-366). Only asked of an upload-only project, where lane A carries
+        mutable files (documents, project files, WAVs) on an --ignore-existing
+        run: {"count", "samples"} (zero for a full tick) or None for "could
+        not tell". Never raises."""
+        if self.direction != DIRECTION_UP:
+            return None
+        if not (carry_all or self.carries_everything(subpath)):
+            return {"count": 0, "samples": []}
+        try:
+            return scan_edited_since_upload(
+                self.rclone_path, self.local_root, self.remote, self.remote_root,
+                self._ensure_filter_file(subpath=subpath, carry_all=carry_all),
+                subpath, tuning=self.tuning,
+            )
+        except Exception:
+            log.exception("%s: edited-since-upload probe failed", self.name)
+            return None
+
+    def local_tree_scan(self, subpath: Optional[str] = None,
+                        carry_all: bool = False) -> Optional[dict]:
+        """scan_local_tree for `subpath` with this lane's own carry-all
+        decision (GL-12/GL-13). None when the disk could not be read."""
+        if self.direction != DIRECTION_UP:
+            return None
+        try:
+            return scan_local_tree(
+                self.local_root, subpath,
+                bool(carry_all) or self.carries_everything(subpath))
+        except Exception:
+            log.exception("%s: local tree scan failed for %s", self.name, subpath)
+            return None
+
+    def forget_future_dated(self, subpath: Optional[str]) -> None:
+        """Drop a project's future-date entry (CR-366 round 2, GL-12): it was
+        removed from this machine, so its warning names a file that is gone."""
+        with self._lock:
+            self._future_dated_by_sub.pop(subpath or "", None)
+
+    def future_dated_report(
+        self, ticked: Optional[Iterable[str]] = None,
+    ) -> Optional[dict]:
+        """Last scan for files lane A would carry but whose date is in the
+        future (GL-12), or None before the first one.
+
+        An entry is dropped when its local folder no longer exists, or, when
+        `ticked` (the subpaths still selected here) is given, when its project
+        left the selection: the scan only runs for ticked projects, so nothing
+        else would ever clear it (CR-366 round 2)."""
+        keep = (None if ticked is None else
+                {unicodedata.normalize("NFC", str(t)) for t in ticked})
+        with self._lock:
+            for key in list(self._future_dated_by_sub):
+                gone = False
+                if key:
+                    try:
+                        gone = not (Path(self.local_root) / Path(*key.replace("\\", "/").split("/"))).is_dir()
+                    except (OSError, ValueError, TypeError):
+                        gone = False
+                if gone or (keep is not None and key and unicodedata.normalize("NFC", key) not in keep):
+                    self._future_dated_by_sub.pop(key, None)
+            parts = [r for r in self._future_dated_by_sub.values() if r.get("count")]
+        if not parts:
+            return None
+        samples: list[str] = []
+        for r in parts:
+            samples += list(r.get("samples") or [])
+        firsts = [r["first_mtime"] for r in parts if r.get("first_mtime") is not None]
+        return {
+            "count": sum(int(r["count"]) for r in parts),
+            "samples": samples[:20],
+            "first_mtime": min(firsts) if firsts else None,
+            "checked_at": max(str(r.get("checked_at") or "") for r in parts),
+        }
+
+    def _refresh_future_dated(self, subpath: Optional[str]) -> None:
+        """Local walk on the orphan scan's cadence: name the files lane A
+        refuses for ever because their date is ahead of this clock. Logged
+        and kept for the tray; never raises."""
+        try:
+            scan = scan_local_tree(
+                self.local_root, subpath, self.carries_everything(subpath))
+        except Exception:
+            log.debug("%s: future-date scan failed", self.name, exc_info=True)
+            return
+        future = scan["future"]
+        if future["count"]:
+            log.warning(
+                "%s: %d file(s) under %s are dated MORE THAN %d s IN THE FUTURE (a "
+                "camera clock or timezone set wrong) -- lane A's age floor will "
+                "never pass them, so they do not upload (first: %s). A few hours "
+                "ahead uploads by itself once that time passes; further ahead "
+                "needs the modified date reset to now (a copy or re-import "
+                "keeps the date). Fixing the camera clock only helps future "
+                "recordings.",
+                self.name, future["count"], subpath or "the tree",
+                FUTURE_DATED_TOLERANCE_SECONDS, (future["samples"] or ["?"])[0],
+            )
+        report = {**future, "subpath": subpath,
+                  "first_mtime": scan.get("future_first_mtime"),
+                  "checked_at": datetime.now(timezone.utc).isoformat()}
+        # One entry per project, so a clean project scanned after a dated one
+        # does not wipe the warning (the report is per pass, the lane has many
+        # projects).
+        with self._lock:
+            self._future_dated_by_sub[subpath or ""] = report
 
     def orphan_report(self) -> Optional[dict]:
         """Last refresh_orphan_report() result, or None if never run.

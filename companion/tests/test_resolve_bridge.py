@@ -173,6 +173,9 @@ class FakeMediaPool:
         # AddSubFolder returning None/False rather than raising is a thing
         # Resolve does on a locked project.
         self.add_subfolder_result = "make it"
+        self.move_calls: list[tuple[list[str], str]] = []
+        self.move_applies = True
+        self.raise_on_move = False
 
     def GetRootFolder(self):
         return self._root_folder
@@ -191,6 +194,17 @@ class FakeMediaPool:
             return self.add_subfolder_result
         return parent.add_subfolder(FakeFolder(name=name))
 
+    def MoveClips(self, clips, target):
+        self.move_calls.append(([c.GetName() for c in clips], _folder_name(target)))
+        if self.raise_on_move:
+            raise RuntimeError("boom")
+        if not self.move_applies:
+            return False
+        for clip in clips:
+            _detach(self._root_folder, clip)
+            target.add_clip(clip)
+        return True
+
     def ImportMedia(self, paths):
         self.import_calls.append(list(paths))
         if self.raise_on_import:
@@ -203,6 +217,13 @@ class FakeMediaPool:
             self._current.add_clip(item)
             items.append(item)
         return items
+
+
+def _detach(folder, clip) -> None:
+    if clip in folder._clips:
+        folder._clips.remove(clip)
+    for sub in folder._subfolders:
+        _detach(sub, clip)
 
 
 def _folder_name(folder) -> str:
@@ -1440,19 +1461,69 @@ def test_import_files_makes_no_bin_when_everything_is_already_there(monkeypatch)
     assert pool.added_bins == [], "a no-op import must not leave an empty bin behind"
 
 
-def test_import_files_restores_the_current_bin(monkeypatch):
+def test_import_files_never_changes_the_current_bin(monkeypatch):
+    """2026-09-30: the importer used to SetCurrentFolder(term bin) and back
+    around every batch, and with a download feeding a Youtube folder the
+    editor's media pool jumped between bins every 20-60 s. It imports where
+    the editor is and MOVES the clips instead."""
     pool, root = _import_world(monkeypatch)
     editors_bin = root.add_subfolder(FakeFolder(name="Interviews"))
     pool.SetCurrentFolder(editors_bin)
     pool.current_folder_names.clear()
 
-    resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
+    result = resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
 
+    assert result["ok"] is True
+    assert result["imported"] == ["P:\\a.mp4"]
+    assert pool.current_folder_names == [], "the current bin is the editor's"
     assert pool.GetCurrentFolder() is editors_bin
-    assert pool.current_folder_names[-1] == "Interviews"
+    assert editors_bin.GetClipList() == []
+    term_bin = _root_bin(pool, "Youtube").GetSubFolderList()[0]
+    assert [c.GetName() for c in term_bin.GetClipList()] == ["a.mp4"]
 
 
-def test_import_files_restores_the_current_bin_even_when_import_raises(monkeypatch):
+def test_import_files_does_not_move_clips_already_in_the_term_bin(monkeypatch):
+    pool, _root = _import_world(monkeypatch)
+    term_bin = resolve_bridge._ensure_bin_path(pool, _root, ["Youtube", "term"])
+    pool.SetCurrentFolder(term_bin)
+
+    result = resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
+
+    assert result["imported"] == ["P:\\a.mp4"]
+    assert pool.move_calls == []
+
+
+def test_import_files_leaves_the_clip_where_it_landed_when_the_move_is_refused(monkeypatch):
+    """A refused MoveClips must not raise and must not delete: the clip is in
+    the project either way (so it counts as imported, and the warning names
+    the bin it is in), and the next scan's pool-wide dedupe skips it rather
+    than importing a second copy."""
+    pool, root = _import_world(monkeypatch)
+    editors_bin = root.add_subfolder(FakeFolder(name="Interviews"))
+    pool.SetCurrentFolder(editors_bin)
+    pool.move_applies = False
+
+    result = resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
+
+    assert result["imported"] == ["P:\\a.mp4"]
+    assert result["failed"] == []
+    assert [c.GetName() for c in editors_bin.GetClipList()] == ["a.mp4"]
+    again = resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
+    assert again["skipped_existing"] == ["P:\\a.mp4"]
+    assert len(pool.import_calls) == 1
+
+
+def test_import_files_survives_a_raising_move(monkeypatch):
+    pool, _root = _import_world(monkeypatch)
+    pool.raise_on_move = True
+
+    result = resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
+
+    assert result["imported"] == ["P:\\a.mp4"]
+    assert result["failed"] == []
+
+
+def test_import_files_keeps_the_current_bin_when_import_raises(monkeypatch):
     """The editor's media pool selection is theirs. A background job that
     parks it in a bin they never opened -- because ImportMedia threw -- is a
     side effect of something they never asked to see."""

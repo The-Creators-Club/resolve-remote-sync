@@ -1,0 +1,11 @@
+# GL-25 / COM-H10 (CR-371, 2026-10-07): every workflow action is pinned to a
+# commit SHA (a tag can be repointed; a SHA cannot), so the pins need a way to
+# move forward. Dependabot opens one reviewed PR per bump, and understands the
+# `# vN` comment we leave beside each pin.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

@@ -170,9 +170,31 @@
   }
 
   function renderAi(data) {
+    // GL-31 / CR-374: on a build that hard-disables the CLI providers the
+    // page shows no CLI row, no CLI switch and no subscription notice.
+    if (data && data.cli_build_locked) {
+      var ccRow = (data.providers || []).filter(function (p) { return p.name === "claude_code"; })[0] || {};
+      data.providers = (data.providers || []).filter(function (p) { return p.kind !== "cli"; });
+      drawLockedCheck(ccRow.configured_path || "");
+    }
     S = data;
     showAiError("");
     drawAll();
+  }
+
+  // GL-31 / CR-374 round 2 (2026-10-07): on a locked build the only CLI
+  // control is the server check's path box. No sign-in, no set up, no
+  // subscription: a Claude Code you installed yourself, run on your API key.
+  function drawLockedCheck(path) {
+    var line = document.getElementById("ai-cli-line");
+    if (!line) return;
+    line.hidden = false;
+    if (document.activeElement && document.activeElement.id === "ai-check-path") return;
+    line.innerHTML =
+      '<span title="The scheduled server check can run a Claude Code that YOU installed on this server. It runs only on your Claude API key, never a subscription sign-in.">Server check, Claude Code you installed (optional):</span>' +
+      '<input class="inp" type="text" id="ai-check-path" placeholder="/usr/local/bin/claude" value="' + esc(path) + '">' +
+      '<button class="key sm" type="button" id="ai-check-path-save"><span class="t">Save path</span></button>' +
+      '<span class="res" id="ai-cli-state">' + esc(path ? "path saved" : "blank: the server looks for claude on its PATH") + "</span>";
   }
 
   function drawAll() {
@@ -203,7 +225,9 @@
     }
     var cc = byName("claude_code") || {};
     var check;
-    if (!S.cli_enabled) {
+    if (S.cli_build_locked) {
+      check = '<span class="v"><b>your own Claude Code</b><span class="why">This build does not include Claude Code or sign in to it. The check runs only if you installed it on this server (path below) and added a Claude API key.</span></span>';
+    } else if (!S.cli_enabled) {
       check = '<span class="v"><b>cannot run</b><span class="why">Claude Code is switched off on this server (CLI tools are off for this site)</span></span>';
     } else if (cc.status === "available") {
       check = '<span class="v"><b>Claude Code</b><span class="why">always Claude Code, whatever the order or the pin say</span></span>';
@@ -331,6 +355,7 @@
   }
 
   function drawCli() {
+    if (S.cli_build_locked) return; // drawLockedCheck owns that line
     var box = document.getElementById("ai-cli-enabled");
     if (box) box.checked = !!S.cli_enabled;
     var tos = document.getElementById("ai-cli-tos");
@@ -871,6 +896,13 @@
       if (pk) { openWizard(pk.getAttribute("data-pick")); return; }
       if (t.closest("[data-back-pick]") && W && !W.manage && !W.replace) {
         closeWizard(); addMode = "pick"; drawAdd(); return;
+      }
+      if (t.closest("#ai-check-path-save")) {
+        var cp = document.getElementById("ai-check-path");
+        api("/api/v1/admin/ai-providers/claude_code/path", {method: "PUT", body: JSON.stringify({path: cp ? cp.value : ""})})
+          .then(renderAi)
+          .catch(function (err) { aiRefused("could not save the path: " + err.message); });
+        return;
       }
       var w = t.closest("#ai-add [data-wz]");
       if (w && !w.disabled) onWizardAction(w.getAttribute("data-wz"), w);

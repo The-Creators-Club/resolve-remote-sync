@@ -206,7 +206,12 @@ def test_the_optional_postgres_port_is_configurable():
     Note Station), and a stack that cannot start is worse than one on another
     port."""
     ports = _list_block(_rendered(), "postgres", "ports")
-    assert ports == ["${DASH_PG_PORT:-5432}:5432"]
+    # GL-19 (CR-368, 2026-10-07): the host port is still a variable, but it is
+    # published on the LAN and tailnet addresses only, never on every interface.
+    assert ports == ["${DASH_BIND_LAN:-192.168.0.10}:${DASH_PG_PORT:-5432}:5432",
+                     "${DASH_BIND_TAILNET:-100.64.0.1}:${DASH_PG_PORT:-5432}:5432"]
+    assert not any(p.startswith("${DASH_PG_PORT") or p.startswith("0.0.0.0")
+                   for p in ports)
     assert "image: postgres:13" in _service_block(_rendered(), "postgres")
 
 
@@ -351,8 +356,53 @@ def test_the_shared_report_token_flag_reaches_the_dict_the_deploy_posts():
     the flag would never have reached the container it was written for."""
     service = ida.compose_config(8480, "/mnt/tank/apps/ccsync-dashboard",
                                  "http://gui:8384", "k", "t")["services"]["dashboard"]
-    assert service["environment"]["DASH_SHARED_REPORT_TOKEN_ENABLED"] == "1"
+    # CR-367 / GL-15 (2026-10-07): a NEW site ships with the shared token OFF.
+    assert service["environment"]["DASH_SHARED_REPORT_TOKEN_ENABLED"] == "0"
     assert "DASH_SHARED_REPORT_TOKEN_ENABLED" in _rendered()
+
+
+def test_a_site_that_lives_on_the_shared_token_keeps_it_through_its_own_site_toml(monkeypatch):
+    """The studio's fleet predates per-computer tokens: its OWN site.toml says
+    [security] shared_report_token = true and a redeploy must not flip it. The
+    environment still wins over both."""
+    import common
+    saved = common._SITE
+    try:
+        monkeypatch.delenv("DASH_SHARED_REPORT_TOKEN_ENABLED", raising=False)
+        common._SITE = {**(saved or {}), "security": {"shared_report_token": True}}
+        env = ida.compose_config(8480, "/mnt/tank/apps/ccsync-dashboard",
+                                 "http://gui:8384", "k", "t")["services"]["dashboard"]["environment"]
+        assert env["DASH_SHARED_REPORT_TOKEN_ENABLED"] == "1"
+        monkeypatch.setenv("DASH_SHARED_REPORT_TOKEN_ENABLED", "0")
+        env = ida.compose_config(8480, "/mnt/tank/apps/ccsync-dashboard",
+                                 "http://gui:8384", "k", "t")["services"]["dashboard"]["environment"]
+        assert env["DASH_SHARED_REPORT_TOKEN_ENABLED"] == "0"
+    finally:
+        common._SITE = saved
+
+
+def test_the_compose_files_and_the_dict_agree_on_the_shared_token_flag(monkeypatch):
+    """CR-367 round 2 (2026-10-07): both templates hard-coded "0", so a site on
+    Synology (or a hand-pasted YAML) that says shared_report_token = true in
+    its own site.toml was switched off at the next deploy while the TrueNAS dict
+    kept "1". One container, one answer."""
+    import common
+    saved = common._SITE
+    try:
+        monkeypatch.delenv("DASH_SHARED_REPORT_TOKEN_ENABLED", raising=False)
+        for site_value, want in ((True, "1"), (None, "0")):
+            common._SITE = {**(saved or {}), "security": (
+                {"shared_report_token": True} if site_value else {})}
+            env = ida.compose_config(8480, "/mnt/tank/apps/ccsync-dashboard",
+                                     "http://gui:8384", "k", "t"
+                                     )["services"]["dashboard"]["environment"]
+            line = f'DASH_SHARED_REPORT_TOKEN_ENABLED: "{want}"'
+            assert env["DASH_SHARED_REPORT_TOKEN_ENABLED"] == want
+            assert line in ida.render_compose_yaml(ida.compose_variables())
+            assert line in ida.render_compose_yaml(ida.compose_variables(),
+                                                   template=IMAGE_TEMPLATE)
+    finally:
+        common._SITE = saved
 
 
 def test_the_nas_block_names_the_backend_and_its_ssh_channel():

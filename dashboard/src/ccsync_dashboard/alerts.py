@@ -621,6 +621,8 @@ def settings_view(conn: sqlite3.Connection, settings: Any) -> dict[str, Any]:
         "password_source": source,
         "password_mask": mask(secret),
         "timezone": timezone_name(conn),
+        # The kinds whose alerts are switched off (2026-09-29).
+        "muted_kinds": sorted(muted_kinds(conn)),
     }
 
 def sink_deliverable(conn: sqlite3.Connection, now: str = "") -> tuple[bool, str]:
@@ -1274,6 +1276,10 @@ class Ctx:
         # Machines a more specific kind has already named, so the catch-all
         # ("red for an hour and we cannot say why") does not repeat them.
         self.named: set[str] = set()
+        # CR-363 / GL-09 (2026-10-07): the bundled tailnet node, or None when
+        # this deployment has none or it could not be asked. Gathered once on
+        # the Ctx rule; the unix socket answers in milliseconds or not at all.
+        self.tailnet: dict[str, Any] | None = _tailnet_state()
         self._open_alert_subjects: dict[str, set[str]] = {}
 
     def guard(self, entry: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1346,6 +1352,19 @@ def _ytdl_health(mounts: Mapping[str, tuple[str, str]]) -> dict[str, Any] | None
             SimpleNamespace(state=SimpleNamespace(ytdl_status=status)))
     except Exception:                                               # noqa: BLE001
         log.debug("alerts: could not read the ytdl health snapshot", exc_info=True)
+        return None
+
+
+def _tailnet_state() -> dict[str, Any] | None:
+    """`tailnet_serve.snapshot()`, never raising. None means "no bundled node
+    here" or "could not ask", and every check that reads it treats None as NOT
+    CHECKED rather than as healthy or broken."""
+    try:
+        from . import tailnet_serve
+
+        return tailnet_serve.snapshot()
+    except Exception:                                                  # noqa: BLE001
+        log.debug("alerts: could not read the tailnet node", exc_info=True)
         return None
 
 
@@ -2134,7 +2153,7 @@ def _check_feed_runtime_mismatch(ctx: Ctx) -> list[Finding]:
         "Every new CC Sync build on offer needs a newer container than this "
         "NAS is running, so none of them can install themselves. Updates will "
         "keep appearing and never apply.",
-        f"On the NAS: {mismatch.get('nas_hint') or 'use your NAS app manager to update the ccsync container'}.",
+        f"On the NAS: {mismatch.get('nas_hint') or 'use your NAS app manager to update the ccsync container'}",
         "versions: " + ", ".join(mismatch.get("versions") or []))]
 
 
@@ -3513,6 +3532,39 @@ def _check_media_sidecar_failed(ctx: Ctx) -> list[Finding]:
     return out
 
 
+def _check_sftp_transport(ctx: Ctx) -> list[Finding]:
+    """The stored SFTP window is one this NAS's own sshd cannot serve (GL-10,
+    CR-364, 2026-10-07).
+
+    On DSM 7.2 (OpenSSH 8.2) a lane-B download at 255Ki x 64 is cut short at
+    514 MiB while rclone reports success, so the grid stays green over proxies
+    that are silently truncated. The manifest already lowers a bad stored value
+    on the wire (`sftp_transport.derive`), so from this build on no NEW
+    download is cut; this finding is for the proxies fetched before that, and
+    for the admin who has not been told. Read from the stored values, never
+    from what is published: the published pair is the corrected one.
+    """
+    from . import site_store
+
+    try:
+        manifest = site_store.resolved_manifest(ctx.conn, ctx.settings)
+    except Exception:                                              # noqa: BLE001
+        log.debug("alerts: could not read the site manifest", exc_info=True)
+        return []
+    problem = str(manifest.get("_sftp_transport_problem") or "")
+    if not problem:
+        return []
+    return [_f(
+        "sftp-transport",
+        f"This server's SFTP settings are unsafe for its own sshd: {problem}. "
+        f"Computers are being given the safe values now, but any proxy over "
+        f"514 MiB downloaded before that may be cut short while its proxy "
+        f"download showed green.",
+        "Settings -> Site: set the SFTP chunk size to 64Ki and concurrency to 16 "
+        "(or blank both), then re-download proxies over 514 MiB on each computer.",
+        problem[:300])]
+
+
 def _check_loopback_down(ctx: Ctx) -> list[Finding]:
     """"Send to Resolve" cannot work on that computer (CMEDIA-3).
 
@@ -3912,6 +3964,189 @@ def _check_red_unexplained(ctx: Ctx) -> list[Finding]:
     return out
 
 
+# ------------------------------------------- the server's own tailnet (GL-09)
+#
+# CR-363 / GL-09 (2026-10-07; PL-RES-05). Every check above is about something
+# an editor's computer REPORTED, so a fault in the one link all of them depend
+# on (this server's node on the tailnet) shows up as forty computers going
+# quiet, named one at a time a full day later. Tailscale's default key
+# expiry is 180 days: on that day the whole fleet goes silent at once and the
+# first mail arrives 24 hours after that. These four read the node directly
+# (`tailnet_serve.snapshot`, a unix socket) and say it in one sentence.
+
+TAILNET_KEY_WARN_DAYS = 14
+# "Most of the machines that were reporting stopped together." A laptop lid
+# closing is one machine; the server losing its network is a cluster of last
+# reports inside minutes of each other. Below 30 minutes is a slow cycle, and
+# past six hours the per-machine kind (24 h) is the better description.
+FLEET_SILENT_MIN_SECONDS = 30 * 60
+# GL-09 overseer fix (2026-10-07): the finding stays open for as long as the
+# cluster stays silent and hands over to machine_silent at 24 h (the age cut
+# below). A 6 h cap made a real overnight outage "clear" at hour six.
+FLEET_SILENT_MAX_SECONDS = SILENT_SECONDS
+FLEET_SILENT_CLUSTER_SECONDS = 10 * 60
+
+
+def _check_tailnet_node(ctx: Ctx) -> list[Finding]:
+    t = ctx.tailnet
+    if not t or t.get("backend_state") == "Running":
+        return []
+    state = str(t.get("backend_state") or "unknown")
+    return [_f(
+        "this server's tailnet connection",
+        f"This server's own node on your Tailscale network is {state}, not Running. "
+        f"Every editor's computer reaches this server over that connection, so none "
+        f"of them can sync or report until it is back, and this server cannot hear "
+        f"them go quiet.",
+        "Open Setup, then Connect to your tailnet, and press SIGN IN OR PUBLISH. If "
+        "that offers no link, check the Tailscale machine list in your admin console "
+        "(the node may have been removed or its key expired), and check that a NAS "
+        "update did not stop the Tailscale container.",
+        f"backend_state={state}")]
+
+
+def _check_tailnet_key(ctx: Ctx) -> list[Finding]:
+    t = ctx.tailnet
+    if t and t.get("backend_state") == "unreachable":
+        # GL-09 overseer fix (2026-10-07): a node that did not answer this
+        # cycle told us nothing about its key. Raising makes the kind
+        # `check_failed` for the scan, so an open alert is not mailed as
+        # "cleared" by a read that failed.
+        raise RuntimeError("the tailnet node did not answer, so its key expiry is unknown")
+    expiry = t.get("key_expiry") if t else None
+    if expiry is None:
+        return []
+    try:
+        now = db.parse_iso(ctx.now)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=dt.timezone.utc)
+    except (ValueError, TypeError):
+        return []
+    days = (expiry - now).total_seconds() / 86400.0
+    if days > TAILNET_KEY_WARN_DAYS:
+        return []
+    when = expiry.date().isoformat()
+    if days <= 0:
+        diagnosis = (f"This server's Tailscale key expired on {when}. Its connection is "
+                     f"about to drop, or already has, and every editor loses the server "
+                     f"at the same moment.")
+    else:
+        diagnosis = (f"This server's Tailscale key expires on {when}, in "
+                     f"{int(days)} day(s). On that day its connection drops and every "
+                     f"editor loses the server at the same moment.")
+    return [_f(
+        "this server's tailnet key",
+        diagnosis,
+        "In the Tailscale admin console open Machines, find this server's node, and "
+        "choose Disable key expiry. That one click removes the deadline for good.",
+        f"key_expiry={expiry.isoformat()}")]
+
+
+def _check_tailnet_serve(ctx: Ctx) -> list[Finding]:
+    t = ctx.tailnet
+    if t and (t.get("backend_state") == "unreachable"
+              or (t.get("backend_state") == "Running" and t.get("serve") is None)):
+        # GL-09 overseer fix: "could not read" is NOT CHECKED, never fine.
+        raise RuntimeError("the tailnet node's Serve settings could not be read")
+    if not t or t.get("backend_state") != "Running" or t.get("serve") is not False:
+        return []
+    try:
+        from . import tailnet_serve
+
+        repair = tailnet_serve.last_repair()
+    except Exception:                                                  # noqa: BLE001
+        repair = {}
+    return [_f(
+        "this server's tailnet publishing",
+        "This server's node is connected, but nothing publishes the dashboard on your "
+        "tailnet any more, so no editor can reach it. The server tried to put it "
+        "back and could not.",
+        "Open Setup, then Connect to your tailnet, and press SIGN IN OR PUBLISH. If it "
+        "says Serve is not turned on for your tailnet, open the link in that message "
+        "once. From a terminal on the NAS: docker compose exec tailscale tailscale "
+        "serve --bg http://dashboard:8480",
+        str(repair.get("detail") or "")[:200])]
+
+
+def _mid_transfer(entry: Mapping[str, Any]) -> bool:
+    """The machine's last report showed a lane busy. A computer shut down at
+    18:00 was not mid-transfer; one that vanished while syncing lost the
+    server (or its own network), so this is evidence that is independent of
+    the tailnet node's own state."""
+    return any(isinstance(l, Mapping) and str(l.get("state") or "") == "syncing"
+               for l in entry.get("lanes") or [])
+
+
+def _check_fleet_silent_at_once(ctx: Ctx) -> list[Finding]:
+    # GL-09 overseer fixes (2026-10-07). Half a studio going quiet within ten
+    # minutes is also what 18:00 looks like, so the cluster alone proves
+    # nothing. It must be corroborated by one of two independent signals:
+    # (1) THIS server's own node is unhealthy (not Running, did not answer, or
+    # no longer publishing the dashboard); or (2) round 2: at least half of
+    # the silent cluster (and two machines) were mid-transfer at their last
+    # report, which an end-of-day shutdown is not. (2) is the only signal on
+    # a deployment with no bundled node (the studio, every TrueNAS install,
+    # where Tailscale is a TrueNAS app), where the NAS losing its Tailscale
+    # app is exactly the case this kind exists for.
+    t = ctx.tailnet
+    node_sick = bool(t) and (t.get("backend_state") != "Running" or t.get("serve") is False)
+    active: list[Any] = []
+    silent: list[tuple[Any, Any]] = []
+    for e in ctx.editors:
+        stamp = e.get("received_at")
+        age = _age(stamp, ctx.now)
+        if not stamp or age is None or age >= SILENT_SECONDS:
+            continue
+        active.append(e)
+        if FLEET_SILENT_MIN_SECONDS < age < FLEET_SILENT_MAX_SECONDS:
+            try:
+                silent.append((db.parse_iso(stamp), e))
+            except (ValueError, TypeError):
+                continue
+    if len(active) < 2 or len(silent) < 2:
+        return []
+    silent.sort(key=lambda pair: pair[0])
+    best: list[tuple[Any, Any]] = []
+    lo = 0
+    for hi in range(len(silent)):
+        while (silent[hi][0] - silent[lo][0]).total_seconds() > FLEET_SILENT_CLUSTER_SECONDS:
+            lo += 1
+        if hi - lo + 1 > len(best):
+            best = silent[lo:hi + 1]
+    needed = max(2, -(-len(active) // 2))
+    if len(best) < needed:
+        return []
+    busy = sum(1 for _t, e in best if _mid_transfer(e))
+    if not node_sick and (busy < 2 or busy * 2 < len(best)):
+        return []
+    names = ", ".join(sorted(_who(e) for _t, e in best)[:6])
+    if not node_sick:
+        return [_f(
+            "the whole fleet",
+            f"{len(best)} of the {len(active)} computers that were reporting today all "
+            f"stopped within a few minutes of each other, {busy} of them in the middle "
+            f"of a transfer, and have been silent since. Computers shut down for the "
+            f"evening are not mid-transfer, so the likely cause is this server's own "
+            f"connection (for example a NAS update that stopped the Tailscale app), "
+            f"not {len(best)} separate computers.",
+            "Check the NAS is on and online, and that its Tailscale app is running. "
+            "Asking the editors one by one will not find it.",
+            f"computers: {names}")]
+    return [_f(
+        "the whole fleet",
+        f"{len(best)} of the {len(active)} computers that were reporting today all "
+        f"stopped within a few minutes of each other and have been silent since, and "
+        f"this server's own Tailscale node is not healthy "
+        f"({t.get('backend_state') or 'unknown'}"
+        f"{', not publishing the dashboard' if t.get('serve') is False else ''}). "
+        f"The likely cause is this server's own connection, not "
+        f"{len(best)} separate computers.",
+        "Check this server's tailnet connection first: Setup, then Connect to your "
+        "tailnet. Then check the NAS is on and online. Asking the editors one by "
+        "one will not find it.",
+        f"computers: {names}")]
+
+
 # The registry. ORDER MATTERS in exactly one way: `red_unexplained` is last,
 # because it reports only what the specific kinds above it did not name.
 ALERT_KINDS: tuple[AlertKind, ...] = (
@@ -4056,6 +4291,9 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
               "a computer could not install its media tools",
               "each computer's ffmpeg/ffprobe/deno sidecar",
               _check_media_sidecar_failed),
+    AlertKind("sftp_transport_unsafe", SEV_ERROR,
+              "the SFTP settings can cut big downloads short",
+              "the SFTP window against this NAS's sshd", _check_sftp_transport),
     AlertKind("loopback_down", SEV_WARN,
               "Send to Resolve cannot work on a computer",
               "the 8899 loopback on each computer", _check_loopback_down),
@@ -4078,6 +4316,19 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
               "b-roll ingest batches", _check_broll_batch_stuck),
     AlertKind("broll_share_expiring", SEV_WARN, "a client link is about to expire",
               "client links near their expiry", _check_broll_share_expiring),
+    # CR-363 / GL-09 (2026-10-07): the server's own link to the fleet.
+    AlertKind("tailnet_node_down", SEV_ERROR,
+              "this server's tailnet connection is down",
+              "this server's own tailnet node", _check_tailnet_node),
+    AlertKind("tailnet_key_expiring", SEV_ERROR,
+              "this server's tailnet key is about to expire",
+              "the tailnet key's expiry date", _check_tailnet_key),
+    AlertKind("tailnet_serve_missing", SEV_ERROR,
+              "the dashboard is not published on the tailnet",
+              "the tailnet publishing of this dashboard", _check_tailnet_serve),
+    AlertKind("fleet_silent_at_once", SEV_ERROR,
+              "most computers went quiet at the same time",
+              "computers going quiet together", _check_fleet_silent_at_once),
     AlertKind("red_unexplained", SEV_ERROR, "a computer is not syncing",
               "computers red with no specific cause", _check_red_unexplained),
 )
@@ -4106,6 +4357,122 @@ def _known_kind(kind: str) -> AlertKind | None:
 
 # The check_failed subject when the scan context itself could not be built.
 SCAN_FAILED_SUBJECT = "the whole scan"
+
+
+# ------------------------------------------------- which kinds are sent (2026-09-29)
+#
+# The owner asked to choose which kinds of alert reach the admin. A switch per
+# registry kind, grouped for the page; the scan is untouched, so a switched-off
+# kind still shows under CURRENTLY OPEN, in the weekly report and in the topbar
+# count. Only the MESSAGE is withheld.
+#
+# Stored as the kinds switched OFF, never the kinds switched on: a check added
+# by a later build must reach the admin from its first cycle, and an allow-list
+# saved today would silently exclude it for ever.
+#
+# Its own site_settings row rather than a SETTING_KEYS entry: the save form
+# carries exactly one field per SETTING_KEYS name (settings-1), and this is a
+# list of up to len(ALERT_KINDS) checkboxes with its own form.
+MUTED_KEY = "alerts_muted_kinds"
+
+# Page order. Every registry kind is in exactly one group
+# (test_alert_kind_selection pins it), so a new kind without a row fails the
+# suite rather than vanishing from the page's switches.
+KIND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("editors' computers", (
+        "machine_silent", "red_unexplained", "breaker_tripped", "disk_park",
+        "disk_low", "engine_down", "lane_stalled", "lane_error",
+        "report_refused", "clock_skew", "folders_unfiltered",
+        "thread_restarts", "crashes", "file_move_expired", "loopback_down",
+        "dashboard_reached_over_public_http")),
+    ("sharing and fleet controls", (
+        "fleet_halt", "fleet_halt_expired", "enforce_refusal",
+        "deactivation_refusal", "enforce_plan", "key_drain")),
+    ("this server", (
+        "nas_engine_down", "data_disk", "nas_tree", "notice_error",
+        "collector_stale", "watchdog_restart", "collector_kind_failed",
+        "collector_kind_overdue", "code_not_applied", "invariant_broken",
+        "protection_missing", "protection_unverifiable", "ignored_sections",
+        "weekly_send_failed", "sftp_transport_unsafe",
+        # CR-363 / GL-09 (2026-10-07)
+        "tailnet_node_down", "tailnet_key_expiring", "tailnet_serve_missing",
+        "fleet_silent_at_once")),
+    ("updates", (
+        "upgrade_failed", "upgrade_refused", "upgrade_reverted",
+        "retracted_running", "rollout_stalled", "versions_behind",
+        "soak_failed", "feed_stale", "feed_runtime_mismatch",
+        "platform_channel_stale")),
+    ("projects and footage", (
+        "out_of_tree", "stray_projects", "moved_project_dir",
+        "ingest_staging")),
+    ("fleet jobs", (
+        "jobs_starved", "jobs_abandoned", "jobs_pinned_no_executor")),
+    ("youtube downloads", (
+        "ytdl_worker_dead", "ytdl_downloads_failing",
+        "ytdl_pot_provider_unreachable", "ytdl_plugin_install_failed",
+        "ytdl_stale", "ytdlp_failed", "ytdlp_stale", "media_sidecar_failed")),
+    ("b-roll", (
+        "broll_archive_unreadable", "broll_batch_stuck",
+        "broll_share_expiring")),
+)
+
+
+def muted_kinds(conn: sqlite3.Connection) -> frozenset[str]:
+    """The registry kinds this site has switched off. Unknown names (a kind a
+    later build retired) are dropped on read, so they can never mute a new
+    kind that reuses the name by accident of a stale row. A missing table is
+    "nothing muted", get_settings' rule: the collector can read this before
+    migrations finish, and the safe direction is to send."""
+    try:
+        row = conn.execute("SELECT value FROM site_settings WHERE key=?",
+                           (MUTED_KEY,)).fetchone()
+    except sqlite3.Error:
+        return frozenset()
+    raw = str(row["value"] or "") if row else ""
+    return frozenset(k for k in (p.strip() for p in raw.split(","))
+                     if k in KIND_BY_NAME)
+
+
+def set_muted_kinds(conn: sqlite3.Connection, kinds: Any,
+                    updated_by: str) -> frozenset[str]:
+    """Store the switched-off set. Every name must be a registry kind, or the
+    whole save is refused (set_settings' all-or-nothing rule)."""
+    wanted = {str(k or "").strip() for k in (kinds or ())} - {""}
+    unknown = sorted(wanted - set(KIND_BY_NAME))
+    if unknown:
+        raise AlertError(f"not an alert kind: {', '.join(unknown[:5])}")
+    value = ",".join(k.kind for k in ALERT_KINDS if k.kind in wanted)
+    conn.execute(
+        "INSERT INTO site_settings (key, value, updated_at, updated_by) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+        "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+        (MUTED_KEY, value, db.utcnow_iso(), str(updated_by or "?")),
+    )
+    return frozenset(wanted)
+
+
+def _is_muted(muted: frozenset[str], kind: str, subject: str) -> bool:
+    """A check_failed finding is filed under the FAILING kind's name as its
+    subject, so switching a kind off also silences "that check could not
+    run". Everything else about check_failed (the whole scan failing) is
+    always sent: it is not a kind anybody chose to switch off."""
+    if kind == CHECK_FAILED.kind:
+        return subject in muted
+    return kind in muted
+
+
+def kind_groups_view(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """KIND_GROUPS with each kind's registry row and whether it is sent, for
+    the page and the JSON route."""
+    muted = muted_kinds(conn)
+    return [{"group": name,
+             "kinds": [{"kind": k, "severity": KIND_BY_NAME[k].severity,
+                        "title": KIND_BY_NAME[k].title,
+                        "what": KIND_BY_NAME[k].what,
+                        "send": k not in muted}
+                       for k in names if k in KIND_BY_NAME]}
+            for name, names in KIND_GROUPS]
 
 
 def scan(conn: sqlite3.Connection, settings: Any, now: str,
@@ -4562,6 +4929,19 @@ def compose_weekly(
             lines.append(f"  {finding['subject']}: {finding['detail']}")
     lines.append("")
 
+    # 2026-09-29: the kinds whose alerts are switched off. Every week, for
+    # the reason 3b gives: a switch somebody flipped in March must not turn
+    # into "the mailbox has been quiet, so nothing is wrong" in June. They
+    # are still checked and still listed under PROBLEMS above.
+    muted = muted_kinds(conn)
+    if muted:
+        lines.append(f"NOT SENT AS ALERTS ({len(muted)}, switched off on "
+                     f"Settings, Alerts; still checked and listed above)")
+        for kind in ALERT_KINDS:
+            if kind.kind in muted:
+                lines.append(f"  off - {kind.what}")
+        lines.append("")
+
     lines.append("This report is composed from what the dashboard already "
                  "knows. Anything it could not read is named above rather "
                  "than left out.")
@@ -4709,6 +5089,15 @@ def _transmit(
     """
     values = get_settings(conn)
     sink = values.get("alerts_sink") or SINK_NONE
+    try:
+        # GL-34 / CR-374 (2026-10-07): the one choke point every mailed alert,
+        # digest, weekly report and triage mail passes, so a "send us the
+        # container log" line carries the site's support address.
+        from . import site_store
+
+        text = site_store.with_support_text(text, site_store.support_contact_for(conn, settings))
+    except Exception:  # noqa: BLE001 - a lookup failure must never stop a delivery
+        pass
     if sink == SINK_NONE:
         # Not a delivery and not an exception: the caller records it, because
         # "we composed an alert and this site has no sink" is a fact the
@@ -4924,12 +5313,20 @@ def deliver(
     deadline = clock() + max(0.0, float(budget))
     digest = digest_enabled(get_settings(conn))
     catch_up = digest and _take_catch_up(conn)
+    muted = muted_kinds(conn)
     pending: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for finding in findings:
         kind = str(finding["kind"])
         subject = str(finding["subject"])
         seen.add((kind, subject))
+        # 2026-09-29: a kind the admin switched off is not sent and gets NO
+        # ledger row, so the day it is switched back on a condition that is
+        # still true goes out as new. One that was already open before the
+        # switch keeps its row and its place in the repeat rule. Not counted
+        # in "still open from before": that line is about the mailbox.
+        if _is_muted(muted, kind, subject):
+            continue
         severity = finding.get("severity", SEV_WARN)
         was_open = _is_open(conn, kind, subject)
         # LG-1 review round (2026-09-25): a WITHDRAWN finding closes its row
@@ -5020,6 +5417,17 @@ def deliver(
         } - {str(f["kind"]) for f in findings if f.get("truncated")}
     for kind, subject in _open_subjects(conn, checked_kinds):
         if (kind, subject) in seen:
+            continue
+        if _is_muted(muted, kind, subject):
+            # Closed without a message, the withdrawn finding's shape: the
+            # admin asked not to hear about this kind, and "cleared" is still
+            # hearing about it. Closing (rather than leaving it open) is what
+            # stops a stale "cleared" going out weeks later when the kind is
+            # switched back on.
+            db.record_alert(conn, kind + RECOVERED_SUFFIX, subject, "", True,
+                            "closed without a message: this kind of alert "
+                            "is switched off", now)
+            conn.commit()
             continue
         if digest:
             # CR-190: the good news rides the same message. A recovery that

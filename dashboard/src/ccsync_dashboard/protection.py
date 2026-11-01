@@ -480,6 +480,18 @@ def _ack_date(ctx: Ctx, key: str) -> tuple[str, float | None]:
     return date, (now - when).total_seconds() / 86400.0
 
 
+def vendor_holds_the_key(settings: Any) -> bool:
+    """True on a vendor-build dashboard whose every configured release key is
+    the vendor's (CR-362 / GL-02, 2026-10-07). One predicate for the status
+    line AND the "what only you can confirm" form, so the page cannot tell a
+    customer there is nothing to back up and then ask them to confirm they did."""
+    from . import vendor_defaults
+    return bool((getattr(settings, "vendor_defaults", False)
+                 or getattr(settings, "vendor_customer", False))
+                and vendor_defaults.holds_only_vendor_keys(
+                    getattr(settings, "release_pubkeys", ()) or ()))
+
+
 def _check_key_backup(ctx: Ctx) -> Outcome:
     """The offline release key, backed up. An ADMIN-SET DATE, because nothing
     on this server can see a key that lives on somebody's workstation.
@@ -492,6 +504,15 @@ def _check_key_backup(ctx: Ctx) -> Outcome:
         return not_checked(
             "this server has no release signing key configured, so there is "
             "nothing here to have backed up")
+    # CR-362 / GL-02 (2026-10-07, PL-RES-30 / PRAC-55): a vendor-build
+    # dashboard trusts the VENDOR's public key and holds no private half, so
+    # "nobody has confirmed it is backed up" was a permanent red line on every
+    # customer's panel for a key they could not back up. Only when EVERY
+    # configured key is the vendor's: a site that added a key of its own holds
+    # that private half and still has to back it up.
+    if vendor_holds_the_key(ctx.settings):
+        return ok("the vendor holds the update signing key; there is nothing "
+                  "for you to back up")
     date, age = _ack_date(ctx, ACK_KEY_BACKUP)
     if not date:
         return broken(
@@ -1074,7 +1095,7 @@ def _note(counts: dict[str, int]) -> str | None:
     return "; ".join(parts) if parts else None
 
 
-def page_view(conn: sqlite3.Connection) -> dict[str, Any]:
+def page_view(conn: sqlite3.Connection, settings: Any = None) -> dict[str, Any]:
     """Every line with its last verdict, for the panel.
 
     THE REGISTRY IS THE SPINE, not the stored blob: a line no pass has
@@ -1107,6 +1128,9 @@ def page_view(conn: sqlite3.Connection) -> dict[str, Any]:
         "counts": counts,
         "checked_at": str(stored.get("checked_at") or ""),
         "acks": acks,
+        # False hides the release-key acknowledgement row (PL-RES-30): no
+        # settings (a caller that cannot say) keeps the row, the studio's shape.
+        "show_key_ack": not vendor_holds_the_key(settings),
     }
 
 

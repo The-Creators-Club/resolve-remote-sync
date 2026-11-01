@@ -53,7 +53,7 @@
 #     Finish page without scraping the human-facing summary.
 set -u
 
-INSTALLER_VERSION="1.0.46"
+INSTALLER_VERSION="1.0.47"
 
 # ----------------------------------------------------------------------
 # PINNED DOWNLOADS (2026-08-17, docs/COMMERCIAL_READINESS.md item 13)
@@ -1741,20 +1741,9 @@ fi
 if [ -n "$RCLONE_BIN" ]; then
     skip "rclone already installed: $RCLONE_BIN"
 else
+    # CR-372 / GL-28 / PL-RES-42 (2026-10-07): the PINNED, sha256-verified
+    # download goes first; brew's current, untested build is only the fallback.
     installed=0
-    if have_cmd brew; then
-        if [ "$DRY_RUN" = 1 ]; then
-            dry "would run: brew install rclone"
-            installed=1
-        else
-            step "installing rclone via brew..."
-            if brew install rclone; then
-                installed=1
-            else
-                warn "brew install of rclone failed, falling back to direct download"
-            fi
-        fi
-    fi
     if [ "$installed" = 0 ]; then
         ARCH="$(uname -m)"
         if [ "$ARCH" = "arm64" ]; then
@@ -1769,12 +1758,15 @@ else
         EXTRACT_DIR="$STAGE_DIR/rclone-extract"
         if [ "$DRY_RUN" = 1 ]; then
             dry "would download $ZIP_URL, verify sha256 $RCLONE_SHA256, extract, and copy rclone to $BIN_DIR"
+            installed=1
         else
             step "downloading rclone $RCLONE_VERSION from $ZIP_URL ..."
-            curl -fsSL "$ZIP_URL" -o "$ZIP_PATH"
+            if ! curl -fsSL "$ZIP_URL" -o "$ZIP_PATH"; then
+                warn "rclone download failed"
+                rm -f "$ZIP_PATH"
             # Verified BEFORE unzip: an artifact that does not match the pin
             # never gets inflated onto the disk at all.
-            if ! verify_sha256 "$ZIP_PATH" "$RCLONE_SHA256" "rclone $RCLONE_VERSION"; then
+            elif ! verify_sha256 "$ZIP_PATH" "$RCLONE_SHA256" "rclone $RCLONE_VERSION"; then
                 warn "rclone was not installed from the direct download"
             else
                 rm -rf "$EXTRACT_DIR"
@@ -1797,8 +1789,18 @@ else
                     # do anything".
                     xattr -d com.apple.quarantine "$BIN_DIR/rclone" 2>/dev/null || true
                     step "installed rclone to $BIN_DIR/rclone"
+                    installed=1
+                    RCLONE_BIN="$BIN_DIR/rclone"
                 fi
             fi
+        fi
+    fi
+    if [ "$installed" = 0 ] && have_cmd brew; then
+        if [ "$DRY_RUN" = 1 ]; then
+            dry "would fall back to: brew install rclone (only if the pinned download fails)"
+        else
+            warn "falling back to brew's rclone: NOT the pinned $RCLONE_VERSION"
+            brew install rclone || warn "brew install of rclone failed"
         fi
     fi
 fi
@@ -1834,21 +1836,8 @@ fi
 if [ -n "$SYNCTHING_BIN" ]; then
     skip "Syncthing already installed: $SYNCTHING_BIN"
 else
+    # CR-372 / GL-28 / PL-RES-42: pinned and verified first, brew last.
     installed=0
-    if have_cmd brew; then
-        if [ "$DRY_RUN" = 1 ]; then
-            dry "would run: brew install syncthing"
-            installed=1
-        else
-            step "installing Syncthing via brew..."
-            if brew install syncthing; then
-                installed=1
-                SYNCTHING_BIN="$(command -v syncthing)"
-            else
-                warn "brew install of syncthing failed, falling back to direct download"
-            fi
-        fi
-    fi
     if [ "$installed" = 0 ]; then
         ARCH="$(uname -m)"
         if [ "$ARCH" = "arm64" ]; then
@@ -1879,10 +1868,13 @@ else
         EXTRACT_DIR="$STAGE_DIR/syncthing-extract"
         if [ "$DRY_RUN" = 1 ]; then
             dry "would download $ZIP_URL, verify sha256 $SYNCTHING_SHA256, unzip, and copy syncthing to $BIN_DIR"
+            installed=1
         else
             step "downloading Syncthing $SYNCTHING_VERSION from $ZIP_URL ..."
-            curl -fsSL "$ZIP_URL" -o "$ZIP_PATH"
-            if ! verify_sha256 "$ZIP_PATH" "$SYNCTHING_SHA256" "Syncthing $SYNCTHING_VERSION"; then
+            if ! curl -fsSL "$ZIP_URL" -o "$ZIP_PATH"; then
+                warn "Syncthing download failed"
+                rm -f "$ZIP_PATH"
+            elif ! verify_sha256 "$ZIP_PATH" "$SYNCTHING_SHA256" "Syncthing $SYNCTHING_VERSION"; then
                 warn "Syncthing was not installed from the direct download"
             else
                 rm -rf "$EXTRACT_DIR"
@@ -1900,8 +1892,17 @@ else
                     xattr -d com.apple.quarantine "$BIN_DIR/syncthing" 2>/dev/null || true
                     SYNCTHING_BIN="$BIN_DIR/syncthing"
                     step "installed Syncthing to $BIN_DIR/syncthing"
+                    installed=1
                 fi
             fi
+        fi
+    fi
+    if [ "$installed" = 0 ] && have_cmd brew; then
+        if [ "$DRY_RUN" = 1 ]; then
+            dry "would fall back to: brew install syncthing (only if the pinned download fails)"
+        else
+            warn "falling back to brew's Syncthing: NOT the pinned $SYNCTHING_VERSION"
+            if brew install syncthing; then SYNCTHING_BIN="$(command -v syncthing)"; else warn "brew install of syncthing failed"; fi
         fi
     fi
 fi
@@ -2293,6 +2294,45 @@ ensure_dir "$RCLONE_CONF_DIR"
 SHELL_TYPE="$(site_value sftp_shell_type)"
 [ -n "$SHELL_TYPE" ] || SHELL_TYPE="unix"
 
+# GL-19 (CR-368, 2026-10-07): "editor lanes trust any NAS host key". rclone's
+# sftp backend verifies NOTHING unless known_hosts_file is set. When the site
+# publishes the NAS sshd's host key (/api/v1/site sftp_hostkey), write it to a
+# known_hosts file of our own and point the stanza at it: a CHANGED key is then
+# a refusal in rclone, never a re-trust. No published key (the studio's
+# legacy) leaves the stanza exactly as it always was.
+SFTP_HOSTKEY="$(site_value sftp_hostkey)"
+KNOWN_HOSTS_PATH=""
+KNOWN_HOSTS_ALGO=""
+KH_LINE=""
+case "$SFTP_HOSTKEY" in
+    ssh-*" "?*|ecdsa-*" "?*|sk-*" "?*)
+        KNOWN_HOSTS_PATH="$CCSYNC_CONFIG_DIR/nas_known_hosts"
+        # CR-368 follow-up (2026-10-07): rclone prefers ECDSA over ed25519 and
+        # the NAS sshd offers every type, so a known_hosts with ONE key type is
+        # "knownhosts: key mismatch" on every connect. Pin the algorithm too.
+        KNOWN_HOSTS_ALGO="${SFTP_HOSTKEY%% *}"
+        # CR-368 round 2 (2026-10-07): OpenSSH 8.8+ no longer offers the SHA-1
+        # "ssh-rsa" host-key algorithm, so an RSA pin is negotiated as
+        # rsa-sha2-*. rclone takes a space-separated list.
+        if [ "$KNOWN_HOSTS_ALGO" = "ssh-rsa" ]; then KNOWN_HOSTS_ALGO="rsa-sha2-512 rsa-sha2-256"; fi
+        if [ "$SFTP_PORT" = "22" ]; then KNOWN_HOST_ID="$TAILNET_HOST"; else KNOWN_HOST_ID="[$TAILNET_HOST]:$SFTP_PORT"; fi
+        if [ "$DRY_RUN" = 1 ]; then
+            dry "would write the NAS host key for $KNOWN_HOST_ID to $KNOWN_HOSTS_PATH and pin rclone to it"
+        else
+            mkdir -p "$CCSYNC_CONFIG_DIR"
+            printf '%s %s\n' "$KNOWN_HOST_ID" "$SFTP_HOSTKEY" > "$KNOWN_HOSTS_PATH"
+            chmod 600 "$KNOWN_HOSTS_PATH" 2>/dev/null || true
+            step "pinned the NAS SSH host key for $KNOWN_HOST_ID in $KNOWN_HOSTS_PATH"
+        fi
+        KH_LINE="known_hosts_file = $KNOWN_HOSTS_PATH
+host_key_algorithms = $KNOWN_HOSTS_ALGO
+"
+        ;;
+    *)
+        skip "the site publishes no NAS SSH host key: rclone will not verify the NAS's identity (ask the admin to redeploy the dashboard with the host key pinned)"
+        ;;
+esac
+
 STANZA="[$REMOTE_NAME]
 type = sftp
 host = $TAILNET_HOST
@@ -2300,11 +2340,13 @@ user = $EDITOR_NAME
 port = $SFTP_PORT
 key_file = $KEY_FILE_PATH
 shell_type = $SHELL_TYPE
-"
+${KH_LINE}"
 
 has_section=0
 existing_host=""
 existing_user=""
+existing_known_hosts=""
+existing_kh_algo=""
 if [ -f "$RCLONE_CONF_PATH" ] && grep -qF "[$REMOTE_NAME]" "$RCLONE_CONF_PATH"; then
     has_section=1
     # Read host/user from THIS stanza only: awk from its header to the next
@@ -2321,9 +2363,26 @@ if [ -f "$RCLONE_CONF_PATH" ] && grep -qF "[$REMOTE_NAME]" "$RCLONE_CONF_PATH"; 
         inside && /^[[:space:]]*user[[:space:]]*=/ {
             sub(/^[[:space:]]*user[[:space:]]*=[[:space:]]*/, ""); print; exit
         }' "$RCLONE_CONF_PATH")"
+    existing_kh_algo="$(awk -v sect="[$REMOTE_NAME]" '
+        $0 == sect { inside=1; next }
+        /^\[/      { inside=0 }
+        inside && /^[[:space:]]*host_key_algorithms[[:space:]]*=/ {
+            sub(/^[[:space:]]*host_key_algorithms[[:space:]]*=[[:space:]]*/, ""); print; exit
+        }' "$RCLONE_CONF_PATH")"
+    existing_known_hosts="$(awk -v sect="[$REMOTE_NAME]" '
+        $0 == sect { inside=1; next }
+        /^\[/      { inside=0 }
+        inside && /^[[:space:]]*known_hosts_file[[:space:]]*=/ {
+            sub(/^[[:space:]]*known_hosts_file[[:space:]]*=[[:space:]]*/, ""); print; exit
+        }' "$RCLONE_CONF_PATH")"
 fi
 
-if [ "$has_section" = 1 ] && [ "$existing_host" = "$TAILNET_HOST" ] && [ "$existing_user" = "$EDITOR_NAME" ]; then
+# A stanza written before the site published a host key lacks the pin, and that
+# alone is a reason to rewrite it (GL-19).
+KH_OK=1
+if [ -n "$KNOWN_HOSTS_PATH" ] && { [ "$existing_known_hosts" != "$KNOWN_HOSTS_PATH" ] || [ "$existing_kh_algo" != "$KNOWN_HOSTS_ALGO" ]; }; then KH_OK=0; fi
+
+if [ "$has_section" = 1 ] && [ "$existing_host" = "$TAILNET_HOST" ] && [ "$existing_user" = "$EDITOR_NAME" ] && [ "$KH_OK" = 1 ]; then
     skip "rclone.conf already has a correct [$REMOTE_NAME] section: $RCLONE_CONF_PATH"
 elif [ "$has_section" = 1 ]; then
     # INST-17: the single most likely reason to re-run this script is a
@@ -2864,7 +2923,9 @@ else
     # ui-onboarding-11 (2026-09-25): steps 1-3 through print_first_setup_steps,
     # which knows whether onboard's wizard ran this script (it has done all three).
     print_first_setup_steps
-    echo "   4. connect DaVinci Resolve to the Project Server"
+    echo "   4. connect DaVinci Resolve (Studio) to the Project Server: add the"
+    echo "      PostgreSQL project library, and check Preferences > System >"
+    echo "      General > External scripting using = Local"
     echo "   5. Playback > Proxy Handling > Prefer Proxies"
     print_resolve_mapping_step
     echo "   7. do NOT mount any NAS share over SMB alongside this -- see the"

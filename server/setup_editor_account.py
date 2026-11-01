@@ -99,7 +99,7 @@ from common import (  # noqa: F401
     DEFAULT_HOMES_PARENT, EDITORS_GROUP, ScriptCalls, add_host_key_arg,
     add_nas_kind_arg, add_site_arg, cli, confirm_destructive,
     editor_shell_is_sftp_only,
-    editor_shell_mode, get_backend, ok, print_nas_banner, project_acl_mode,
+    editor_shell_mode, get_backend, ok, print_nas_banner, print_truenas_version_note, project_acl_mode,
     project_group_name,
     require_site_value, run_ssh, set_host_key_pin, shell_quote, site_value,
     synology_api, truenas_api, wait_for_job,
@@ -456,13 +456,16 @@ def main():
         if args.name or args.ssh_pubkey_file:
             ap.error("--migrate-existing works on every existing editor; it does not take "
                      "--name/--ssh-pubkey-file")
+        print_truenas_version_note(truenas_api, args=args)
         return migrate_existing(args)
     if args.revoke_key:
         if not args.name:
             ap.error("--revoke-key needs --name")
+        print_truenas_version_note(truenas_api, args=args)
         return revoke_key(args)
     if not args.name or not args.ssh_pubkey_file:
         ap.error("--name and --ssh-pubkey-file are required (unless --migrate-existing)")
+    print_truenas_version_note(truenas_api, args=args)
 
     homes_parent = require_site_value(HOMES_PARENT, "[tree] pool_root")
 

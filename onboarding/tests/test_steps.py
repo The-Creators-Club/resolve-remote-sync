@@ -50,7 +50,10 @@ class _FakeResult:
 def test_verify_account_success_returns_username_token_report_token():
     def fake_post(url, data, headers, timeout):
         assert url == "http://dash.example.com/api/v1/verify"
-        assert data == {"username": "jsmith", "password": "hunter2"}
+        # CR-367 round 2 (2026-10-07): the computer is named so a re-run replaces its token.
+        import platform
+        assert data == {"username": "jsmith", "password": "hunter2",
+                        "machine": platform.node()}
         return {"ok": True, "username": "jsmith", "token": "v1.jsmith.999.abc", "report_token": "shared-secret"}
 
     result = steps.verify_account("http://dash.example.com", "jsmith", "hunter2", http_post=fake_post)

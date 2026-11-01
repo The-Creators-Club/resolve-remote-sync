@@ -335,3 +335,14 @@ def test_site_list_takes_a_scalar_and_refuses_junk(tmp_path, monkeypatch):
         assert common.site_list("tree", "nothing_here") == []
     finally:
         common.load_site(FIXTURE_SITE, reload=True)
+
+
+def test_every_repo_site_toml_parses():
+    """CR-367 (2026-10-07): two parallel packages each appended a [security]
+    header to the studio's site.toml; tomllib refuses a table declared twice and
+    server/common.py parses it at import, so every deploy script crashed."""
+    import tomllib
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    for p in root.glob("site*.toml"):
+        tomllib.loads(p.read_text(encoding="utf-8"))

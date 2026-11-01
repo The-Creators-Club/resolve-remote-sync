@@ -62,7 +62,7 @@ def _documented_key_commands() -> list[list[str]]:
 
 def _publish(feed_dir, artifact, version, *extra):
     return pf.main(["--artifact", str(artifact), "--platform", "windows",
-                    "--version", version, "--min-version", "0.0.0",
+                    "--version", version, "--min-version", "0.0.0", "--allow-no-floor",
                     "--feed-dir", str(feed_dir), "--base-url", BASE_URL,
                     "--make-current", *extra])
 

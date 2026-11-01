@@ -83,7 +83,7 @@ def test_report_flag_absent_when_matched_or_mapped_or_no_project(env):
     client, conn, _pd = env
     headers = report_headers()
     # auto-match succeeds -> absent
-    resp = client.post("/api/v1/report", headers=headers, json=report("FF4 Nuclear Cut"))
+    resp = client.post("/api/v1/report", headers=headers, json=report("Nuclear"))
     assert "resolve_project_unmapped" not in resp.json()
     # explicitly mapped -> absent
     dbmod.admin_set_project_root(conn, "Mystery Doc", "2025-ff4-nuclear",

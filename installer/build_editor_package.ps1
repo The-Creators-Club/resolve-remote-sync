@@ -1041,7 +1041,9 @@ if ($Publish) {
     # decision (raise it whenever a release fixes something a downgrade would
     # reintroduce), and a wrong value is remembered by every editor for ever.
     $minVersion = "$env:CCSYNC_MIN_VERSION".Trim()
-    if (-not $minVersion) { $minVersion = "0.0.0" }
+    # GL-25b (CR-371, 2026-10-07): empty means "tools\release_floor.json", which
+    # sign_release.py resolves per kind/platform and refuses to leave at 0.0.0.
+    # It is no longer defaulted to 0.0.0 here.
     # Second gate on the same fault (CR-52). The preflight at the top of this
     # script catches it before PyInstaller runs; this one is what stands
     # between a bad floor and a SIGNED record, and it also covers the onboard
@@ -1056,8 +1058,9 @@ if ($Publish) {
     $signArgs = @(
         (Join-Path $RepoRoot "tools\sign_release.py"),
         "--artifact", $ExePath, "--kind", "companion", "--platform", "windows",
-        "--version", $version, "--min-version", $minVersion
+        "--version", $version
     )
+    if ($minVersion) { $signArgs += @("--min-version", $minVersion) }
     if ($signedBinary) { $signArgs += "--signed-binary" }
     # Measured by tools\release.ps1, never retyped here: a signed record that
     # describes a different build than the one in hand is the --runtime-id
@@ -1110,7 +1113,7 @@ if ($Publish) {
         Write-Warn2 "the signed record describes sha256 $($signRecord.sha256) but the exe is $sha -- NOT publishing"
         exit 1
     }
-    Write-Step "signed release record: key $($signRecord.pubkey_id), min_version $minVersion, signed_binary $signedBinary"
+    Write-Step "signed release record: key $($signRecord.pubkey_id), min_version $($signRecord.min_version), signed_binary $signedBinary"
 
     $uri = "$DashboardUrl/api/v1/admin/packages/windows/${version}?sha256=$sha&make_current=$mc$($signRecord.query)"
 
@@ -1170,8 +1173,9 @@ if ($Publish) {
         $onboardSignArgs = @(
             (Join-Path $RepoRoot "tools\sign_release.py"),
             "--artifact", $OnboardExePath, "--kind", "onboard", "--platform", "windows",
-            "--version", $onboardVersion, "--min-version", $minVersion
+            "--version", $onboardVersion
         )
+        if ($minVersion) { $onboardSignArgs += @("--min-version", $minVersion) }
         if ($onboardSignedBinary) { $onboardSignArgs += "--signed-binary" }
         # Same stderr-under-EAP='Stop' hazard as the companion record above.
         $prevSignEAP = $ErrorActionPreference

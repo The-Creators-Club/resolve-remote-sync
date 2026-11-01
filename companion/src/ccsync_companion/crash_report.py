@@ -552,6 +552,9 @@ def write_run_marker(cfg: Optional[dict[str, Any]] = None) -> Optional[Path]:
             "version": getattr(config_mod, "VERSION", "?"),
             "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "frozen": bool(getattr(sys, "frozen", False)),
+            # GL-22 (CR-370): see supervisor.MARKER_FRESH_KEY.
+            supervisor.MARKER_FRESH_KEY: _fresh_build(),
+            supervisor.MARKER_BOOTED_KEY: False,
         }
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
@@ -579,6 +582,32 @@ def mark_clean_exit(cfg: Optional[dict[str, Any]] = None) -> None:
         pass
     try:
         run_marker_path(cfg).unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _fresh_build() -> bool:
+    try:
+        from . import startguard  # noqa: PLC0415
+
+        return bool(startguard.fresh_build())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def mark_booted(cfg: Optional[dict[str, Any]] = None) -> None:
+    """"This process finished starting" (GL-22, CR-370): stamp OUR marker
+    `booted: true`, which ends the supervisor's "a just-upgraded build that
+    died before it booted is a failed start" reading. Never raises."""
+    try:
+        marker = _read_run_marker(cfg)
+        if marker is None or int(marker.get("pid", -1)) != os.getpid():
+            return
+        marker[supervisor.MARKER_BOOTED_KEY] = True
+        path = run_marker_path(cfg)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(marker), encoding="utf-8")
+        os.replace(tmp, path)
     except Exception:  # noqa: BLE001
         pass
 

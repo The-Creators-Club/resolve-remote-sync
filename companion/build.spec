@@ -35,8 +35,10 @@ hidden_imports = ["watchdog", "watchdog.observers", "watchdog.events",
                   # engine over a runtime sys.path, so static analysis never
                   # sees the engine's own imports -- the project-library pair
                   # must be named or the frozen role pushes "No module named
-                  # 'psycopg2'" onto every /cards state (2026-08-31)
-                  "psycopg2", "zstandard"]
+                  # 'psycopg2'" onto every /cards state (2026-08-31).
+                  # psycopg2 is NOT named here any more (GL-32, CR-375,
+                  # 2026-10-07): see the lgpl_datas block below.
+                  "zstandard"]
 if sys.platform == "darwin":
     # watchdog picks its backend at import time inside a try/except chain
     # (fsevents on darwin, ReadDirectoryChangesW on win32, inotify on linux),
@@ -129,6 +131,44 @@ hidden_imports += [
     "zstandard.backend_c",
 ]
 
+# GL-32 (CR-375, 2026-10-07, COM-H3): psycopg2 is LGPL-3.0-or-later. Frozen
+# into the one-file exe it was unpacked to a fresh temp directory on every
+# launch and nobody could replace it without rebuilding our exe, which LGPL
+# section 4 requires them to be able to do (the reason pystray left, above).
+# So it is kept OUT of the analysed archive (`excludes` below) and shipped as
+# plain files under ccsync_lib/ in the bundle, byte-identical to the wheel's
+# (on macOS this also stops PyInstaller rewriting and re-signing its
+# dylibs). ccsync_companion/lgpl_libs.py puts ~/.ccsync/lib (the user's own
+# build, wins) and <_MEIPASS>/ccsync_lib on sys.path before the Cards engine
+# imports it. A HARD failure when psycopg2 is not installed: a build that
+# silently dropped it would fail on every /cards state, as 2026-08-31 did.
+def _collect_lgpl_tree():
+    import importlib.util
+
+    _spec = importlib.util.find_spec("psycopg2")
+    if _spec is None or not _spec.submodule_search_locations:
+        raise SystemExit(
+            "psycopg2 is not installed in the build venv -- install "
+            "companion/requirements.lock before building (GL-32)")
+    _pkg = Path(list(_spec.submodule_search_locations)[0])
+    _roots = [_pkg]
+    # Linux wheels keep libpq/OpenSSL in a sibling psycopg2_binary.libs
+    # directory; Windows and macOS keep them inside the package.
+    _libs = _pkg.parent / "psycopg2_binary.libs"
+    if _libs.is_dir():
+        _roots.append(_libs)
+    _out = []
+    for _root in _roots:
+        for _f in sorted(_root.rglob("*")):
+            if _f.is_dir() or "__pycache__" in _f.parts or _f.suffix == ".pyc":
+                continue
+            _dest = Path("ccsync_lib") / _root.name / _f.parent.relative_to(_root)
+            _out.append((str(_f), str(_dest).replace("\\", "/")))
+    return _out
+
+
+lgpl_datas = _collect_lgpl_tree()
+
 entry_point = "launcher.py"  # absolute-import shim; running the package __main__.py directly breaks relative imports
 
 # Windows wants a .ico and we ship one. macOS wants an .icns, which this repo
@@ -139,8 +179,22 @@ entry_point = "launcher.py"  # absolute-import shim; running the package __main_
 # NSStatusItem, so it has no Dock presence to put an icon on anyway. The window
 # icon (assets/icon.png, collected in datas) is unaffected on every platform.
 exe_icon = None
+exe_version = None
 if sys.platform == "win32":
     exe_icon = "src/ccsync_companion/assets/icon.ico"
+    # CR-373 / GL-30 (2026-10-07): a VERSIONINFO resource, so an unsigned beta
+    # exe names itself in Explorer and SmartScreen's More info instead of
+    # showing a blank description. tools/winversion.py is stdlib-only.
+    sys.path.insert(0, str(Path(SPECPATH).resolve().parent / "tools"))
+    import winversion
+    exe_version = winversion.write(
+        Path(SPECPATH).resolve() / "build" / "version_info.txt",
+        version=winversion.read_assigned_version(
+            Path(SPECPATH).resolve() / "src" / "ccsync_companion" / "config.py",
+            "VERSION"),
+        file_description="CC Sync companion",
+        internal_name="ccsync-companion",
+        original_filename="ccsync-companion.exe")
 
 # fusionscript.dll (Resolve's scripting library, loaded into this process at
 # runtime by resolve_bridge) links against the stable-ABI forwarder
@@ -230,7 +284,23 @@ a = Analysis(
         # EULA.md line above exists to prevent, one feature later.
         ("src/ccsync_companion/broll_vlm/prompts/index_clip_v7_compact.md",
          "ccsync_companion/broll_vlm/prompts"),
-    ] + licence_datas + onnx_datas,
+    ] + [
+        # The "originals on request" Resolve menu (2026-10-31,
+        # docs/SELECTIVE_ORIGINALS.md 12.1). resolve_menu_install.py reads
+        # these out of sys._MEIPASS and writes them into Resolve's Scripts
+        # folder at startup; a .lua is never collected on its own, so a build
+        # without these lines installs no menu and logs why.
+        # test_resolve_menu_install pins this list to the folder's contents.
+        (f"src/ccsync_companion/resolve_menu/{_name}", "ccsync_companion/resolve_menu")
+        for _name in (
+            "_originals_common.lua",
+            "Bring originals - selected media pool clips.lua",
+            "Bring originals - timeline clips between In and Out.lua",
+            "Bring originals - whole timeline.lua",
+            "Stop originals - selected media pool clips.lua",
+            "Stop originals - timeline clips between In and Out.lua",
+        )
+    ] + licence_datas + onnx_datas + lgpl_datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
@@ -245,7 +315,9 @@ a = Analysis(
     # PyInstaller's own dependency. Nothing in the companion imports any of
     # these at run time. `tomli` itself cannot be listed: PyInstaller's
     # setuptools pre-import hook aliases it and raises on an excluded name.
-    excludes=["setuptools", "pkg_resources", "_distutils_hack"],
+    excludes=["setuptools", "pkg_resources", "_distutils_hack",
+              # GL-32: shipped as files under ccsync_lib/, see lgpl_datas
+              "psycopg2"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -300,4 +372,5 @@ exe = EXE(
     codesign_identity=(os.environ.get("CCSYNC_APPLE_DEV_ID") or None),
     entitlements_file=None,
     icon=exe_icon,
+    version=exe_version,
 )

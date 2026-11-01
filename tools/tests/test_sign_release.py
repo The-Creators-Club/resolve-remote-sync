@@ -167,7 +167,7 @@ def test_the_query_suffix_url_encodes_base64(key, artifact):
                 "--platform", "windows", "--version", "0.7.12"])
     assert "+" not in out["query"].split("&signature=")[1].split("&")[0]
     assert out["query"].startswith("&signature=")
-    assert "&min_version=0.0.0" in out["query"]
+    assert "&min_version=0.0.1" in out["query"]  # the suite floor (conftest)
 
 
 def test_signing_a_different_file_changes_the_signature(key, artifact, tmp_path):

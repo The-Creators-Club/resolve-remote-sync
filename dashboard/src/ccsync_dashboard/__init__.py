@@ -28,4 +28,9 @@
 # set by the person AT a machine, from their tray -- opens that machine's
 # idle gate while they work. Schema v46, `commands.jobs.forced` on the report
 # reply, `ids` on the claim. Pairs with companion 0.9.61.
-VERSION = "0.7.76"
+# 0.7.74 (2026-10-07): the prelaunch-review wave CR-362..CR-377. Deploy it
+# BEFORE companion 0.9.86, and to the studio by a full install_dashboard_app.py
+# redeploy with [studio] allow_cli_providers set (CR-374), never by OTA first.
+# 0.7.77 (2026-10-31): originals on request (schema v60, `original_picks`,
+# docs/SELECTIVE_ORIGINALS.md) and CR-379. Deploy it BEFORE companion 0.9.87.
+VERSION = "0.7.77"

@@ -77,12 +77,15 @@ def write_credentials(gui_url: str, user: str, password: str) -> Path:
     """Record the credentials where the operator will look for them (0600)."""
     path = credentials_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    text = (
         f"# Syncthing GUI credentials, written by server/secure_syncthing_gui.py\n"
         f"# The GUI is an admin surface over every folder in the fleet -- treat this\n"
         f"# like the NAS password. Automation does NOT use it (X-API-Key does).\n"
-        f"url={gui_url}\nuser={user}\npassword={password}\n",
-        encoding="utf-8")
+        f"url={gui_url}\nuser={user}\npassword={password}\n")
+    # Created with 0600 (never world-readable even for an instant).
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -105,6 +108,61 @@ def read_gui_config(gui_url: str, api_key: str, dry_run: bool):
     if not isinstance(body, dict):
         return None, "GET /rest/config/gui: the response was not a JSON object"
     return body, ""
+
+
+def secure_gui(gui_url: str, api_key: str, user: str = DEFAULT_GUI_USER,
+               password: str = "", bind: str = "") -> tuple[bool, str, str]:
+    """Do what `main()` does, as a function the installers can call
+    (CR-363 / GL-08, 2026-10-07; bug-server-3).
+
+    `install_syncthing_app` used to print "run secure_syncthing_gui.py by hand"
+    and leave the GUI an unauthenticated admin surface on every interface of
+    the NAS until somebody did. It now calls this itself once the app is up.
+    Returns (ok, message, password); the password is "" when nothing was set
+    (the GUI already had a login, which is left alone). Never raises: a
+    refusal is a message the installer prints.
+    """
+    current, err = read_gui_config(gui_url, api_key, False)
+    if err:
+        return False, err, ""
+    if (current.get("user") or "").strip() and (current.get("password") or "").strip() \
+            and not current.get("insecureAdminAccess") and not bind:
+        return True, "the GUI already requires a login; left as it is", ""
+    wanted = dict(current)
+    wanted["insecureAdminAccess"] = False
+    if bind:
+        wanted["address"] = bind
+    if (current.get("user") or "").strip() and (current.get("password") or "").strip() and not password:
+        # Overseer fix (2026-10-07): an existing login with only
+        # insecureAdminAccess on keeps its own password.
+        resp = syncthing_api("PUT", gui_url, "/rest/config/gui", api_key, json_body=wanted)
+        if not ok(resp):
+            return False, (f"PUT /rest/config/gui answered HTTP "
+                           f"{getattr(resp, 'status_code', '?')}"), ""
+        return True, "insecureAdminAccess turned off; the existing GUI login was kept", ""
+    password = password or generate_password()
+    wanted["user"] = (current.get("user") or "").strip() or user
+    wanted["password"] = password
+    # CR-363 / GL-08 round 2 (2026-10-07): record the password BEFORE the
+    # engine holds it. A PUT that lands with the write failing after it leaves
+    # a login nobody knows, and a rerun then says "already requires a login".
+    existed = credentials_path().exists()
+    try:
+        path = write_credentials(gui_url, wanted["user"], password)
+    except OSError as exc:
+        return False, (f"could not record the GUI password at {credentials_path()} "
+                       f"({exc}); the Syncthing GUI was NOT changed"), ""
+    resp = syncthing_api("PUT", gui_url, "/rest/config/gui", api_key, json_body=wanted)
+    if not ok(resp):
+        if not existed:
+            try:
+                path.unlink()       # a file naming a password the engine never took
+            except OSError:
+                pass
+        return False, (f"PUT /rest/config/gui answered HTTP "
+                       f"{getattr(resp, 'status_code', '?')}"), ""
+    return True, (f"the GUI now requires a login (user {wanted['user']}; "
+                  f"credentials in {path}, mode 0600)"), password
 
 
 def main():

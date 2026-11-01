@@ -11,7 +11,7 @@
   'button': ('hi', 'button', 'the editor used Copy diagnostics in the companion (' ~ COMPANION_DIAGNOSTICS_PATH ~ ')')} %}
 {% if crash_reports %}
 <div class="hint">This server has <b>{{ crash_reports }}</b> saved crash report(s) of its own.
-  <a class="key sm" href="/admin/diagnostics/crash-reports.zip" title="Downloads this server's own crash reports as one zip, to send to support."><span class="t">download crash reports</span></a></div>
+  <a class="key sm" href="/admin/diagnostics/crash-reports.zip" title="Downloads this server's own crash reports as one zip, to send to support."><span class="t">download crash reports</span></a> <span class="dim">then send them to {{ support_contact }}</span></div>
 {% endif %}
 {% if diagnostics.bundles %}
   {% for b in diagnostics.bundles %}

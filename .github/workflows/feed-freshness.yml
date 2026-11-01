@@ -1,0 +1,36 @@
+# Fail when the customer release channel trails main -- GL-24 / COM-H8
+# (CR-371, 2026-10-07). The vendor feed sat a month behind the studio and
+# nothing said so. This reads the PUBLISHED, signature-verified channel and
+# compares its current dashboard with the VERSION in this tree
+# (tools/check_feed_freshness.py). Exit 3 = could not check, which is a red
+# run, never a green one.
+#
+# FEED_READ_TOKEN: a token with read access to the feed repo (the default
+# GITHUB_TOKEN cannot read a different private repo). Without it the fetch
+# uses the default token and, if the feed repo is private, reports NOT CHECKED.
+
+name: feed-freshness
+
+on:
+  schedule:
+    - cron: "41 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: the customer channel is not behind main
+        env:
+          GH_TOKEN: ${{ secrets.FEED_READ_TOKEN || github.token }}
+        run: python tools/check_feed_freshness.py

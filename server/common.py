@@ -31,6 +31,8 @@ from pathlib import Path
 
 import urllib3
 
+import truenas_rpc
+
 # TrueNAS uses a self-signed cert by default; suppress the noisy warning
 # (same as the `curl -sk` pattern already used against this host).
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -148,6 +150,73 @@ def site_bool(section: str, key: str, default: bool = False) -> bool:
     if raw in ("0", "false", "no", "off"):
         return False
     return default
+
+
+# GL-10 / CR-364 (2026-10-07): the one place that knows which rclone SFTP
+# window a NAS's own sshd tolerates. DSM 7.2's OpenSSH 8.2 has no
+# limits@openssh.com, so a lane-B download at the fleet's 255Ki x 64
+# TRUNCATES at 539,000,832 bytes while rclone reports success (spike 6,
+# docs/synology-spikes-2026-08-17.md). Until now only comments protected it
+# and site.example.toml shipped the unsafe value. The dashboard has its own
+# copy (ccsync_dashboard/sftp_transport.py) because the container cannot import
+# server/; a test pins the two equal.
+SYNOLOGY_SAFE_SFTP_CHUNK_BYTES = 64 * 1024
+SYNOLOGY_SAFE_SFTP_CONCURRENCY = 16
+
+
+def parse_sftp_size(raw) -> int | None:
+    """rclone's size syntax ("64Ki", "64k", "1M", "65536") as bytes, or None
+    when it is blank or not a size. Unit-less is bytes, as rclone reads it;
+    K/M/G are binary like rclone's."""
+    text = str(raw or "").strip().lower().replace(" ", "")
+    if not text:
+        return None
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([kmgt]?)(i?b?)", text)
+    if not m:
+        return None
+    mult = {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3, "t": 1024 ** 4}[m.group(2)]
+    return int(float(m.group(1)) * mult)
+
+
+def sftp_transport_problem(kind: str, chunk_size, concurrency) -> str:
+    """"" when the pair is safe for the sshd that serves lanes A/B on `kind`,
+    else a sentence naming what to set. Only a Synology site on DSM's own sshd
+    has limits; the appliance's ccsync-sftp sidecar (OpenSSH 9.6) is fine at
+    255Ki and does not come through here (its nas_kind is not synology)."""
+    if str(kind or "").strip().lower() != "synology":
+        return ""
+    problems = []
+    size = parse_sftp_size(chunk_size)
+    if str(chunk_size or "").strip() and size is None:
+        problems.append(f"sftp_chunk_size {chunk_size!r} is not a size (use \"64Ki\")")
+    elif size is not None and size > SYNOLOGY_SAFE_SFTP_CHUNK_BYTES:
+        problems.append(
+            f"sftp_chunk_size {chunk_size!r} is above 64Ki: DSM's sshd silently "
+            f"truncates downloads over 514 MiB at that size")
+    try:
+        conc = int(concurrency or 0)
+    except (TypeError, ValueError):
+        conc = 0
+    if conc > SYNOLOGY_SAFE_SFTP_CONCURRENCY:
+        problems.append(
+            f"sftp_concurrency {conc} is above {SYNOLOGY_SAFE_SFTP_CONCURRENCY}")
+    return "; ".join(problems)
+
+
+def derive_sftp_transport(kind: str, chunk_size, concurrency) -> tuple[str, int]:
+    """The (chunk, concurrency) to publish: what was asked for, with a blank
+    on a Synology site filled with the measured-safe 64Ki / 16. A value above
+    the limit is NOT silently lowered here - callers refuse it first
+    (`sftp_transport_problem`)."""
+    chunk = str(chunk_size or "").strip()
+    try:
+        conc = int(concurrency or 0)
+    except (TypeError, ValueError):
+        conc = 0
+    if str(kind or "").strip().lower() == "synology":
+        chunk = chunk or "64Ki"
+        conc = conc or SYNOLOGY_SAFE_SFTP_CONCURRENCY
+    return chunk, conc
 
 
 def add_site_arg(ap) -> None:
@@ -274,14 +343,91 @@ PROJECT_GROUP_MAXLEN = 32
 
 
 def project_acl_mode() -> str:
-    """"shared" (default, today's behaviour) or "per-project"."""
-    mode = (site_value("stack", "project_acl") or "shared").lower()
+    """"per-project" (the default for a NEW site) or "shared".
+
+    GL-19 / COM-H15 (CR-368, 2026-10-07): the default used to be "shared", under
+    which any editor can delete any other editor's project. A site that has
+    always run that way keeps it by saying so: the studio's own site.toml
+    carries `project_acl = "shared"`. Only an UNSET key means per-project.
+    """
+    mode = (site_value("stack", "project_acl") or "per-project").lower()
     if mode not in PROJECT_ACL_MODES:
         raise EnvError(
             f"[stack] project_acl is {mode!r}; expected one of "
             f"{', '.join(PROJECT_ACL_MODES)} (docs/TENANCY.md)"
         )
     return mode
+
+
+# --------------------------------------------------------------------------
+# [security] -- the legacy switches (GL-18 / GL-19, CR-368, 2026-10-07)
+# --------------------------------------------------------------------------
+#
+# Owner decision 2026-10-07: a NEW site gets every COM-H15 secure default, and
+# the studio's own long-running site keeps its legacy values by NAMING them in
+# its own site.toml. Each flag below is the explicit opt-out for ONE default and
+# is false/absent on a new site. They are never read from the environment on
+# purpose: a legacy posture belongs in the manifest where it is written down,
+# not in one operator's shell history.
+SECURITY_LEGACY_FLAGS = (
+    # TrueNAS: the dashboard container may hold the NAS admin PASSWORD instead
+    # of a scoped API key (COM-H5). Default: a key is mandatory.
+    "allow_nas_password_in_container",
+    # The dashboard admin list may name the NAS admin account itself (COM-H5).
+    # Default: the dashboard admin is a different account from the NAS admin.
+    "allow_nas_admin_as_dashboard_admin",
+    # Do NOT publish the NAS SSH host key to editors' rclone remotes (COM-H15).
+    # Default: published, and both installers pin it.
+    "skip_lane_host_key_pin",
+)
+
+
+def security_legacy(flag: str) -> bool:
+    """True when site.toml `[security] <flag> = true` names a legacy posture."""
+    if flag not in SECURITY_LEGACY_FLAGS:
+        raise KeyError(f"unknown [security] flag {flag!r}")
+    return site_bool("security", flag, False)
+
+
+# Resolve's well-known project-server password. The optional Postgres profile
+# used to default to it and publish 5432 on every interface (bug-server-8 /
+# PL-RES-27); it is refused outright now, wherever it comes from.
+PG_WELL_KNOWN_PASSWORDS = ("davinci",)
+PG_PASSWORD_ENV = "PG_PASSWORD"
+PG_PASSWORD_FILE_ENV = "CCSYNC_PG_PASSWORD_FILE"
+
+
+def project_server_password() -> str:
+    """The Postgres (Resolve Project Server) password for the compose profile.
+
+    $PG_PASSWORD wins; otherwise a random one is generated ONCE and kept in
+    ~/.ccsync/pg_password (0600), so a redeploy re-renders the same secret and
+    never strands an initialised data volume behind a different one. Refuses
+    Resolve's well-known default from either source. It goes in the 0600 .env
+    beside the compose file (Synology) and is printed by the deploy so the
+    admin can type it into Resolve's database entry once (GL-19, CR-368,
+    2026-10-07)."""
+    import secrets as _secrets
+
+    value = os.environ.get(PG_PASSWORD_ENV, "").strip()
+    path = Path(os.environ.get(PG_PASSWORD_FILE_ENV, "").strip()
+                or Path.home() / ".ccsync" / "pg_password")
+    if not value and path.is_file():
+        value = path.read_text(encoding="utf-8").strip()
+    if not value:
+        value = _secrets.token_urlsafe(24)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass   # Windows ACLs; the file lives in the operator's profile
+    if value.lower() in PG_WELL_KNOWN_PASSWORDS:
+        raise EnvError(
+            "the Postgres project-server password is Resolve's well-known default "
+            "('DaVinci'); anyone who can reach port 5432 would have a superuser. Unset "
+            f"${PG_PASSWORD_ENV} and let this toolchain generate one, or choose your own.")
+    return value
 
 
 def project_group_name(slug: str) -> str:
@@ -855,35 +1001,198 @@ def truenas_api_key() -> str:
     return os.environ.get(TRUENAS_API_KEY_ENV, "").strip()
 
 
-# TLS verification for the NAS's own API. Off is still ALLOWED -- both
-# platforms ship a self-signed cert and a customer who has not put a real one
-# on their NAS must still be able to install -- but it is no longer silent:
-# these calls carry the admin password or an API key with user/group rights.
+def truenas_api_key_user() -> str:
+    """The account the API key was minted for (create_api_key.py --username).
+
+    JSON-RPC's API_KEY_PLAIN login names it, and it is NOT the admin account
+    TRUENAS_USER (CR-365 overseer 1, 2026-10-07). Blank means "the key is the
+    admin's own"."""
+    return os.environ.get("TRUENAS_API_KEY_USER", "").strip()
+
+
+# TLS verification for the NAS's own API.
+#
+# THE DEFAULT IS A CERTIFICATE PIN (GL-18/GL-19 "NAS TLS verify by default",
+# CR-368, 2026-10-07). Both platforms ship a self-signed certificate, so the
+# secure default cannot be "verify against the system CA bundle"; it is "accept
+# exactly the certificate the operator saw at install": `sha256:<64 hex>`.
+# Unset [nas] verify_ssl / $TRUENAS_VERIFY_SSL means:
+#
+#   a fingerprint already recorded in ~/.ccsync/known_certs.json  -> pinned to it
+#   none recorded, --trust-host-key-on-first-use / CCSYNC_SSH_TRUST_ON_FIRST_USE
+#       -> record the certificate now (printed, with the line to paste), pinned
+#   none recorded, no first-use opt-in -> REFUSAL naming the ways forward
+#
+# which is the SSH host-key rule, deliberately the same one. A changed
+# certificate is a refusal, never a re-trust. The other values are as before:
+# "1" (CA bundle), a CA file path, a `sha256:` pin, and "0" -- off, loud, and
+# what the STUDIO's own site.toml keeps (verify_ssl = "0").
 _TLS_WARNED = set()
+CERT_PIN_PREFIX = "sha256:"
+KNOWN_CERTS_ENV = "CCSYNC_KNOWN_CERTS"
 
 
-def _verify_ssl_setting(raw: str, env_name: str, host_hint: str = "the NAS"):
-    """"" / "0" -> False (warned once), "1" -> True, anything else -> CA path."""
+def parse_cert_pin(raw) -> str:
+    """The lowercase 64-hex digest of a `sha256:` pin, "" for anything else.
+    A malformed pin raises: a typo in a security setting is never "off"."""
+    text = str(raw or "").strip()
+    if not text.lower().startswith(CERT_PIN_PREFIX):
+        return ""
+    digest = text[len(CERT_PIN_PREFIX):].replace(":", "").replace(" ", "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise EnvError(
+            f"{text!r} is not a certificate pin: expected 'sha256:' and 64 hex digits "
+            f"(`openssl x509 -noout -fingerprint -sha256`).")
+    return digest
+
+
+def known_certs_path() -> Path:
+    override = os.environ.get(KNOWN_CERTS_ENV, "").strip()
+    return Path(override) if override else Path.home() / ".ccsync" / "known_certs.json"
+
+
+def fetch_cert_fingerprint(host: str, port: int = 443, timeout: float = 10.0) -> str:
+    """SHA-256 (lowercase hex) of the certificate `host:port` presents. One
+    handshake, nothing sent: the chain is NOT validated, because the point is to
+    learn what a self-signed NAS serves so it can be pinned."""
+    import hashlib
+    import socket
+    import ssl
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, int(port)), timeout=timeout) as raw:
+        with ctx.wrap_socket(raw, server_hostname=host) as tls:
+            der = tls.getpeercert(binary_form=True)
+    if not der:
+        raise EnvError(f"{host}:{port} presented no certificate")
+    return hashlib.sha256(der).hexdigest()
+
+
+def _read_known_certs() -> dict:
+    import json
+
+    path = known_certs_path()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise EnvError(
+            f"{path} could not be read ({exc}). Fix or delete it, or set "
+            f"[nas] verify_ssl = \"sha256:<fingerprint>\" in site.toml instead.") from exc
+    return data if isinstance(data, dict) else {}
+
+
+def _record_known_cert(host: str, port: int, digest: str) -> Path:
+    import json
+
+    path = known_certs_path()
+    data = _read_known_certs()
+    data[f"{host}:{int(port)}"] = digest
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass   # a no-op chmod on Windows; the file holds public fingerprints only
+    return path
+
+
+def nas_cert_port() -> int:
+    """The port whose certificate the operator scripts verify: DSM's web API
+    port on a Synology, 443 on TrueNAS."""
+    kind = (os.environ.get(NAS_KIND_ENV, "").strip() or site_value("nas", "kind")).lower()
+    return synology_port() if kind == "synology" else 443
+
+
+def default_cert_pin(host: str = "", port: int = 0, fetch=None) -> str:
+    """The `sha256:` pin to use when nothing says otherwise; see the block above.
+
+    `fetch` is the handshake (a test seam). Raises EnvError instead of ever
+    returning "trust everything"."""
+    if not host:
+        host = nas_host_user()[0]
+    port = int(port or nas_cert_port())
+    key = f"{host}:{port}"
+    recorded = str(_read_known_certs().get(key) or "").strip().lower()
+    if recorded:
+        return CERT_PIN_PREFIX + recorded
+    if not trust_on_first_use():
+        raise EnvError(
+            f"refusing to talk to the NAS API at {key}: its TLS certificate is neither "
+            f"pinned nor recorded.\n"
+            f"  These calls carry the NAS admin password or an API key, so an unverified "
+            f"certificate means anything on the network can have it (GL-19).\n"
+            f"  Pin it (preferred): put [nas] verify_ssl = \"sha256:<fingerprint>\" in "
+            f"site.toml (`openssl s_client -connect {key} </dev/null 2>/dev/null | openssl "
+            f"x509 -noout -fingerprint -sha256`).\n"
+            f"  Or, standing in front of the box, accept it once with {_TOFU_FLAG} "
+            f"(${TOFU_ENV}=1): it is recorded in {known_certs_path()} and every later run "
+            f"is checked against it.\n"
+            f"  Or deliberately turn verification off with [nas] verify_ssl = \"0\" "
+            f"(this studio's own legacy setting).")
+    digest = (fetch or fetch_cert_fingerprint)(host, port)
+    path = _record_known_cert(host, port, digest)
+    print(f"TRUSTED ON FIRST USE: the NAS API certificate at {key} "
+          f"(sha256 {digest}) is recorded in {path}. Later runs are checked against it "
+          f"and a change is a refusal.\n  Pin it properly by adding this to site.toml [nas]:\n"
+          f"    verify_ssl = \"{CERT_PIN_PREFIX}{digest}\"", file=sys.stderr)
+    return CERT_PIN_PREFIX + digest
+
+
+def _verify_ssl_setting(raw: str, env_name: str, host_hint: str = "the NAS", host: str = "",
+                        port: int = 0):
+    """"" -> a certificate pin (the secure default, see above); "0" -> False
+    (warned once); "1" -> True; `sha256:...` -> that pin; anything else -> CA path."""
     raw = str(raw or "").strip()
-    if raw in ("", "0", "false", "no", "off"):
+    if raw == "":
+        return default_cert_pin(host, port)
+    if raw.lower() in ("0", "false", "no", "off"):
         if env_name not in _TLS_WARNED:
             _TLS_WARNED.add(env_name)
             print(f"WARNING: TLS certificate verification is OFF for {host_hint}'s API "
-                  f"({env_name} is unset or 0). The admin password and every account "
+                  f"({env_name} is 0). The admin password and every account "
                   f"this creates cross that connection (COMMERCIAL_READINESS.md item 6). "
-                  f"Export the NAS's CA and set {env_name}=/path/to/ca.pem -- "
-                  f"docs/SERVER.md, \"Verifying the NAS certificate\".", file=sys.stderr)
+                  f"Pin the certificate with {env_name}=sha256:<fingerprint>, or point it at "
+                  f"a CA file -- docs/SERVER.md, \"Verifying the NAS certificate\".",
+                  file=sys.stderr)
         return False
-    if raw in ("1", "true", "yes", "on"):
+    if raw.lower() in ("1", "true", "yes", "on"):
         return True
+    if raw.lower().startswith(CERT_PIN_PREFIX):
+        return CERT_PIN_PREFIX + parse_cert_pin(raw)
     return raw
 
 
 def truenas_verify_ssl():
-    """False / True / a CA bundle path, from TRUENAS_VERIFY_SSL or [nas] verify_ssl."""
+    """False / True / a CA bundle path / a `sha256:` pin, from TRUENAS_VERIFY_SSL
+    or [nas] verify_ssl; unset is the recorded-or-refused pin."""
     return _verify_ssl_setting(
         os.environ.get("TRUENAS_VERIFY_SSL", "").strip() or site_value("nas", "verify_ssl"),
         "TRUENAS_VERIFY_SSL")
+
+
+def requests_with_verify(method: str, url: str, verify, **kwargs):
+    """requests.request that understands a `sha256:` pin: it mounts a pinned
+    adapter for the one call and passes verify=False. Anything else is
+    requests.request unchanged."""
+    import requests
+
+    digest = parse_cert_pin(verify) if isinstance(verify, str) else ""
+    if not digest:
+        return requests.request(method, url, verify=verify, **kwargs)
+    from requests.adapters import HTTPAdapter
+
+    class _Pinned(HTTPAdapter):
+        def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+            pool_kwargs["assert_fingerprint"] = digest
+            super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+    with requests.Session() as session:
+        session.mount("https://", _Pinned())
+        return session.request(method, url, verify=False, **kwargs)
 
 
 def nas_host_user(dry_run: bool = False):
@@ -994,6 +1303,34 @@ def host_key_pin() -> str:
     return (_HOST_KEY_PIN
             or os.environ.get("CCSYNC_SSH_HOSTKEY", "").strip()
             or site_value("nas", "ssh_hostkey"))
+
+
+def nas_ssh_hostkey_line(host: str = "", port: int = 0) -> str:
+    """The NAS sshd's host key as one `<type> <base64>` line: the configured pin
+    (--host-key / $CCSYNC_SSH_HOSTKEY / [nas] ssh_hostkey), else the key this
+    toolchain recorded for the host in ~/.ccsync/known_hosts, else "".
+
+    This is what is carried into the places that must trust the SAME key the
+    operator scripts do: the Synology dashboard's DASH_NAS_SSH_HOSTKEY
+    (bug-dash-ops-5) and the site manifest's `sftp_hostkey`, which both editor
+    installers write into rclone's known_hosts file (GL-19). A pin that cannot
+    be parsed is returned as written rather than dropped, so a typo is seen
+    downstream and not silently turned into "no pin"."""
+    pin = host_key_pin()
+    try:
+        if pin:
+            keytype, key = _parse_host_key(pin)
+            return f"{keytype} {key.get_base64()}"
+        if not host:
+            host = nas_host_user()[0]
+        recorded = _known_host_key(host, int(port or nas_ssh_port()))
+        if recorded:
+            keytype, key = recorded
+            return f"{keytype} {key.get_base64()}"
+    except EnvError:
+        if pin:
+            return " ".join(pin.split())
+    return ""
 
 
 def known_hosts_path() -> Path:
@@ -1318,7 +1655,8 @@ def sftp_put_text(remote_dir: str, files: dict, dry_run: bool = False) -> bool:
 
 def truenas_api(method: str, path: str, json_body=None, dry_run: bool = False,
                  params=None):
-    """Call the TrueNAS REST API (v2.0) with HTTP basic auth.
+    """Call the TrueNAS API with a REST-shaped call: JSON-RPC over WebSocket
+    when the NAS has it (CR-365), REST /api/v2.0 otherwise.
 
     `path` must start with '/', e.g. '/user' or '/group'.
     Returns a requests.Response in real mode, or None in dry-run mode.
@@ -1344,12 +1682,53 @@ def truenas_api(method: str, path: str, json_body=None, dry_run: bool = False,
 
     import requests
 
+    verify = truenas_verify_ssl()
+    # CR-365 / GL-11 (2026-10-07): TrueNAS 26 has no /api/v2.0. Prefer the
+    # JSON-RPC websocket (25.04+, truenas_rpc.py maps every route below onto
+    # it and answers with the same status_code/text/json() surface); fall back
+    # to REST only when the NAS has no /api/current (24.10 and older), or when
+    # TRUENAS_API_TRANSPORT=rest pins it.
+    mode = truenas_rpc.transport_setting()
+    if mode != "rest" and not truenas_rpc.rest_only(host):
+        try:
+            return truenas_rpc.rest_call(
+                host, method, path, json_body, params, user=user, password=pw,
+                api_key=api_key, api_key_user=truenas_api_key_user(), verify=verify,
+                timeout=30, url=os.environ.get("TRUENAS_WS_URL", "").strip() or None)
+        except truenas_rpc.RpcUnavailable as exc:
+            if mode == "jsonrpc":
+                raise requests.exceptions.ConnectionError(
+                    f"{host} has no JSON-RPC API ({exc}) and "
+                    "TRUENAS_API_TRANSPORT=jsonrpc forbids falling back to REST")
+            truenas_rpc.mark_rest_only(host)
+            print(f"NOTE: {host} serves no JSON-RPC API ({exc}); using REST /api/v2.0, "
+                  "which TrueNAS 26 no longer has.", file=sys.stderr)
+        except truenas_rpc.UnmappedRoute as exc:
+            # A route nobody mapped: REST still answers on 25.x, so use it there.
+            if mode == "jsonrpc":
+                raise requests.exceptions.ConnectionError(
+                    f"TrueNAS JSON-RPC {method.upper()} {path}: {exc}") from exc
+        except (truenas_rpc.RpcTransportError, truenas_rpc.RpcAuthError) as exc:
+            raise requests.exceptions.ConnectionError(
+                f"TrueNAS JSON-RPC {method.upper()} {path}: {exc}") from exc
+
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
-    resp = requests.request(
-        method, url, json=json_body, params=params, headers=headers,
-        auth=None if api_key else (user, pw),
-        verify=truenas_verify_ssl(), timeout=30,
+    resp = requests_with_verify(
+        method, url, verify, json=json_body, params=params, headers=headers,
+        auth=None if api_key else (user, pw), timeout=30,
     )
+    if (resp is not None and resp.status_code == 404 and mode != "rest"
+            and truenas_rpc.rest_only(host)):
+        # REST answered 404 after we fell back to it: either a release that
+        # removed /api/v2.0 (TrueNAS 26, upgraded under us) or a legitimately
+        # absent object. Forget the REST-only memory so the next call tries
+        # JSON-RPC again; a collection route never 404s legitimately, so name
+        # the likely cause for those (res-deps-3, 2026-10-07).
+        truenas_rpc.clear_rest_only(host)
+        if "/id/" not in path:
+            print(f"NOTE: {method.upper()} {path} answered 404 on {host}: if this NAS runs "
+                  "TrueNAS 26 or later REST is gone and JSON-RPC at /api/current must be "
+                  "reachable (docs/SERVER.md, supported versions).", file=sys.stderr)
     return resp
 
 
@@ -1460,7 +1839,8 @@ def synology_verify_ssl():
     raw = (os.environ.get("SYNO_VERIFY_SSL", "").strip()
            or os.environ.get("TRUENAS_VERIFY_SSL", "").strip()
            or site_value("nas", "verify_ssl"))
-    return _verify_ssl_setting(raw, "SYNO_VERIFY_SSL", host_hint="DSM")
+    return _verify_ssl_setting(raw, "SYNO_VERIFY_SSL", host_hint="DSM",
+                               port=synology_port())
 
 
 def synology_port() -> int:
@@ -1489,10 +1869,10 @@ def _dsm_http(host: str, cgi: str, params: dict, post: bool, token: str = ""):
     url = _dsm_url(host, cgi)
     headers = {"X-SYNO-TOKEN": token} if token else {}
     if post:
-        return requests.post(url, data=params, headers=headers,
-                             verify=synology_verify_ssl(), timeout=30)
-    return requests.get(url, params=params, headers=headers,
-                        verify=synology_verify_ssl(), timeout=30)
+        return requests_with_verify("POST", url, synology_verify_ssl(), data=params,
+                                    headers=headers, timeout=30)
+    return requests_with_verify("GET", url, synology_verify_ssl(), params=params,
+                                headers=headers, timeout=30)
 
 
 def _dsm_body(resp, what: str) -> dict:
@@ -1868,6 +2248,40 @@ def print_nas_banner(force: bool = False, stream=None) -> str:
         _BANNER_PRINTED = True
         print(line, file=stream or sys.stdout, flush=True)
     return line
+
+
+_VERSION_NOTE_PRINTED = False
+
+
+def print_truenas_version_note(api=None, stream=None, args=None) -> str:
+    """Once per process, name an unsupported TrueNAS release (CR-365 round 2,
+    GL-11, 2026-10-07). `api` is the CALLING script's own truenas_api, so a
+    test that patches that name patches this call too. Best effort and silent
+    on doubt: a version the NAS will not tell us is not a reason to stop.
+
+    `args` is the script's parsed namespace: it carries --nas-kind (so a
+    Synology run never sends its admin credential to a TrueNAS API) and
+    --dry-run (which opens nothing, so this makes no call). Call it AFTER the
+    script's own argument checks."""
+    global _VERSION_NOTE_PRINTED
+    if getattr(args, "dry_run", False):
+        return ""
+    try:
+        kind = nas_kind(args)
+    except EnvError:
+        return ""
+    if _VERSION_NOTE_PRINTED or kind != "truenas":
+        return ""
+    _VERSION_NOTE_PRINTED = True
+    try:
+        resp = (api or truenas_api)("GET", "/system/info")
+        info = resp.json() if resp is not None else {}
+        note = truenas_rpc.version_note(str((info or {}).get("version") or ""))
+    except Exception:  # noqa: BLE001 - advisory only
+        return ""
+    if note:
+        print(f"NOTE: {note}", file=stream or sys.stderr, flush=True)
+    return note
 
 
 def confirm_destructive(what: str, *, assume_yes: bool = False,

@@ -7,7 +7,8 @@ trusts only the keys baked into the binary it is already running. The strongest
 statement of that fact lived on line 668 of a 1200-line runbook, `new` said
 nothing about backing anything up, and there was no `backup` command at all.
 
-There is deliberately NO passphrase wrap: the in-tree crypto
+For the PLAINTEXT copy there is deliberately NO passphrase wrap (an encrypted
+v2 file is CR-378, tests/test_release_key_encrypted.py): the in-tree crypto
 (`ccsync_companion.ed25519`) signs and verifies and does not encrypt, and a
 homemade construction protecting the one secret in this product that must never
 be guessable is worse than the problem. What these tests pin instead is that

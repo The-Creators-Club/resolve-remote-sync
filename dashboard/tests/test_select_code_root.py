@@ -389,3 +389,32 @@ def test_a_read_only_data_volume_still_boots(world):
     assert proc.returncode == 0
     assert proc.stdout.strip() == volume_path(world)
     assert "WARNING: could not write" in proc.stderr
+
+
+# CR-363 / GL-07 round 2 (2026-10-07): a key pasted into the wizard lives in
+# <data>/secrets/appliance_config.json, which the app applies only after this
+# script has run.
+
+
+def _store_wizard_key(world, key):
+    secrets_dir = world["data"] / "secrets"
+    secrets_dir.mkdir(exist_ok=True)
+    (secrets_dir / "appliance_config.json").write_text(
+        json.dumps({"DASH_RELEASE_PUBKEYS": key}), encoding="utf-8")
+
+
+def test_a_key_pasted_into_the_wizard_verifies_the_boot_time_tree(world):
+    install_tree(world)
+    set_current(world, NEW_VERSION)
+    _store_wizard_key(world, TEST_PUBKEY)
+    proc = run(world, pubkeys="")
+    assert proc.stdout.strip() == volume_path(world)
+
+
+def test_the_environment_wins_over_the_stored_wizard_key(world):
+    install_tree(world)
+    set_current(world, NEW_VERSION)
+    _store_wizard_key(world, TEST_PUBKEY)
+    other = base64.b64encode(ed25519.public_key(OTHER_SEED)).decode("ascii")
+    proc = run(world, pubkeys=other)
+    assert proc.stdout.strip() == image_path(world)

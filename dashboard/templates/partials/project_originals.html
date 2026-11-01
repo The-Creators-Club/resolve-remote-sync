@@ -1,0 +1,122 @@
+{# The project page's ORIGINALS ON REQUEST window body (2026-10-31,
+   docs/SELECTIVE_ORIGINALS.md §12.3). Rendered by
+   ui._project_originals_answer into #project-originals, innerHTML, on load
+   and after its own buttons; never polled, so a folder half browsed stays
+   open. Every pick is listed for everyone who can see the project (D2);
+   only the computers the viewer may pick for (D4) get buttons. "N of M in"
+   counts the computer's reported file list against the NAS walk, and is
+   "cannot tell" when that list is withheld or not reported yet, never 0. #}
+{% if originals_error %}<div class="note err error-banner"><span class="grow">{{ originals_error }}</span></div>{% endif %}
+{% if originals_done and (originals_done.added or originals_done.removed) %}
+<div class="note ok result-banner"><span class="tag ok"><span class="w">{{ 'asked for' if originals_done.action == 'add' else 'stopped' }}</span></span><span class="grow">{% if originals_done.action == 'add' %}{{ originals_done.rel }} comes down to {{ originals_done.machine }} on its next pass. Everything chosen there for this project is {{ originals_done.total_bytes | human_bytes }}.{% else %}{{ originals_done.rel }} no longer comes down to {{ originals_done.machine }}. Files already there stay.{% endif %}</span></div>
+{% endif %}
+<div class="hint">Camera originals brought down to one computer, beside its proxies. A folder also brings what is uploaded into it later. Stopping keeps the files already down.</div>
+
+{% if picks %}
+<div class="scroll-x"><table class="tbl stack-sm">
+  <thead><tr><th>person</th><th>computer</th><th>what</th><th>size</th><th>on that computer</th><th></th></tr></thead>
+  <tbody>
+  {% for p in picks %}
+    <tr>
+      <td data-label="person">{{ p.editor | shown_as }}</td>
+      <td data-label="computer" class="num">{{ p.machine }}</td>
+      <td data-label="what"><span class="tag"><span class="w">{{ 'folder' if p.is_dir else 'file' }}</span></span> <span class="num" title="Chosen by {{ p.picked_by | shown_as }} from {{ 'Resolve' if p.via == 'resolve' else 'the dashboard' }}, {{ p.at }}">{{ p.rel }}</span></td>
+      <td data-label="size" class="num">{{ p.bytes | human_bytes }}</td>
+      <td data-label="on that computer">
+        {% if p.n_in is none %}<span class="dim" title="{{ 'This computer does not report its file list (its reporting switch is off), so the server cannot tell what is on it.' if p.why == 'withheld' else 'This computer has not reported its files for this project yet.' }}">cannot tell</span>
+        {% elif p.total == 0 %}<span class="dim">nothing on the server yet</span>
+        {% else %}<span class="num">{{ 'at least ' if p.at_least }}{{ p.n_in }} of {{ p.total }} in</span>{% endif %}
+      </td>
+      <td data-label="">
+        {% if p.can_edit %}
+        <form class="inline" hx-post="/partials/project/{{ slug }}/originals" hx-target="#project-originals" hx-swap="innerHTML"
+              hx-confirm="Stop bringing {{ p.rel }} to {{ p.machine }}? The files already there stay.">
+          <input type="hidden" name="action" value="remove">
+          <input type="hidden" name="editor" value="{{ p.editor }}">
+          <input type="hidden" name="machine" value="{{ p.machine }}">
+          <input type="hidden" name="rel" value="{{ p.rel }}">
+          <button class="key quiet sm" type="submit" title="Stop bringing this down. Nothing is deleted from the computer."><span class="t">Stop</span></button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<div class="allclear"><span class="led off" aria-hidden="true"></span>No originals chosen for this project. Proxies come down as usual.</div>
+{% endif %}
+
+<h3 class="sec">bring originals to a computer</h3>
+{% if candidates %}
+<form class="strip" hx-get="/partials/project/{{ slug }}/originals" hx-target="#project-originals" hx-swap="innerHTML">
+  <label class="field grow"><span>computer</span>
+    <select name="target" class="sel" title="Only computers with this project ticked for full sync are listed.">
+      {% for c in candidates %}<option value="{{ c.value }}"{{ ' selected' if chosen and chosen.value == c.value }}{{ ' disabled' if not c.ready }}>{{ c.machine }} ({{ c.editor | shown_as }}){{ ' - needs companion ' ~ min_version if not c.ready }}</option>{% endfor %}
+    </select></label>
+  <button class="key" type="submit" title="Shows the originals the server holds for this project, with their sizes."><span class="t">Browse originals</span></button>
+</form>
+{% for c in candidates if not c.ready %}
+<div class="dim">{{ c.machine }} {{ ('runs companion ' ~ c.version) if c.version else 'has not said which companion it runs' }}: it ignores originals picks until it is updated to {{ min_version }} or later.</div>
+{% endfor %}
+{% else %}
+<div class="allclear">None of {{ 'the' if session_is_admin else 'your' }} computers has this project ticked for full sync, so there is nowhere to bring originals to.</div>
+{% endif %}
+
+{% if browse and chosen %}
+<div class="hint">Originals of <b>{{ label }}{{ '/' ~ browse.dir if browse.dir }}</b> on the server, for <b>{{ chosen.machine }}</b>.</div>
+{% if browse.parent is not none %}
+<button class="key quiet sm" type="button" hx-get="/partials/project/{{ slug }}/originals?target={{ chosen.value | urlencode }}&dir={{ browse.parent | urlencode }}"
+        hx-target="#project-originals" hx-swap="innerHTML"><span class="t">Up a folder</span></button>
+{% endif %}
+{% if browse.folders or browse.files %}
+<div class="scroll-x"><table class="tbl stack-sm">
+  <thead><tr><th>name</th><th>files</th><th>size</th><th></th></tr></thead>
+  <tbody>
+  {% for f in browse.folders %}
+    <tr>
+      <td data-label="name"><button class="key quiet sm" type="button" title="Open this folder."
+            hx-get="/partials/project/{{ slug }}/originals?target={{ chosen.value | urlencode }}&dir={{ f.rel | urlencode }}"
+            hx-target="#project-originals" hx-swap="innerHTML"><span class="t">{{ f.name }}/</span></button></td>
+      <td data-label="files" class="num">{{ f.count }}</td>
+      <td data-label="size" class="num">{{ f.bytes | human_bytes }}</td>
+      <td data-label="">
+        {% if f.picked %}<span class="tag ok"><span class="w">chosen</span></span>{% else %}
+        <form class="inline" hx-post="/partials/project/{{ slug }}/originals" hx-target="#project-originals" hx-swap="innerHTML"
+              hx-confirm="Bring the {{ f.count }} originals in {{ f.name }} ({{ f.bytes | human_bytes }}) to {{ chosen.machine }}, and anything uploaded into it later?">
+          <input type="hidden" name="action" value="add">
+          <input type="hidden" name="editor" value="{{ chosen.editor }}">
+          <input type="hidden" name="machine" value="{{ chosen.machine }}">
+          <input type="hidden" name="rel" value="{{ f.rel }}">
+          <input type="hidden" name="is_dir" value="1">
+          <input type="hidden" name="dir" value="{{ browse.dir }}">
+          <button class="key sm" type="submit"><span class="t">Bring this folder</span></button>
+        </form>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  {% for f in browse.files %}
+    <tr>
+      <td data-label="name" class="num">{{ f.name }}</td>
+      <td data-label="files" class="num">1</td>
+      <td data-label="size" class="num">{{ f.bytes | human_bytes }}</td>
+      <td data-label="">
+        {% if f.picked %}<span class="tag ok"><span class="w">chosen</span></span>{% else %}
+        <form class="inline" hx-post="/partials/project/{{ slug }}/originals" hx-target="#project-originals" hx-swap="innerHTML">
+          <input type="hidden" name="action" value="add">
+          <input type="hidden" name="editor" value="{{ chosen.editor }}">
+          <input type="hidden" name="machine" value="{{ chosen.machine }}">
+          <input type="hidden" name="rel" value="{{ f.rel }}">
+          <input type="hidden" name="dir" value="{{ browse.dir }}">
+          <button class="key sm" type="submit"><span class="t">Bring this file</span></button>
+        </form>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% if browse.more_files %}<div class="dim">and {{ browse.more_files }} more files here. Bring the folder to get them all.</div>{% endif %}
+{% else %}
+<div class="allclear">The server has no originals here yet.</div>
+{% endif %}
+{% endif %}

@@ -57,7 +57,7 @@ def _sign(argv):
 def _base_argv(artifact, version="0.9.67"):
     return ["--artifact", str(artifact), "--kind", "companion",
             "--platform", "windows", "--version", version,
-            "--min-version", "0.0.0"]
+            "--min-version", "0.0.0", "--allow-no-floor"]
 
 
 def test_notes_ride_the_query_and_not_the_signature(key, artifact):

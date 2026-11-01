@@ -211,7 +211,9 @@ def test_resolve_health_sends_the_documented_keys_and_nothing_else(tmp_path):
         "connected", "project_open", "wedged_seconds", "wedged_call",
         "missing_clips", "non_canonical_refused",
         "proxy_attach", "proxy_gaps", "stills",
-        "ignored_this_session", "ignored_folders", "skipped_ever",
+        # `ignored_folders` left with CR-356 (2026-09-30); the dashboard's
+        # ResolveHealthIn keeps it optional for older companions.
+        "ignored_this_session", "skipped_ever",
         "last_scan_at", "open_project",
         # comp-broll-tiers-5 (2026-09-18, CR-283X): the stand-ins whose
         # editing-proxy upgrade gave up. Declared on the dashboard's

@@ -20,14 +20,14 @@ A tick now carries a **mode**:
 | mode | lane A (video originals, up) | lane B (proxies, down) | lane C (everything else, both ways) |
 |---|---|---|---|
 | `full` (every tick until now) | runs | runs | the folder is shared with the machine |
-| `upload_only` | runs | **skipped** | **the folder is never shared with the machine** |
+| `upload_only` | runs, **carries every file** (CR-366, section 5) | **skipped** | **the folder is never shared with the machine** |
 
 So an upload-only tick is **lane A alone**. The editor puts the footage in
 the project's folder on their own disk, in the tree's layout
 (`P:\Projects\<year>\<series>\<project>\...`, exactly where a full tick would
-have put it), and the companion uploads the video originals it finds
-outside `Proxy/` directories, with the same filters, age floor and
-`--ignore-existing` rule lane A has always had. Nothing is downloaded: no
+have put it), and the companion uploads **every file** it finds outside `Proxy/`
+directories (since 2026-10-07; it was video only before, see section 5),
+with the same age floor and `--ignore-existing` rule lane A has always had. Nothing is downloaded: no
 proxies, no shared project files, no borrowed folders, no folder skeleton
 beyond what the project's own structure clone has always made.
 
@@ -121,19 +121,72 @@ Companion:
 - A mode flip is a selection change (`_update_known_selection` wakes the
   sequencer), so full -> upload-only stops lane B on the next pass and the
   reverse starts it.
-- `app.removal_blockers` asks the lane A question only; `removable_projects`
+- `app.removal_blockers` asks the lane A questions only; `removable_projects`
   carries `upload_only`; the tray's "Remove…" item says `(upload only)`.
+  Since CR-366 (2026-10-07) those are: the lane A dry run WITHOUT the age
+  floor, a strict same-name-different-size check, a local scan for files no
+  lane carries, and a local scan for future-dated files (section 5).
 
 ## 5. Known limits and open decisions
 
-- **Only VIDEO originals go up.** Lane A's filter is `VIDEO_EXTS` outside
-  `Proxy/`, unchanged. Separate-recorder audio (a Zoom or Tascam WAV in the
-  same card dump), stills, documents: none of that is carried by an
-  upload-only tick, because lane C is what carries it and lane C is off. If
-  that turns out to be what editors expect, the change is one place -
-  `rclone_lane.build_filter_rules_up` widened for upload-only runs - and it
-  is the owner's call, because it also decides whether a re-tick to full sync
-  later finds the audio already on the server (it would).
+- **Lane A carries EVERY file of an upload-only project** (decided by the
+  owner 2026-10-07, CR-366 / prelaunch GL-13; this section used to say "only
+  VIDEO originals go up" and leave it as an open decision). The tick has no
+  lane C, so a sound recording from a separate recorder, a still or a
+  document had no way to reach the server, and "Remove from this machine"
+  deleted them. `build_filter_rules_up(carry_all=True)` is `+ *` instead of
+  the `+ *<video ext>` list, for runs whose subpath is an upload-only
+  project (`RcloneLane.carry_all_fn` <- `Sequencer.is_upload_only_subpath`;
+  its own filter file, `filter_up_all.txt`). Everything the video rules
+  already refused stays refused: `Proxy/` (lane B's, the server makes
+  proxies), AppleDouble `._*`, file-move staging, ytdl work files, the
+  half-written `.partial`/`.tmp`/`.lock`/`.part`/`.ytdl`/`.ccsync-tmp`,
+  OS litter (`.DS_Store`, `Thumbs.db`, `desktop.ini`: nobody's work, and a
+  Finder-rewritten `.DS_Store` would otherwise block almost every Mac
+  removal) and Syncthing's own state (`.stfolder/`, `.stignore`,
+  `.stversions/`: a project that was a full tick holds them, and they must
+  never be pushed into the server's versioning tree). A full tick is
+  unchanged (video only on lane A; the rest is lane C). The consequence the
+  owner accepted: a later re-tick to full sync finds the audio already on
+  the server. The express path is unchanged and still video only; the
+  periodic pass carries the rest.
+- **What the removal gate checks, and the one thing it blocks on by name.**
+  An upload-only removal is blocked, behind the typed override and naming the
+  files, when the folder holds a file no lane carries (the refused names
+  above). `Proxy/` content, OS litter (`.DS_Store`, `Thumbs.db`,
+  `desktop.ini`, `._*`) and 0-byte files do not count. The confirm dialog
+  claims only what was checked (`tray.remove_ready_body`).
+  **The same rule holds for a full tick (round 2):** lane C ignores every video
+  extension, so a video file lane A refuses (`*.original.*`, `*.temp.*`,
+  `*.editready.*`, `*.f137.*`, `*.failed`, move staging) is carried by nobody
+  on a full tick either, and so are `.part`/`.ytdl`/`.ccsync-tmp`. The local
+  scan names them and the gate blocks.
+- **An edit to an already uploaded file never goes up on an upload-only tick.**
+  Lane A is `copy --ignore-existing`: the first version of a name to reach
+  the server is the only one that ever will, and that now applies to the
+  documents, project files and WAVs the lane carries. The gate looks for the
+  two shapes of it and blocks, naming files: a different size (the strict
+  `rclone check`) and a same-size edit (`scan_edited_since_upload`, a
+  `copy --update` dry run: a file whose local copy is NEWER than the server's,
+  minus what is simply not uploaded yet). The way out is the one the block
+  names: rename the file so it uploads as a new one. Video re-exports behave
+  the same way.
+- **Same-name files and future dates** (GL-12, GL-14, any tick): the gate's
+  lane A dry run drops `--min-age` (a file under two minutes old, or dated
+  in the future by a camera clock, has not reached the server), the strict
+  `rclone check --combined` finds local files the NAS holds at another size
+  (they never upload) and returns "could not tell" on anything it does not
+  understand, and a local walk names files dated more than 300 s ahead of
+  the machine clock. Every one of them blocks, names files, and fails
+  closed. The editor sees future-dated files in Settings as an advisory line
+  naming the first file and its date (`tray._future_dated_line`, a local read
+  of `RcloneLane.future_dated_report`, summed over all projects). That line is
+  deliberately NOT a `sync_guard` report key: it is injected into the tray's
+  own copy of the guard, so there is no telemetry row and nothing on the wire;
+  a dashboard chip needs a model on both sides and a dashboard-first deploy
+  and is left for a later wave. Not done: uploading future-dated files (lane
+  A's age floor still refuses them; the gate, the tray line and the log name
+  them).
 - **An old companion (< 0.9.54) treats an upload-only tick as originals up
   AND proxies down.** It ignores `sync_mode`, so lane B runs for the project;
   lane C still cannot, because the server never shares the folder. That is
@@ -159,4 +212,7 @@ Companion:
 the three consumers, the controls), `companion/tests/test_upload_only.py`
 (lane A alone, lane C never expects it, mode flip wakes, unknown mode fails
 closed, startup sweeps skip it), `companion/tests/test_sync_halt.py` (the
-removal gate asks the lane A question only).
+removal gate asks the lane A questions only),
+`companion/tests/test_removal_gate_cr366.py` (carry-all rules against the real
+rclone, the age-floor-free dry run, the strict same-name check, the local
+scan, the dialog wording).

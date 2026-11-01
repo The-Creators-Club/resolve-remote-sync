@@ -591,6 +591,15 @@ else
         --workpath "$COMPANION_DIR/build/build" \
         || fail "tools/scan_frozen.py refused this build (see the [scan_frozen] lines above) -- NOT signing, NOT writing a manifest"
 
+    # GL-22 / PL-RES-03 (CR-370, 2026-10-07): LAUNCH what was built. Nothing
+    # did before it was published, so a binary that cannot import its own
+    # package shipped and died on every Mac that took it. --self-test imports
+    # everything from inside the binary, takes no lock and starts nothing.
+    SELFTEST_OUT="$COMPANION_DIR/build/self-test.txt"
+    rm -f "$SELFTEST_OUT"
+    "$ARTIFACT" --self-test --self-test-out "$SELFTEST_OUT" || fail "the built binary FAILED its own --self-test: $(cat "$SELFTEST_OUT" 2>/dev/null || echo 'no result file') -- NOT signing, NOT writing a manifest"
+    step "self-test: $(cat "$SELFTEST_OUT" 2>/dev/null)"
+
     # --- Developer ID + notarisation (COMMERCIAL_READINESS.md item 4,
     # 2026-08-17). Set these on the release Mac:
     #   CCSYNC_APPLE_DEV_ID       "Developer ID Application: Name (TEAMID)"
@@ -835,9 +844,12 @@ have_cmd curl || fail "no curl on PATH -- cannot publish"
 SIGN_PY="$VENV_PY"
 [ -x "$SIGN_PY" ] || SIGN_PY="$(command -v python3 || true)"
 [ -n "$SIGN_PY" ] || fail "no python to run tools/sign_release.py with"
-MIN_VERSION="${CCSYNC_MIN_VERSION:-0.0.0}"
+# GL-25b (CR-371, 2026-10-07): empty = tools/release_floor.json (sign_release.py
+# resolves it and refuses a floorless companion record). Never defaulted to 0.0.0.
+MIN_VERSION="${CCSYNC_MIN_VERSION:-}"
 SIGN_ARGS="--signed-binary"
 [ "$SIGNED_BINARY" = true ] || SIGN_ARGS=""
+[ -n "$MIN_VERSION" ] && SIGN_ARGS="$SIGN_ARGS --min-version $MIN_VERSION"
 # shellcheck disable=SC2086  # SIGN_ARGS is a deliberate single optional flag
 # --arch and --requires-dashboard are only PUBLISHED when the record covers
 # them (sign_release drops the arch with a note, refuses a requires_dashboard
@@ -854,7 +866,7 @@ else
 fi
 SIGN_JSON="$("$SIGN_PY" "$REPO_ROOT/tools/sign_release.py" \
     --artifact "$ARTIFACT" --kind companion --platform macos \
-    --version "$VERSION" --min-version "$MIN_VERSION" $SIGN_ARGS 2>/dev/null)" \
+    --version "$VERSION" $SIGN_ARGS 2>/dev/null)" \
     || fail "could not sign the release record.
          The offline release key is missing on this Mac. Copy it from the
          release rig to ~/.ccsync-release/release.key (chmod 600), or set
@@ -863,7 +875,7 @@ SIGN_QUERY="$(printf '%s' "$SIGN_JSON" | sed -n 's/.*"query": "\([^"]*\)".*/\1/p
 [ -n "$SIGN_QUERY" ] || fail "tools/sign_release.py produced no query suffix -- NOT publishing"
 SIGN_SHA="$(printf '%s' "$SIGN_JSON" | sed -n 's/.*"sha256": "\([^"]*\)".*/\1/p')"
 [ "$SIGN_SHA" = "$SHA" ] || fail "the signed record describes $SIGN_SHA but the binary is $SHA -- NOT publishing"
-step "signed release record (min_version $MIN_VERSION, signed_binary $SIGNED_BINARY)"
+step "signed release record (min_version ${MIN_VERSION:-from tools/release_floor.json}, signed_binary $SIGNED_BINARY)"
 
 if [ "$GIT_DIRTY" = true ]; then
     warn "publishing $VERSION_STAMP -- built from an UNCOMMITTED tree (${GIT_DESCRIBE:-unknown});"

@@ -331,13 +331,32 @@ def test_the_sequencer_is_built_knowing_whether_this_machine_is_halted(tmp_path)
 
 
 class _FakeLaneA:
-    def __init__(self, pending):
+    def __init__(self, pending, mismatch=None, tree=None, edited=None):
         self._pending = pending
         self.asked: list[str] = []
+        # CR-366: the removal gate's other three questions. The defaults are
+        # the clean answers, so every older test is still about its own point.
+        self._mismatch = {"count": 0, "samples": []} if mismatch is None else mismatch
+        self._tree = tree if tree is not None else {
+            "uncarried": {"count": 0, "samples": []},
+            "future": {"count": 0, "samples": []},
+        }
+        self._edited = {"count": 0, "samples": []} if edited is None else edited
+        self.mismatch_asked: list[str] = []
 
-    def pending_uploads(self, subpath=None):
+    def pending_uploads(self, subpath=None, carry_all=False):
         self.asked.append(subpath)
         return self._pending
+
+    def strict_size_mismatches(self, subpath=None, carry_all=False):
+        self.mismatch_asked.append(subpath)
+        return self._mismatch if self._mismatch != "unknown" else None
+
+    def edited_since_upload(self, subpath=None, carry_all=False):
+        return self._edited if self._edited != "unknown" else None
+
+    def local_tree_scan(self, subpath=None, carry_all=False):
+        return self._tree if self._tree != "unknown" else None
 
 
 def _gate_app(tmp_path, pending, admin=None):
@@ -608,3 +627,101 @@ def test_removing_a_lender_with_a_selected_borrower_is_blocked(tmp_path):
                for r in blockers["reasons"])
     # a covered include is never dry-run as the borrower's own upload scope
     assert "Projects/2026/FF5/Civil Defence" in app._lane_a.asked[0]
+
+
+# -- CR-366 (GL-12 / GL-13 / GL-14, 2026-10-07): the other ways a file is not
+# on the server ---------------------------------------------------------------
+
+
+def _gate_app_with(tmp_path, mismatch=None, tree=None, upload_only=False, edited=None):
+    app = _gate_app(tmp_path, {"count": 0, "samples": []}, _FakeAdmin())
+    app._lane_a = _FakeLaneA({"count": 0, "samples": []}, mismatch, tree, edited)
+    app.removable_projects = lambda: [
+        {"slug": "p1", "rel": "2026/CCT/Website Highlights",
+         "upload_only": upload_only}]
+    return app
+
+
+def test_a_same_name_file_the_server_holds_differently_blocks_and_is_named(tmp_path):
+    app = _gate_app_with(tmp_path, mismatch={"count": 2, "samples": ["C0001.MP4", "b.mov"]})
+    blockers = app.removal_blockers("p1")
+    assert blockers["blocked"] is True
+    assert blockers["size_mismatches"] == 2
+    assert any("C0001.MP4" in r and "never upload" in r for r in blockers["reasons"])
+
+
+def test_a_size_check_that_could_not_run_blocks_the_removal(tmp_path):
+    app = _gate_app_with(tmp_path, mismatch="unknown")
+    blockers = app.removal_blockers("p1")
+    assert blockers["blocked"] is True and blockers["unknown"] is True
+
+
+def test_the_size_check_is_asked_of_every_borrowed_dir_too(tmp_path):
+    app = _gate_app(tmp_path, {"count": 0, "samples": []}, _FakeAdmin())
+    app.selection_client = _FakeSelectionEntries(_borrower_entries())
+    app.removal_blockers("p1")
+    assert app._lane_a.mismatch_asked == [
+        "Projects/2026/CCT/Website Highlights",
+        "Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu",
+    ]
+
+
+def test_files_no_lane_carries_block_an_upload_only_removal_and_are_named(tmp_path):
+    app = _gate_app_with(
+        tmp_path, upload_only=True,
+        tree={"uncarried": {"count": 1, "samples": ["Audio/take1.tmp"]},
+              "future": {"count": 0, "samples": []}})
+    blockers = app.removal_blockers("p1")
+    assert blockers["blocked"] is True
+    assert blockers["not_carried"] == 1
+    assert any("Audio/take1.tmp" in r for r in blockers["reasons"])
+
+
+def test_future_dated_footage_blocks_and_says_why(tmp_path):
+    app = _gate_app_with(
+        tmp_path,
+        tree={"uncarried": {"count": 0, "samples": []},
+              "future": {"count": 1, "samples": ["A001.mov"]}})
+    blockers = app.removal_blockers("p1")
+    assert blockers["blocked"] is True and blockers["future_dated"] == 1
+    assert any("dated in the future" in r and "A001.mov" in r
+               for r in blockers["reasons"])
+
+
+def test_a_folder_that_could_not_be_read_blocks_the_removal(tmp_path):
+    app = _gate_app_with(tmp_path, tree="unknown")
+    blockers = app.removal_blockers("p1")
+    assert blockers["blocked"] is True and blockers["unknown"] is True
+
+
+def test_a_lane_that_cannot_answer_the_new_questions_blocks(tmp_path):
+    """An older or stubbed lane with no such methods: AttributeError is "could
+    not tell", and "could not tell" is a refusal."""
+    app = _gate_app(tmp_path, {"count": 0, "samples": []}, _FakeAdmin())
+    app._lane_a = type("Old", (), {
+        "pending_uploads": lambda self, subpath=None: {"count": 0, "samples": []}})()
+    blockers = app.removal_blockers("p1")
+    assert blockers["blocked"] is True and blockers["unknown"] is True
+
+
+def test_the_pending_reason_for_an_upload_only_project_says_file_not_video(tmp_path):
+    app = _gate_app(tmp_path, {"count": 2, "samples": ["take1.wav"]}, _FakeAdmin())
+    app._lane_a = _FakeLaneA({"count": 2, "samples": ["take1.wav"]})
+    app.removable_projects = lambda: [
+        {"slug": "p1", "rel": "2026/CCT/Website Highlights", "upload_only": True}]
+    reasons = app.removal_blockers("p1")["reasons"]
+    assert any("2 files have not been uploaded yet" in r for r in reasons), reasons
+
+
+def test_a_file_edited_after_it_went_up_blocks_and_is_named(tmp_path):
+    app = _gate_app_with(tmp_path, upload_only=True,
+                         edited={"count": 1, "samples": ["Audio/vo.wav"]})
+    blockers = app.removal_blockers("p1")
+    assert blockers["blocked"] is True
+    assert blockers["edited_since_upload"] == 1
+    assert any("Audio/vo.wav" in r and "changed after" in r for r in blockers["reasons"])
+
+
+def test_an_edit_check_that_could_not_run_blocks_the_removal(tmp_path):
+    blockers = _gate_app_with(tmp_path, upload_only=True, edited="unknown").removal_blockers("p1")
+    assert blockers["blocked"] is True and blockers["unknown"] is True

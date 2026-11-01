@@ -504,13 +504,15 @@ have_cmd curl || fail "no curl on PATH -- cannot publish"
 SIGN_PY="$VENV_PY"
 [ -x "$SIGN_PY" ] || SIGN_PY="$(command -v python3 || true)"
 [ -n "$SIGN_PY" ] || fail "no python to run tools/sign_release.py with"
-MIN_VERSION="${CCSYNC_MIN_VERSION:-0.0.0}"
+# GL-25b (CR-371, 2026-10-07): empty = tools/release_floor.json, see release_macos.sh.
+MIN_VERSION="${CCSYNC_MIN_VERSION:-}"
 SIGN_ARGS="--signed-binary"
 [ "${SIGNED_BINARY:-false}" = true ] || SIGN_ARGS=""
+[ -n "$MIN_VERSION" ] && SIGN_ARGS="$SIGN_ARGS --min-version $MIN_VERSION"
 # shellcheck disable=SC2086  # SIGN_ARGS is a deliberate single optional flag
 SIGN_JSON="$("$SIGN_PY" "$REPO_ROOT/tools/sign_release.py" \
     --artifact "$ZIP_PATH" --kind onboard --platform macos \
-    --version "$ONBOARD_VERSION" --min-version "$MIN_VERSION" $SIGN_ARGS 2>/dev/null)" \
+    --version "$ONBOARD_VERSION" $SIGN_ARGS 2>/dev/null)" \
     || fail "could not sign the release record.
          The offline release key is missing on this Mac. Copy it from the
          release rig to ~/.ccsync-release/release.key (chmod 600), or set
@@ -519,7 +521,7 @@ SIGN_QUERY="$(printf '%s' "$SIGN_JSON" | sed -n 's/.*"query": "\([^"]*\)".*/\1/p
 [ -n "$SIGN_QUERY" ] || fail "tools/sign_release.py produced no query suffix -- NOT publishing"
 SIGN_SHA="$(printf '%s' "$SIGN_JSON" | sed -n 's/.*"sha256": "\([^"]*\)".*/\1/p')"
 [ "$SIGN_SHA" = "$ZIP_SHA" ] || fail "the signed record describes $SIGN_SHA but the zip is $ZIP_SHA -- NOT publishing"
-step "signed release record (min_version $MIN_VERSION, signed_binary ${SIGNED_BINARY:-false})"
+step "signed release record (min_version ${MIN_VERSION:-from tools/release_floor.json}, signed_binary ${SIGNED_BINARY:-false})"
 
 # --- log in (same shape as release_macos.sh: password via stdin, cookie
 # jar in a private temp dir) -------------------------------------------

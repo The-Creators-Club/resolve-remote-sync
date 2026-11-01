@@ -475,3 +475,31 @@ def test_forget_machine_never_touches_the_bucket_or_another_machine(conn):
     rows = conn.execute("SELECT machine, project_slug FROM selections WHERE editor_username='ruskin' "
                         "ORDER BY project_slug").fetchall()
     assert [(r[0], r[1]) for r in rows] == [("MAC", "p2"), ("", "p3")]
+
+
+def test_delete_leaves_no_trace_of_the_name_in_meta_and_the_tombstone_still_works(env):
+    """CR-367 round 2 (2026-10-07): the delete tombstone used to live under
+    `identity_gen:<username>`, the one plaintext survivor of an erasure the
+    published privacy text promises. It is keyed by an HMAC now; the lookup
+    still refuses the deleted person's report and /verify."""
+    client, _conn0, nas_case, _syncthing = env
+    nas_case.seed_editor("matej.simalcik", 3012)
+    report(client, "matej.simalcik", "DESKTOP-9", machine_id="mid-9",
+           syncthing_device_id=DEV_A, platform="windows")
+    as_user(client, "owen")
+    resp = client.delete("/api/v1/admin/users/matej.simalcik")
+    assert resp.status_code == 200, resp.text
+
+    conn = _conn(client)
+    rows = conn.execute("SELECT key, value FROM meta").fetchall()
+    assert not [r for r in rows if "simalcik" in str(r[0]).lower()
+                or "simalcik" in str(r[1]).lower()]
+    # the tombstone is there, found by name through the keyed lookup
+    assert dbmod.identity_removed(conn, "matej.simalcik") is True
+    assert dbmod.identity_removed(conn, "someone.else") is False
+    conn.close()
+    refused = client.post("/api/v1/report", json={
+        "editor_name": "matej.simalcik", "machine": "DESKTOP-9",
+        "reported_at": "2026-10-07T10:00:00+00:00", "lanes": []},
+        headers=hdr("matej.simalcik"))
+    assert refused.status_code == 401 and "removed" in refused.json()["detail"]

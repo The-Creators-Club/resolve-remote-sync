@@ -327,51 +327,26 @@ def test_perform_fix_all_continues_past_failures():
 
 
 # ===========================================================================
-# RES-12 / UX-4 (resilience sweep 2026-08-28): the third answer, and what the
-# headless path records
+# UX-4 (resilience sweep 2026-08-28): what the headless path records. RES-12's
+# third answer, [ ALWAYS LEAVE THIS FOLDER ALONE ON THIS COMPUTER ], was
+# removed by CR-356 (2026-09-30).
 # ===========================================================================
 
 
-def test_perform_ignore_folders_persists_one_entry_per_distinct_folder(tmp_path):
-    from ccsync_companion.popup import folders_of, perform_ignore_folders
+def test_the_folder_button_and_its_helpers_are_gone():
+    """CR-356: the only dismissal left is SKIP FOR NOW (this session)."""
+    import inspect
 
-    tracker = fixer.IgnoreTracker(tmp_path / "state")
-    rows = [
-        {"file_path": r"C:\Stock\a.mov"},
-        {"file_path": r"C:\Stock\b.mov"},
-        {"file_path": r"D:\Other\c.mov"},
-    ]
-    assert folders_of(rows) == [r"C:\Stock", r"D:\Other"]
-    persisted, failed = perform_ignore_folders(rows, tracker, reason="chosen in the fixer")
-    assert failed == []
-    assert sorted(persisted) == [r"C:\Stock", r"D:\Other"]
-    assert tracker.folder_count() == 2
-    # The clips in front of the editor go away either way.
-    assert tracker.is_ignored(r"C:\Stock\a.mov") is True
-    # ...and a clip they have never seen, in the same folder, does too.
-    assert tracker.is_ignored(r"C:\Stock\never_seen.mov") is True
+    from ccsync_companion import popup
 
-
-def test_perform_ignore_folders_reports_what_it_could_not_save(tmp_path, monkeypatch):
-    from ccsync_companion.popup import perform_ignore_folders
-
-    tracker = fixer.IgnoreTracker(tmp_path / "state")
-    monkeypatch.setattr(fixer, "_write_json_atomic", lambda *a, **k: False)
-    persisted, failed = perform_ignore_folders([{"file_path": r"C:\Stock\a.mov"}], tracker)
-    assert persisted == []
-    assert failed == [r"C:\Stock"]
-    # Weakest meaning of the button still honoured: skipped for this session.
-    assert tracker.is_ignored(r"C:\Stock\a.mov") is True
-
-
-def test_the_folder_button_names_its_own_scope():
-    from ccsync_companion.popup import _folder_button_label
-
-    one = _folder_button_label([{"file_path": r"C:\Stock\a.mov"}])
-    assert one == "ALWAYS LEAVE THIS FOLDER ALONE ON THIS COMPUTER"
-    two = _folder_button_label([{"file_path": r"C:\Stock\a.mov"},
-                                {"file_path": r"D:\Other\b.mov"}])
-    assert two == "ALWAYS LEAVE THESE 2 FOLDERS ALONE ON THIS COMPUTER"
+    for name in ("_folder_button_label", "folders_of", "perform_ignore_folders",
+                 "IGNORE_FOLDER_FAILED"):
+        assert not hasattr(popup, name), name
+    assert not hasattr(popup.PopupDialog, "_on_ignore_folder")
+    assert "_folder_btn" not in popup.PopupDialog.WIDGET_ATTRS
+    source = inspect.getsource(popup.PopupDialog)
+    assert '"SKIP FOR NOW (this session)"' in source
+    assert "self._folder_btn" not in source
 
 
 def test_the_headless_fallback_records_that_nobody_chose_this(monkeypatch, tmp_path):
@@ -1392,7 +1367,7 @@ def _bare_dialog(rows):
     dialog._failed_rows = []
     dialog.root = _FakeRoot()
     for name in ("status_label", "_space_label", "_progress_frame", "_fix_btn",
-                 "_ignore_btn", "_folder_btn", "_retry_btn", "_stop_btn",
+                 "_ignore_btn", "_retry_btn", "_stop_btn",
                  "_skip_btn", "_cancel_btn"):
         setattr(dialog, name, _FakeWidget())
     return dialog
@@ -2024,11 +1999,10 @@ def test_every_window_class_here_releases_its_root_through_ui_dispatch():
 # -- RES-2: no route out of the dialog may destroy it mid-copy -------------
 
 
-def test_fix_all_disables_the_leave_this_folder_alone_button(monkeypatch):
-    """RES-2 [verified]: _run_fix disabled _fix_btn and _ignore_btn and left
-    _folder_btn live, and its handler ends in root.destroy() -- which returns
-    show_popup(), releases app._popup_active_lock and lets a second pass start
-    over clips the ccsync-fixall daemon is still copying (CORE-M1)."""
+def test_fix_all_disables_the_skip_button(monkeypatch):
+    """RES-2: every route out of the dialog that ends in root.destroy() is
+    disabled while the ccsync-fixall daemon is copying (CORE-M1). Since
+    CR-356 that is SKIP FOR NOW alone beside FIX ALL."""
     from ccsync_companion import popup
 
     dialog = _bare_dialog([_row("a.mov")])
@@ -2040,18 +2014,8 @@ def test_fix_all_disables_the_leave_this_folder_alone_button(monkeypatch):
     try:
         assert dialog._fix_btn.state == "disabled"
         assert dialog._ignore_btn.state == "disabled"
-        assert dialog._folder_btn.state == "disabled"
     finally:
         _release_never_returns()
-
-
-def test_always_leave_this_folder_alone_does_nothing_while_copying():
-    dialog = _bare_dialog([_row("a.mov")])
-    dialog._fixing = True
-
-    dialog._on_ignore_folder()
-
-    assert dialog.root.destroyed is False
 
 
 def test_skip_for_now_does_nothing_while_copying():
@@ -2061,16 +2025,6 @@ def test_skip_for_now_does_nothing_while_copying():
     dialog._on_ignore()
 
     assert dialog.root.destroyed is False
-
-
-def test_the_folder_button_still_works_when_nothing_is_copying(tmp_path,
-                                                              monkeypatch):
-    from ccsync_companion import popup
-
-    dialog = _bare_dialog([_row("a.mov")])
-    monkeypatch.setattr(popup, "perform_ignore_folders", lambda *a, **k: (["F"], []))
-    dialog._on_ignore_folder()
-    assert dialog.root.destroyed is True
 
 
 # A copy that never finishes, so _run_fix's worker is still "live" while the
@@ -2423,3 +2377,74 @@ def test_the_rehearsal_warning_is_one_sentence_editors_can_act_on():
     assert popup.REHEARSAL_WARNING == (
         "FIX ALL is in rehearsal mode on this computer and will copy nothing.")
     assert "—" not in popup.REHEARSAL_WARNING   # owner's rule, 2026-08-18
+
+
+# -- CR-358: FIX ALL refuses a row seen in a project that is no longer open --
+
+
+def _fix_spy():
+    calls: list[str] = []
+
+    def fake_fix_clip(file_path, dest_rel, local_root, media_pool_item):
+        calls.append(file_path)
+        return {"ok": True, "message": "ok", "copied_to": "x"}
+
+    return calls, fake_fix_clip
+
+
+def test_build_popup_rows_carries_the_project_the_clip_was_seen_in():
+    rows = build_popup_rows(
+        [_item(r"C:\Desktop\track.aac", resolve_project_name="Framing Formosa")],
+        r"C:\Creators_Club", "owen")
+    assert rows[0]["resolve_project_name"] == "Framing Formosa"
+    assert rows[0]["suggested_dest"] == "Audio/Music"
+
+
+def test_perform_fix_all_refuses_a_row_from_another_project_without_copying():
+    """Ruskin 2026-09-30: a Framing Formosa batch, FIX ALL pressed with
+    Reproductive Rights Fight open -> copied into Film 1 + 2, relinked nothing."""
+    rows = build_popup_rows(
+        [_item(r"C:\Desktop\track.aac", resolve_project_name="Framing Formosa")],
+        r"C:\Creators_Club", "owen")
+    calls, fake_fix_clip = _fix_spy()
+
+    results = perform_fix_all(rows, {}, r"C:\Creators_Club", fix_clip_fn=fake_fix_clip,
+                              current_project_fn=lambda: "Reproductive Rights Fight")
+
+    assert calls == []
+    assert results[0]["ok"] is False
+    assert results[0]["wrong_project"] is True
+    assert "Framing Formosa" in results[0]["message"]
+    assert "—" not in results[0]["message"]   # owner's rule, 2026-08-18
+
+
+@pytest.mark.parametrize("open_now,seen_in", [
+    ("Framing Formosa", "Framing Formosa"),   # same project
+    ("", "Framing Formosa"),                  # nothing open / cannot tell
+    ("Reproductive Rights Fight", ""),        # row predates the tag
+])
+def test_perform_fix_all_runs_when_the_project_matches_or_is_unknown(open_now, seen_in):
+    rows = build_popup_rows(
+        [_item(r"C:\Desktop\track.aac", resolve_project_name=seen_in)],
+        r"C:\Creators_Club", "owen")
+    calls, fake_fix_clip = _fix_spy()
+
+    perform_fix_all(rows, {}, r"C:\Creators_Club", fix_clip_fn=fake_fix_clip,
+                    current_project_fn=lambda: open_now)
+
+    assert calls == [r"C:\Desktop\track.aac"]
+
+
+def test_perform_fix_all_runs_when_the_project_question_raises():
+    rows = build_popup_rows(
+        [_item(r"C:\Desktop\track.aac", resolve_project_name="Framing Formosa")],
+        r"C:\Creators_Club", "owen")
+    calls, fake_fix_clip = _fix_spy()
+
+    def boom():
+        raise RuntimeError("fusionscript went away")
+
+    perform_fix_all(rows, {}, r"C:\Creators_Club", fix_clip_fn=fake_fix_clip,
+                    current_project_fn=boom)
+
+    assert calls == [r"C:\Desktop\track.aac"]

@@ -15,6 +15,7 @@ import hmac
 import importlib
 import json
 import logging
+import os
 import re
 import secrets
 import sqlite3
@@ -22,7 +23,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator, Literal, Mapping
+from typing import Any, Iterable, Iterator, Literal, Mapping
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
@@ -223,6 +224,11 @@ def resolve_companion_credential(
 # short sentences about the account and not about this request.
 REFUSED_ACCOUNT_DISABLED = "this account has been disabled"
 REFUSED_ACCOUNT_SUSPENDED = "this account is suspended"
+# CR-367 / GL-15 (2026-10-07): the person was DELETED. On smb/oidc the account
+# lives off this dashboard, so nothing else could say so: forget_editor erases
+# the known_editors row that carried the suspension, and the shared token plus
+# a never-expiring identity token let the next report re-register them.
+REFUSED_ACCOUNT_REMOVED = "this account was removed"
 
 # What the editor at the tray reads. The reason above is for the admin's
 # page; this is the 401 detail, and it has to name who can undo it.
@@ -233,6 +239,9 @@ _ACCOUNT_REFUSAL_DETAIL = {
     REFUSED_ACCOUNT_SUSPENDED: (
         "this account is suspended on the dashboard. Ask your admin to press RESUME: "
         "your sync plan is untouched and comes straight back"),
+    REFUSED_ACCOUNT_REMOVED: (
+        "this account was removed from the dashboard. Ask your admin to add it "
+        "again if that was a mistake"),
 }
 
 
@@ -247,6 +256,9 @@ def _account_refusal(settings, conn: sqlite3.Connection, editor: str) -> str | N
     if not name:
         return None
     try:
+        # On EVERY auth method, and first: a removed person is not "paused".
+        if db.identity_removed(conn, name):
+            return REFUSED_ACCOUNT_REMOVED
         if name in db.suspended_editors(conn):
             return REFUSED_ACCOUNT_SUSPENDED
     except sqlite3.Error:                                              # noqa: BLE001
@@ -1868,6 +1880,27 @@ def _collector_alarms_block(conn: sqlite3.Connection) -> dict[str, Any]:
 SITE_SYNCTHING_ID_RETRY_SECONDS = 60.0
 
 
+def _appliance_sftp_hostkey() -> str:
+    """The appliance sftp sidecar's public ed25519 host key, or "".
+
+    GL-19 follow-up (CR-368, 2026-10-07): the deploy-time DASH_SITE_SFTP_HOSTKEY
+    does not exist on an appliance, whose sidecar generates its own keys. The
+    sidecar publishes the PUBLIC half into a directory mounted read-only here
+    (compose.appliance.yaml, sftp/entrypoint.sh); read per request because the
+    sidecar may first boot after the dashboard. Never raises, and anything that
+    is not a single `ssh-ed25519 <base64>` line is "" (unpinned) rather than
+    a half-parsed pin."""
+    path = os.environ.get("DASH_SFTP_HOSTKEY_FILE", "").strip() or         "/sftp-hostkey-pub/ssh_host_ed25519_key.pub"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            parts = fh.read(4096).split()
+    except OSError:
+        return ""
+    if len(parts) >= 2 and parts[0] == "ssh-ed25519" and re.fullmatch(r"[A-Za-z0-9+/=]{20,}", parts[1]):
+        return f"{parts[0]} {parts[1]}"
+    return ""
+
+
 def _nas_syncthing_id(request: Request, conn: sqlite3.Connection) -> str:
     """The NAS's Syncthing device ID, live value preferred.
 
@@ -1954,6 +1987,9 @@ def api_site(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> 
         # org_short -> org_name -> product_name, so an unbranded install shows
         # the product rather than another tenant's studio.
         "org_short": site["org_short"] or site["org_name"],
+        # GL-34 / CR-374: additive to schema 1; an older companion ignores it
+        # and a newer one against an older dashboard shows its own default.
+        "support_contact": site["support_contact"],
         "product_name": site["product_name"] or "CC Sync",
         # The fleet's own tray/window mark (2026-08-18). Additive to schema 1
         # like `features`: a companion too old to read it wears the product
@@ -1970,6 +2006,9 @@ def api_site(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> 
         "smb_unc": site["smb_unc"],
         "sftp_host": site["sftp_host"],
         "sftp_port": site["sftp_port"],
+        # GL-19 (CR-368, 2026-10-07): additive to schema 1. Public-key material,
+        # never a secret; an older installer ignores it.
+        "sftp_hostkey": getattr(settings, "site_sftp_hostkey", "") or _appliance_sftp_hostkey(),
         # See settings.site_sftp_chunk_size: the NAS's sshd decides the safe
         # rclone chunk size, so the server states it (2026-08-17).
         "sftp_chunk_size": site["sftp_chunk_size"],
@@ -2109,6 +2148,71 @@ def api_presence(
     if view is None:
         raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
     return view
+
+
+def _access_project_or_404(conn: sqlite3.Connection, slug: str) -> None:
+    if conn.execute("SELECT 1 FROM projects WHERE slug=?", (slug,)).fetchone() is None:
+        raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
+
+
+@router.get("/projects/{slug}/access")
+def api_project_access(
+    slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """Explicit per-project grants (CR-368 round 2, 2026-10-07). Under
+    per-project ACL these are the ONLY way a wired editor, who cannot tick,
+    gets into a project; a ticked editor needs none."""
+    _require_admin(request)
+    _access_project_or_404(conn, slug)
+    from . import project_groups
+
+    return {"slug": slug, "editors": project_groups.grants(conn).get(slug, [])}
+
+
+def set_project_access(
+    request: Request, conn: sqlite3.Connection, slug: str, editor: str, *, give: bool,
+) -> dict[str, Any]:
+    """Grant or revoke one editor's explicit access to one project. The JSON
+    routes below and the project page's access window (ui.py) both come here,
+    so the two cannot drift. Audited (project.access.grant / .revoke) in the
+    same transaction as the change: COM-M30 asked for exactly this kind of row
+    (2026-10-07, CR-368 follow-up: the grant had no UI and no audit)."""
+    user = _require_admin(request)
+    editor = editor.strip().lower()
+    _access_project_or_404(conn, slug)
+    if give and editor not in db.known_editor_usernames(conn):
+        raise HTTPException(status_code=404, detail=f"unknown editor {editor!r}")
+    from . import project_groups
+
+    if give:
+        changed = project_groups.grant(conn, slug, editor)
+    else:
+        changed = project_groups.revoke(conn, slug, editor)
+    if changed:
+        db.audit(conn, user, "project.access.grant" if give else "project.access.revoke",
+                 slug, {"editor": editor})
+    conn.commit()
+    if changed:
+        if give:
+            log.info("%s granted %s access to project %s", user, editor, slug)
+        else:
+            log.info("%s revoked %s's access to project %s", user, editor, slug)
+        _nudge_collector(request)
+    return {"slug": slug, "editor": editor, "changed": changed}
+
+
+@router.put("/projects/{slug}/access/{editor}")
+def api_project_access_grant(
+    slug: str, editor: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    return set_project_access(request, conn, slug, editor, give=True)
+
+
+@router.delete("/projects/{slug}/access/{editor}")
+def api_project_access_revoke(
+    slug: str, editor: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    return set_project_access(request, conn, slug, editor, give=False)
 
 
 @router.get("/projects/{slug}/devices/{device_id}/missing")
@@ -2259,6 +2363,16 @@ def api_login(payload: LoginIn, request: Request, response: Response) -> dict[st
     if not settings.session_secret:
         raise HTTPException(status_code=503, detail="login not configured (DASH_SESSION_SECRET unset)")
     username = payload.username.strip().lower()
+    # GL-16 / bug-dash-auth-1 (CR-367, 2026-10-07): the same two refusals the
+    # browser form makes, from ONE helper (auth.password_login_refusal). On an
+    # OIDC site this route used to accept any NAS SMB password and mint a
+    # session, skipping the IdP, MFA and the allowed-groups rule.
+    refusal = auth.password_login_refusal(settings, request, username)
+    if refusal is not None:
+        status, detail, counts = refusal
+        if counts:
+            auth.record_login_failure(request, username)
+        raise HTTPException(status_code=status, detail=detail)
     # Per-username AND per-IP budget, in SQLite so it survives the restart
     # every deploy performs (auth.login_throttled, 2026-08-17).
     #
@@ -2276,6 +2390,11 @@ def api_login(payload: LoginIn, request: Request, response: Response) -> dict[st
     except auth.CredentialProbeBusy as exc:
         raise HTTPException(status_code=503, detail=f"login busy: {exc}; try again") from exc
     if not verified:
+        auth.record_login_failure(request, username)
+        raise HTTPException(status_code=401, detail="bad username or password")
+    if auth.removed_signin_refused(settings, username):
+        # Generic on purpose, and counted: this page never says which half of a
+        # sign-in was wrong (GL-15, CR-367 round 2, 2026-10-07).
         auth.record_login_failure(request, username)
         raise HTTPException(status_code=401, detail="bad username or password")
     auth.clear_login_failures(request, username)
@@ -2315,12 +2434,23 @@ class VerifyIn(LoginIn):
     # replaced the offer. Optional: a companion that does not send it is
     # answered exactly as before.
     arch: str | None = None
+    # CR-367 / GL-15 (2026-10-07): the computer's name, so the per-computer
+    # report token a sign-in mints can be labelled and replaced by the SAME
+    # computer's next sign-in. Optional: a companion that does not send it
+    # (every build in the field today) is answered, and its token labelled,
+    # without one.
+    machine: str | None = None
 
     @field_validator("arch", mode="before")
     @classmethod
     def _arch_bounded(cls, value):
         # Truncate, never 422: a sign-in must not fail on a telemetry field.
         return value[:32] if isinstance(value, str) else None
+
+    @field_validator("machine", mode="before")
+    @classmethod
+    def _machine_bounded(cls, value):
+        return value.strip()[:48] if isinstance(value, str) and value.strip() else None
 
 
 def _require_fleet_member(settings, username: str,
@@ -2404,6 +2534,113 @@ def _require_fleet_member(settings, username: str,
         )
 
 
+# The label a sign-in-minted report token carries, and how many live ones one
+# person may hold before the oldest is retired (a person has a few computers;
+# the cap only stops a loop of sign-ins growing the table without bound).
+VERIFY_TOKEN_LABEL = "tray sign-in"
+VERIFY_TOKENS_PER_EDITOR = 16
+
+
+def _mint_verify_report_token(conn: sqlite3.Connection, username: str,
+                              machine: str | None) -> str:
+    """A per-editor `cce1.` report token for the computer that just signed in.
+
+    CR-367 / GL-15 (2026-10-07). With the shared fleet token OFF (the default
+    for a new site) /verify used to answer report_token "" and "ask your admin
+    for a per-editor token", so a self-installing customer's companions could
+    never report. The credential a sign-in already proves the right to is
+    exactly this one: revocable per person (delete, disable and the Users page
+    revoke it), accepted on every fleet door, and answered in the existing
+    `report_token` key so a companion in the field adopts it with no upgrade.
+    The same computer signing in again REPLACES its own token (label match);
+    one that sends no name just adds one, up to VERIFY_TOKENS_PER_EDITOR."""
+    label = (f"{VERIFY_TOKEN_LABEL}: {machine}" if machine
+             else VERIFY_TOKEN_LABEL)[:64]
+    live = [r for r in db.fetch_editor_report_tokens(conn, editor=username)
+            if str(r.get("label") or "").startswith(VERIFY_TOKEN_LABEL)]
+    if machine:
+        for row in live:
+            if row["label"] == label:
+                db.revoke_editor_report_token(
+                    conn, row["token_id"], revoked_by="verify: replaced by a new sign-in")
+        live = [r for r in live if r["label"] != label]
+    # Retire the LEAST RECENTLY USED, not the oldest created: another of the
+    # person's computers may still be reporting on the oldest token.
+    live.sort(key=lambda r: str(r.get("last_used_at") or r.get("created_at") or ""),
+              reverse=True)
+    for row in live[VERIFY_TOKENS_PER_EDITOR - 1:]:
+        db.revoke_editor_report_token(
+            conn, row["token_id"], revoked_by="verify: over the per-person cap")
+    token, _row = db.create_editor_report_token(
+        conn, username, created_by="verify", label=label)
+    conn.commit()
+    return token
+
+
+def _identity_floor_of(conn: sqlite3.Connection | None, username: str) -> int:
+    if conn is None:
+        return 0
+    try:
+        return db.identity_floor(conn, username)
+    except sqlite3.Error:                                              # noqa: BLE001
+        return 0
+
+
+def identity_bar(settings, token: str | None) -> str | None:
+    """Why a VALID identity token may not act right now, or None.
+
+    The mounted fleet APIs (b-roll, music, ytdl) verify the X-CCSync-Identity
+    header themselves with the session secret and cannot see this database, so
+    a token that is revoked, or whose person is suspended, disabled or removed,
+    passed every one of their checks (CR-367 / GL-15, 2026-10-07; the shared
+    fleet token stamps the request and asks nothing about the person). Their
+    gates call this and STRIP the header when it answers, so the sub-app's own
+    "a valid identity is required" refusal is the outcome.
+
+    None for no token, a token that does not verify (the sub-app refuses
+    those itself), and any database that cannot be read (fail open)."""
+    if not token:
+        return None
+    username, _retired, revoked = auth.identity_status(settings, token)
+    if username is None:
+        return None
+    if revoked:
+        return ("this computer's sign-in was revoked: sign in again from the "
+                "CC Sync tray")
+    try:
+        conn = db.connect(settings.db_path)
+    except Exception:                                                  # noqa: BLE001
+        return None
+    try:
+        return account_bar_reason(settings, conn, username)
+    except Exception:                                                  # noqa: BLE001
+        return None
+    finally:
+        conn.close()
+
+
+def strip_barred_identity(settings, headers: list[tuple[bytes, bytes]],
+                          mount: str) -> list[tuple[bytes, bytes]]:
+    """`headers` without X-CCSync-Identity when that identity may not act
+    (identity_bar). One call per mounted fleet gate (CR-367 / GL-15,
+    2026-10-07), so b-roll, music and ytdl cannot drift apart on the word.
+    Costs nothing on a request with no such header (every browser request)."""
+    if settings is None:
+        return headers
+    kept: list[tuple[bytes, bytes]] = []
+    for key, value in headers:
+        if key.lower() == b"x-ccsync-identity":
+            try:
+                barred = identity_bar(settings, value.decode("latin-1", "replace"))
+            except Exception:                                          # noqa: BLE001
+                barred = None
+            if barred:
+                log.warning("%s fleet call: identity header withheld: %s", mount, barred)
+                continue
+        kept.append((key, value))
+    return kept
+
+
 @router.post("/verify")
 def api_verify(
     payload: VerifyIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
@@ -2434,10 +2671,25 @@ def api_verify(
         raise HTTPException(status_code=401, detail="bad username or password")
     auth.clear_login_failures(request, username)
     _require_fleet_member(settings, username, conn)
+    # CR-367 / GL-15 (2026-10-07): a person an admin DELETED is refused a new
+    # identity even when the account still exists elsewhere (an smb/oidc
+    # account the NAS or IdP was never told about), and the answer says who
+    # can undo it. Suspension and disablement are named the same way: a
+    # companion that signs in under one would be turned away at its first
+    # report anyway, with a worse message.
+    removed_or_barred = (_account_refusal(settings, conn, username)
+                         if conn is not None else None)
+    if removed_or_barred:
+        raise HTTPException(status_code=403,
+                            detail=_ACCOUNT_REFUSAL_DETAIL[removed_or_barred])
     result = {
         "ok": True,
         "username": username,
-        "token": auth.make_identity_token(settings.session_secret, username),
+        # floor= the person's revocation point: signing in again after a
+        # revocation always yields a token that passes (auth.make_identity_token).
+        "token": auth.make_identity_token(
+            settings.session_secret, username,
+            floor=_identity_floor_of(conn, username)),
         # The report token is a shared secret every editor's companion uses;
         # hand it to a just-verified editor so onboarding needs no extra
         # copy-paste of secrets. Empty when the server has none configured
@@ -2467,6 +2719,18 @@ def api_verify(
         # companions/wizards that still read it; never make it gate sync.
         "role": "base" if auth.is_admin(settings, username) else "editor",
     }
+    if not settings.shared_report_token_enabled and conn is not None:
+        # CR-367 / GL-15 (2026-10-07): the shared token is off, so the sign-in
+        # itself hands this computer its own revocable one. The kind stays
+        # "editor" (what the tray already words as "per-editor token") and
+        # `editor_report_token` carries it under the name a newer companion
+        # stores it by. A site that still runs the shared token is answered
+        # exactly as before: nothing is minted for a fleet that does not need
+        # it, and no old companion is handed a credential it did not ask for.
+        minted = _mint_verify_report_token(
+            conn, username, getattr(payload, "machine", None))
+        result["report_token"] = minted
+        result["editor_report_token"] = minted
     # REL-16 (resilience sweep 2026-08-28): getattr, because `arch` is an
     # optional report field a companion older than this wave never sends and
     # a ReportIn/VerifyIn that has not declared it yet does not carry -- and
@@ -2615,7 +2879,17 @@ def _selection_view(conn: sqlite3.Connection, editor: str,
                     machine: str | None = None) -> dict[str, Any]:
     rows = db.fetch_selections(conn, editor, machine=machine)
     includes_by_slug = _expand_includes(conn, rows)
-    return {
+    # Originals on request (docs/SELECTIVE_ORIGINALS.md §12.3, v60): only for
+    # a NAMED computer, and only on its FULL ticks of active projects. A pick
+    # belongs to one disk, so the person-level union must carry none (it is
+    # what an old companion reads, and it would be every computer's picks at
+    # once), and an upload-only tick brings nothing down by definition.
+    originals_by_slug: dict[str, list[str]] = {}
+    if machine:
+        originals_by_slug = db.original_rels_for_machine(conn, editor, machine, [
+            r["slug"] for r in rows
+            if r["active"] and (r["sync_mode"] or db.SYNC_MODE_FULL) == db.SYNC_MODE_FULL])
+    view = {
         "editor": editor,
         "machine": machine or "",
         # Every computer this person has, so a companion (and the wizard) can
@@ -2646,6 +2920,13 @@ def _selection_view(conn: sqlite3.Connection, editor: str,
             for r in rows
         ],
     }
+    # Added after the fact, and only where there is something to bring, so a
+    # selection with no picks is byte for byte what it was before v60.
+    for item in view["selection"]:
+        rels = originals_by_slug.get(item["slug"])
+        if rels:
+            item["originals"] = rels
+    return view
 
 
 def _require_selection_read(request: Request, editor: str,
@@ -2732,7 +3013,9 @@ def _require_selection_untick(request: Request, editor: str,
     this machine" must untick before deleting (a delete while ticked just
     errors the Syncthing folder), so a machine may remove ITS OWN ticks.
     Ticking stays session-only on purpose: a compromised shared token plus
-    one identity must not be able to start syncing projects TO machines."""
+    one identity must not be able to start syncing projects TO machines.
+    The originals picks (v60) use this rule too: a pick only narrows a FULL
+    tick that already exists (api_put_original_picks says why)."""
     settings = request.app.state.settings
     token = request.headers.get("x-ccsync-token", "")
     auth_kind, token_editor = resolve_companion_credential(settings, conn, token)
@@ -3005,6 +3288,149 @@ def api_untick(
     view = _selection_view(conn, editor, machine=target)
     view["changed"] = removed
     return view
+
+
+# ---------------------------------------------- originals on request (v60)
+# docs/SELECTIVE_ORIGINALS.md §12.3 (2026-10-31). The bodies are capped: the
+# Resolve door sends one entry per selected clip, and a whole timeline is a
+# few thousand at most, while an unbounded list is one request that holds the
+# write lock for as long as the sender likes.
+ORIGINAL_PICKS_MAX = 5000
+
+
+class OriginalPickIn(BaseModel):
+    rel: str = Field(min_length=1, max_length=1024)
+    is_dir: bool = False
+
+
+class OriginalPicksIn(BaseModel):
+    add: list[OriginalPickIn] = Field(default_factory=list, max_length=ORIGINAL_PICKS_MAX)
+    remove: list[str] = Field(default_factory=list, max_length=ORIGINAL_PICKS_MAX)
+    via: str = "dashboard"
+
+
+_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+
+def _clean_pick_rel(raw: str) -> str:
+    """A pick's path: posix, inside the project, never absolute, never a
+    Proxy folder (proxies already come down with lane B; a pick there would
+    be lane B's file handed to a second downloader), never the marker. A
+    refusal, never a repair: a companion that sent `P:\\Projects\\...` has a
+    mapping bug, and stripping the drive would pick a different file."""
+    text = str(raw or "").strip()
+    if text.startswith(("/", "\\")) or _DRIVE_RE.match(text):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{text!r} is an absolute path: name the file inside the project instead")
+    value = text.replace("\\", "/").strip("/")
+    if not value:
+        raise HTTPException(status_code=400, detail="a pick needs a path inside the project")
+    try:
+        parts = [_validate_tree_part(p, "path segment") for p in value.split("/")]
+    except ProjectSetupError as exc:
+        raise HTTPException(status_code=400, detail=f"{value!r}: {exc}")
+    if any(p.lower() == "proxy" for p in parts):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{value!r} is inside a Proxy folder: proxies already come down on their own")
+    from . import provision
+
+    if parts[-1] == provision.MARKER_FILENAME:
+        raise HTTPException(status_code=400, detail="the project marker is not footage")
+    return "/".join(parts)
+
+
+def _originals_refusal(conn: sqlite3.Connection, editor: str, machine: str,
+                       slug: str, label: str) -> str | None:
+    """Why this computer cannot be given originals of this project, as the
+    sentence the person reads (D9: it says how to fix it), or None."""
+    if editor in db.base_only_editors(conn) or (editor, machine) in db.base_machines(conn):
+        return (f"{machine} is wired to the server: it works directly off the NAS, "
+                f"so every original of {label} is already there and nothing needs to "
+                f"come down.")
+    row = next((r for r in db.fetch_selections(conn, editor, machine=machine)
+                if r["slug"] == slug), None)
+    if row is None:
+        return (f"{label} is not ticked on {machine}, so nothing of it comes down "
+                f"there. Tick it for {machine} first, then choose its originals.")
+    if (row["sync_mode"] or db.SYNC_MODE_FULL) != db.SYNC_MODE_FULL:
+        return (f"{label} is set to upload only on {machine}, so nothing comes down "
+                f"to it. Switch it to full sync on the dashboard first.")
+    return None
+
+
+def apply_original_picks(
+    conn: sqlite3.Connection, editor: str, slug: str, machine: str | None,
+    body: OriginalPicksIn, actor: str,
+) -> dict[str, Any]:
+    """The one writer behind the PUT and the project page's buttons.
+    `actor` is a USERNAME (picked_by and the audit actor), never a display
+    name. Additions are refused whole with a 409 when the computer cannot
+    take originals of this project; removals never are, because a pick made
+    before a tick went upload-only must still be removable."""
+    target = _machine_arg(machine)
+    if target is None:
+        raise HTTPException(
+            status_code=400,
+            detail="say which computer: originals are picked for one computer at a time")
+    if target not in db.machines_of(conn, editor):
+        raise HTTPException(status_code=404,
+                            detail=f"{editor!r} has no computer named {target!r}")
+    label = _active_project_label(conn, slug)
+    via = (body.via or "").strip().lower()
+    if via not in db.ORIGINAL_PICK_VIAS:
+        raise HTTPException(status_code=400,
+                            detail=f"unknown source {body.via!r}: use 'resolve' or 'dashboard'")
+    adds = [(_clean_pick_rel(p.rel), bool(p.is_dir)) for p in body.add]
+    removes = [_clean_pick_rel(r) for r in body.remove]
+    if adds:
+        sentence = _originals_refusal(conn, editor, target, slug, label)
+        if sentence:
+            raise HTTPException(status_code=409, detail=sentence)
+    now = db.utcnow_iso()
+    added: list[dict[str, Any]] = []
+    removed: list[str] = []
+    for rel in removes:
+        if db.remove_original_pick(conn, editor=editor, machine=target, slug=slug, rel=rel):
+            removed.append(rel)
+    for rel, is_dir in adds:
+        if db.add_original_pick(conn, editor=editor, machine=target, slug=slug, rel=rel,
+                                is_dir=is_dir, picked_by=actor, via=via, now=now):
+            added.append({"rel": rel, "is_dir": is_dir})
+    cap = db._ORIGINALS_AUDIT_NAMES
+    if added:
+        db.audit(conn, actor, "originals.pick", slug, {
+            "editor": editor, "machine": target, "via": via, "count": len(added),
+            "picks": added[:cap], "truncated": len(added) > cap}, now=now)
+    if removed:
+        db.audit(conn, actor, "originals.unpick", slug, {
+            "editor": editor, "machine": target, "via": via, "count": len(removed),
+            "rels": removed[:cap], "truncated": len(removed) > cap}, now=now)
+    conn.commit()
+    return {"ok": True, "added": len(added), "removed": len(removed),
+            "total_bytes": db.original_picks_total_bytes(conn, editor, target, slug)}
+
+
+@router.put("/selection/{editor}/{slug}/originals")
+def api_put_original_picks(
+    editor: str, slug: str, body: OriginalPicksIn, request: Request,
+    machine: str | None = None, conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Pick (or un-pick) camera originals for ONE computer (§12.3).
+
+    The companion's own credential may write here, the untick rule rather
+    than the tick rule: the Resolve menu runs on the computer itself, with
+    nobody signed in to a browser. That is safe where ticking is not because
+    a pick can never start a project syncing to a machine: it is refused
+    unless the project is already FULL-ticked there, so the worst a stolen
+    token does is bring down footage the tick already entitles that computer
+    to see as proxies. A session is an editor for their own computers or an
+    admin for anyone's (D4), can_manage's rule."""
+    editor = editor.strip().lower()
+    who = _require_selection_untick(request, editor, conn)
+    actor = editor if who.startswith("companion:") else who
+    return apply_original_picks(conn, editor, slug, machine, body, actor)
 
 
 class ProjectRootIn(BaseModel):
@@ -3812,6 +4238,52 @@ def _validate_tree_part(value: str, what: str) -> str:
     return value
 
 
+# CR-379: the unregistered-folder walk behind the sticky auto-map. It runs
+# only while a confident match is about to be written, but a rival keeps the
+# name unmapped, so every report from that machine would walk again; a short
+# cache bounds it. Keyed by (projects_dir, depth).
+_UNREGISTERED_CACHE: dict[tuple[str, int], tuple[float, list[str]]] = {}
+_UNREGISTERED_CACHE_LOCK = threading.Lock()
+_UNREGISTERED_TTL_S = 60.0
+
+
+def _auto_map_has_rival(settings, resolve_project: str, match: str,
+                        labels: Iterable[str]) -> bool:
+    """True when an unregistered folder looks as much like `resolve_project`
+    as the registered `match` (db.unregistered_rivals), or when the tree
+    cannot be read: a sticky mapping is permanent and a prompt is cheap, so
+    doubt means ask. No projects_dir configured means there is no tree to
+    consult (a dev/test dashboard) and the old behaviour stands."""
+    from . import provision
+
+    projects_dir = str(getattr(settings, "projects_dir", "") or "")
+    if not projects_dir:
+        return False
+    depth = max([str(label).count("/") + 1 for label in labels] + [3])
+    depth = min(depth, 8)
+    key = (projects_dir, depth)
+    now = time.monotonic()
+    with _UNREGISTERED_CACHE_LOCK:
+        hit = _UNREGISTERED_CACHE.get(key)
+    if hit is not None and now - hit[0] < _UNREGISTERED_TTL_S:
+        folders = hit[1]
+    else:
+        try:
+            folders = provision.scan_unregistered_dirs(Path(projects_dir), max_depth=depth)
+        except OSError as exc:
+            log.warning("report: not auto-mapping %r to %r - the tree could not be "
+                        "read to look for a closer folder (%s)", resolve_project, match, exc)
+            return True
+        with _UNREGISTERED_CACHE_LOCK:
+            _UNREGISTERED_CACHE[key] = (now, folders)
+    rivals = db.unregistered_rivals(resolve_project, match, folders)
+    if rivals:
+        log.info("report: not auto-mapping %r to %r - unregistered folder(s) %s match "
+                 "as well, so the editor is asked (CR-379)",
+                 resolve_project, match, ", ".join(rivals[:5]))
+    return bool(rivals)
+
+
 def _projects_dir_or_error(settings) -> Path:
     projects_dir = str(getattr(settings, "projects_dir", "") or "")
     if not projects_dir or not Path(projects_dir).is_dir():
@@ -4027,6 +4499,12 @@ def create_tree_project(
             f"a different project already uses this identifier: {row['label']}. Pick another name"
         )
 
+    # CR-368 round 3 (2026-10-07): who made an existing marked folder is read
+    # BEFORE write_marker overwrites it; only that person's retry earns the
+    # grant, and a stranger's POST must not erase the evidence either.
+    prior_creator = ""
+    if exists and existing_marker is not None:
+        prior_creator = str((provision.read_marker_data(target) or {}).get("created_by") or "")
     try:
         target.mkdir(parents=True, exist_ok=True)
         # The site's OWN template, DB-first (dash-admin-3 / CR-58,
@@ -4037,7 +4515,7 @@ def create_tree_project(
         # and then given the documentary defaults by this create.
         for sub in site_store.template_folders(conn, settings):
             (target / sub).mkdir(parents=True, exist_ok=True)
-        provision.write_marker(target, slug, created_by=user)
+        provision.write_marker(target, slug, created_by=prior_creator or user)
     except OSError as exc:
         # The OSError text carries the NAS's ABSOLUTE path
         # (/mnt/<pool>/<tenant>/Projects/...), and this route is reachable by
@@ -4048,7 +4526,35 @@ def create_tree_project(
             "could not create the folders on the NAS. Ask an admin to check the "
             "dashboard log")
 
-    return _register_project(settings, conn, rel, slug, resolve_project, user)
+    # CR-368 follow-up (2026-10-07): under per-project ACL a project this
+    # dashboard creates starts private to proj-<slug>, not shared through the
+    # inherited editors group. Best-effort and inert on a shared site.
+    if not exists:
+        from . import project_groups
+
+        project_groups.close_new_project_dir(settings, rel, slug)
+    # A retry after a first attempt that made and closed the folder but failed
+    # to register it takes the existing-marker branch: it is a creator's own
+    # project when no projects row exists yet, so it still earns the grant.
+    retry_of_own_create = False
+    if exists:
+        try:
+            retry_of_own_create = (
+                bool(user) and prior_creator.strip().lower() == user.strip().lower()
+                and conn.execute(
+                    "SELECT 1 FROM projects WHERE slug=?", (slug,)).fetchone() is None)
+        except sqlite3.Error:
+            retry_of_own_create = False
+    result = _register_project(settings, conn, rel, slug, resolve_project, user)
+    # CR-368 round 2 (2026-10-07): the folder is now private to proj-<slug>, so
+    # its creator needs a way in. A wired editor's tick is refused (409), so
+    # the grant is the only door; same transaction as the projects row.
+    if not exists or retry_of_own_create:
+        from . import project_groups
+
+        if project_groups.enabled(settings) and user:
+            project_groups.grant(conn, slug, user)
+    return result
 
 
 def adopt_folder(
@@ -4165,7 +4671,9 @@ def api_archive_project(
     """Archive (or restore) a project. DCORE-5, 2026-09-04.
 
     Admin-only, and it deletes NOTHING: the folder, its marker, its files and
-    every tick stay exactly as they are. The project leaves the tick lists,
+    every tick stay exactly as they are. (On a per-project site the NAS group
+    membership is taken back while it is archived and restored on unarchive,
+    because ticks and explicit grants are kept: CR-368.) The project leaves the tick lists,
     the assignments grid and the queue (`active=0`, the flag every reader
     already filters on), and the enforce cycle removes its Syncthing shares
     the same way an untick does. [ UNARCHIVE ] puts all of it back.
@@ -4195,6 +4703,57 @@ def api_archive_project(
     conn.commit()
     return {"ok": True, "slug": slug, "archived": bool(payload.archived),
             "editors": editors}
+
+
+class ApproveRemovalsIn(BaseModel):
+    # The count the admin SAW on the banner: approving "whatever is waiting
+    # now" would let a click authorise a set the admin never read.
+    count: int
+
+
+@router.post("/enforce/approve-removals")
+def api_approve_enforce_removals(
+    payload: ApproveRemovalsIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """[ APPLY THESE N REMOVALS ] (GL-33 / CR-376, 2026-10-07). Admin-only,
+    audited, good for one hour, and only for the exact (folder, computer)
+    pairs the standing refusal names, so it cannot approve more than the
+    refusal named. The admin's count must match, and the banner points at the
+    home-page list (share_without_plan notices) to check first; the click is
+    the check, not a guarantee the list was read."""
+    admin = _require_admin(request)
+    try:
+        record = db.approve_enforce_removals(conn, db.utcnow_iso(), admin, payload.count)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    conn.commit()
+    _nudge_collector(request)
+    log.warning("admin %r approved %d share removal(s) the brake had refused",
+                admin, len(record["pairs"]))
+    return {"ok": True, "approved": len(record["pairs"]), "expires": record["expires"]}
+
+
+class EnforceAllowanceIn(BaseModel):
+    per_computer: int
+
+
+@router.post("/enforce/allowance")
+def api_set_enforce_allowance(
+    payload: EnforceAllowanceIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Site setting: share removals allowed per computer in one enforce cycle
+    (GL-33). The brake's limit is max(DASH_ENFORCE_MAX_REMOVALS, this x
+    computers); 0 restores the flat limit. Admin-only and audited."""
+    admin = _require_admin(request)
+    try:
+        value = db.set_enforce_removals_per_computer(conn, payload.per_computer, admin)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    conn.commit()
+    _nudge_collector(request)
+    return {"ok": True, "per_computer": value}
 
 
 @router.post("/projects/link")
@@ -5296,6 +5855,12 @@ def delete_user_everywhere(request: Request, conn: sqlite3.Connection, username:
         result["warnings"].extend(result["account"].get("warnings") or [])
 
     result["fleet"] = db.forget_editor(conn, username, was_admin=was_admin)
+    # CR-367 / GL-15 (2026-10-07): the durable tombstone, in the same
+    # transaction as the forget. It is what keeps the deleted person's laptop
+    # refused on smb/oidc, where nothing else records that they were here
+    # (see db.revoke_identity).
+    db.revoke_identity(conn, username, by=f"admin:{admin}",
+                       reason="account deleted", removed=True)
     # The one row that records the delete names the person by their stand-in,
     # or it would re-identify them on the very log forget_editor has just
     # pseudonymised (LG-3, D2). Counts only, as before. The machine names are
@@ -5559,6 +6124,29 @@ def api_admin_revoke_sessions(username: str, request: Request) -> dict[str, Any]
     revoked = store.revoke_user(username, by=f"admin:{admin}")
     log.warning("admin %r revoked %d session(s) for %r", admin, revoked, username)
     return {"ok": True, "revoked": revoked}
+
+
+@router.post("/admin/users/{username}/identity/revoke")
+def api_admin_revoke_identity(username: str, request: Request,
+                              conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    """Withdraw every computer-identity token minted for this person so far
+    (CR-367 / GL-15, 2026-10-07). Their computers 401 on the next report and
+    the tray asks the person to sign in again; signing in works at once and
+    mints a token that passes. Nothing is deleted and no plan is touched: this
+    is the "I think a laptop was taken" button, and the per-person half of
+    retiring the fleet token. Not a NAS call, so it works while the NAS is
+    down, which is when it is reached for."""
+    admin = _require_admin(request)
+    username = username.strip().lower()
+    if not is_valid_username(username):
+        raise HTTPException(status_code=422, detail="not a valid username")
+    record = db.revoke_identity(conn, username, by=f"admin:{admin}",
+                                reason="admin revoked computer sign-ins")
+    db.audit(conn, admin, "user.identity_revoke", username, {"gen": record["gen"]})
+    conn.commit()
+    log.warning("admin %r revoked the computer identities of %r (generation %d)",
+                admin, username, record["gen"])
+    return {"ok": True, "generation": record["gen"]}
 
 
 # ------------------------------------------------- per-editor report tokens
@@ -6966,7 +7554,8 @@ async def api_publish_package(
             status_code=503,
             detail="this dashboard has no release public key configured, so it cannot "
                    "verify a build and will not publish one. Set DASH_RELEASE_PUBKEYS "
-                   "to the vendor's key (tools/release_key.py pubkey) and redeploy. "
+                   "to the VENDOR's public key (docs/INSTALL.md step 6; a customer "
+                   "does not make a key of their own) and redeploy. "
                    "See docs/RELEASE.md.",
         )
     if not signature:
@@ -10238,6 +10827,19 @@ def api_report(
                 "X-CCSync-Identity required: sign in from the companion tray "
                 "(Sign in…) to get a computer identity token",
                 "no computer identity token was sent")
+        if id_user is None and auth.identity_status(
+                settings, identity, conn=conn)[2]:
+            # CR-367 / GL-15: ours and withdrawn, which is not the secret
+            # having changed and must not be worded as if it were.
+            # A DELETE bumps the generation too, but telling a removed
+            # person to sign in again sends them to a 403: the tombstone
+            # wins over the generation (overseer defect 2, 2026-10-07).
+            _gone = _account_refusal(settings, conn, editor)
+            if _gone:
+                raise _refuse_identity(_ACCOUNT_REFUSAL_DETAIL[_gone], _gone)
+            raise _refuse_identity(
+                "X-CCSync-Identity was revoked: sign in again from the companion tray",
+                "its computer identity token was revoked by an admin")
         if id_user is None:
             raise _refuse_identity(
                 "X-CCSync-Identity is invalid or expired: sign in again from the "
@@ -10413,6 +11015,11 @@ def api_report(
                 for r in conn.execute("SELECT slug, label FROM projects WHERE active=1")
             }
             match = db.match_project_label_confident(resolve_project, labels.keys())
+            if match is not None and _auto_map_has_rival(settings, resolve_project,
+                                                         match, labels.keys()):
+                # CR-379: leave it unmapped, so the reply below carries
+                # resolve_project_unmapped and a human picks the folder.
+                match = None
             if match is not None:
                 detected_slug = labels[match]
                 db.sticky_project_root(conn, resolve_project, detected_slug, received_at)
@@ -11479,6 +12086,8 @@ def api_alerts(request: Request, conn: sqlite3.Connection = Depends(get_conn)
         "counts": alerts.open_counts(findings),
         "kinds": [{"kind": k.kind, "severity": k.severity, "title": k.title,
                    "what": k.what} for k in alerts.ALERT_KINDS],
+        # 2026-09-29: the same kinds, grouped, each with whether it is sent.
+        "groups": alerts.kind_groups_view(conn),
         "log": db.fetch_alerts(conn, limit=200),
     }
 

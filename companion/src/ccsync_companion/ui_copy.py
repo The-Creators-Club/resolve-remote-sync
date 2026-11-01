@@ -172,6 +172,7 @@ LANE_WORDS = {
     "lane_a_video_up": "upload",
     "B": "proxy download",
     "lane_b_proxy_down": "proxy download",
+    "lane_b_originals_down": "originals download",
     "C": "folder sync",
     "lane_c_syncthing": "folder sync",
     "express": "express upload",

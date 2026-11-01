@@ -39,6 +39,9 @@ def strict(monkeypatch):
 
 
 def _settings(tmp_path, name="s.db", **kwargs) -> Settings:
+    # CR-362 (2026-10-07): SMB login with no NAS address refuses to boot; the
+    # verifier is stubbed, so the host is never contacted.
+    kwargs.setdefault("smb_host", "nas.test")
     return Settings(db_path=str(tmp_path / name), session_secret=STRONG,
                     admin_users=frozenset({"owen"}), **kwargs)
 
@@ -448,12 +451,13 @@ def test_cookie_secure_1_without_a_tls_path_refuses_to_boot(strict, tmp_path):
     # a site that publishes an https URL (Tailscale Serve) is a TLS path
     create_app(Settings(db_path=str(tmp_path / "tls2.db"), session_secret=STRONG,
                         cookie_secure="1", trusted_proxies="",
-                        site_dashboard_url="https://nas.example.ts.net"))
+                        site_dashboard_url="https://nas.example.ts.net",
+                        smb_host="nas.test"))
 
 
 def test_login_over_http_is_refused_when_secure_is_forced(strict, tmp_path):
     settings = Settings(db_path=str(tmp_path / "http.db"), session_secret=STRONG,
-                        cookie_secure="1")
+                        cookie_secure="1", smb_host="nas.test")
     with TestClient(_app(settings)) as client:
         # TestClient speaks http and is not a trusted proxy, so this IS the
         # "editor loops on the login page forever" case -- answered, not looped.
@@ -468,7 +472,8 @@ def test_login_over_http_is_refused_when_secure_is_forced(strict, tmp_path):
 def test_x_forwarded_proto_is_only_believed_from_a_trusted_peer(strict, tmp_path):
     """H1: X-Forwarded-Proto was trusted from anyone, so any host on the
     tailnet decided whether the Secure flag went on the session cookie."""
-    settings = Settings(db_path=str(tmp_path / "prox.db"), session_secret=STRONG)
+    settings = Settings(db_path=str(tmp_path / "prox.db"), session_secret=STRONG,
+                        smb_host="nas.test")
     with TestClient(_app(settings)) as client:
         # TestClient's peer is 'testclient', which parses as no IP at all
         resp = _login(client)
@@ -477,7 +482,8 @@ def test_x_forwarded_proto_is_only_believed_from_a_trusted_peer(strict, tmp_path
                            headers={"X-Forwarded-Proto": "https"}, follow_redirects=False)
         assert "secure" not in resp.headers["set-cookie"].lower()
 
-    loopback = Settings(db_path=str(tmp_path / "prox2.db"), session_secret=STRONG)
+    loopback = Settings(db_path=str(tmp_path / "prox2.db"), session_secret=STRONG,
+                        smb_host="nas.test")
     with TestClient(_app(loopback), client=("127.0.0.1", 5000)) as client:
         resp = client.post("/login", data={"username": "jsmith", "password": "correct-horse"},
                            headers={"X-Forwarded-Proto": "https"}, follow_redirects=False)

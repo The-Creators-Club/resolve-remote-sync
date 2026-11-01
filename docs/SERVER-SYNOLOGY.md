@@ -319,6 +319,24 @@ python server/setup_editor_account.py --site site.toml --nas-kind synology \
     --name jsmith --revoke-key --apply --lock
 ```
 
+### Service account, and the residual risk of the password in the container
+
+DSM has no API-key concept, so the dashboard container holds the password of the
+account in `[nas] admin_user` (the deploy prints this on every run, GL-18). The
+install requires an `administrators` member with 2FA off, so use a **dedicated
+service account** for it, not a person's: it can then be rotated and watched
+without touching anyone's login. What does **not** go away: anything that can
+execute code in that container can read the password and act as an administrator
+over SSH and the Web API. The mitigations are the tailnet-only perimeter
+(`docs/TAILNET_POLICY.md`), the read-only code mounts, and a dashboard admin list
+that does not include the DSM admin account (`DASH_ADMIN_USERS`, enforced by the
+deploy for a new site).
+
+The container's SSH to DSM is **pinned**: `DASH_NAS_SSH_HOSTKEY` is the configured
+`[nas] ssh_hostkey`, else the key the base rig recorded, and with neither the
+container records the first key it sees under `<data>/secrets/nas_known_hosts` and
+refuses a different one afterwards (bug-dash-ops-5).
+
 ### Per-project ACLs on DSM are PARTIAL — read this before turning them on
 
 `[stack] project_acl = "per-project"` (`docs/TENANCY.md` §2) is only half

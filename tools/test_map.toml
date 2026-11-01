@@ -321,6 +321,7 @@ paths = [
 ]
 tests = [
     "tools/tests/test_docs_index.py",
+    "tools/tests/test_release_pipeline_cr371.py",   # reads docs/DOCKER.md (CR-371)
     # found by select_suites.py --audit, 2026-10-06
     "companion/tests/test_bug_hunt_2026_09_24_w2_c-resolve.py",
     "companion/tests/test_config.py",
@@ -343,6 +344,11 @@ tests = [
     "tools/tests/test_build_dashboard_bundle.py",
     "tools/tests/test_release_scripts.py",
     "ytdl/web/tests/test_dedupe.py",
+    # found by select_suites.py --audit, pre-launch track A gate, 2026-10-07
+    "dashboard/tests/test_cr362_appliance_defaults.py",
+    "dashboard/tests/test_legal_drafts.py",
+    "server/tests/test_secure_defaults.py",
+    "tools/tests/test_gen_notices.py",
 ]
 
 # --- components with nothing to deploy on the dashboard -----------------------
@@ -357,6 +363,7 @@ tests = [
     "dashboard/tests/test_jobs_contract.py",
     "dashboard/tests/test_site_telemetry.py",
     "dashboard/tests/test_report_optouts.py",
+    "tools/tests/test_release_pipeline_cr371.py",   # reads companion config.py VERSION (CR-371)
     # found by select_suites.py --audit, 2026-10-06
     "dashboard/tests/test_bug_hunt_2026_09_11b_dash_api.py",
     "dashboard/tests/test_bug_hunt_2026_09_24_w2_d-diag.py",
@@ -382,7 +389,13 @@ tests = [
     "tools/tests/test_release_notes_flag.py",
     "tools/tests/test_scan_frozen.py",
     "tools/tests/test_sign_release.py",
+    "tools/tests/test_release_key_encrypted.py",
     "ytdl/web/tests/test_bug_hunt_2026_09_24_w2_music-ytdl.py",
+    # found by select_suites.py --audit, pre-launch track A gate, 2026-10-07
+    "dashboard/tests/test_cr362_appliance_defaults.py",
+    "onboarding/tests/test_gl29_resolve_connect.py",
+    "onboarding/tests/test_support_line.py",
+    "tools/tests/test_winversion.py",
 ]
 
 [[area]]
@@ -394,6 +407,8 @@ tests = [
     # found by select_suites.py --audit, 2026-10-06
     "tools/tests/test_gen_notices.py",
     "tools/tests/test_scan_frozen.py",
+    # found by select_suites.py --audit, pre-launch track A gate, 2026-10-07
+    "tools/tests/test_winversion.py",
 ]
 
 [[area]]
@@ -402,6 +417,7 @@ tier = "scoped"
 paths = ["installer/**"]
 suites = ["installer", "installer/macos"]
 tests = [
+    "tools/tests/test_release_pipeline_cr371.py",   # reads build_editor_package.ps1 (CR-371)
     # found by select_suites.py --audit, 2026-10-06
     "companion/tests/test_config.py",
     "companion/tests/test_rclone_stanza_rewrite.py",
@@ -417,6 +433,9 @@ tests = [
     "tools/tests/test_gen_notices.py",
     "tools/tests/test_release_scripts.py",
     "tools/tests/test_scan_frozen.py",
+    # found by select_suites.py --audit, pre-launch track A gate, 2026-10-07
+    "companion/tests/test_lane_hostkey_pin.py",
+    "tools/tests/test_winversion.py",
 ]
 
 [[area]]
@@ -430,6 +449,10 @@ tests = [
     "dashboard/tests/test_sweep_2026_09_04_copy.py",
     "tools/tests/test_gen_notices.py",
     "tools/tests/test_release_scripts.py",
+    # found by select_suites.py --audit, pre-launch track A gate, 2026-10-07
+    "dashboard/tests/test_build_flavor.py",
+    "dashboard/tests/test_cr368_project_groups.py",
+    "dashboard/tests/test_truenas_jsonrpc_overseer.py",
 ]
 
 [[area]]
@@ -499,6 +522,9 @@ tests = [
     "dashboard/tests/test_mobile_origin.py",
     "onboarding/tests/test_macos_steps.py",
     "onboarding/tests/test_release_gates.py",
+    # found by select_suites.py --audit, pre-launch track A gate, 2026-10-07
+    "companion/tests/test_gl22_gl23_startup_rollback.py",
+    "dashboard/tests/test_release_feed_freshness.py",
 ]
 
 [[area]]
@@ -612,6 +638,7 @@ tests = [
     "dashboard/tests/test_every_template_renders.py",
     "dashboard/tests/test_help_page.py",
     "dashboard/tests/test_jobs_contract.py",
+    "dashboard/tests/test_session_100_days.py",
     "dashboard/tests/test_jobs_pinning.py",
     "dashboard/tests/test_mobile_admin.py",
     "dashboard/tests/test_mobile_css.py",
@@ -621,6 +648,8 @@ tests = [
     "dashboard/tests/test_tab_memory.py",
     "server/tests/test_bug_hunt_2026_09_11_server_tools.py",
     "tools/tests/test_build_dashboard_bundle.py",
+    # found by select_suites.py --audit, pre-launch track A gate, 2026-10-07
+    "dashboard/tests/test_cr362_appliance_defaults.py",
 ]
 
 # --- dashboard core: everything else the dashboard is --------------------------

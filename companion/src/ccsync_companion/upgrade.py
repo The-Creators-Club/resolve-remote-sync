@@ -96,6 +96,18 @@ _OLD_SUFFIX = ".old"
 # the update dialog.
 CHILD_TAKEOVER_GRACE_SECONDS = 2.0
 CHILD_TAKEOVER_POLL_SECONDS = 0.1
+# GL-22 / PL-RES-03 (CR-370, 2026-10-07): the 2 s grace above is SHORTER than a
+# onefile extraction, so a replacement that was merely still unpacking read as
+# "alive", and one that died at import after the predecessor stood down was
+# never noticed. A replacement that carries startguard now writes its
+# "started" marker (handoff_started.json, naming its own pid) at the top of
+# run(), once everything is imported; the hand-off waits for THAT, up to this
+# long. The marker is written BEFORE the single-instance wait on purpose: the
+# child waits up to 90 s for us to exit, so a marker written after it would
+# deadlock the two of us. A child that is alive but silent at the deadline is
+# treated as slow, not dead (the legacy outcome): we cannot swap an exe back
+# from under a live process anyway.
+HANDOFF_STARTED_WAIT_SECONDS = 30.0
 # The published exe is ~20 MB. A ceiling stops a hostile or broken response
 # filling the editor's disk (there was none at all), and the free-space check
 # stops a download that cannot possibly complete (AUDIT_2 §2-low).
@@ -1040,6 +1052,63 @@ def keep_old_exe_until_healthy(
             return ""
 
 
+def watch_child_takeover(
+    child: Any,
+    cfg: Any,
+    clock: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    state_dir: Optional[Path] = None,
+    wait_seconds: float = HANDOFF_STARTED_WAIT_SECONDS,
+) -> Optional[int]:
+    """Watch a freshly spawned replacement before standing down.
+
+    -> the child's exit code if it died while watched (the caller rolls back
+    and keeps running), else None ("taken over", or cannot be watched).
+
+    With a real pid the wait ends on the child's "started" marker (see
+    HANDOFF_STARTED_WAIT_SECONDS); a child without a pid (a test double, an
+    injected spawn) keeps the legacy fixed grace. Never raises."""
+    if child is None or not hasattr(child, "poll"):
+        return None
+    pid = getattr(child, "pid", None)
+    watch_marker = isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+    budget = float(wait_seconds) if watch_marker else CHILD_TAKEOVER_GRACE_SECONDS
+    marker_dir = state_dir
+    if watch_marker and marker_dir is None:
+        try:
+            from . import startguard  # noqa: PLC0415
+
+            marker_dir = startguard.state_dir_for(cfg if isinstance(cfg, dict) else None)
+        except Exception:  # noqa: BLE001
+            watch_marker = False
+            budget = CHILD_TAKEOVER_GRACE_SECONDS
+    deadline = clock() + budget
+    while clock() < deadline:
+        code = child.poll()
+        if code is not None:
+            return int(code)
+        if watch_marker:
+            try:
+                from . import startguard  # noqa: PLC0415
+
+                # A PyInstaller onefile exe is two processes: Popen.pid is the
+                # bootloader and the Python child writes the marker with its
+                # own pid, the bootloader's as ppid (CR-370 / GL-22, measured
+                # 2026-10-07). Accept either.
+                mark = startguard.read_started(marker_dir)
+                if pid in (mark.get("pid"), mark.get("ppid")):
+                    log.info("upgrade: the replacement (pid %s) reported that it "
+                             "started", pid)
+                    return None
+            except Exception:  # noqa: BLE001
+                log.debug("upgrade: could not read the started marker", exc_info=True)
+        sleep_fn(CHILD_TAKEOVER_POLL_SECONDS)
+    if watch_marker:
+        log.warning("upgrade: the replacement (pid %s) is alive but wrote no "
+                    "started marker in %.0fs; standing down as before", pid, budget)
+    return None
+
+
 def revert_to_previous_build(
     state_dir: Path,
     cfg: Any = None,
@@ -1962,20 +2031,16 @@ class UpgradeManager:
         # with nothing. Only enforceable when the spawn seam hands back
         # something poll()-able: _default_spawn does; injected spawns that
         # return None keep the fire-and-forget contract.
-        if child is not None and hasattr(child, "poll"):
-            deadline = self._clock() + CHILD_TAKEOVER_GRACE_SECONDS
-            while self._clock() < deadline:
-                code = child.poll()
-                if code is not None:
-                    log.warning(
-                        "upgrade: the new build exited with code %s within %.0fs of "
-                        "launch -- rolling back rather than standing down",
-                        code, CHILD_TAKEOVER_GRACE_SECONDS,
-                    )
-                    self.last_failure = ERROR_EXEC
-                    self._rollback(old, exe, aside=new)
-                    return False
-                self._sleep(CHILD_TAKEOVER_POLL_SECONDS)
+        code = watch_child_takeover(child, self.cfg, self._clock, self._sleep)
+        if code is not None:
+            log.warning(
+                "upgrade: the new build exited with code %s before it reported "
+                "that it had started -- rolling back rather than standing down",
+                code,
+            )
+            self.last_failure = ERROR_EXEC
+            self._rollback(old, exe, aside=new)
+            return False
 
         log.info("upgrade: v%s launched; shutting down v%s", info["version"], config_mod.VERSION)
         if self._request_shutdown is not None:
@@ -2127,18 +2192,14 @@ def restart_self(
     except Exception:
         log.exception("self-restart: could not launch the replacement")
         return False
-    if child is not None and hasattr(child, "poll"):
-        deadline = clock() + CHILD_TAKEOVER_GRACE_SECONDS
-        while clock() < deadline:
-            code = child.poll()
-            if code is not None:
-                log.warning(
-                    "self-restart: the replacement exited with code %s within "
-                    "%.0fs -- keeping this instance running",
-                    code, CHILD_TAKEOVER_GRACE_SECONDS,
-                )
-                return False
-            sleep_fn(CHILD_TAKEOVER_POLL_SECONDS)
+    code = watch_child_takeover(child, None, clock, sleep_fn)
+    if code is not None:
+        log.warning(
+            "self-restart: the replacement exited with code %s before it "
+            "reported that it had started -- keeping this instance running",
+            code,
+        )
+        return False
     log.info("self-restart: replacement launched; shutting this instance down")
     try:
         request_shutdown()

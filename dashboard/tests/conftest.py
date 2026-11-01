@@ -17,6 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # app.csrf_gate); a deployment that sets it gets a WARNING on every boot.
 os.environ["DASH_DEV_INSECURE"] = "1"
 
+# GL-31 / CR-374 (2026-10-07): the suite runs as the STUDIO flavour so the
+# existing CLI-provider tests keep exercising that code; the vendor lock has
+# its own tests (test_build_flavor.py), which delete this variable.
+os.environ.setdefault("DASH_STUDIO_CLI_PROVIDERS", "1")
+
 # The AI providers' keys (ai_providers.py, 2026-08-18). Removed at import
 # time, for the same reason ytdl/web's conftest blanks DASH_REPORT_TOKEN: the
 # base rig genuinely exports ANTHROPIC_API_KEY, "the environment always wins"

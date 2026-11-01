@@ -86,15 +86,17 @@ statically linked, and the customer can replace the installed copy with \
 their own build without touching our code; it is imported only by the \
 mounted Timeline Cards page's project-library route, and only on a site that \
 sets DASH_CARDS_ENABLED. In the companion (since 2026-09-25, LG-11) it is \
-frozen by PyInstaller as SEPARATE files, the psycopg2 extension module and \
-the libpq and OpenSSL shared libraries its wheel carries, which are \
-extracted to a temporary directory at run time and loaded from there as \
-separate, replaceable shared-library files rather than code linked into \
-ours. Their code is not changed; on macOS PyInstaller does rewrite each \
-collected library's load commands (install names) and re-sign it, so there \
-the files are not byte-identical to the wheel's (flagged for counsel against \
-THIRD_PARTY_NOTICES' "unmodified", 2026-09-25 review round). It is used \
-only by the Timeline Cards role. Both are covered by \
+shipped OUTSIDE the one-file archive (GL-32, CR-375, 2026-10-07): build.spec \
+excludes it from the frozen modules and bundles the psycopg2 package, with \
+the libpq and OpenSSL shared libraries its wheel carries, as plain files \
+under ccsync_lib/, unmodified, and ccsync_companion/lgpl_libs.py puts \
+~/.ccsync/lib (the user's own build, which wins) ahead of that directory on \
+sys.path, so a recipient can replace the library without rebuilding our exe, \
+as LGPL section 4 requires. (Before that it sat inside the PyInstaller \
+archive and was NOT replaceable; the earlier wording here claiming otherwise \
+was wrong.) The LGPL-3.0 text ships in the licence bundle \
+(tools/notices_extra/lgpl-3.0.txt). It is used only by the Timeline Cards \
+role. Both are covered by \
 psycopg2's own linking exception as well. Obligations, met in \
 docs/legal/THIRD_PARTY_NOTICES.md and in the licence texts every binary \
 carries (tools/gen_notices.py --write-texts): the notice, the licence text, \

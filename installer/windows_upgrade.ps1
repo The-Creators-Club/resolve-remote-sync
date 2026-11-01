@@ -442,6 +442,38 @@ else {
     }
 }
 
+# GL-27 / CR-372 (2026-10-07): every wizard install before this date ran
+# `icacls ~/.ccsync /inheritance:r` with no (OI)(CI), leaving each file and
+# folder already inside (eula_accepted.json, logs\, state\) with an EMPTY
+# permission list: the EULA re-asks, the install log stops, and the lane B
+# breaker / fleet halt / drive reminder latches cannot be saved. Those machines
+# never run the bootstrap again, so THIS is their repair: re-grant the folder
+# (OI)(CI) and reset everything inside it to inherit. The folder itself is not
+# reset (that would hand the fleet token back to the profile's default ACL).
+# Best-effort: a permissions repair never fails an upgrade that has already
+# swapped the exe. The companion runs the same repair at start
+# (state_acl.py), for a machine that upgrades by the tray rather than by this.
+function Repair-CCSyncStateAcl {
+    param([string]$Dir)
+
+    if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { return }
+    if ($DryRun) {
+        Write-Step "[dry-run] would re-grant $Dir and reset every file and folder inside it to inherit (icacls /reset /T)"
+        return
+    }
+    try {
+        $me = "$env:USERDOMAIN\$env:USERNAME"
+        cmd /c "icacls `"$Dir`" /inheritance:r /grant:r `"$me`":(OI)(CI)(F) `"*S-1-5-18`":(OI)(CI)(F) `"*S-1-5-32-544`":(OI)(CI)(F) >nul 2>&1"
+        if ($LASTEXITCODE -ne 0) { Write-Warn2 "could not re-grant $Dir (icacls exit $LASTEXITCODE)"; return }
+        cmd /c "icacls `"$Dir\*`" /reset /T /C /Q >nul 2>&1"
+        if ($LASTEXITCODE -ne 0) { Write-Warn2 "could not reset every file inside $Dir (icacls exit $LASTEXITCODE)" }
+    }
+    catch {
+        Write-Warn2 "could not repair the permissions inside $Dir ($($_.Exception.Message))"
+    }
+}
+Repair-CCSyncStateAcl -Dir "$env:USERPROFILE\.ccsync"
+
 # Tighten the two files that hold the fleet token in clear text, on every
 # upgrade -- that is how the machines provisioned before 2026-08-17 get the
 # fix, since they will never run the bootstrap again (COMMERCIAL_READINESS.md

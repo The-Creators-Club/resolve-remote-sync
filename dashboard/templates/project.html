@@ -52,6 +52,29 @@
       </div>
     {% endcall %}
 
+    {# Who can open the project besides the people who tick it (CR-368
+       follow-up, 2026-10-07). Loaded once, not polled: a 10 s poll would
+       wipe a half-chosen name. #}
+    {% if session_is_admin %}
+    {% call hm.win('access', 'project_access') %}
+      <div class="body" id="project-access" hx-get="/partials/project/{{ project.slug }}/access" hx-trigger="load" hx-swap="innerHTML">
+        <div class="allclear">reading who has access</div>
+      </div>
+    {% endcall %}
+    {% endif %}
+
+    {# Originals on request (2026-10-31, docs/SELECTIVE_ORIGINALS.md §12.3).
+       Loaded once and redrawn by its own buttons, the access window's rule:
+       a poll would close a folder someone is browsing. Every signed-in
+       viewer sees every pick (D2). #}
+    {% if session_user %}
+    {% call hm.win('originals', 'originals_on_request') %}
+      <div class="body" id="project-originals" hx-get="/partials/project/{{ project.slug }}/originals" hx-trigger="load" hx-swap="innerHTML">
+        <div class="allclear">reading which originals are wanted</div>
+      </div>
+    {% endcall %}
+    {% endif %}
+
     {% if session_user %}
     {% call hm.win('roots', 'project_roots') %}
       <div class="body" id="roots" hx-get="/partials/project-roots" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">

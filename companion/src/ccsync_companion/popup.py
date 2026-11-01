@@ -475,6 +475,9 @@ def build_popup_rows(
                 # the SAME prefix the suggestion used, instead of offering
                 # un-prefixed destinations that never sync (AUDIT_2 CORE-H3).
                 "effective_prefix": effective_prefix,
+                # CR-358: the project these clips were seen in, which FIX ALL
+                # checks against the one open when the button is pressed.
+                "resolve_project_name": resolve_project_name,
             }
         )
     return rows
@@ -616,6 +619,32 @@ def call_fix_clip(
 _FIX_CLIP_DEFAULT = fixer.fix_clip
 
 
+def _open_project_mismatch(row: dict[str, Any],
+                           current_project_fn: Optional[Callable[[], str]]) -> str:
+    """The open project's name when it is NOT the row's, else "".
+
+    Asked per row, at the moment of the copy: a dialog can sit open for ten
+    minutes while the editor switches projects. Only a definite, different
+    name refuses; a row with no project, no project open, or a question that
+    could not be asked all answer "" and the fix runs as it always has.
+    Never raises."""
+    seen_in = str(row.get("resolve_project_name") or "").strip()
+    if not seen_in:
+        return ""
+    try:
+        if current_project_fn is not None:
+            now_open = current_project_fn()
+        else:
+            now_open = resolve_bridge.current_project_name(max_age=0)
+    except Exception:
+        log.debug("fix all: could not read the open project", exc_info=True)
+        return ""
+    now_open = str(now_open or "").strip()
+    if now_open and now_open != seen_in:
+        return now_open
+    return ""
+
+
 def perform_fix_all(
     rows: list[dict[str, Any]],
     selections: dict[str, str],
@@ -626,6 +655,7 @@ def perform_fix_all(
     should_stop: Optional[Callable[[], bool]] = None,
     control: Optional[BatchControl] = None,
     canonical_prefix: str = "",
+    current_project_fn: Optional[Callable[[], str]] = None,
 ) -> list[dict[str, Any]]:
     """Run fixer.fix_clip for every row, using `selections[file_path]` as the
     chosen destination (falling back to the row's suggested_dest if a path
@@ -664,6 +694,13 @@ def perform_fix_all(
     thread-safe and this process has already shown Tk instability
     (CORE-H8/CORE-M3). Publish to a shared dict and let a root.after tick
     read it.
+
+    `current_project_fn()` names the project open in Resolve (default:
+    resolve_bridge.current_project_name, uncached). A row seen in a
+    DIFFERENT project is refused before anything is copied (CR-358): its
+    destination was chosen from that project's folder and its clips cannot
+    be found in the one that is open, so the copy would land in the wrong
+    project and relink nothing.
     """
     results: list[dict[str, Any]] = []
     total = len(rows)
@@ -760,12 +797,28 @@ def perform_fix_all(
                 placeholder=placeholder, stopped=False,
                 rehearsing=rehearsing)
 
-        outcome = call_fix_clip(
-            fix_clip_fn, (path, dest_rel, local_root, media_pool_items),
-            on_bytes=_on_bytes,
-            should_abort=control.should_abort_current if control is not None else None,
-            canonical_prefix=canonical_prefix or None,
-        )
+        wrong_project = _open_project_mismatch(row, current_project_fn)
+        if wrong_project:
+            log.warning("fix all: %s not copied -- it was seen in %r but %r is open "
+                        "in Resolve", path, row.get("resolve_project_name"), wrong_project)
+            outcome = {
+                "ok": False,
+                "message": (
+                    f"Not copied. This clip belongs to the Resolve project "
+                    f"\"{row.get('resolve_project_name')}\", but \"{wrong_project}\" "
+                    f"is open now. Open \"{row.get('resolve_project_name')}\" and "
+                    "press FIX ALL again."
+                ),
+                "copied_to": None,
+                "wrong_project": True,
+            }
+        else:
+            outcome = call_fix_clip(
+                fix_clip_fn, (path, dest_rel, local_root, media_pool_items),
+                on_bytes=_on_bytes,
+                should_abort=control.should_abort_current if control is not None else None,
+                canonical_prefix=canonical_prefix or None,
+            )
 
         outcome = dict(outcome)
         outcome["file_path"] = path
@@ -839,58 +892,6 @@ def perform_ignore_all(rows: list[dict[str, Any]], ignore_tracker: "fixer.Ignore
         ignore_tracker.ignore(row["file_path"], how=how)
 
 
-def _folder_button_label(rows: list[dict[str, Any]]) -> str:
-    """The third button's caption, which has to name its own scope: one
-    folder or several is the difference between a safe click and a surprise."""
-    count = len(folders_of(rows))
-    if count > 1:
-        return f"ALWAYS LEAVE THESE {count} FOLDERS ALONE ON THIS COMPUTER"
-    return "ALWAYS LEAVE THIS FOLDER ALONE ON THIS COMPUTER"
-
-
-def folders_of(rows: list[dict[str, Any]]) -> list[str]:
-    """The distinct parent folders of `rows`, first-seen order.
-
-    Pure and separately testable because the dialog that calls it cannot be
-    driven in the suite (no real Tk, per tests/conftest.py)."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for row in rows:
-        folder = fixer._folder_of(str(row.get("file_path") or ""))
-        if not folder:
-            continue
-        key = canon.norm(folder)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(folder)
-    return out
-
-
-def perform_ignore_folders(rows: list[dict[str, Any]],
-                           ignore_tracker: "fixer.IgnoreTracker",
-                           reason: str = "") -> tuple[list[str], list[str]]:
-    """"Always leave clips in this folder alone on this machine" (RES-12).
-
-    Returns (persisted, failed). A folder that could not be written is
-    reported rather than swallowed: the editor pressed a button that says
-    "always", and a decision that quietly lasts until the next restart is the
-    thing this finding exists to stop."""
-    persisted: list[str] = []
-    failed: list[str] = []
-    for folder in folders_of(rows):
-        try:
-            ok = ignore_tracker.ignore_folder(folder, reason=reason)
-        except Exception:
-            log.exception("could not record the folder ignore for %s", folder)
-            ok = False
-        (persisted if ok else failed).append(folder)
-    # Whatever happened to the file, the clips in front of the editor go away
-    # now: they pressed a button whose weakest possible meaning is SKIP.
-    perform_ignore_all(rows, ignore_tracker, how="folder")
-    return persisted, failed
-
-
 # -- RES-8 (usability sweep 2026-09-04): is a FIX ALL copy live RIGHT NOW? ---
 #
 # The tray's Quit tore the process down mid-write() with no question asked,
@@ -922,16 +923,6 @@ def _set_copy_state(info: Optional[dict[str, Any]]) -> None:
         _copy_state.clear()
         if info:
             _copy_state.update(info)
-
-
-# comp-ui-3 (2026-09-11): the wave-4 copy pass replaced the hand-written menu
-# route with ui_copy.DIAGNOSTICS and left the tail of the old literal behind,
-# so the one sentence explaining that "always leave this folder alone" did not
-# stick read "... COPY DIAGNOSTICS FOR YOUR ADMINFOR YOUR ADMIN." A module
-# constant, so the suite can assert on it without building a dialog.
-IGNORE_FOLDER_FAILED = (
-    "CCSync could not save that choice, so these clips are only skipped until "
-    f"you restart. {ui_copy.DIAGNOSTICS}.")
 
 
 # ui-comp-windows-8 (2026-09-25): the destination field and its drop-down (a
@@ -1137,17 +1128,13 @@ class PopupDialog:
         self._ignore_btn = theme.neon_button(
             tk, btn_bar, "SKIP FOR NOW (this session)", self._on_ignore, primary=False)
         self._ignore_btn.pack(side="left", padx=(0, 18))
-        # RES-12 (resilience sweep 2026-08-28): the third answer. An editor
-        # who keeps a personal stock-footage folder outside the tree was
-        # offered the same 300 clips at every start and pressed SKIP every
-        # time, which trains them to dismiss the one dialog that also catches
-        # a genuinely un-synced card dump. Undone from Settings, never from
-        # here -- an "always" you can set by accident and cannot see is worse
-        # than the nagging.
-        self._folder_btn = theme.neon_button(
-            tk, btn_bar, _folder_button_label(rows), self._on_ignore_folder,
-            primary=False)
-        self._folder_btn.pack(side="left", padx=(0, 18))
+        # CR-356 (2026-09-30, owner's order): RES-12's third button, [ ALWAYS
+        # LEAVE THIS FOLDER ALONE ON THIS COMPUTER ], is gone. Its rule matched
+        # RECURSIVELY and for ever, so a click made for one subtitle file on a
+        # Desktop silently covered a Desktop\Music Docs folder created a day
+        # later: 30 licensed tracks cut into an episode, never offered here,
+        # never uploaded, offline on every other machine. SKIP FOR NOW is the
+        # only dismissal, and it lasts one session on purpose.
         self._fix_btn = theme.neon_button(tk, btn_bar, "FIX ALL", self._on_fix_all, primary=True)
         self._fix_btn.pack(side="left")
         # Present only after a run that left failures behind -- a failed file
@@ -1449,15 +1436,6 @@ class PopupDialog:
         try:
             self._fix_btn.config(state="disabled")
             self._ignore_btn.config(state="disabled")
-            # RES-2 (usability sweep 2026-09-04): the folder button was the
-            # one control this bar forgot, and its handler ends in
-            # root.destroy() -- which ends mainloop(), returns show_popup()
-            # and releases app._popup_active_lock while the ccsync-fixall
-            # daemon is still copying multi-GB files and calling ReplaceClip.
-            # Exactly the second-pass-over-the-same-clips shape CORE-M1
-            # closed for the X, and the destroy-under-a-live-worker shape
-            # CR-93 aborts on.
-            self._folder_btn.config(state="disabled")
             self._retry_btn.pack_forget()
             self._progress_frame.grid()
             for btn in (self._stop_btn, self._skip_btn, self._cancel_btn):
@@ -1675,9 +1653,6 @@ class PopupDialog:
             try:
                 self._fix_btn.config(state="normal")
                 self._ignore_btn.config(state="normal")
-                # RES-2: re-enabled with the other two, on the same thread
-                # and in the same batch-is-over branch.
-                self._folder_btn.config(state="normal")
                 if self._failed_rows:
                     self._retry_btn.pack(side="left", padx=(18, 0))
             except Exception:
@@ -1804,34 +1779,11 @@ class PopupDialog:
             self.on_done([])
         self.root.destroy()
 
-    def _on_ignore_folder(self) -> None:
-        # RES-2 (2026-09-04): see _on_ignore. This one is the reason the guard
-        # exists -- it is the route that destroyed the window mid-copy.
-        if self._fixing:
-            return
-        persisted, failed = perform_ignore_folders(
-            self.rows, self.ignore_tracker, reason="the editor chose it in the fixer")
-        if failed:
-            # Fail in a named direction: the clips are skipped for this
-            # session either way, and the editor is told that the "always"
-            # half did not stick rather than discovering it next Monday.
-            log.error("could not persist the folder ignore for: %s", ", ".join(failed))
-            try:
-                self.status_label.config(text=IGNORE_FOLDER_FAILED)
-            except Exception:
-                log.debug("could not update the popup status line", exc_info=True)
-            return
-        log.info("fixer: leaving %d folder(s) alone on this machine: %s",
-                 len(persisted), ", ".join(persisted))
-        if self.on_done is not None:
-            self.on_done([])
-        self.root.destroy()
-
     # Every widget this dialog keeps a handle on. Cleared on the Tk thread
     # when the window closes -- see show() (CR-93).
     WIDGET_ATTRS = (
         "status_label", "_space_label", "_progress_frame", "_file_label", "_file_bar",
-        "_batch_label", "_batch_bar", "_fix_btn", "_ignore_btn", "_folder_btn",
+        "_batch_label", "_batch_bar", "_fix_btn", "_ignore_btn",
         "_retry_btn", "_stop_btn", "_skip_btn", "_cancel_btn",
     )
 
@@ -2648,9 +2600,11 @@ class WorkProgressWindow:
 DIALOG_WRAP_PX = 520
 
 
-def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
+def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED",
+                   cancel_label: str = "CANCEL") -> bool:
     """Modal neon confirm dialog. Returns True if the user clicked the OK
-    button, False on cancel/close. Falls back to False (safe default: do
+    button, False on cancel/close. `cancel_label` (CR-380, 2026-11-01) is for
+    callers where the safe answer reads better as CLOSE than CANCEL. Falls back to False (safe default: do
     nothing) if no display is available."""
     try:
         import tkinter as tk
@@ -2695,7 +2649,7 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
         def _cancel():
             root.destroy()
 
-        cancel_btn = theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False)
+        cancel_btn = theme.neon_button(tk, btn_bar, cancel_label, _cancel, primary=False)
         cancel_btn.pack(side="left", padx=(0, 18))
         theme.neon_button(tk, btn_bar, ok_label, _ok, primary=True).pack(side="left")
         root.protocol("WM_DELETE_WINDOW", _cancel)

@@ -70,6 +70,9 @@ needs).
   calling `destroy()` itself, so there is one place that knows a copy is live.
 - **Effort:** S  **Value:** critical  **Confidence:** high
 - **Related:** CORE-M1, CR-93 (a destroy from under a live worker is also the Tk shape)
+- **Status (2026-09-30):** moot. The folder button itself was removed by CR-356
+  (companion 0.9.85); SKIP FOR NOW keeps the `_fixing` guard and is disabled
+  during a copy.
 
 ### RES-3: the proxy ATTACH half has no user-visible surface at all, and its diagnosis is discarded
 - **Lens:** both  **Who:** editor / admin
@@ -459,7 +462,7 @@ needs).
 - RES-9 (a renamed project orphans its own undo): not built - the journal header still keys on the name.
 - RES-10 (`_relink_moved` only fixes the open project): **partly built** - the watcher now offers a repoint for a MISSING clip that matches a recent move (`watcher.py:335-347`), but a project the editor has not opened is still never revisited.
 - RES-11 (library walk cannot see unsaved edits): not built.
-- RES-12 (an editor who says "no" is never heard): **half built** - persisted folder ignores with [ FORGET ] exist (`settings_window.py:560-566`); the counts still do not reach the dashboard.
+- RES-12 (an editor who says "no" is never heard): **half built** - persisted folder ignores with [ FORGET ] exist (`settings_window.py:560-566`); the counts still do not reach the dashboard. (2026-09-30: the persisted folder ignores were REMOVED by CR-356.)
 - RES-13 (`save_point_due` burns the slot before the export works): not built.
 - RES-14 (edits past 5000 silently unjournalled): not built - `resolve_journal.py:265-267` still returns with no log line.
 - RES-15 (a zero-byte or in-flight proxy can be handed to `LinkProxyMedia`): not built.

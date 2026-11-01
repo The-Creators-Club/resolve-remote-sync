@@ -64,6 +64,10 @@ STRING_KEYS = (
     # organisation where only a few characters fit; `product_name` is the
     # VENDOR's product, which is why it is the last fallback and not blank.
     "org_short", "product_name",
+    # GL-34 / CR-374 (2026-10-07): where an editor sends a problem. Additive
+    # to schema 1; a dashboard that predates it sends nothing and
+    # support_contact() answers the vendor default.
+    "support_contact",
     # The fleet's own tray/window mark, as a bare asset name the build already
     # ships ("cc_mark_white.png") or an absolute path to a white-on-transparent
     # PNG deployed to the editors. Added 2026-08-18: without it, item 10's
@@ -347,6 +351,10 @@ NEUTRAL_DRIVE_OWNER = "studio"
 # title bar, the tray tooltip's app name). Must match the dashboard's
 # settings.site_product_name default.
 DEFAULT_PRODUCT_NAME = "CC Sync"
+# GL-34 / CR-374: the vendor's support address, shown when the site manifest
+# carries none (an older dashboard, an unprovisioned machine). Must match the
+# dashboard's site_store.DEFAULT_SUPPORT_CONTACT; a test pins the pair.
+DEFAULT_SUPPORT_CONTACT = "support@thecreatorsclub.co"
 
 # The manifest is read from disk for these, and the tray asks on every status
 # repaint, so the parse is memoised against the cache file's identity+mtime --
@@ -403,6 +411,18 @@ def product_name(site: Optional[dict[str, Any]] = None,
     if isinstance(site, dict):
         value = str(site.get("product_name") or "").strip()
     return value or DEFAULT_PRODUCT_NAME
+
+
+def support_contact(site: Optional[dict[str, Any]] = None,
+                    path: Optional[Path] = None) -> str:
+    """Where this site's editors send a problem. Never blank: like the
+    product name there is always somewhere to send it, and a help screen that
+    says "contact: " helps nobody."""
+    site = site if site is not None else _brand_site(path)
+    value = ""
+    if isinstance(site, dict):
+        value = str(site.get("support_contact") or "").strip()
+    return value or DEFAULT_SUPPORT_CONTACT
 
 
 def brand_logo(site: Optional[dict[str, Any]] = None,

@@ -80,6 +80,8 @@ delete the CLI push and purge `.cache/ytdl/claude`.
 * **API keys remain the vendor default**, per tenant, rotatable and metered: `<data>/secrets/ai/*` 0600 (or the environment, which always wins), a masked read-back, a Test button, and nothing secret in `GET /api/v1/site`. A deployment that never visits the page behaves exactly as it did on 2026-08-17.
 * We cannot and do not script an interactive OAuth: a logged-out CLI is reported as "not signed in" with the command the admin runs **on the host**.
 
+**Update 2026-10-07 (GL-31 / CR-374, owner decision):** the vendor build now HARD-DISABLES the CLI providers, the wizard's sign-in relay, the CLI auto-update and the CLI-only triage agent; `ai_cli_providers` is no longer something a customer can switch on. The studio's own dashboard keeps them through a deploy-only switch (`docs/STUDIO_BUILD.md`). Read the paragraph above as the studio's flavour only.
+
 Operator: nothing to do unless you want a non-Anthropic provider — set keys on Settings → AI providers, and leave `ai_cli_providers` off unless a customer has asked for it and understands the sentence above.
 
 ### 2. Put a legal wrapper around — or drop — the YouTube download stack — STOP-SHIP, weeks + counsel

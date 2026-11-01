@@ -1,0 +1,2457 @@
+{
+  "pass": "prelaunch-review-2026-10-06 bug hunt",
+  "head": "08b40eb (+ uncommitted working tree)",
+  "raw_findings": 175,
+  "distinct": 162,
+  "by_severity": {
+    "critical": 1,
+    "high": 11,
+    "medium": 90,
+    "low": 60
+  },
+  "findings": [
+    {
+      "id": "bug-server-1",
+      "sources": [
+        "bug-server-1"
+      ],
+      "severity": "critical",
+      "hunter_severity": "critical",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "CONFIRMED",
+      "title": "The appliance stack boots with no way for anyone to sign in",
+      "where": "dashboard/deploy/compose.appliance.yaml:153-173; settings.py:807; setup_routes.py:60-90; auth.py:158-165",
+      "recommendation": "Set DASH_AUTH_METHOD: \"local\" in compose.appliance.yaml and pin it in tools/tests/test_compose_appliance.py. Have check_boot_secrets refuse smb with an empty smb_host.",
+      "known": "",
+      "theme": null
+    },
+    {
+      "id": "bug-sync-1",
+      "sources": [
+        "bug-sync-1"
+      ],
+      "severity": "high",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "CONFIRMED",
+      "title": "Remove from this machine deletes originals lane A has not uploaded when their mtime is recent or in the future",
+      "where": "companion sync/rclone_lane.py:1792-1854, 2005-2058, 6779-6782; app.py:6203-6236, 6340-6392; tray.py:1926-1931",
+      "recommendation": "Run the gate's dry run without --min-age (and --min-size) so anything the NAS lacks blocks. Detect and report future-dated video in lane A; apply the age gate only to past mtimes or use express's size-stability test.",
+      "known": "not recorded (APP-13 covers machine clock skew, not file mtimes)",
+      "theme": null
+    },
+    {
+      "id": "bug-sync-2",
+      "sources": [
+        "bug-sync-2"
+      ],
+      "severity": "high",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "CONFIRMED",
+      "title": "Removing an upload-only project deletes every non-video file while the dialog says nothing will be lost",
+      "where": "companion app.py:6171, 6236-6283; tray.py:1926-1931; docs/UPLOAD_ONLY_TICK.md section 5",
+      "recommendation": "Block, or require the typed confirmation, when the folder holds files lane A does not carry and that are not provably on the server (e.g. rclone check --one-way --size-only). Make the dialog claim only what was checked.",
+      "known": "UPLOAD_ONLY_TICK.md records the upload limit as open, not the deletion",
+      "theme": null
+    },
+    {
+      "id": "bug-installer-1",
+      "sources": [
+        "bug-installer-1"
+      ],
+      "severity": "high",
+      "hunter_severity": "critical",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "The Windows bootstrap strips ACL inheritance from ~/.ccsync: every file and folder already inside becomes unreadable (install log, EULA record, state\\ safety latches)",
+      "where": "installer/windows_bootstrap.ps1:551-575, 2179-2186; onboarding/onboard.py:526; onboarding/steps.py:2320-2341, 2500-2518; companion eula.py:146-160; sync/lane_guard.py:172-181",
+      "recommendation": "Grant with (OI)(CI) on directories, or harden files only (as secretfile.py does). Ship a repair (re-grant with (OI)(CI) /T) from the next bootstrap, windows_upgrade.ps1 and the companion at start. Add an installer test with a pre-existing child.",
+      "known": "not recorded; CR-17 / COMMERCIAL_READINESS item 15 record this icacls as the fix",
+      "theme": null
+    },
+    {
+      "id": "bug-comp-ui-1",
+      "sources": [
+        "bug-comp-ui-1"
+      ],
+      "severity": "high",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "CONFIRMED",
+      "title": "shutdown() re-entry returns at once, so the process exits while Quit/Restart/self-upgrade teardown is still running on a daemon thread",
+      "where": "companion app.py:11453-11469, 11939-11956, 6821-6855; tray.py:2433-2446, 5190; upgrade.py:2142-2147",
+      "recommendation": "Make the repeat call wait on a _shutdown_done Event (bounded ~30-40 s), or have Quit/restart/upgrade only set _stop_event and let the main thread do the single teardown (the revert path already does this). Add a regression test driving shutdown from a worker thread.",
+      "known": "",
+      "theme": null
+    },
+    {
+      "id": "bug-comp-ytdl-1",
+      "sources": [
+        "bug-comp-ytdl-1",
+        "bug-ytdl-web-3"
+      ],
+      "severity": "high",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "CONFIRMED",
+      "title": "A suspended, disabled or deleted editor keeps fleet-write access to YouTube jobs (and the b-roll/music fleet routes) through the shared token, indefinitely",
+      "where": "dashboard ytdl.py:246-281 (YtdlGate/_fleet_stamp); ytdl/web/ytdlweb/routes_fleet.py:134-180, 242-283; ytdlweb/identity.py:64-95; api.py:2449-2455; same shape broll.py:338, music.py:208",
+      "recommendation": "On AUTH_SHARED, verify the identity header in YtdlGate (and the b-roll and music gates) and refuse when api.account_bar_reason names that editor, or refuse barred identities once in login_gate's fleet bypass. Add server-side identity revocation (a deny-list by user and issued-at).",
+      "known": "CR-259g / security-1 (marked FIXED; the shared-token path was never covered)",
+      "theme": null
+    },
+    {
+      "id": "bug-dash-auth-1",
+      "sources": [
+        "bug-dash-auth-1"
+      ],
+      "severity": "high",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "CONFIRMED",
+      "title": "/api/v1/login accepts NAS passwords for everyone on an OIDC site",
+      "where": "dashboard api.py:2255-2293; auth.py:151-166; ui.py:1028-1034",
+      "recommendation": "Move the page_login_submit rules (oidc admin-only, plaintext refusal) into one helper both routes call; refuse with the same generic message and record a failure.",
+      "known": "",
+      "theme": null
+    },
+    {
+      "id": "bug-comp-trust-1",
+      "sources": [
+        "bug-comp-trust-1"
+      ],
+      "severity": "high",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "CONFIRMED",
+      "title": "The one release signing key every customer trusts sits in plaintext on the everyday workstation",
+      "where": "companion release_pubkey.py:56-58; %USERPROFILE%\\.ccsync-release\\release.key; tools/release_key.py:229; docs/COMMERCIAL_READINESS.md:144",
+      "recommendation": "Before the first customer: generate the production key offline (hardware token or isolated VM), bake it, run the overlap release. At minimum DPAPI-wrap it like android.keystore.pw next to it. Keep .ccsync-release out of agent scope. Bake an emergency key and write a compromise runbook.",
+      "known": "COMMERCIAL_READINESS item 4 ('decide keep/rotate before the first customer ship'): OPEN",
+      "theme": null
+    },
+    {
+      "id": "bug-dash-release-1",
+      "sources": [
+        "bug-dash-release-1"
+      ],
+      "severity": "high",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "CONFIRMED",
+      "title": "Dashboard auto-update re-applies a bundle that just crash-looped and was reverted, forever",
+      "where": "dashboard release_feed.py:1144-1153, 1189-1197; dashboard_update.py:1338-1374; deploy/select_code_root.py:427-441",
+      "recommendation": "Treat current.json reverted_from==version as tried-and-failed; have revert write a durable do-not-auto-apply marker cleared only by a newer version or an explicit admin APPLY. Add an apply -> revert -> poll test.",
+      "known": "",
+      "theme": null
+    },
+    {
+      "id": "bug-server-3",
+      "sources": [
+        "bug-server-3"
+      ],
+      "severity": "high",
+      "hunter_severity": "high",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "CONFIRMED",
+      "title": "Syncthing GUI is an unauthenticated admin surface on both install paths",
+      "where": "dashboard/deploy/compose.appliance.yaml:264-279; server/backends/truenas.py:304-323, 387-393; server/secure_syncthing_gui.py",
+      "recommendation": "Bind the GUI to 127.0.0.1 and reach it via a shared netns, or have the dashboard set a GUI user and random password at boot with the API key. Make install_syncthing_app run the secure step itself.",
+      "known": "COMMERCIAL_READINESS item 7 H4 (TrueNAS half, not run on either NAS); appliance half unrecorded",
+      "theme": null
+    },
+    {
+      "id": "bug-server-2",
+      "sources": [
+        "bug-server-2"
+      ],
+      "severity": "high",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "CONFIRMED",
+      "title": "Appliance dashboard is never wired to its own Syncthing, its release keys or the tailnet",
+      "where": "dashboard/deploy/compose.appliance.yaml:153-203; settings.py:797, 840, 910; setup_engine.py:881-899; docs/APPLIANCE_INSTALL.md",
+      "recommendation": "Add SYNCTHING_GUI_URL=http://tailscale:8384 (or share the netns) with a test; bake the vendor pubkey as non-secret data; finish WP B Serve before calling the appliance installable; fix the DASH_NAS_KIND default or comment.",
+      "known": "APPLIANCE_INSTALL.md admits Serve/publishing NOT YET TRUE; Syncthing URL and pubkey gaps unrecorded",
+      "theme": null
+    },
+    {
+      "id": "bug-installer-2",
+      "sources": [
+        "bug-installer-2"
+      ],
+      "severity": "high",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "CONFIRMED",
+      "title": "On a machine with winget, rclone and Syncthing installed by winget are invisible to the same run: the first install ends NOT READY with no Syncthing set up, and bypasses the pinned verified binaries",
+      "where": "installer/windows_bootstrap.ps1:1089-1100, 1239-1248, 1281-1301, 1338-1343, 1951-1957, 2486-2488; onboarding/steps.py:1870",
+      "recommendation": "Prefer the pinned verified download into $BinDir and drop winget or use it only as a fallback. If kept, refresh $env:Path from the registry after each winget call and probe WinGet\\Links; never set $installed without a located exe; write the absolute rclone path into config.toml.",
+      "known": "not recorded (ui-onboarding-4 is the same stale-PATH shape for Tailscale, fixed in the wizard only)",
+      "theme": null
+    },
+    {
+      "id": "bug-app-a-1",
+      "sources": [
+        "bug-app-a-1"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "Resume after a pause can leave a managed machine with no sequencer at all (sync silently dead until restart)",
+      "where": "companion app.py:10075-10127, 6697-6721, 6896-6908, 8150-8162, 9147-9178; sync/sequencer.py:695-705, 754-784",
+      "recommendation": "On managed resume call _start_lanes() when not _lanes_started, else sequencer.resume(); make sync_now_result refuse when lanes were never started.",
+      "known": "",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-app-a-2",
+      "sources": [
+        "bug-app-a-2",
+        "bug-app-b-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Accepting the licence, or clearing a local halt, starts the lanes with nobody signed in",
+      "where": "companion app.py:6638-6646, 6666-6695, 8150-8162, 10155-10168, 11862-11879; tray.py:2139; settings_window.py:1676",
+      "recommendation": "Add the login gate to _lanes_refusal() with _mark_lanes_pending_login as its action so every caller inherits it.",
+      "known": "",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-app-a-3",
+      "sources": [
+        "bug-app-a-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A fleet halt release also erases the editor's own local halt",
+      "where": "companion sync/lane_guard.py:1421-1490; app.py:9147-9178",
+      "recommendation": "Track the local halt separately and fall back to it on fleet release.",
+      "known": "",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-app-a-4",
+      "sources": [
+        "bug-app-a-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "Consolidate pulls proxies (lane B) for a project ticked upload-only on this machine",
+      "where": "companion app.py:4407-4418; consolidate.py",
+      "recommendation": "Skip the lane B pull (and say so) when the open project's tick is upload_only.",
+      "known": "",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-app-b-1",
+      "sources": [
+        "bug-app-b-1"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "The reporter thread calls into Resolve in-process, so a wedged or modal Resolve stops that machine's reports, halt and pushed updates",
+      "where": "companion app.py:2566-2571, 8813, 9005; resolve_bridge.py:144, 2685, 2723; file_moves.py:953; reporter.py:1416",
+      "recommendation": "Move undo replay and move relink to the watcher thread or a worker and answer 'retrying' until done; at least skip while bridge_activity() shows a call in flight.",
+      "known": "",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-app-b-2",
+      "sources": [
+        "bug-app-b-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The update stand-down test runs before a minutes-long download and is never repeated before the swap",
+      "where": "companion app.py:6984-7002, 11591-11599; upgrade.py:1920-1986",
+      "recommendation": "Re-check the predicate in UpgradeManager.apply just before the swap and hold a standing-down latch that FIX ALL / consolidate / new popups refuse under; same for restart_self.",
+      "known": "",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-comp-ui-2",
+      "sources": [
+        "bug-comp-ui-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Quit is only confirmed for a FIX ALL copy; a CONSOLIDATE copy in flight is killed with no question",
+      "where": "companion tray.py:2362-2411; popup.py:910-925; consolidate.py:405-503; app.py:6948-6966",
+      "recommendation": "Have Quit consult _standing_down_would_kill_work() and show the same confirm.",
+      "known": "RES-8 covered FIX ALL only",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-comp-ui-3",
+      "sources": [
+        "bug-comp-ui-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "macOS: a quit Apple event (logout, restart, Activity Monitor Quit) exits through Tk's default handler, bypassing shutdown()",
+      "where": "companion app.py:11812-11829; shutdown_guard.py:1145-1191; crash_report.py:586-605; supervisor.py:159-203",
+      "recommendation": "Register root.createcommand('::tk::mac::Quit', ...) routing into app.shutdown() off the UI thread; verify on a Mac.",
+      "known": "CR-316 fixed only the Windows WM_ENDSESSION half",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-sync-3",
+      "sources": [
+        "bug-sync-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Borrowed folder of a renamed lender is re-pointed at an empty skeleton and silently stops syncing",
+      "where": "companion sync/borrowed_folders.py:230-240, 293-305; sync/sequencer.py:1350-1358, 2187-2195, 2318-2327",
+      "recommendation": "Mirror repath: never re-point after a failed/skipped move unless the target holds the marker; leave paused with a problem sentence; add the marker-missing check.",
+      "known": "bug-comp-syncthing-7 fixed only the shared-folder twin",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-sync-4",
+      "sources": [
+        "bug-sync-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "File-move section 4b trashes a single file without checking the server holds that version",
+      "where": "companion file_moves.py:630-669",
+      "recommendation": "Apply the destination listing check to single files and keep the file (retrying) on mismatch or listing failure.",
+      "known": "logic-plans-3 fixed the folder branch only",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-sync-5",
+      "sources": [
+        "bug-sync-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "File-move 4b bins a whole folder of un-synced non-video files when the server listing fails",
+      "where": "companion file_moves.py:503-541",
+      "recommendation": "On a failed listing answer 'retrying' for any folder holding files.",
+      "known": "",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-sync-6",
+      "sources": [
+        "bug-sync-6"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Lane B sweeps proxies an editor generates locally (Resolve/BPG) into the trash, and a batch trips the breaker",
+      "where": "companion sync/rclone_lane.py:977-1026, 2273-2345; sync/lane_guard.py:1293-1345",
+      "recommendation": "Do not delete local-only proxies the NAS never had (explicit NAS-confirmed delete list), or carry editor proxies up; at least detect and warn instead of tripping.",
+      "known": "SPEC.md line 54 records the companion-generator case only",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-sync-7",
+      "sources": [
+        "bug-sync-7"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "Server-side folder move does not end a handed-off upload from that folder, so it lands at the cleared path",
+      "where": "companion app.py:8786-8806; file_moves.py:684-690; sync/rclone_lane.py:3597-3626; sync/sequencer.py:2864-2876",
+      "recommendation": "Call lane_a.end_handoffs_under(src) and stop in-flight runs over that subtree before apply_move touches disk.",
+      "known": "CR-347 covers repath/borrowed only",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-comp-media-1",
+      "sources": [
+        "bug-comp-media-1"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Quitting the tray during a whisper job often leaves the whisper worker running on the GPU",
+      "where": "companion jobs_runner.py:962-967, 1314-1347; app.py:11518-11522",
+      "recommendation": "Keep the live Popen on the runner and have stop() kill_tree it; check _stop before the heartbeat; join for the kill budget.",
+      "known": "",
+      "theme": "Companion: sync lifecycle, removal and halts"
+    },
+    {
+      "id": "bug-resolve-1",
+      "sources": [
+        "bug-resolve-1"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "UNDO LAST FIX right after a FIX ALL retires the journal and undoes nothing when the pool comes from the project library",
+      "where": "companion resolve_bridge.py:911-919, 1744-1847, 2723-2813; library.py:42-43, 738-779",
+      "recommendation": "Decide undo from the live API walk or re-read each clip's live path; never mark_undone when undone == 0 unless verified against the API.",
+      "known": "",
+      "theme": "Companion: Resolve"
+    },
+    {
+      "id": "bug-resolve-2",
+      "sources": [
+        "bug-resolve-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The library's 60 s staleness ceiling never fires while the watcher polls, so pool-only edits stay invisible to library readers",
+      "where": "companion resolve_bridge.py:1164-1172, 1470-1507, 1823-1840",
+      "recommendation": "Stamp the cache-drop time separately; invalidate the path cache after every successful replace_clip / link_proxy_media.",
+      "known": "",
+      "theme": "Companion: Resolve"
+    },
+    {
+      "id": "bug-resolve-3",
+      "sources": [
+        "bug-resolve-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "UNDO LAST FIX is hidden behind an empty or un-replayable newer journal, and refusals are reported as clips that left the pool",
+      "where": "companion resolve_journal.py:451-487, 537-541, 601-613, 713-727; resolve_bridge.py:2305-2338, 2693-2721, 2777-2813",
+      "recommendation": "Write the save-point outcome with the first record(); skip empty journals; step past or retire un-replayable ones; count refused separately.",
+      "known": "",
+      "theme": "Companion: Resolve"
+    },
+    {
+      "id": "bug-resolve-4",
+      "sources": [
+        "bug-resolve-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Every b-roll insert, music import and stand-in upgrade takes a full SaveProject+ExportProject and opens its own journal (worker is a new process per request)",
+      "where": "companion music_server.py:155-200; music_worker.py:300, 483-536; resolve_bridge.py:2305-2338, 3297-3303, 3558-3586; resolve_journal.py:117-118, 451-482, 543-560",
+      "recommendation": "Persist the save-point time (like resolve_auto.json) or decide it in the parent; tag worker journals so UNDO LAST FIX skips them; add the pid to _session_path.",
+      "known": "",
+      "theme": "Companion: Resolve"
+    },
+    {
+      "id": "bug-resolve-5",
+      "sources": [
+        "bug-resolve-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "The macOS Resolve process probe uses pgrep -x \"DaVinci Resolve\", which probably never matches (the executable is Resolve)",
+      "where": "companion resolve_prefs.py:149-153, 352, 447, 504; resolve_bridge.py:592-633; app.py:4747, 4814, 11996; installer/macos_bootstrap.sh:725 vs 1452",
+      "recommendation": "Use pgrep -f on the bundle path or accept both names; verify on the studio Mac; fix wait_for_resolve_quit too.",
+      "known": "",
+      "theme": "Companion: Resolve"
+    },
+    {
+      "id": "bug-comp-trust-2",
+      "sources": [
+        "bug-comp-trust-2",
+        "bug-dash-release-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Downgrade floor is 0.0.0 on every signed record, so any older signed build can be pushed back onto a fleet",
+      "where": "installer/build_editor_package.ps1:1043-1044; tools/sign_release.py:281, 460; tools/publish_feed.py:1042; tools/publish_latest.py:381, 419; tools/release_macos.sh:838; companion upgrade.py:726-776, 1502-1565",
+      "recommendation": "Track a MIN_VERSION read by all signers, raise it at launch and at every security release; make sign_release refuse 0.0.0 for companion records without --allow-no-floor; print the stamped floor.",
+      "known": "release-pipeline-8 (deferred 2026-08-21, open)",
+      "theme": "Companion: trust, identity and updates"
+    },
+    {
+      "id": "bug-comp-trust-3",
+      "sources": [
+        "bug-comp-trust-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A second person signing in on a computer provisioned with someone else's per-editor token is locked out of the fleet",
+      "where": "companion identity.py:146-176, 279-288, 498-506; onboarding/steps.py:3622; dashboard api.py:2649-2658, 2718-2724, 10172-10177, 11729-11734",
+      "recommendation": "Have /verify say who owns the current token and drop or replace it on mismatch (or refuse the sign-in clearly); show 'this computer's key belongs to another editor'.",
+      "known": "",
+      "theme": "Companion: trust, identity and updates"
+    },
+    {
+      "id": "bug-comp-trust-4",
+      "sources": [
+        "bug-comp-trust-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The loopback token adds nothing against local processes: any non-browser caller can send an allowed Origin",
+      "where": "companion broll_server.py:2048-2104; loopback_guard.py:13-28",
+      "recommendation": "Require the token unless browser-only evidence is present (Sec-Fetch-Site/Mode), or use a short-lived capability from the dashboard; fix the docstring.",
+      "known": "",
+      "theme": "Companion: trust, identity and updates"
+    },
+    {
+      "id": "bug-comp-trust-5",
+      "sources": [
+        "bug-comp-trust-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "On plain-http LAN, the unauthenticated site manifest is persisted and widens the loopback allow-list and the SMB target",
+      "where": "companion site.py:142-198; loopback_guard.py:244; config.py:1912; reporter.py:1323-1420",
+      "recommendation": "Make https/Tailscale the supported commercial transport; do not let the manifest widen the allow-list or set a foreign smb_unc.",
+      "known": "'require https site-wide' deferred (LEGAL_GAP plan section 6); manifest effects unrecorded",
+      "theme": "Companion: trust, identity and updates"
+    },
+    {
+      "id": "bug-wire-3",
+      "sources": [
+        "bug-wire-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "A Mac's first install takes the channel's current package with no architecture check, so an Intel Mac is handed an arm64 companion",
+      "where": "installer/macos_bootstrap.sh:106, 2398-2410; dashboard api.py:7375-7419; tools/release_macos.sh:683-699",
+      "recommendation": "Pass ?arch=$(uname -m) and refuse mismatches server-side; check with file/lipo; ship universal2 or state Apple silicon is required and refuse x86_64 up front.",
+      "known": "REL-16 fixed the upgrade offer only",
+      "theme": "Companion: trust, identity and updates"
+    },
+    {
+      "id": "bug-wire-4",
+      "sources": [
+        "bug-wire-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A Windows-on-ARM laptop reports arm64 while running the x64 companion, so once records carry arch it is never offered an update",
+      "where": "companion upgrade.py:157-176; dashboard api.py:6304-6323, 6528-6531; tools/release.ps1:600-606; build_editor_package.ps1:140-142; publish_latest.py:177-183",
+      "recommendation": "Treat an x86_64 Windows record as installable on arm64, or report process architecture; add a test.",
+      "known": "REL-16 (discriminator); this mismatch unrecorded",
+      "theme": "Companion: trust, identity and updates"
+    },
+    {
+      "id": "bug-comp-media-2",
+      "sources": [
+        "bug-comp-media-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A 409 from /uploaded is re-posted before the re-upload starts, so the retry budget is gone in seconds while files still upload",
+      "where": "companion broll_ingest.py:3083-3084, 3134-3135, 3150-3167; broll_upload.py:294-309, 409-413",
+      "recommendation": "Forget done-ledger entries for re-declared rels (or track an upload generation) and re-post only once they land; re-send only detail.missing.",
+      "known": "",
+      "theme": "Companion: media, ingest and YouTube"
+    },
+    {
+      "id": "bug-comp-media-3",
+      "sources": [
+        "bug-comp-media-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Music: two picked .ogg files with the same name transcode to one out/<stem>.mp3, so a track can be uploaded with the other's audio",
+      "where": "companion music_clap_sidecar.py:777; broll_ingest.py:1597-1607, 2455-2463; music_ingest.py:342-366, 610-670",
+      "recommendation": "Name transcode output per item (out/<item uid>.mp3) or use a per-item subdirectory.",
+      "known": "",
+      "theme": "Companion: media, ingest and YouTube"
+    },
+    {
+      "id": "bug-comp-ytdl-2",
+      "sources": [
+        "bug-comp-ytdl-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The tray's YouTube terms are a materially shorter text recorded under the same TEXT_VERSION as the web notice",
+      "where": "companion ytdl_attestation.py:49-84; ytdl/web/ytdlweb/attestation.py:46-80",
+      "recommendation": "Use one source text verbatim with a CI equality test; bump TEXT_VERSION both sides; store a hash of the shown text; counsel to review.",
+      "known": "",
+      "theme": "Companion: media, ingest and YouTube"
+    },
+    {
+      "id": "bug-comp-ytdl-3",
+      "sources": [
+        "bug-comp-ytdl-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The signed-in YouTube session (cookies.txt and the Chromium login profile) survives sign-out, so the next person downloads as the previous person's Google account",
+      "where": "companion ytdl_cookies.py:80-104; ytdl_browser_login.py:32, 211-213; app.py:6910-6924; identity.py:554-560; ytdl_executor.py:2999-3020",
+      "recommendation": "Record which editor installed the jar and ignore it for others; delete jar, status and profile on sign-out / forget-this-computer.",
+      "known": "",
+      "theme": "Companion: media, ingest and YouTube"
+    },
+    {
+      "id": "bug-comp-ytdl-4",
+      "sources": [
+        "bug-comp-ytdl-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Free space is checked once, at the claim, so one local YouTube job can fill the editor's disk to zero",
+      "where": "companion ytdl_executor.py:2265-2278, 2422-2453, 2689-2700",
+      "recommendation": "Re-measure before each clip and conversion and hand back with an editor sentence below margin plus estimate.",
+      "known": "server-side twins CR-263b / CR-286L fixed",
+      "theme": "Companion: media, ingest and YouTube"
+    },
+    {
+      "id": "bug-comp-ytdl-5",
+      "sources": [
+        "bug-comp-ytdl-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Every editor machine takes the newest yt-dlp nightly daily, with no remote way to pin, hold or roll back a bad build",
+      "where": "companion ytdlp_manager.py:80-83, 125, 934-1022; ytdl/web/ytdlweb/routes_fleet.py:294-301",
+      "recommendation": "Add ytdlp_channel (nightly/stable/pin:<v>) and max version to client config and site manifest, honoured via --update-to <channel>@<tag>; optionally an N-hour delay.",
+      "known": "CR-361 (BUILT, unshipped)",
+      "theme": "Companion: media, ingest and YouTube"
+    },
+    {
+      "id": "bug-dash-api-1",
+      "sources": [
+        "bug-dash-api-1",
+        "bug-dash-auth-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "Deleting an editor on an smb/oidc site does not stop their companion: it re-registers them as a known editor and erases a prior suspension",
+      "where": "dashboard api.py:228-271 (_account_refusal), 5114-5143, 5178-5300 (delete_user_everywhere), 10144-10270 (api_report); db.py:2803 (suspended_editors), forget_editor; auth.py:74, 375-391; settings.py:135",
+      "recommendation": "Write a durable removal tombstone checked on every auth method; keep suspension off the deletable row; add per-identity revocation (trust-model-1); ship new sites with the shared token off.",
+      "known": "trust-model-1 / CR-86 trade (OPEN); the deletion-erases-suspension half is new",
+      "theme": "Dashboard: authentication, accounts and request safety"
+    },
+    {
+      "id": "bug-dash-auth-2",
+      "sources": [
+        "bug-dash-auth-2",
+        "bug-dash-api-7"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "Browser sign-in on smb sites checks the password only: no fleet membership, and suspension does not stop sign-in or NAS writes through the dashboard",
+      "where": "dashboard ui.py:984-1081; api.py:2255-2293, 2435 (only api_verify calls _require_fleet_member), 3699, 4107, 4177, 4863-4885",
+      "recommendation": "Call _require_fleet_member (and _account_refusal) in both sign-in routes; gate session-only write routes on _account_refusal; optionally revoke sessions on suspend.",
+      "known": "contradicts KNOWN_BUGS trust-model-5 / CR-56 wording; DCORE-4 keeps suspension and sign-in independent on purpose",
+      "theme": "Dashboard: authentication, accounts and request safety"
+    },
+    {
+      "id": "bug-dash-auth-3",
+      "sources": [
+        "bug-dash-auth-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "The login throttle can be bypassed with concurrent requests (unbounded on local accounts, plus a scrypt memory DoS)",
+      "where": "dashboard ui.py:1019, 1042; api.py:2268, 2422; sessions.py:580-671; auth.py:159",
+      "recommendation": "Reserve each attempt atomically under _write_lock before verifying; semaphore local scrypt and answer busy.",
+      "known": "",
+      "theme": "Dashboard: authentication, accounts and request safety"
+    },
+    {
+      "id": "bug-dash-auth-4",
+      "sources": [
+        "bug-dash-auth-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "OIDC identity is the mutable preferred_username claim, matched straight against DASH_ADMIN_USERS",
+      "where": "dashboard oidc.py:280-312, 347-348, 359-365, 498",
+      "recommendation": "Bind (iss, sub) at first sign-in; apply the group gate before the admin shortcut; document that the claim must not be user-editable.",
+      "known": "",
+      "theme": "Dashboard: authentication, accounts and request safety"
+    },
+    {
+      "id": "bug-dash-api-2",
+      "sources": [
+        "bug-dash-api-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The package routes 'make current' and 'roll the fleet back' are CSRF-exempt session routes",
+      "where": "dashboard app.py:234, 1083; api.py:7091 (api_set_current_package), 7281 (api_roll_fleet_back)",
+      "recommendation": "Remove the prefix from the exemption (publish tools already get a csrf token at login), or keep the Origin check for POSTs.",
+      "known": "",
+      "theme": "Dashboard: authentication, accounts and request safety"
+    },
+    {
+      "id": "bug-dash-api-3",
+      "sources": [
+        "bug-dash-api-3",
+        "bug-dash-db-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Any fleet member can take another editor's Syncthing device by reporting its id; cloned PCs flip-flop, and invariant 3 reads OK",
+      "where": "dashboard api.py:7876-7906 (_register_machine); db.py:5201-5238 (release_device_id_elsewhere); collector.py:1484-1495, 1556-1580; invariants.py:375-433",
+      "recommendation": "Scope the release to the reporting editor's rows; on a cross-editor collision refuse and raise a notice naming both; persist contention so invariant 3 can see it; validate against the device's mapped editor.",
+      "known": "",
+      "theme": "Dashboard: authentication, accounts and request safety"
+    },
+    {
+      "id": "bug-dash-ui-2",
+      "sources": [
+        "bug-dash-ui-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "No browser security headers on any dashboard response",
+      "where": "dashboard app.py (no middleware sets nosniff, X-Frame-Options/frame-ancestors, Referrer-Policy or CSP)",
+      "recommendation": "One middleware: nosniff, frame-ancestors 'self' + X-Frame-Options SAMEORIGIN, Referrer-Policy same-origin; plan a script CSP later.",
+      "known": "docs/MOBILE_PLAN.md:47 notes 'Security headers: none'",
+      "theme": "Dashboard: authentication, accounts and request safety"
+    },
+    {
+      "id": "bug-dash-api-4",
+      "sources": [
+        "bug-dash-api-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "NEW PROJECT, USE THIS FOLDER and file moves accept names Windows cannot create, so Windows editors cannot sync the project",
+      "where": "dashboard api.py:3772-3787 (_validate_tree_part) and its callers",
+      "recommendation": "Refuse those characters, trailing '.'/space and reserved stems in _validate_tree_part; report existing invalid folders as a notice.",
+      "known": "",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-dash-db-1",
+      "sources": [
+        "bug-dash-db-1"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The unassigned plan bucket never empties, so every new computer a person registers starts syncing it",
+      "where": "dashboard db.py:7061-7108, 7147-7176, 7715-7739, 7831-7921; collector.py:1376-1382",
+      "recommendation": "Move bucket rows onto the first registered computer in _register_machine's transaction; add a DESK/LAPTOP regression test.",
+      "known": "",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-dash-db-2",
+      "sources": [
+        "bug-dash-db-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Archiving a project or suspending an editor raises false error alerts that every tick is 'not shared'",
+      "where": "dashboard notices.py:557-608; invariants.py:286-330; collector.py:1474-1520",
+      "recommendation": "Apply archived_project_slugs and suspended_editors once inside fetch_machine_selections(for_enforce=True) and use it in both readers.",
+      "known": "",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-dash-db-3",
+      "sources": [
+        "bug-dash-db-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "After a computer is renamed, its old name stays on the grid for 30 days, raises daily 'gone quiet' error alerts, and FORGET answers 404",
+      "where": "dashboard db.py:6944-7058 (adopt_renamed_machine), 8886-8900; api.py:1058-1105, 5391-5409; alerts.py:1580-1605",
+      "recommendation": "Re-key or delete the old name's rows in every per-machine table; let FORGET sweep by (editor, machine) without a registry row.",
+      "known": "",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-dash-ops-1",
+      "sources": [
+        "bug-dash-ops-1"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Weekly report and daily heartbeat are sent over SMTP/webhook while the collector holds the SQLite write lock",
+      "where": "dashboard alerts.py:5284, 5310, 5325, 5374-5404",
+      "recommendation": "Send through _send_committed or commit first; add both paths to test_db_write_locks.",
+      "known": "",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-dash-ops-2",
+      "sources": [
+        "bug-dash-ops-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Completion pass calls Syncthing /rest/events after it has started writing, every cycle",
+      "where": "dashboard collector.py:2181-2257",
+      "recommendation": "Commit before _ingest_item_finished or fetch events with the other HTTP reads.",
+      "known": "",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-dash-ops-3",
+      "sources": [
+        "bug-dash-ops-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Provision pass holds the write lock across every project's Syncthing calls and tree walks once any notice is filed",
+      "where": "dashboard collector.py:672-692, 743-755, 779, 805, 947, 986-1003, 1112, 1133",
+      "recommendation": "Buffer notices until after the HTTP/filesystem phase (as _run_inventory does), or commit after each.",
+      "known": "",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-dash-ops-4",
+      "sources": [
+        "bug-dash-ops-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "Triage agent's read-only scope is not enforced: Read/Grep/Glob reach the whole container, and the report is mailed unscrubbed",
+      "where": "dashboard triage.py:207-214, 415-560, 657-690",
+      "recommendation": "Deny Read outside the run/package dirs via a permissions file; scrub the composed subject/body with live secret values; mark evidence as data; consider a separate uid.",
+      "known": "",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-dash-ops-5",
+      "sources": [
+        "bug-dash-ops-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Synology SSH without a pinned host key trusts every connection (not TOFU) and sends the DSM admin password on it",
+      "where": "dashboard nas/synology.py:1054-1063, 1079-1128; server/install_dashboard_app.py:2663-2670",
+      "recommendation": "Persist known_hosts under <data>/secrets with RejectPolicy after first add, or refuse without a pin; carry the base rig's key into DASH_NAS_SSH_HOSTKEY.",
+      "known": "COMMERCIAL_READINESS H2 / CR-9 cover the base-rig side only",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-dash-ops-6",
+      "sources": [
+        "bug-dash-ops-6"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "SMTP port 465 (implicit TLS) can never work, though the Alerts page recommends it",
+      "where": "dashboard alerts.py:742-746, 758-799; templates/partials/admin_alerts.html:134",
+      "recommendation": "Use SMTP_SSL on 465 (or a TLS-mode setting); otherwise refuse 465 at save and fix the tooltip.",
+      "known": "",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-wire-1",
+      "sources": [
+        "bug-wire-1"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Retrying file moves and parked undos hold the head of the offer queue, so newer commands are never delivered and lane A puts the files back",
+      "where": "dashboard db.py:6377-6410, 6532-6540, 6751-6777; companion file_moves.py:65-67; sync/rclone_lane.py:3368-3383",
+      "recommendation": "Offer never-delivered targets first (ORDER BY delivered_at IS NOT NULL, id) or always include every undelivered target; same for undos, parked last.",
+      "known": "",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-wire-2",
+      "sources": [
+        "bug-wire-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "File-move answers are unbounded on the companion, capped by a raising 64 on the dashboard, and lost for good when a report fails",
+      "where": "dashboard api.py:9944; companion app.py:8930-8934, 9042-9065; reporter.py:1026-1033, 1383-1388",
+      "recommendation": "Make these sections truncate instead of reject; cap at 64 and carry the rest; requeue on POST failure or keep relink_pending until accepted.",
+      "known": "related to fixed bug-wire-1/-6 (2026-09-25); this loss path unrecorded",
+      "theme": "Dashboard: data model, collector and alerts"
+    },
+    {
+      "id": "bug-dash-jobs-cards-1",
+      "sources": [
+        "bug-dash-jobs-cards-1"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "A percent-encoded ? or # walks past CardsGate: /cards/p/<slug>/api/root%3F reaches engine.set_root()",
+      "where": "dashboard cards.py:421-464 (CardsGate, _gate_readings); cards_wsgi.py:200-219 (request_head)",
+      "recommendation": "Cut gate readings at '?'/'#', refuse CR/LF/NUL, or re-quote PATH_INFO in request_head; add tests for %3F, %23, %0D%0A.",
+      "known": "sibling of fixed bug-dash-cards-jobs-1",
+      "theme": "Timeline Cards and the fleet job system"
+    },
+    {
+      "id": "bug-dash-jobs-cards-3",
+      "sources": [
+        "bug-dash-jobs-cards-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "Each Cards agent long-poll holds one of the 40 shared threadpool workers; about 40 agents stall /report",
+      "where": "dashboard cards_tunnel.py:200-230, 430-500; deploy/run.sh:593, 608",
+      "recommendation": "Make the long poll async (asyncio.Event) or use a capped executor; raise the anyio limiter; jitter the no-engine hold.",
+      "known": "",
+      "theme": "Timeline Cards and the fleet job system"
+    },
+    {
+      "id": "bug-dash-jobs-cards-4",
+      "sources": [
+        "bug-dash-jobs-cards-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Closing a Cards episode frees the seat but leaks the engine (threads and ~128 MB); open/close cycles grow the dashboard until OOM",
+      "where": "dashboard cards_pool.py:707-730, 753-766; MulticamPipeline cards/project_agent.py:686",
+      "recommendation": "Land the real stop() upstream before selling Cards; meanwhile count leaked engines in health, refuse opens past a ceiling, add an alert.",
+      "known": "CARDS_TWO_PROJECTS.md section 6.1 (open)",
+      "theme": "Timeline Cards and the fleet job system"
+    },
+    {
+      "id": "bug-dash-jobs-cards-5",
+      "sources": [
+        "bug-dash-jobs-cards-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Montage sessions in <data>/cards_sessions are never pruned: unbounded disk and indefinite retention of interview transcripts",
+      "where": "dashboard cards_ai.py:648-668, 1209-1222",
+      "recommendation": "Prune in the collector (age + file cap), report count/bytes in health, document in privacy/retention docs.",
+      "known": "DDIAG-19 (open)",
+      "theme": "Timeline Cards and the fleet job system"
+    },
+    {
+      "id": "bug-dash-release-2",
+      "sources": [
+        "bug-dash-release-2",
+        "bug-tools-ci-1",
+        "bug-tools-ci-2",
+        "bug-tools-ci-7"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "Container image path bypasses the offline release key: :1 moves on any v* tag push with no CI/main/version gate, actions are tag-pinned, and the documented cosign verify accepts any identity",
+      "where": ".github/workflows/image.yml (triggers, tag computation, build-push, tag-pinned actions with packages:write/id-token:write); dashboard/deploy/compose.appliance.yaml:88, 147, 291; docs/DOCKER.md:548-565; server/install_dashboard_app.py:1419-1627 (:edge advice)",
+      "recommendation": "Gate :1/:VERSION on main ancestry plus a green ci.yml run behind a protected environment; require tag == v$VERSION and newer; never overwrite :<VERSION>; restrict :edge to main; pin actions by SHA; publish an exact-identity cosign verify; consider carrying the image digest in the signed channel and checking it.",
+      "known": "release-pipeline-9 (mutable :1 tag, deferred)",
+      "theme": "Release, supply chain and CI"
+    },
+    {
+      "id": "bug-dash-release-4",
+      "sources": [
+        "bug-dash-release-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "No channel freshness check: the feed host can replay an old signed channel to roll back policy=current fleets and hide later recalls",
+      "where": "dashboard release_feed.py:395-433, 870-875, 1010-1023; package_store.py:251-261; docs/RELEASE_FEED.md:231-235, 503-505",
+      "recommendation": "Persist the highest accepted generated_at and refuse lower ones with a notice; optionally a max age; correct the threat model doc.",
+      "known": "",
+      "theme": "Release, supply chain and CI"
+    },
+    {
+      "id": "bug-dash-release-5",
+      "sources": [
+        "bug-dash-release-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "publish_feed merge lets a stale local feed/ dir overwrite the live channel's current pointer and records",
+      "where": "tools/publish_feed.py:275-314, 1186-1198, 1567-1578",
+      "recommendation": "Overlay only what this run changed, or refuse when a local pointer/record differs from the published one unasked.",
+      "known": "",
+      "theme": "Release, supply chain and CI"
+    },
+    {
+      "id": "bug-dash-release-6",
+      "sources": [
+        "bug-dash-release-6"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "ship.cmd -PublishFeed makes a dirty or untested onboard installer current on the vendor feed, past every gate",
+      "where": "tools/ship.ps1:375-390, 1019-1046; tools/publish_feed.py:962-973",
+      "recommendation": "Give the onboard publish its provenance so gates apply; never --make-current when the ship refused current; skip the onboard when the companion publish failed.",
+      "known": "",
+      "theme": "Release, supply chain and CI"
+    },
+    {
+      "id": "bug-server-6",
+      "sources": [
+        "bug-server-6",
+        "bug-dash-release-8"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "select_code_root boots OTA code whose files are never re-verified",
+      "where": "dashboard/deploy/select_code_root.py:219-279 (check_tree); dashboard_update.py:846-867",
+      "recommendation": "Re-hash the tree against a signed files_sha256 or tree digest at boot and refuse (counting toward revert), or store trees where the app uid cannot write.",
+      "known": "",
+      "theme": "Release, supply chain and CI"
+    },
+    {
+      "id": "bug-tools-ci-3",
+      "sources": [
+        "bug-tools-ci-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "publish_latest signs and ships a release build without checking that ci.yml was green for that commit",
+      "where": "tools/publish_latest.py:236-246; .github/workflows/release-windows.yml, release-macos.yml; docs/RELEASE_PATHWAYS.md",
+      "recommendation": "After commit_is_on_main, require a successful ci.yml run for that sha (--allow-red-ci override); fix the docs.",
+      "known": "",
+      "theme": "Release, supply chain and CI"
+    },
+    {
+      "id": "bug-tools-ci-4",
+      "sources": [
+        "bug-tools-ci-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The licence gate is a GPL-family denylist: non-commercial, source-available, proprietary, EUPL and OSL licences pass silently",
+      "where": "tools/check_licenses.py:78-108; tools/scan_frozen.py:77",
+      "recommendation": "Switch to an allowlist of permissive licences with reasoned exceptions; at minimum deny the listed families.",
+      "known": "",
+      "theme": "Release, supply chain and CI"
+    },
+    {
+      "id": "bug-tools-ci-5",
+      "sources": [
+        "bug-tools-ci-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "CI tests the installer's PowerShell under pwsh 7; editors run it under Windows PowerShell 5.1",
+      "where": ".github/workflows/ci.yml installer step (shell: pwsh); installer/windows_*.ps1:1 (#requires 5.1); onboarding/steps.py:1831, 2681, 3079, 3170",
+      "recommendation": "Run the step with shell: powershell / powershell -File (5.1 ships on windows-latest); optionally both editions.",
+      "known": "",
+      "theme": "Release, supply chain and CI"
+    },
+    {
+      "id": "bug-ytdl-web-4",
+      "sources": [
+        "bug-ytdl-web-4",
+        "bug-server-14"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The server pulls and imports an unpinned yt-dlp nightly from PyPI into the dashboard process that holds every fleet secret",
+      "where": "ytdl/web/ytdlweb/ytdlp_nightly.py:80-90, 300-350, 440-470; dashboard/deploy/run.sh:353-425, 587-589",
+      "recommendation": "Run the downloader in a sidecar without dashboard secrets, or pin vetted nightlies by digest via the signed feed; allow-list the verify child's env; keep the code dir read-only to the app uid.",
+      "known": "CR-361 (BUILT, unshipped; owner decision 2026-10-05)",
+      "theme": "Release, supply chain and CI"
+    },
+    {
+      "id": "bug-broll-1",
+      "sources": [
+        "bug-broll-1"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "DOWNGRADED",
+      "title": "The archive-name allocator compares folders by exact bytes: shoots differing only in case (or NFC vs NFD) get the same file name and can overwrite each other's original",
+      "where": "broll/web/app/ingest_batches.py:257-337; routes_batches.py:66-86; companion broll_upload.py:159-195",
+      "recommendation": "Casefold+NFC the folder key in both sources; normalise share/rel_dir on the way in; refuse a shoot name matching an existing one except by case; never overwrite an original the upload did not create.",
+      "known": "",
+      "theme": "B-roll"
+    },
+    {
+      "id": "bug-broll-2",
+      "sources": [
+        "bug-broll-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A partial /api/ingest/video upsert wipes hash, size, duration, dimensions, codec, shot_date and in_inbox",
+      "where": "broll/web/app/routes_ingest.py:68-108; broll/indexer/broll_index/storage/http_backend.py:129-140; pipeline.py:109, 176, 208",
+      "recommendation": "COALESCE every column; make in_inbox Optional; add a partial-after-full test.",
+      "known": "",
+      "theme": "B-roll"
+    },
+    {
+      "id": "bug-broll-3",
+      "sources": [
+        "bug-broll-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Publishing the b-roll index while a dashboard ingest batch runs silently loses that batch's writes and re-numbers its clips under the live companion",
+      "where": "server/publish_db.py:898-981; server/broll_drain.py; broll/web/app/ingest_batches.py:1069-1345; docs/INDEXERS.md:315-319",
+      "recommendation": "Refuse while open_batches > 0 without --allow-running-ingest; better, a site-wide ingest hold during drain+apply.",
+      "known": "operator caution in INDEXERS.md; the loss and re-mint unrecorded",
+      "theme": "B-roll"
+    },
+    {
+      "id": "bug-broll-4",
+      "sources": [
+        "bug-broll-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "release('done') with unfinished items ends the batch 'done', leaves invisible 'ingesting' rows holding names, and nothing can retry them",
+      "where": "broll/web/app/ingest_batches.py:584-651, 1350-1398",
+      "recommendation": "In release(done) mark every unfinished item failed with a reason; log the mismatch.",
+      "known": "",
+      "theme": "B-roll"
+    },
+    {
+      "id": "bug-broll-5",
+      "sources": [
+        "bug-broll-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A client link built against a public base with no explicit port keeps the dashboard's own port, so the link is dead for the client",
+      "where": "broll/web/static/clientfolders.js:54-62 (cfShareUrl)",
+      "recommendation": "Use new URL(local.pathname, cf.publicBase) or set port explicitly; add a test.",
+      "known": "",
+      "theme": "B-roll"
+    },
+    {
+      "id": "bug-broll-6",
+      "sources": [
+        "bug-broll-6"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Preview stills are keyed by videos.id in one shared folder while the base rig, fleet ingest and the drain mint ids independently (still open)",
+      "where": "broll/web/app/ingest_batches.py:149-161, 822-831; routes_media.py:50-59; routes_share.py; broll/indexer/build_archive.py:116-129, 590-606; server/broll_drain.py",
+      "recommendation": "Implement the owner's pending option (A): a disjoint fleet id range kept by the drain plus a one-off rename.",
+      "known": "bug-broll-3 (2026-09-24), DEFERRED for the owner, OPEN",
+      "theme": "B-roll"
+    },
+    {
+      "id": "bug-broll-7",
+      "sources": [
+        "bug-broll-7"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The public media gate re-resolves the whole folder on every thumbnail after any renumber and never heals",
+      "where": "broll/web/app/routes_share.py:93-109; client_folders.py:795-818, 855-868, 972-977",
+      "recommendation": "Rewrite the stored video_id when resolution finds a new id, or cache per (folder, search_generation); consider a per-token budget.",
+      "known": "",
+      "theme": "B-roll"
+    },
+    {
+      "id": "bug-music-1",
+      "sources": [
+        "bug-music-1"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "Publishing music.db deletes every fleet-ingested track and the whole batch ledger",
+      "where": "server/publish_db.py:88-135, 404-418; music/web/DEPLOY.md:237, 246-252, 321-355",
+      "recommendation": "Drain and merge fleet rows and the ledger like b-roll, or refuse while the live file holds ingest_items the source lacks; correct SPECS and DEPLOY.md.",
+      "known": "CR-152 fixed the b-roll half only",
+      "theme": "Music"
+    },
+    {
+      "id": "bug-music-5",
+      "sources": [
+        "bug-music-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "A new customer with no GPU base rig gets a music page whose search 500s and whose fleet-ingested tracks are never tagged",
+      "where": "music/web/musicweb/text_encoder.py:293-365; rescore.py:110-118, 389-391; dashboard music.py:480-517; deploy/compose.image.yaml:323; server/install_dashboard_app.py:5849-5862",
+      "recommendation": "Ship the text tower as a sha-pinned feed artefact fetched by the container or wizard; until then report DEGRADED and hide search instead of 500ing.",
+      "known": "only an operator NOTE in install_dashboard_app.py",
+      "theme": "Music"
+    },
+    {
+      "id": "bug-music-2",
+      "sources": [
+        "bug-music-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A dropped connection or timeout on the music result POST fails the track for good (and can strand a track row)",
+      "where": "companion music_ingest.py:424-431, 540, 636-642; broll_ingest.py:114, 249-271, 2306-2313, 2340-2349",
+      "recommendation": "Treat transport errors as retryable with backoff; set embedded only after 200; re-POST when dest_name is empty; pre-warm the encoder at mount.",
+      "known": "music-2 covers only 503 and name_race",
+      "theme": "Music"
+    },
+    {
+      "id": "bug-music-3",
+      "sources": [
+        "bug-music-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A track that fails after its result keeps a library row with no audio, which also blocks re-dropping it",
+      "where": "music/web/musicweb/ingest_batches.py:1237-1324; db.py:647-671; companion broll_ingest.py:3091-3110, 3150-3161",
+      "recommendation": "Drop unlanded rows of failed items on every terminal release and in lease expiry, or ignore failed-item rows in duplicate checks.",
+      "known": "bug-music-ytdl-4 fixed the cancelled path only",
+      "theme": "Music"
+    },
+    {
+      "id": "bug-music-4",
+      "sources": [
+        "bug-music-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "One malformed window vector takes text search and 'similar' down for the whole fleet, and it survives restarts",
+      "where": "music/web/musicweb/ingest_batches.py:1088-1119; db.py:349-358; search.py:24-26, 230-262",
+      "recommendation": "422 or drop wrong-width windows; have the loaders skip and log bad rows.",
+      "known": "",
+      "theme": "Music"
+    },
+    {
+      "id": "bug-music-6",
+      "sources": [
+        "bug-music-6"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Any write to music.db (heartbeat, checkpoint, waveform cache) makes the next search rebuild the whole index",
+      "where": "music/web/musicweb/db.py:208-236; search.py:207-245; ingest_batches.py:779-792; routes_media.py:221-223",
+      "recommendation": "Key staleness on a revision counter bumped by writers of tracks/windows/debias; keep the inode check for swaps.",
+      "known": "",
+      "theme": "Music"
+    },
+    {
+      "id": "bug-music-7",
+      "sources": [
+        "bug-music-7"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "Preview proxies from the base rig can play another track's audio after a drain, because ids diverge",
+      "where": "music/web/musicweb/drain.py apply_bundle; music/indexer/make_proxies.py:20-40; music/web/DEPLOY.md:270-320; config.py:132-172",
+      "recommendation": "Key proxies by a stable value (content hash or rel_path digest) or verify (id, rel_path) on push.",
+      "known": "related to music-4 (fixed in-process path)",
+      "theme": "Music"
+    },
+    {
+      "id": "bug-ytdl-web-1",
+      "sources": [
+        "bug-ytdl-web-1",
+        "bug-dash-jobs-cards-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "Turning the YouTube downloader OFF does not stop the server downloading, and hands in-flight local downloads to the server IP",
+      "where": "dashboard ytdl.py:468-578, 806-819 (YtdlFeatureGate); ytdl/web/ytdlweb/worker.py:170-201, 244-320; ytdlp_nightly.py:440-470; companion ytdl_executor.py:388",
+      "recommendation": "Give the worker, canary and refresher the cached feature predicate and idle while off; do not reclaim leases while off; show paused jobs; test a mid-job flip.",
+      "known": "",
+      "theme": "YouTube downloader (server)"
+    },
+    {
+      "id": "bug-ytdl-web-2",
+      "sources": [
+        "bug-ytdl-web-2"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A deleted person's username stays in manifest.json files in the footage tree",
+      "where": "ytdl/web/ytdlweb/db.py:2085-2130, 2323; worker.py write_manifest",
+      "recommendation": "Stop writing the username (stand-in or nothing) or rewrite manifests in forget_requester; mention in export and PRIVACY.md.",
+      "known": "",
+      "theme": "YouTube downloader (server)"
+    },
+    {
+      "id": "bug-server-4",
+      "sources": [
+        "bug-server-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "high",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "DOWNGRADED",
+      "title": "TrueNAS setup_editor_account.py takes over any existing account, admin and root included",
+      "where": "server/setup_editor_account.py:165, 493-581; server/backends/truenas.py:443-529 (contrast backends/synology.py:607-701, dashboard nas/truenas.py:65-67)",
+      "recommendation": "Port _refuse_non_editor into TrueNASBackend create/update (builtin, uid<1000, not already in editors, the [nas] admin_user); add tests.",
+      "known": "",
+      "theme": "Server, appliance and installers"
+    },
+    {
+      "id": "bug-server-5",
+      "sources": [
+        "bug-server-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "run.sh image mode: docker stop kills PID 1 before uvicorn finishes shutting down",
+      "where": "dashboard/deploy/run.sh:592-602",
+      "recommendation": "Loop `while kill -0 $app_pid; do wait $app_pid || rc=$?; done` before choosing the exit code, or exec a supervisor.",
+      "known": "WPK-3 (open, generic)",
+      "theme": "Server, appliance and installers"
+    },
+    {
+      "id": "bug-server-7",
+      "sources": [
+        "bug-server-7"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Image-mode deploys fail their own health gate whenever the image is not the checkout's VERSION",
+      "where": "server/install_dashboard_app.py:1762-1778, 1889-1930, 5990, 6139; server/tests/conftest.py:83",
+      "recommendation": "In image mode compare against the image/current.json version or accept any healthy answer; drop the bind rollback line there.",
+      "known": "",
+      "theme": "Server, appliance and installers"
+    },
+    {
+      "id": "bug-server-8",
+      "sources": [
+        "bug-server-8"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Optional Postgres profile publishes a superuser with Resolve's default password on all interfaces",
+      "where": "dashboard/deploy/compose.yaml:763-783; compose.image.yaml:~415-425",
+      "recommendation": "Bind to DASH_BIND_* and require ${PG_PASSWORD:?}; refuse 'DaVinci'.",
+      "known": "",
+      "theme": "Server, appliance and installers"
+    },
+    {
+      "id": "bug-server-9",
+      "sources": [
+        "bug-server-9"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "The 'scoped' TrueNAS API key is still root-equivalent",
+      "where": "server/create_api_key.py:1-60, 76-82, 160-175",
+      "recommendation": "Require a dedicated --username; document residual root equivalence; seek a narrower privilege or move account writes out of the container.",
+      "known": "COMMERCIAL_READINESS item 6 / H3 (treated as mitigated)",
+      "theme": "Server, appliance and installers"
+    },
+    {
+      "id": "bug-server-10",
+      "sources": [
+        "bug-server-10"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "Live b-roll databases sit in the editor-writable SMB share",
+      "where": "server/install_dashboard_app.py:5659-5713; server/publish_db.py:198; broll/web/app/client_folders.py:143",
+      "recommendation": "Move the databases to a private app data dir (as music.db is) and share only media; at minimum 0600 service-owned in a non-editor-writable subdir.",
+      "known": "",
+      "theme": "Server, appliance and installers"
+    },
+    {
+      "id": "bug-installer-3",
+      "sources": [
+        "bug-installer-3"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "A Syncthing installed by winget gets its versioned package folder baked into the logon shim, so winget upgrade silently kills lane C",
+      "where": "installer/windows_bootstrap.ps1:1259, 1967, 2007; companion sync/syncthing_supervisor.py:167-223",
+      "recommendation": "Always run our pinned copy from $BinDir, or resolve to the stable WinGet\\Links path.",
+      "known": "",
+      "theme": "Server, appliance and installers"
+    },
+    {
+      "id": "bug-installer-4",
+      "sources": [
+        "bug-installer-4"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Re-running the wizard silently downgrades the companion to whatever build that onboard.exe bundled, skipping the floor",
+      "where": "onboarding/steps.py:2980, 3011-3019, 3207-3229; installer/windows_bootstrap.ps1:2276-2300; onboarding/onboard.py:1733; installer/windows_upgrade.ps1",
+      "recommendation": "Read the installed version first and keep a newer build (or warn); same guard in windows_upgrade.ps1.",
+      "known": "",
+      "theme": "Server, appliance and installers"
+    },
+    {
+      "id": "bug-installer-5",
+      "sources": [
+        "bug-installer-5"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A tree-drive letter held by a real volume is read as free: install says DONE with no tree drive and a logon task that fails at every logon",
+      "where": "installer/drive_mapping.ps1:131-202; installer/windows_bootstrap.ps1:1476-1494, 1691-1736; onboarding/steps.py:2156-2226",
+      "recommendation": "Check whether the letter is in use at all before mapping and treat a foreign one as a capability miss; verify after mapping; refuse in the wizard.",
+      "known": "CR-153/OPS-1 covers the mapped-foreign case only",
+      "theme": "Server, appliance and installers"
+    },
+    {
+      "id": "bug-installer-6",
+      "sources": [
+        "bug-installer-6"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Any Syncthing the editor already runs is taken to be ours (lane C wired to the wrong instance, DONE shown), and the Windows uninstaller kills it",
+      "where": "installer/windows_bootstrap.ps1:1895-1901, 2010-2013, 2027-2030; windows_uninstall.ps1:321-331; windows_upgrade.ps1:572-579",
+      "recommendation": "Use the wizard's managed-directory filter in all three scripts; give ours its own ports or record a named capability miss.",
+      "known": "INST-20 fixed in the wizard and macos_uninstall.sh only",
+      "theme": "Server, appliance and installers"
+    },
+    {
+      "id": "bug-installer-7",
+      "sources": [
+        "bug-installer-7"
+      ],
+      "severity": "medium",
+      "hunter_severity": "medium",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Every wizard install blocks ALL inbound SMB (139/445) on every network profile, with no opt-out and no notice",
+      "where": "installer/windows_bootstrap.ps1:1413-1434, 1649-1659; onboarding/steps.py:1829-1856",
+      "recommendation": "Avoid or scope the change; detect existing shares and ask or report; document for customer IT.",
+      "known": "COMMERCIAL_READINESS item 15 introduced the rule; side effect unrecorded",
+      "theme": "Server, appliance and installers"
+    },
+    {
+      "id": "bug-app-a-5",
+      "sources": [
+        "bug-app-a-5"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "Dashboard file moves are applied on disk during a halt",
+      "where": "companion app.py:2541-2566, 8680-8895; dashboard api.py:10990-11010",
+      "recommendation": "Answer pending moves 'retrying' while halted.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-app-a-6",
+      "sources": [
+        "bug-app-a-6"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A watchdog restart of a dead sequencer silently undoes Pause and the drive-out pause",
+      "where": "companion app.py:1206-1255; sync/sequencer.py:652-655",
+      "recommendation": "Re-apply pause after a watchdog restart when _paused or _root_absent.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-app-a-7",
+      "sources": [
+        "bug-app-a-7"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Lane completion events are drained before the POST and lost when it fails",
+      "where": "companion app.py:5099-5112; reporter.py:941-947, 1384-1389",
+      "recommendation": "Hold drained completions and resend until a post succeeds.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-app-a-8",
+      "sources": [
+        "bug-app-a-8"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Pushed update and auto-update on one reply race; the loser records a false 'Update failed'",
+      "where": "companion app.py:2547, 2575, 8382-8571; upgrade.py:1901-1918",
+      "recommendation": "Return a distinct 'already applying' outcome and treat it as a stand-down.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-app-a-9",
+      "sources": [
+        "bug-app-a-9"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Bin-only non-canonical clips are latched once per process even when the relink fails",
+      "where": "companion app.py:3445-3449, 3626-3644, 4888-4891",
+      "recommendation": "Discard the key on a refused relink and for unreachable items.",
+      "known": "RES-19 fixed the watcher half only",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-app-b-4",
+      "sources": [
+        "bug-app-b-4"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A Windows shutdown/log-off is never stamped clean for the crash-loop counter, so reboots after an update can revert a good build",
+      "where": "companion app.py:11212-11215, 11634-11637; shutdown_guard.py:590-614; upgrade.py:289-305",
+      "recommendation": "Call upgrade.note_clean_shutdown in the session-end callback.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-app-b-5",
+      "sources": [
+        "bug-app-b-5"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "Restarting the watcher thread clears the process-wide stop event, which can undo a racing shutdown",
+      "where": "companion app.py:1094-1229, 10331, 11459-11478, 11946",
+      "recommendation": "Give the watcher its own stop event; never clear _stop_event.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-app-b-6",
+      "sources": [
+        "bug-app-b-6"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "'Copy diagnostics' says the bundle was sent to the admin when it was not",
+      "where": "companion app.py:9291-9293, 9918-9960",
+      "recommendation": "Toast 'copied', then report the upload's real outcome.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-sync-8",
+      "sources": [
+        "bug-sync-8"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Removal gate rewrites lane A's shared filter file without exclusions, racing a run's startup",
+      "where": "companion sync/rclone_lane.py:2985, 3384, 3402, 3877-3890",
+      "recommendation": "Give probes their own filter file.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-resolve-6",
+      "sources": [
+        "bug-resolve-6"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A Windows TCP-table read failure yields ABSENT instead of UNKNOWN (spurious disconnections)",
+      "where": "companion script_server.py:188-206, 323-336",
+      "recommendation": "Retry on error 122 with the new size; raise so the probe answers UNKNOWN.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-resolve-7",
+      "sources": [
+        "bug-resolve-7"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Undo's cross-project guard compares 80-char slugs, so similar project names replay each other's journals",
+      "where": "companion resolve_journal.py:141-151; resolve_bridge.py:2693, 2731-2739",
+      "recommendation": "Compare raw stored names; hash the full name into the slug.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-resolve-8",
+      "sources": [
+        "bug-resolve-8"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The stills 'gallery moved' message prints a forward slash on Windows",
+      "where": "companion stills.py:161; app.py:10603, 12017",
+      "recommendation": "Resolve None to os.name == 'nt' before choosing the separator.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-comp-ui-4",
+      "sources": [
+        "bug-comp-ui-4"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Settings [ GIVE THIS COMPUTER A NEW ID ] opens a Tk dialog without taking _popup_active_lock",
+      "where": "companion settings_window.py:548-595",
+      "recommendation": "Take the lock non-blocking with the standard toast.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-comp-trust-6",
+      "sources": [
+        "bug-comp-trust-6"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A dashboard_url with an explicit default port (:443/:80) makes every Send to Resolve 403",
+      "where": "companion loopback_guard.py:208-231",
+      "recommendation": "Normalise default ports before building origins.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-comp-trust-7",
+      "sources": [
+        "bug-comp-trust-7"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A jobs_kinds typo turns a restriction into 'take every kind'",
+      "where": "companion capabilities.py:101-135",
+      "recommendation": "Take no work when a non-empty setting yields no known kind; warn in Settings.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-comp-media-4",
+      "sources": [
+        "bug-comp-media-4"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The peaks recipe buffers the whole decode in the tray process (~1-2 GB for long files)",
+      "where": "companion jobs_media.py:335-351, 636-718",
+      "recommendation": "Bin while streaming, O(bins) memory.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-comp-ytdl-6",
+      "sources": [
+        "bug-comp-ytdl-6"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A yt-dlp self-update whose new binary cannot be read is published as ok under the old version",
+      "where": "companion ytdlp_manager.py:979-992",
+      "recommendation": "Treat updated-but-unreadable as its own failed outcome with the short retry.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-comp-ytdl-7",
+      "sources": [
+        "bug-comp-ytdl-7"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The executor's 'old yt-dlp' poke is swallowed by CR-361's 20 h update throttle",
+      "where": "companion ytdl_executor.py:2887-2915; ytdlp_manager.py:914-976",
+      "recommendation": "Pass a force flag from the poke (keep one per job, 1 h floor).",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-comp-ytdl-8",
+      "sources": [
+        "bug-comp-ytdl-8"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "A stop just after yt-dlp finishes leaves the clip under its deliverable name, never probed",
+      "where": "companion ytdl_executor.py:2555-2561, 3253-3261",
+      "recommendation": "Move a landed file onto the staging name so the sweep removes it.",
+      "known": "related to CR-327 (fixed)",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-comp-ytdl-9",
+      "sources": [
+        "bug-comp-ytdl-9"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "/ytdl/fetch will pull any file under Projects/ from the NAS, not only YouTube originals",
+      "where": "companion ytdl_server.py:328-387; broll_fetch.py:106, 220-261",
+      "recommendation": "Require <label>/Youtube/ and a video extension (optionally a synced label).",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-wire-5",
+      "sources": [
+        "bug-wire-5"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "A Resolve project name over 256 chars gets every heavy report refused while its journal is among the newest 20",
+      "where": "companion resolve_journal.py:682-711; dashboard api.py:9641-9655",
+      "recommendation": "Cap 'project' in the companion and add a truncating validator.",
+      "known": "",
+      "theme": "Companion"
+    },
+    {
+      "id": "bug-dash-api-5",
+      "sources": [
+        "bug-dash-api-5"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A shared-token holder can stamp 'being turned away' on any editor's computer and trigger report_refused alerts",
+      "where": "dashboard api.py:10196-10220; db.py:5668",
+      "recommendation": "Stamp only when the credential proves that editor.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-api-6",
+      "sources": [
+        "bug-dash-api-6"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Job claim trusts the machine name in its body, so a hostname target can be claimed by any editor (and cooldowns evaded)",
+      "where": "dashboard api.py:12104-12150; jobs.py:478-483",
+      "recommendation": "Refuse a claim whose machine is not in machines_of(editor); match targets as editor/machine.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-api-8",
+      "sources": [
+        "bug-dash-api-8"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "A file move can overwrite a file that appears at the destination after the exists() check",
+      "where": "dashboard api.py:3151, 3207-3226",
+      "recommendation": "Use a no-replace rename or re-check immediately before.",
+      "known": "related to CR-333 (OPEN)",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-api-9",
+      "sources": [
+        "bug-dash-api-9"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Per-machine storage bounds (diagnostics, pending SSH keys) are keyed on a caller-chosen machine name",
+      "where": "dashboard db.py:2413, 5983-6008; api.py:10144, 11183",
+      "recommendation": "Per-editor caps; refuse diagnostics for unregistered machines.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-api-10",
+      "sources": [
+        "bug-dash-api-10",
+        "bug-dash-release-9"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Publish-time prune deletes recalled rows and builds a machine has a pending push for",
+      "where": "dashboard db.py:4639-4690, 5021-5035; package_store.py:535; api.py:6326-6354",
+      "recommendation": "Exclude retracted rows and versions named by pending pushes (or keep the row, drop only the file).",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-auth-6",
+      "sources": [
+        "bug-dash-auth-6"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The first local admin is whoever reaches /api/v1/setup/admin first",
+      "where": "dashboard setup_api.py:63-105; app.py:90; setup_routes.py:47-84",
+      "recommendation": "Require a one-time setup code generated at first boot.",
+      "known": "related to 09-24 bug-dash-auth-1 (window scope, fixed)",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-auth-7",
+      "sources": [
+        "bug-dash-auth-7"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The SMB guest/null-session rejection is dead code (session_flags never exists)",
+      "where": "dashboard auth.py:115-126",
+      "recommendation": "Check session.session_key is None after connect or pin require_signing=True; add a test.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-auth-8",
+      "sources": [
+        "bug-dash-auth-8"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Non-ASCII header/query values 500 two pre-auth comparisons (internal sftp bearer, OIDC state)",
+      "where": "dashboard internal_sftp.py:89; oidc.py:462",
+      "recommendation": "Route through api.token_ok or catch TypeError.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-auth-9",
+      "sources": [
+        "bug-dash-auth-9"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "/broll, /music, /ytdl writes skip CSRF and Origin checks and rely on SameSite=Lax alone",
+      "where": "dashboard app.py:234-235, 1083-1085; musicweb/routes_ingest.py:432; ytdlweb/routes_api.py",
+      "recommendation": "Apply _origin_mismatch to these prefixes as for /cards/.",
+      "known": "deliberate interim exemption",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-ops-7",
+      "sources": [
+        "bug-dash-ops-7"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "File-move reconciliation can delete the row of a move still in progress, so the fleet is never told",
+      "where": "dashboard api.py:3217-3227, 3249, 3448-3468; collector.py:390-397",
+      "recommendation": "Reconcile only rows older than a grace period or share a lock; check complete_file_move's rowcount.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-ops-8",
+      "sources": [
+        "bug-dash-ops-8"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "Snapshot restore follows symlinks, copying container files (e.g. secrets) into the Projects tree",
+      "where": "dashboard recovery.py:270-292, 510-520",
+      "recommendation": "Walk and copy with follow_symlinks=False; skip and name symlinks.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-jobs-cards-6",
+      "sources": [
+        "bug-dash-jobs-cards-6"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Whether a spent media job is pinned or abandoned depends on whether a Cards episode happens to be open",
+      "where": "dashboard jobs.py:120-133; cards_exec.py:153-172; cards.py:385-402",
+      "recommendation": "Make available() true when the checkout exposes fleet_execute; let tick wait for an engine.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-jobs-cards-7",
+      "sources": [
+        "bug-dash-jobs-cards-7"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Re-running Codex SET UP for the installed version deletes the live install before unpacking",
+      "where": "dashboard cli_tools.py:1196-1205",
+      "recommendation": "Unpack into <version>.new and swap atomically, or skip an identical version.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-ui-1",
+      "sources": [
+        "bug-dash-ui-1"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A long project name with no spaces makes the project page scroll sideways",
+      "where": "dashboard templates/project.html:28; static/cc/terminal.css:219; phone.css:7",
+      "recommendation": "overflow-wrap:anywhere and min-width:0 on .head h1/.sub; add a test.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-ui-3",
+      "sources": [
+        "bug-dash-ui-3"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The /help markdown renderer escapes link targets twice, so & in a URL breaks",
+      "where": "dashboard help.py:473, 494",
+      "recommendation": "Unescape before escaping, or match links before escaping; add a test.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-ui-4",
+      "sources": [
+        "bug-dash-ui-4"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The new alert-kinds form blanks its All / Problems only / None buttons while saving",
+      "where": "dashboard templates/partials/admin_alerts.html (uncommitted); static/cc/health.css:76-81",
+      "recommendation": "Give the preset keys a .busy-t or scope the rule to [data-busy].",
+      "known": "new uncommitted code",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-ui-5",
+      "sources": [
+        "bug-dash-ui-5"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The installer 404 shown to an editor tells admins to run a vendor-only release tool",
+      "where": "dashboard ui.py:4008-4021",
+      "recommendation": "Point admins at Settings > Packages instead.",
+      "known": "CR-59 left this sentence",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-ui-6",
+      "sources": [
+        "bug-dash-ui-6"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "An installed Cards app's sign-in page is outside the app's scope (possible iOS sign-in loop)",
+      "where": "dashboard cards_landing.py (APP_SCOPE); app.py login_gate",
+      "recommendation": "Test on iOS/Android; add a /cards/login alias or widen scope.",
+      "known": "",
+      "theme": "Dashboard"
+    },
+    {
+      "id": "bug-dash-release-7",
+      "sources": [
+        "bug-dash-release-7"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Concurrent publishes of one version escape as IntegrityError, orphaning a .part and failing check_now",
+      "where": "dashboard package_store.py:470-494; release_feed.py:886, 1043-1074",
+      "recommendation": "Catch IntegrityError, roll back, unlink the part, re-run the comparison; or lock.",
+      "known": "",
+      "theme": "Release, CI and tooling"
+    },
+    {
+      "id": "bug-tools-ci-6",
+      "sources": [
+        "bug-tools-ci-6"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Licence tools pip-install unpinned pip-licenses into the venv they judge; PyInstaller is pinned but not hashed",
+      "where": "tools/gen_notices.py:177-211; tools/release.ps1; release workflows",
+      "recommendation": "Hashed tools lock, throwaway venv with --python; hash-pin PyInstaller and hooks.",
+      "known": "",
+      "theme": "Release, CI and tooling"
+    },
+    {
+      "id": "bug-tools-ci-8",
+      "sources": [
+        "bug-tools-ci-8"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "check_deploy_drift.ps1 POSTs the admin password through redirect-following calls with no cleartext guard",
+      "where": "tools/check_deploy_drift.ps1:507-611, 854",
+      "recommendation": "-MaximumRedirection 0 on every call; refuse http:// to public hosts.",
+      "known": "",
+      "theme": "Release, CI and tooling"
+    },
+    {
+      "id": "bug-tools-ci-9",
+      "sources": [
+        "bug-tools-ci-9"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The selector's scoped tier never runs licence/notices checks, so allowlist or notices-input changes pass locally",
+      "where": "tools/select_suites.py:312-314; tools/test_map.toml; run_all_tests.ps1:296-310",
+      "recommendation": "Give those files a tier-full row or let an area require full checks.",
+      "known": "",
+      "theme": "Release, CI and tooling"
+    },
+    {
+      "id": "bug-tools-ci-10",
+      "sources": [
+        "bug-tools-ci-10"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "check_licenses judges the container's packages from other venvs, at other versions",
+      "where": "tools/check_licenses.py:140-155, 216-231",
+      "recommendation": "Scan a venv built from the container lock, or match on (name, version).",
+      "known": "",
+      "theme": "Release, CI and tooling"
+    },
+    {
+      "id": "bug-tools-ci-11",
+      "sources": [
+        "bug-tools-ci-11"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The opt-in YouTube-unblock dependency set (GPLv3) is in no gate",
+      "where": "tools/check_licenses.py:157-178; .github/workflows/ci.yml",
+      "recommendation": "Add a named CI step for dashboard-container-unblock.",
+      "known": "by design, unenforced",
+      "theme": "Release, CI and tooling"
+    },
+    {
+      "id": "bug-tools-ci-12",
+      "sources": [
+        "bug-tools-ci-12"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The bench scratch-path guard accepts '..' traversal and any component containing '_bench'",
+      "where": "bench/ccbench/guard.py:126-135",
+      "recommendation": "Refuse '..'; require a component equal to '_bench'.",
+      "known": "",
+      "theme": "Release, CI and tooling"
+    },
+    {
+      "id": "bug-comp-ytdl-10",
+      "sources": [
+        "bug-comp-ytdl-10"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "THIRD_PARTY_NOTICES still says the NAS runs the lock-pinned yt-dlp; since CR-361 it runs an unpinned PyPI nightly",
+      "where": "docs/legal/THIRD_PARTY_NOTICES.md:364, 431",
+      "recommendation": "Update the row; extend gen_notices and the LG-16 drift check to the nightly path.",
+      "known": "follows CR-361",
+      "theme": "Release, CI and tooling"
+    },
+    {
+      "id": "bug-broll-8",
+      "sources": [
+        "bug-broll-8"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A shoot name equal to an indexer share re-files its collection and makes every later drain treat base-rig rows as dashboard-only",
+      "where": "broll/web/app/ingest_batches.py:838-845; routes_batches.py:66-86, 107-109; server/broll_drain.py",
+      "recommendation": "Refuse such names; validate collection; drain by ingest_items.video_id.",
+      "known": "",
+      "theme": "B-roll, music and YouTube web apps"
+    },
+    {
+      "id": "bug-broll-9",
+      "sources": [
+        "bug-broll-9"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The expired/revoked share page shows the curator's login username to anyone with the old link",
+      "where": "broll/web/app/client_folders.py:549-570; routes_share.py:111-138",
+      "recommendation": "Show only the contact or a display name.",
+      "known": "",
+      "theme": "B-roll, music and YouTube web apps"
+    },
+    {
+      "id": "bug-broll-10",
+      "sources": [
+        "bug-broll-10"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "record_view on the public folder route is unguarded against a locked ledger, so a client can get a 500",
+      "where": "broll/web/app/routes_share.py:162-164; client_folders.py:980-984",
+      "recommendation": "Wrap in try/except sqlite3.Error.",
+      "known": "",
+      "theme": "B-roll, music and YouTube web apps"
+    },
+    {
+      "id": "bug-music-8",
+      "sources": [
+        "bug-music-8"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Music fleet routes accept unvalidated shapes: 'live' via /status skips the upload check; nested probe values 500",
+      "where": "music/web/musicweb/ingest_batches.py:79-80, 797-838, 1004-1006; schemas.py:112-123, 161",
+      "recommendation": "Refuse 'live' in set_item_state; type the probe model and bound ints.",
+      "known": "",
+      "theme": "B-roll, music and YouTube web apps"
+    },
+    {
+      "id": "bug-music-9",
+      "sources": [
+        "bug-music-9"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Inline base-rig music ingest leaves the uploaded file in the library with no row when analysis raises",
+      "where": "music/indexer/music_index/ingest.py:145-171",
+      "recommendation": "Unlink or restore dest on any exception after the move.",
+      "known": "",
+      "theme": "B-roll, music and YouTube web apps"
+    },
+    {
+      "id": "bug-ytdl-web-5",
+      "sources": [
+        "bug-ytdl-web-5"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "A job whose last owed clip is server-held waits a full lease (~180 s) before finishing",
+      "where": "ytdl/web/ytdlweb/routes_fleet.py _after_terminal; worker.py _phase_download",
+      "recommendation": "Re-check unfinished_downloads after a clip under a live lease and close out.",
+      "known": "",
+      "theme": "B-roll, music and YouTube web apps"
+    },
+    {
+      "id": "bug-ytdl-web-6",
+      "sources": [
+        "bug-ytdl-web-6"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Worker waits out the local-claim grace on jobs pinned to the server",
+      "where": "ytdl/web/ytdlweb/worker.py _await_local_claim",
+      "recommendation": "Return False when mode_lock is 'server'.",
+      "known": "",
+      "theme": "B-roll, music and YouTube web apps"
+    },
+    {
+      "id": "bug-ytdl-web-7",
+      "sources": [
+        "bug-ytdl-web-7"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "No cap on how many searches one editor can queue",
+      "where": "ytdl/web/ytdlweb/routes_api.py create_job / create_url_job",
+      "recommendation": "Per-editor queue limit with a 409 naming it.",
+      "known": "",
+      "theme": "B-roll, music and YouTube web apps"
+    },
+    {
+      "id": "bug-server-11",
+      "sources": [
+        "bug-server-11"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "Two rename sequences (db swap sidecars, rollback one-liner) can leave the live thing missing or nested on partial failure",
+      "where": "server/install_dashboard_app.py:1846-1860, 3359-3364",
+      "recommendation": "Guard the sidecar moves; use && and shell_quote in the rollback.",
+      "known": "",
+      "theme": "Server and installers"
+    },
+    {
+      "id": "bug-server-12",
+      "sources": [
+        "bug-server-12"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "Pinned ffmpeg URL points at a directory the upstream prunes (and is amd64-only)",
+      "where": "server/install_dashboard_app.py:424-430",
+      "recommendation": "Self-host the pinned tarball with the GPL source offer; surface a missing ffmpeg.",
+      "known": "",
+      "theme": "Server and installers"
+    },
+    {
+      "id": "bug-server-13",
+      "sources": [
+        "bug-server-13"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "PLAUSIBLE",
+      "verdict": "UNVERIFIED",
+      "title": "TrueNAS custom_app body carries secrets unescaped through compose interpolation ($ in a password)",
+      "where": "server/install_dashboard_app.py:2627-2662; server/backends/truenas.py:168-195",
+      "recommendation": "Escape $ as $$ or refuse, as render_env_file does; add a test.",
+      "known": "",
+      "theme": "Server and installers"
+    },
+    {
+      "id": "bug-installer-8",
+      "sources": [
+        "bug-installer-8"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "The wizard's schtasks 'not found' check fails on non-English Windows",
+      "where": "onboarding/steps.py:3184-3203",
+      "recommendation": "Check existence with schtasks /Query exit code or Get-ScheduledTask.",
+      "known": "",
+      "theme": "Server and installers"
+    },
+    {
+      "id": "bug-installer-9",
+      "sources": [
+        "bug-installer-9"
+      ],
+      "severity": "low",
+      "hunter_severity": "low",
+      "hunter_confidence": "CONFIRMED",
+      "verdict": "UNVERIFIED",
+      "title": "macOS default uninstall deletes the Syncthing device identity; Windows default keeps it",
+      "where": "installer/macos_uninstall.sh:242-256; windows_uninstall.ps1:798-806",
+      "recommendation": "Keep syncthing-config unless --full.",
+      "known": "",
+      "theme": "Server and installers"
+    }
+  ]
+}

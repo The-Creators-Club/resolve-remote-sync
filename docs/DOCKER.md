@@ -545,21 +545,46 @@ attaches an SBOM. The tags:
 | trigger | dashboard | sftp |
 |---|---|---|
 | push to `main` | `:<short-sha>`, `:edge` | `:<short-sha>`, `:edge` |
-| tag `v*` | `:<short-sha>`, `:<VERSION>`, `:1` | `:<short-sha>`, `:<VERSION>`, `:1` |
+| tag `v*` | `:<short-sha>` at build; `:<VERSION>` and `:1` only after the smoke test and the `customer-release` environment's approval (CR-371) | the same |
+| `workflow_dispatch` from a branch other than `main` | `:<short-sha>` only (`:edge` moves from `main` alone) | the same |
 
-`:1` is a **deliberately fixed** floating tag, not "whatever VERSION's
-leading digit is" (`VERSION` is `0.5.0` today — a `:0` tag would say the
-wrong thing). It is the one long-lived tag
-`dashboard/deploy/compose.appliance.yaml` pins, so that a customer's NAS
-platform updating it (`docker compose pull && up -d`, or, in Phase 3, one
-click in the platform's own app UI) is the entire update story — see
-`ZERO_TOUCH_PLAN.md` 3.4. Every 0.x/1.x release moves `:1` until a
-deliberately breaking cut earns a `:2`.
+**Customers are pinned by DIGEST, not by `:1`** (owner decision 2026-10-07,
+GL-50, CR-371). `:<VERSION>` is immutable (a tag build refuses to run when it
+already exists) and `tools/release_customers.py` writes the digest into the
+signed channel's `dashboard_image` and into `compose.appliance.yaml`
+(`tools/pin_compose_images.py`), so a customer pulls exactly what was built,
+smoke-tested, signed and approved; the studio soaks it first. `:1` remains
+only as the studio's own convenience tag. A tag build is gated before it
+builds: the tag must be `v<VERSION>`, the newest `v*` tag, on `main`, with a
+green `ci.yml` run for that commit. Every action in the workflows is pinned to
+a commit SHA (Dependabot moves them).
+
+**Updating a digest-pinned site** (GL-50, CR-371 round 2, 2026-10-07).
+A project pinned to `:<VERSION>@sha256:...` never moves by itself, and the
+NAS's own Update/Build button re-pulls the SAME digest, so for such a site
+`docker compose pull && up -d` is NOT the update story. The signed channel's
+`dashboard_image` carries the new tag and digests (the dashboard image and,
+since the same round, the sftp image's digest). When a build on offer needs a
+new container image the dashboard prints the exact replacement lines (the
+Packages page, the Dashboard-update panel, the fleet banner and the alert mail
+all use `release_feed.image_update_hint`): the admin edits the project's compose
+file, puts those references on the `image:` of every ccsync service (the
+`secrets-init` and `dashboard` services use the dashboard image, `sftp` the
+sftp one), saves and redeploys. Base-image security fixes reach a customer the
+same way: a new release re-pins, nothing moves under them. `:1` is a
+**deliberately fixed** floating tag, not "whatever VERSION's leading digit is"
+(a `:0` tag would say the wrong thing); it exists for the studio's own stack,
+which follows it on purpose and so soaks every release first
+(`tools/release_customers.py` refuses until the studio dashboard has run the
+commit for `--soak-hours`, 24 by default).
 
 Verify a signature:
 
 ```bash
-cosign verify --certificate-identity-regexp '.*' \
+# EXACT identity: this repo's image.yml at a release tag. A wildcard identity
+# accepts a lookalike image signed from any repository (CR-371).
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/The-Creators-Club/resolve-remote-sync/\.github/workflows/image\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/<owner>/ccsync@sha256:<digest>
 ```

@@ -7238,6 +7238,11 @@ pressing SKIP.
 `clear()` caller anywhere; there was no persisted third answer; and the
 watcher's counts stopped at `ok`.
 
+**Superseded 2026-09-30 (CR-356):** the persisted FOLDER layer described
+below, its popup button and its Settings [ FORGET ] were REMOVED; an existing
+`fixer_ignores.json` is renamed aside and honoured by nothing. Parts (1) and
+(3) stand.
+
 **Fix.** `fixer.IgnoreTracker(state_dir)` now has three parts. (1) The
 session set is unchanged in meaning, and `app.scan_whole_project` calls
 `clear()` AFTER the Resolve call and its refusals (a scan that could not run
@@ -31601,6 +31606,67 @@ slow start still does not; a sign-in clears the probe cache). Tests:
 `test_cli_tools.py` (the never-opened test became never-leaked),
 `test_ai_providers.py` CR-355 block. Why the refresh failed is not known.
 
+## CR-356 - "always leave this folder alone" hid music an editor downloaded a day later, so it never reached the server - FIXED in repo (companion 0.9.85, unbuilt)
+
+2026-09-30, the owner's order after a live incident. On 2026-09-28 Ruskin's
+out-of-tree popup (DESKTOP-LQQ41TC, companion 0.9.8x) showed a single row,
+`C:\Users\user\Desktop\framing formosa.en.srt`. He pressed RES-12's
+`[ ALWAYS LEAVE THIS FOLDER ALONE ON THIS COMPUTER ]`, which persisted
+`C:\Users\user\Desktop` in `~/.ccsync/state/fixer_ignores.json`.
+`IgnoreTracker._folder_ignored_locked` matched with `canon._is_under`, i.e.
+RECURSIVELY and for ever, so on 2026-09-29 he downloaded 30 licensed music
+`.aac` files into `Desktop\Music Docs`, cut them into Framing Formosa, and was
+never prompted: they never reached the server and were offline on every other
+machine. An "always" rule the editor set for one subtitle file silently
+covered a folder created a day later, and nothing on any surface said so
+beyond a count in Settings.
+
+**Fixed: the folder option is gone; SKIP FOR NOW (this session) is the only
+suppression left.** `popup.py` loses the button, `_on_ignore_folder`,
+`_folder_button_label`, `folders_of`, `perform_ignore_folders` and
+`IGNORE_FOLDER_FAILED`; the bar is SKIP FOR NOW, FIX ALL, and RETRY FAILED
+after a run with failures. `fixer.IgnoreTracker` loses the persisted folder
+layer (`ignore_folder` / `forget_folder` / `folders` / `folder_count` /
+`_folder_ignored_locked`, and `fixer._folder_of`): `is_ignored` is the
+session set only. **A rule already saved in the field is lifted by the
+upgrade**: at start-up the tracker logs once, at INFO, what
+`fixer_ignores.json` held ("CR-356: the 'always leave this folder alone'
+list is retired; ... held N folder(s), no longer honoured: ...") and renames
+it to `fixer_ignores.json.retired-cr356` (a timestamp is appended if that
+name is taken, so a machine rolled back and forward keeps both records).
+Nothing reads it again. The UX-4 ledger (`skipped_clips.json`) is unchanged;
+old records with `how: "folder"` stay as they are. Settings > ADVANCED loses
+the "Leaving clips in <folder> alone" lines and their `[ FORGET: ]` buttons
+(`_ignored_folders`, `action_forget_ignored_folder`); the tray line
+(`tray._ignored_line`) is the session count only; the whole-project scan's
+"all media is in the tree" toast and the diagnostics' "resolve media" line
+drop their folder clauses.
+
+**The wire.** `resolve_health` no longer carries `ignored_folders`. The
+dashboard's `ResolveHealthIn` declares it `int | None = None` and
+`api_report` sums it into `resolve_ignored` as `ignored_this_session or 0 +
+ignored_folders or 0` (None only when BOTH are absent), so a 0.9.85 report
+reads as before and an older companion still sending it is still summed. No
+dashboard change is needed and none was made; no deploy ordering.
+`test_telemetry_disclosure.py`'s pinned key sets and
+`test_bug_hunt_2026_09_11_comp_app.py`'s contract set drop the key.
+
+Tests: `test_fixer.py::test_a_folder_saved_by_an_older_build_no_longer_hides_a_clip_under_it`
+(Ruskin's shape: a clip under the retired folder is offered, the file is
+renamed aside, one log line, silence on the next start),
+`::test_a_second_retired_list_does_not_overwrite_the_first`,
+`::test_the_folder_layer_api_is_gone`,
+`::test_a_corrupt_retired_ignore_file_is_still_moved_aside`;
+`test_app.py::test_a_folder_rule_from_an_older_build_hides_nothing_from_the_scan`
+(through `CompanionApp` start-up and `scan_whole_project`);
+`test_popup.py::test_the_folder_button_and_its_helpers_are_gone`,
+`::test_fix_all_disables_the_skip_button`;
+`test_settings_window.py::test_no_leave_alone_lines_or_forget_buttons_any_more`;
+`test_tray.py::test_ignored_line_ignores_an_old_folder_count`. The RES-12
+folder tests and the comp-ui-3 test of `IGNORE_FOLDER_FAILED` were deleted.
+Ruskin's 30 tracks still need FIX ALL (or SCAN WHOLE PROJECT) on his machine
+once 0.9.85 is on it.
+
 ## CR-359 - Timeline Cards: the lane crawled while zooming (most with the pad's stick) and while panning over many cuts, on a 4K screen with a tall lane - FIXED, LIVE on /cards 2026-10-04 and confirmed on the laptop (Editing 15dc634 + 83d4fb5)
 
 2026-10-04, Alex on the "Razer" (really an ASUS ROG Zephyrus G15 GA503QS),
@@ -31664,6 +31730,76 @@ Full write-ups in `docs/bug-hunt-2026-08.md` and
   deployed companion until the fleet republish.
 - **NAS hygiene (was item 7 incidental)** — `owen_laptop` in the `editors`
   group still looks like a machine-shaped account; rename if it is one.
+
+## CR-357 - Resolve's media pool jumped between bins every 20-60 s while a YouTube folder was filling - FIXED in repo (unbuilt)
+
+2026-09-30, on the base rig. The owner: "my resolve keeps jumping between
+bins". A MontagePipeline session's `montage_fetch.py` was downloading
+Bilibili clips into `Film 1 + 2\Youtube\Golden-Lion`, and before that the
+`中影 CMPC archive` term folder had 137 clips waiting. `youtube_import` files
+them 20 per tick (28 batches between 08:55 and 09:00 in the log), and every
+batch went through `resolve_bridge._import_files_to_bin_path_locked`, which did
+`SetCurrentFolder(Master/Youtube/<term>)` -> `ImportMedia` ->
+`SetCurrentFolder(previous)`. ImportMedia files into the current bin, so that
+was the only way it had to aim, and the editor saw their media pool jump to
+the term bin and back on every batch. Worse, `previous` was captured BEFORE
+the import: a bin the editor clicked into during the call was overwritten by
+the one they had just left.
+
+**Fix.** Import into whatever bin is current and `MediaPool.MoveClips` the new
+items into the term bin; `SetCurrentFolder` is never called. Clips ImportMedia
+filed but did not return are looked for in the landing bin and moved too.
+Skipped when the landing bin already is the term bin (`_same_folder`, by
+folder unique id, since fusionscript hands out a new proxy per call). A
+refused or raising MoveClips logs which bin the clips are in and counts them
+as imported (they are in the project); nothing is deleted, and the pool-wide
+dedupe keeps the next scan from importing a second copy. Cost: new clips show
+in the editor's bin for the length of one call.
+
+Not changed: the b-roll insert (`perform_insert`), `music_worker.import_clip`
+and the Cards conform still switch-and-restore, but each runs only on the
+editor's own click. Tests: `test_resolve_bridge.py`
+(`test_import_files_never_changes_the_current_bin` and the three after it).
+Owed: a look in live Resolve that MoveClips really leaves the current bin
+alone on 20.x.
+
+## CR-358 - FIX ALL copied Reproductive Rights Fight's music into Framing Formosa's folder and relinked nothing; .aac was filed as b-roll - FIXED in repo (companion 0.9.85, unbuilt)
+
+2026-09-30, ruskin (DESKTOP-LQQ41TC, 0.9.82). The owner: the music clips in
+Reproductive Rights Fight "did not get synced from ruskin". All 30 clips in
+its `Music` bin point at `C:\Users\user\Desktop\Music Docs\*.aac`; Framing
+Formosa uses the same 30 files. From his log: 09:01 FIX ALL in Framing
+Formosa (7 copied, correct); 09:02:35 Resolve switched to Reproductive Rights
+Fight; 09:02:41-47 the proxy relink ran over a pool walk taken in Framing
+Formosa (it saved the NEW project as its rollback copy and found none of the
+old project's uids); 09:02:50 the out-of-tree pass over the same walk opened a
+23-clip popup whose rows were tagged "Framing Formosa". FIX ALL at 09:11 and
+09:15 copied all 23 into `Projects/2026/FF5/Film 1 + 2/B-roll/Editor
+Added/ruskin/` and failed every relink ("could not find ... in the media
+pool", 23/23 failed). `Reproductive-Rights/Audio/Music` stayed empty.
+
+Two defects:
+
+1. **A stale pool walk was acted on.** `_refresh_media_tree_once` fed its walk
+   to `_relink_proxies_once` and then `_classify_pool_once` with no check that
+   the walked project was still open, and the relink alone can take a minute
+   when Resolve refuses links. **Fix:** `_pool_walk_is_current` re-reads the
+   open project (`current_project_name(max_age=0)`) before EACH pass and
+   skips on a different name. And because a dialog can sit open for ten
+   minutes while the editor switches, `perform_fix_all` asks again per row
+   (`_open_project_mismatch`, rows now carry `resolve_project_name`): a row
+   seen in another project is refused before anything is copied, with a
+   message naming the project to open. Only a definite different name
+   refuses; no project, an untagged row or a failed question fix as before.
+2. **`.aac` was not audio.** `fixer.AUDIO_EXTS` lacked it, so music went to
+   `B-roll/Editor Added/<editor>` instead of `Audio/Music`. **Fix:** `.aac`
+   and `.opus` added (the set `ingest_kinds.MUSIC_EXTS` already had).
+
+Tests: `test_app.py` (the three `..._project_switch` / `..._mid_relink` /
+`..._unchanged_or_unknown` refresh tests), `test_popup.py` (CR-358 block),
+`test_fixer.py` (`.aac`/`.opus` rows). Not done: the 30 clips in Reproductive
+Rights Fight are still linked to ruskin's desktop; the copies on the server
+are in Film 1 + 2's `Editor Added/ruskin`.
 
 ## CR-360 - ytdl: a bot-checked metadata pass failed every search, though the flat search worked and the editor's companion would have downloaded every clip - FIXED in repo (ytdl web, schema v15, unshipped)
 
@@ -31855,3 +31991,2210 @@ PyPI into a scratch root over the venv's 2026.08.19 and throttled the rerun.
 Not verified: run.sh on the NAS, the image-mode `/data` permissions, and the
 daily thread over a real day. Deploy: dashboard (image) and companion
 separately, in either order.
+
+## CR-362 - a self-installing customer could not sign in to the appliance, its sync engine step could never pass, and it had no vendor key or feed - FIXED in repo (dashboard 0.7.74, unshipped)
+
+2026-10-07, prelaunch review `docs/PRELAUNCH_REVIEW_2026-10-06.md` GL-00
+(STOP-SHIP), GL-01, GL-02, GL-03; owner decisions of 2026-10-07 (customers
+self-install). Two builder rounds; the second failed round-1 oversight on GL-02
+and one INSTALL.md sentence, so none of the four GL items was ticked after round 1.
+
+Symptom: a new customer following docs/APPLIANCE_INSTALL.md could not sign in.
+The compose never set DASH_AUTH_METHOD, so the dashboard defaulted to smb
+against an empty NAS address, the setup page redirected to an uncrossable
+login, and the first-admin window stayed shut (GL-00). The wizard's required
+"Sync engine" step could never pass because the dashboard was never told where
+its Syncthing is (GL-01). The appliance had no vendor feed address and no
+vendor public key, so it could never install an editor or receive an update or
+recall, and the compose comment claiming the key was "generated on first boot"
+was false (GL-02). Every customer dashboard showed a permanent red "release
+key not backed up" line and an "I have backed it up" form for a private key it
+never held. INSTALL.md step 6 told a customer to mint and bake their own
+release key, which ends on a self-signed fork that rejects every vendor build
+(GL-03), and section 3 told them to generate DASH_RELEASE_PUBKEYS with
+openssl, which the dashboard silently drops.
+
+Cause: the compose omitted DASH_AUTH_METHOD and SYNCTHING_GUI_URL; no vendor
+key or feed was baked into the image; the docs, refusal texts and protection
+page described the vendor's own signing workflow as the customer's; on the
+bind/image deploy path the container env is rewritten from site.toml and the
+deploying shell on every run, so a value set by hand in the container never
+stuck.
+
+Fix:
+
+- compose.appliance.yaml: DASH_AUTH_METHOD "local", SYNCTHING_GUI_URL
+  "http://tailscale:8384", DASH_VENDOR_DEFAULTS "1"; comments corrected.
+- New dashboard/src/ccsync_dashboard/vendor_defaults.py holds the vendor
+  public key and the single VENDOR_FEED_URL (a placeholder at today's GitHub
+  feed, GL-47). Defaults apply only when DASH_VENDOR_DEFAULTS=1 AND the
+  variable is absent, so the studio's compose, which renders both variables
+  even when empty, is unchanged. Settings gains vendor_defaults;
+  select_code_root.py applies the same rule.
+- auth.check_boot_secrets refuses smb with no SMB/NAS host when login is on;
+  the refusal no longer appends "generate secrets with openssl" for that
+  problem ("Fix it and redeploy").
+- protection.vendor_holds_the_key(settings) is the one predicate: the status
+  line reads "the vendor holds the update signing key; nothing for you to back
+  up", and page_view(conn, settings)["show_key_ack"] hides the acknowledgement
+  row on a vendor build. The studio and any caller without settings keep it.
+- setup_engine's release_key task, the api 503 publish message and the
+  install_dashboard_app image-mode refusal name the vendor's key.
+- install_dashboard_app: invalid_release_pubkeys() refuses any
+  DASH_RELEASE_PUBKEYS entry that is not a base64 32-byte Ed25519 key, before
+  anything moves. An opt-in DASH_VENDOR_DEFAULTS=1 in the deploying shell
+  makes a blank key or feed fall back to vendor_defaults
+  (effective_release_pubkeys / effective_release_feed_url). An operator-set
+  value always wins.
+- Docs: INSTALL.md step 6 (set site.toml [releases] feed_url and export the
+  key in the deploying shell, never in the container) and section 3;
+  APPLIANCE_INSTALL.md section 5 (only invites and snapshots still untrue;
+  vendor builds come from Packages > From the vendor, recalls honoured);
+  RELEASE.md marks key generation, custody and rotation vendor-only;
+  BACKUP_RESTORE.md; site.example.toml.
+
+Files: dashboard/deploy/compose.appliance.yaml,
+dashboard/deploy/select_code_root.py,
+dashboard/src/ccsync_dashboard/{vendor_defaults,settings,auth,protection,setup_engine,api,app,ui,recovery}.py,
+dashboard/templates/partials/protection.html, server/install_dashboard_app.py,
+docs/{INSTALL,APPLIANCE_INSTALL,RELEASE,BACKUP_RESTORE}.md, site.example.toml.
+
+Tests: dashboard/tests/test_cr362_appliance_defaults.py (17, including the app
+booting with the real baked feed URL, a stubbed fetch and a test-signed
+channel, and a successful POST /api/v1/admin/feed/check);
+tools/tests/test_compose_appliance.py (+3); server/tests/test_image_mode.py
+(43). The central gate fixed 129 errors and 17 failures in strict tests that
+built smb Settings with no host (smb_host="nas.test" in the helpers of
+test_sessions, test_account_api, test_account_page, test_subject_data,
+test_oidc) and kept protection.html's acknowledgement loop a plain literal
+list so the copy sweep can read it.
+
+Deploy order: dashboard image first; no companion change. The studio is
+unaffected: DASH_VENDOR_DEFAULTS is unset there, a present env value wins, the
+smb-empty-host refusal needs login on and no NAS address, and the deploy
+opt-in is off. Appliance customers need a compose re-paste for GL-00 and
+GL-01; the key and feed arrive by image update. Rotating the vendor key means
+editing vendor_defaults.VENDOR_RELEASE_PUBKEYS and the companion's
+release_pubkey.RELEASE_PUBKEYS together (a pin test fails on drift) and an
+overlap release.
+
+Deferred at round 1 (superseded by the round-2 list below): GL-60 (a real appliance install on staging hardware); GL-47 (the
+vendor-owned feed domain, so VENDOR_FEED_URL is a placeholder); GL-42 (a
+hardware-token key would change both pinned key lists); making the deploy-path
+vendor fallback automatic for image mode is an owner choice.
+
+**Round 2 (2026-10-07), passed oversight (pass after 2 refix):** Round 2,
+third pass of CR-362: server/tests/conftest.py now clears DASH_RELEASE_PUBKEYS
+and DASH_VENDOR_DEFAULTS, because the compose templates render the deploying
+shell's values. Without it, tools\ship.cmd falsely failed the server/ gate on
+the base rig, where load_secrets.ps1 exports the key. The same failure would
+have hit a customer who exported the switch per INSTALL.md Step 6.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- POLISH: the setup_engine._check_release_key hint says to paste the vendor
+  key in the box. The box (appliance_config overlay) stores
+  DASH_RELEASE_PUBKEYS but cannot set DASH_VENDOR_CUSTOMER. Left alone to
+  avoid breaking tests that pin the hint text. INSTALL.md Step 6 already tells
+  customers to use the shell export. Letting the box imply the customer flag
+  is an owner policy call.
+- GL-60: a real end-to-end install on a staging Synology or TrueNAS needs live
+  hardware.
+- GL-47: the vendor-owned redirectable feed domain is an owner choice.
+  VENDOR_FEED_URL stays the GitHub placeholder.
+- GL-42: hardware-token key rotation is an owner choice.
+- Making the vendor fallback automatic on the deploy path, instead of opt-in
+  via DASH_VENDOR_DEFAULTS=1, is an owner policy call.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: setup_engine._check_release_key's hint still says to paste the
+  vendor key into the settings box. The appliance_config overlay stores
+  DASH_RELEASE_PUBKEYS but cannot set DASH_VENDOR_CUSTOMER, so a customer who
+  follows the hint and not INSTALL.md Step 6 still sees the backup form. Step
+  6 gives the right path, so this does not block a release.
+
+## CR-363 - the appliance was never published on the tailnet, its sync engine restart-looped, wizard tasks needed a redeploy, the Syncthing GUI was open, and nothing watched the server's own node - FIXED in repo (dashboard 0.7.74, unshipped)
+
+2026-10-07, GL-04, GL-05, GL-07, GL-08, GL-09 (prelaunch review, owner
+decisions 2026-10-07). Two builder rounds; failed round-1 oversight on GL-04,
+GL-07, GL-08 and GL-09.
+
+Symptom, on the self-install appliance: (1) the wizard's tailnet task turned
+green on a Running node though nothing published the dashboard (loopback
+only); (2) Syncthing restart-looped on a fresh install (root-owned
+bind-mounted config and tree folders); (3) six wizard tasks could only be
+fixed by "set DASH_X and redeploy"; (4) Syncthing's admin page sat on
+0.0.0.0:8384 with no login; (5) nothing watched the server's own tailnet node,
+so key expiry or a stopped Tailscale container silenced the fleet with the
+first mail a day later, one per machine. Round 1 was also wrong in six ways
+(the publish path could never run, the tick went green with tailnet HTTPS off,
+fleet_silent_at_once fired every evening and falsely cleared in a long outage,
+the tailnet kinds mailed "cleared" on an unreadable node, the GUI guard
+replaced an admin's own GUI password).
+
+Cause: nothing wrote the Serve config; a real tailscaled answers GET
+serve-config on an empty node with 200 and body `null`, which read_serve
+treated as "could not ask"; LocalAPI POST /serve-config does not check the
+tailnet's HTTPS capability; secrets-init chowned /data only; settings were
+frozen env with no wizard write path; the GUI was bound wide on purpose;
+self-diagnosis only read what computers reported.
+
+Fix:
+
+- New tailnet_serve.py: Serve write, watchdog tick, key expiry, snapshot.
+  read_serve maps 200-null to {} and anything else unreadable to None;
+  https_capable reads CertDomains or the https capability; publish and the
+  setup check refuse and name https://login.tailscale.com/admin/dns when HTTPS
+  is off, without recording dashboard_url.
+- New appliance_config.py: allow-listed values in
+  <data>/secrets/appliance_config.json, applied only where the environment is
+  blank, restart via exit 75. Forms for admin, syncthing, nas_connect,
+  release_key, software and secrets in
+  setup_engine/setup_routes/setup.js/setup.html; the tailnet task is green
+  only with Serve and HTTPS or a tailnet dashboard_url; SIGN IN OR PUBLISH;
+  key-expiry note; alert heartbeat offer.
+- New syncthing_gui_guard.py sets a GUI login on an open page; an existing
+  user and password are kept and only insecureAdminAccess is flipped;
+  DASH_SYNCTHING_GUI_SECURE=0 turns it off. server/secure_syncthing_gui.py
+  gains secure_gui() with the same rule; TrueNAS install_syncthing_app secures
+  the GUI itself and no longer claims the password is "shown once".
+- alerts.py: tailnet_node_down, tailnet_key_expiring, tailnet_serve_missing,
+  fleet_silent_at_once (all under "this server"). The key and serve kinds
+  raise on an unreadable node, so the scan files check_failed and no "cleared"
+  mail goes out. fleet_silent_at_once fires only when this server's node is
+  not healthy and stays open until the 24 h hand-over to machine_silent.
+- compose.appliance.yaml: secrets-init mounts syncthing-config and the tree,
+  chowns the config folder, and creates and chowns only missing Projects,
+  Assets, Assets/B-roll Archive and Assets/Music.
+- docs/APPLIANCE_INSTALL.md steps 2-4 and troubleshooting rewritten.
+
+Files:
+dashboard/src/ccsync_dashboard/{tailnet_serve,appliance_config,syncthing_gui_guard}.py
+(new), setup_engine.py, setup_routes.py, app.py, settings.py, collector.py,
+alerts.py; dashboard/static/cc/setup.js; dashboard/templates/setup.html;
+dashboard/deploy/compose.appliance.yaml; server/secure_syncthing_gui.py;
+server/backends/truenas.py; docs/APPLIANCE_INSTALL.md.
+
+Tests: dashboard/tests/test_cr363_tailnet_appliance.py (about 66),
+server/tests/test_gl08_syncthing_gui.py (5), test_setup_engine.py updated
+where it pinned the old defects.
+
+Deploy order: dashboard first; no companion or schema change. The overlay is
+inert where the environment already sets a value; the watchdog and Serve check
+are inert with no tailscale socket. **The GUI guard WILL set a GUI login on
+the live studio Syncthing on its first cycle** (safe for API-key callers); set
+DASH_SYNCTHING_GUI_SECURE=0 in the studio's environment beforehand to keep the
+old behaviour.
+
+Deferred at round 1 (superseded by the round-2 list below): live proof (GL-60) of the Serve POST, 200-null and CertDomains
+behaviour, secrets-init on real DSM and SCALE, and the Syncthing GUI PUT; the
+appliance GUI bind stays 0.0.0.0:8384 on purpose (a loopback bind breaks the
+dashboard and does not close the exposure under userspace Tailscale); no
+screen shows the generated GUI password (it is in
+<data>/secrets/syncthing_gui_password); a sw.js LOOK bump if it precaches
+setup.js; a healthcheck-driven restart of syncthing/sftp when only tailscaled
+restarts.
+
+**Round 2 (2026-10-07), passed oversight (pass):** Round 2 (A1b / CR-363):
+tailscaled now runs as the dashboard's APP_UID:APP_GID with secrets-init
+chowning its state and socket volume, so Serve publish, the watchdog repair
+and the sign-in POST are no longer 403 read-only peers (S1c claims corrected,
+GL-60 live check added); fleet_silent_at_once gained a node-independent
+corroboration (silent cluster mid-transfer at last report) so TrueNAS installs
+with no bundled node are covered; server secure_gui writes credentials before
+the Syncthing PUT and returns a message on OSError; select_code_root reads the
+wizard-stored DASH_RELEASE_PUBKEYS overlay.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- Live proof (GL-60): LocalAPI write as APP_UID against a real tailscaled
+  running non-root with userspace networking (state dir and socket perms after
+  secrets-init on real DSM and SCALE), Serve POST shape and CertDomains
+  behaviour, Syncthing accepting the GUI PUT. Needs hardware.
+- Studio site: its TrueNAS Syncthing GUI gets a login on the first cycle
+  unless DASH_SYNCTHING_GUI_SECURE=0 is set first (owner/operator action).
+- If sw.js precaches dashboard/static/cc/setup.js a LOOK bump is owed; sw.js
+  was not touched.
+- A live studio running the appliance compose is not affected (studio is
+  TrueNAS app Tailscale); an EXISTING appliance whose tailscale state folder
+  is root-owned is chowned by secrets-init on the next up, but a chown refused
+  by DSM ACLs only logs a message.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: GL-09 fleet_silent_at_once needs at least half of the silent cluster
+  to have been mid-transfer when the server's node is healthy or absent
+  (TrueNAS and the studio). In a typical working day most lanes are idle. For
+  example, 6 machines go silent at once and 2 were mid-transfer: busy*2 < 6,
+  so no alert, and the admin still waits 24 h for machine_silent. Round 1
+  suggested 'the cluster includes machines whose last report showed a lane
+  busy', and half is a stricter reading of that. It is a deliberate trade
+  against false alerts at the end of the day, so I would not block on it, but
+  the threshold should be recorded as a deliberate trade, or loosened to
+  something like 'at least 2 busy'.
+- POLISH: GL-08 server: secure_syncthing_gui.main() (the by-hand CLI that the
+  TrueNAS installer's warning tells the operator to run) still PUTs the new
+  password BEFORE write_credentials (lines 231-238). An OSError there leaves
+  the GUI with a password that was never printed or stored. It is recoverable:
+  main() does not check for an existing login, so a rerun sets a new password
+  once the disk is writable. Still, it should follow the same write-first rule
+  that secure_gui now follows.
+- POLISH: secure_gui's docstring says 'Never raises', but syncthing_api uses
+  requests, which raises on a transport error. I probed this: a
+  ConnectionError on the PUT escapes, and the credentials file is left in
+  place. The only caller (TrueNASBackend._secure_gui_now) catches it and
+  prints a NOTE, and keeping the file is the right choice when a timed-out PUT
+  may have landed. Only the docstring is wrong.
+- POLISH (live check for GL-60): Docker copies an image directory's ownership
+  into an EMPTY named volume when a container is created. The tailscale image
+  very likely has a root-owned /var/run/tailscale, and Go removes the socket
+  file on a clean shutdown, so a recreated tailscale container can start with
+  a root-owned tailscale-sock volume. This is safe only because compose
+  re-runs secrets-init (the chown) before it starts tailscale on every up. Add
+  'recreate only the tailscale service and confirm the socket appears' to the
+  GL-60 live checklist next to 'LocalAPI write as APP_UID'.
+- POLISH (owner awareness, carried from round 1): on the studio's next
+  dashboard deploy, syncthing_gui_guard puts a random login on the TrueNAS
+  Syncthing GUI (the password is only in <data>/secrets/syncthing_gui_password
+  inside the container), unless DASH_SYNCTHING_GUI_SECURE=0 is set first or
+  the GUI already has a login. API-key automation is unaffected, but the
+  owner's own browser access to that GUI changes. The deploy notes should say
+  this before the studio upgrade.
+
+## CR-364 - on Synology the appliance ran as a user that does not exist, and the shipped SFTP window let DSM's sshd cut every proxy over 514 MiB short on a green lane - FIXED in repo (dashboard 0.7.74 + sftp sidecar image, unshipped)
+
+2026-10-07, GL-06, GL-10. Two builder rounds; failed round-1 oversight on
+GL-06.
+
+Symptom 1 (GL-06): the appliance runs as uid 3000:3001 by default. DSM numbers
+local users from 1026, so that user does not exist and every write into the
+DSM-owned tree is refused; the compose comment promised a wizard write-back no
+code performs; the only symptom was the Storage check's "could not
+write/read/delete a probe file". On TrueNAS uid 3000 goes to the first local
+user created and the deploy never asked. Symptom 2 (GL-10): site.example.toml
+shipped sftp_chunk_size = "255Ki" and sftp_concurrency = 64 uncommented; on
+DSM 7.2 (OpenSSH 8.2, no limits@openssh.com) lane-B downloads truncate at
+539,000,832 bytes while rclone reports success.
+
+Cause: nothing derived the values from the NAS kind, refused them, checked
+them or alerted on them; the uid step was undocumented and the comment false.
+
+Fix, GL-06: the false write-back claim is gone; APPLIANCE_INSTALL.md step 2
+documents creating a ccsync DSM account, granting Read/Write, reading `id
+ccsync` and setting APP_UID/APP_GID; setup_engine.storage_identity_hint names
+the container uid, the folder owner and the doc step on a permission refusal
+only; install_dashboard_app.truenas_identity_mismatch refuses a uid/gid
+mismatch on non-Synology deploys (warns if the box cannot answer). Round 2:
+dashboard/deploy/sftp/entrypoint.sh uses `groupadd -o -g "$APP_GID" editors`
+instead of BusyBox addgroup, so DSM's default gid 100 (Alpine's `users`) no
+longer restart-loops the sidecar.
+
+Fix, GL-10: server/common.py parse_sftp_size, sftp_transport_problem and
+derive_sftp_transport (64Ki / 16); site_env publishes the derived pair and
+main refuses an unsafe [net] before anything moves;
+check_health.check_sftp_transport; dashboard sftp_transport.py with the
+appliance sidecar exempt; site_store._shape serves the safe pair and carries
+_sftp_transport_problem; site_store.check_sftp_transport runs inside set_many
+(Settings save, TOML import, undo, import dry run) but skips the one-time
+`seed:env` write so an old 255Ki cannot veto the boot seed; new alert
+sftp_transport_unsafe (error, "this server"); the sftp_chunk_size hint names
+64Ki on Synology and admin_settings.html shows a stored problem above the
+connection fields; site.example.toml lines commented out.
+
+Files: server/{common.py, install_dashboard_app.py, check_health.py};
+dashboard/src/ccsync_dashboard/{sftp_transport.py (new), site_store.py,
+setup_routes.py, setup_engine.py, alerts.py};
+dashboard/templates/admin_settings.html;
+dashboard/deploy/{compose.appliance.yaml (comment), sftp/entrypoint.sh};
+site.example.toml; docs/{APPLIANCE_INSTALL,INSTALL,SELF_DIAGNOSIS}.md.
+
+Tests: dashboard/tests/test_gl06_gl10_synology.py (17),
+server/tests/test_gl06_gl10_synology.py (9, Git Bash). The central gate
+changed the alert copy "while its lane showed green" to "while its proxy
+download showed green" (CR-181 vocabulary).
+
+Deploy order: dashboard first; the appliance sftp sidecar image must be
+rebuilt for the entrypoint change; old companions read the same two manifest
+keys. A Settings save that posts a stored bad chunk size is refused with a 422
+until fixed. The studio's TrueNAS site is unaffected.
+
+Deferred at round 1 (superseded by the round-2 list below): live Synology verification (real DSM account, a refused write
+showing the hint, the sidecar with APP_GID=100); proxies already truncated
+cannot be detected remotely (the alert says to re-download them); a sidecar
+flag in sftp_transport.limited() if a future variant serves lanes from DSM's
+own sshd.
+
+**Round 2 (2026-10-07), passed oversight (pass after 1 refix):** Round 2,
+second pass: the groupmod rename of the APP_GID owner is now guarded. A rename
+of `sftpkeys`, `root` or `sshd` would have survived in /etc/group and made
+`chown root:sftpkeys` fail under set -eu on every container restart. The
+entrypoint now refuses those gids with a clear message. Tests use a fixture
+with the image's own groups and cover a double run (the restart case). No
+version bump.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- Live Synology verification (a real DSM appliance, a refused write showing
+  the Storage hint, the sidecar starting with APP_GID=100, a login landing in
+  the chroot) needs hardware and a container run.
+- Proxies over 514 MiB that were already truncated cannot be detected
+  remotely. The alert tells the admin to re-download them.
+- Round-1 deferral, not done: the setup wizard Storage task shows only 'not
+  yet probed' before the first probe. No owner decision covers it either way.
+- Round-1 deferral, not done: if a future appliance variant serves lanes from
+  DSM's own sshd, `sftp_transport.limited()` will need a sidecar flag. No such
+  variant exists today.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: when APP_GID is owned by another Alpine system group, the guard
+  still renames it to `editors` as long as it is not root, sftpkeys or sshd.
+  For example gid 42 is `shadow`, and /etc/shadow is root:shadow 0640 on
+  Alpine. This is not reachable today: every editor is chrooted with
+  ForceCommand internal-sftp, and no real DSM or TrueNAS account has a primary
+  gid below 100. An allow-list (rename only `users`, or any group with gid >=
+  100) would be tighter than the deny-list.
+- POLISH: the block tests run under Git Bash with stub getent, groupmod and
+  groupadd, not BusyBox ash with shadow's real tools. The fake /etc/group has
+  only 5 rows, not Alpine 3.20's full set (it lacks guest:405:100 and games).
+  The behaviour matches by construction, but this is still not a container
+  run, and the builder already lists that as deferred.
+
+## CR-365 - TrueNAS 26 removes REST /api/v2.0, which every TrueNAS call here used; ported to JSON-RPC before launch - FIXED in repo (dashboard 0.7.74 + base-rig scripts, unshipped)
+
+2026-10-07, GL-11 plus the GL-46 owner decision (port before launch so TrueNAS
+26 works on day one). Two builder rounds; failed round-1 oversight.
+
+Symptom: on TrueNAS 26 the dashboard's Users section, the setup wizard's NAS
+checks, and the deploy, account, snapshot and API-key scripts would all 404.
+The first JSON-RPC port then failed review: a key-only site could not log in,
+a login rate limit escaped raw, every call logged in again, the pre-update
+snapshot route was unmapped, the dashboard ignored the certificate pin, and no
+rollback switch was plumbed.
+
+Cause: the only transport was REST over HTTP (dashboard
+nas/truenas.py:_request, server/common.py:truenas_api); the first port logged
+the API key in as the admin although the key is minted for the dedicated
+account.
+
+Fix:
+
+- New stdlib-only truenas_rpc.py, two byte-identical copies (server/ and
+  dashboard nas/): an RFC 6455 websocket client, a JSON-RPC 2.0 session and a
+  table mapping each REST route to its method, returning an object with
+  status_code/text/json() so no caller body changed.
+- Login is auth.login_ex API_KEY_PLAIN with the key's own account
+  (DASH_NAS_API_KEY_USER / TRUENAS_API_KEY_USER); auth.login_with_api_key is a
+  legacy fallback only; any login RpcError becomes RpcAuthError naming the
+  account presented.
+- One pooled authenticated session per target and credential, dropped after 25
+  s idle; one retry on a dead socket for reads or unsent requests, never a
+  replay of a sent write.
+- /zfs/snapshot maps to pool.snapshot.create with zfs.snapshot.create as
+  fallback; an unmapped route falls back to REST while REST answers, and a
+  pinned jsonrpc transport refuses it by name.
+- A non-101 answer below 500 (not 429) means "no JSON-RPC here"; the REST-only
+  memory is a 300 s TTL shared by both callers and a REST 404 clears it (with
+  a named log line, "TrueNAS 26 removed REST", for a collection route).
+- Connects to /api/v25.04.2 first, then /api/current (TRUENAS_API_PATH
+  overrides). The sha256 certificate pin is honoured by the RPC client.
+- DASH_NAS_API_TRANSPORT (auto|jsonrpc|rest, blank = auto) is the rollback
+  switch, written by compose_config and passed in compose.yaml,
+  compose.image.yaml and compose.appliance.yaml; the key-user variable
+  likewise; create_api_key.py prints its export; the appliance wizard gains an
+  optional "NAS API key account" field.
+- Supported: 26.x JSON-RPC only; 25.04 and 25.10 both, JSON-RPC preferred;
+  24.10 and older REST fallback (unsupported, works).
+
+Files: server/truenas_rpc.py,
+dashboard/src/ccsync_dashboard/nas/truenas_rpc.py, server/common.py,
+dashboard/src/ccsync_dashboard/nas/{truenas,factory}.py, settings.py,
+appliance_config.py, setup_engine.py, server/create_api_key.py,
+server/install_dashboard_app.py,
+dashboard/deploy/compose{,.image,.appliance}.yaml,
+server/tests/fixtures/compose.truenas.golden.yaml, docs/SERVER.md,
+docs/CONFIG.md.
+
+Tests: server/tests/test_truenas_rpc.py, test_truenas_rpc_overseer.py;
+dashboard/tests/test_truenas_jsonrpc.py, test_truenas_jsonrpc_overseer.py
+(including a source scan that every path sent to a TrueNASClient routes),
+fake_truenas_rpc.py. Two REST-header tests are pinned to transport=rest; the
+central gate also pinned
+test_bug_hunt_2026_09_03_dash_db_core.py::test_the_nas_client_refuses_a_redirect
+to transport="rest".
+
+Deploy order: dashboard first, then base-rig scripts; no companion or schema
+change. The studio's 25.x NAS keeps working because both APIs answer. Set
+TRUENAS_API_KEY_USER on the base rig and redeploy so the container gets
+DASH_NAS_API_KEY_USER; without it the login falls back to the legacy method.
+If the first live run misbehaves, set TRUENAS_API_TRANSPORT=rest and redeploy.
+
+Deferred at round 1 (superseded by the round-2 list below): live verification on 25.10 and 26 (login shapes, job ids over the
+websocket, the snapshot method name, the versioned path); the
+create_api_key.py allow-list body is still the REST-era shape; GL-46 paperwork
+beyond docs/SERVER.md; NAS TLS default belongs to CR-368.
+
+**Round 2 (2026-10-07), passed oversight (pass after 1 refix):** Round 2b: the
+version-note helper takes the script's args, so it makes no call on --dry-run,
+respects --nas-kind, and runs only after argument validation. The wizard
+cross-check treats a blank DASH_NAS_API_KEY_USER as clearing the field, so a
+TrueNAS key cannot be left without its account by blanking it. The stale
+versioned-endpoint-first text is removed from both truenas_rpc.py copies,
+which stay identical. The docs/SERVER.md contradiction about a blank key
+account is resolved.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- Live verification on a real TrueNAS 25.10 and 26 box (needs hardware): the
+  auth.login_ex shapes, a job id returned over the websocket, whether
+  pool.snapshot.create or zfs.snapshot.create exists, and core.ping.
+- A dashboard notice or alert for 'REST answered 404 to a known route' is
+  still log-only.
+- create_api_key.py's ALLOWLIST body is still the REST-era shape; on 25.04 and
+  later a key acts as its account's roles.
+- The Synology-side statement in the order form is not written (docs only,
+  belongs to the paperwork track).
+- The NAS TLS verification default belongs to package A3b.
+- Two failures in the full server/ suite from the previous report belong to
+  other packages and were not re-run: compose.appliance.yaml has CRLF, and
+  DASH_VENDOR_CUSTOMER is in the compose_config dict but not in compose.yaml.
+  The overseer's later full run showed 867 passed, 2 skipped.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: server/common.py print_truenas_version_note says it is 'silent on
+  doubt', but when /system/info answers JSON with no version (for example a
+  REST 401 body like {"message": ...}), truenas_rpc.version_note('') returns
+  'cannot tell the TrueNAS version from ''' and the script prints 'NOTE:
+  cannot tell the TrueNAS version from '''. Harmless advisory noise; return
+  silently when the version string is empty.
+
+## CR-366 - "Remove from this machine" deleted files that were not on the server - FIXED in repo (companion 0.9.86, unbuilt, unshipped)
+
+2026-10-07, GL-12, GL-13, GL-14 (prelaunch review). Two builder rounds; failed
+round-1 oversight on a data-loss path in GL-13.
+
+Symptom: a permanent rmtree behind a dialog saying nothing would be lost.
+(GL-12) Footage under 120 s old, or dated in the future by a camera clock, was
+deleted: the gate's dry run reused lane A's --min-age. (GL-13) On an
+upload-only tick lane A carried video only, so WAVs, stills and documents were
+deleted. (GL-14) A local file whose name the NAS already holds at another size
+never uploads under --ignore-existing but counted as uploaded.
+
+Cause: the gate reused build_up_command's floors; upload-only had no lane for
+non-video files; scan_size_mismatches was advisory and fail-open.
+
+Fix (round 1): build_up_command(apply_min_age=False) for the dry run only;
+scan_local_tree names files dated more than 300 s ahead; lane A carries EVERY
+file for an upload-only project (build_filter_rules_up(carry_all=True),
+filter_up_all.txt, RcloneLane.carry_all_fn <-
+Sequencer.is_upload_only_subpath); scan_size_mismatches_strict (`rclone check
+--combined -`, fails closed) run by app._removal_extra_checks;
+tray.remove_ready_body claims only what was checked; UPLOAD_ONLY_TICK.md
+rewritten.
+
+Fix (round 2): carry-all excludes OS litter (.DS_Store, Thumbs.db,
+desktop.ini), Syncthing state (.stversions, .stfolder, .stignore) and work
+files (*.ccsync-tmp, *.part-Frag*), and the local scan skips those dirs; a
+FULL tick also names video files lane A refuses (ytdl work names, move
+staging) plus .part/.ytdl/.ccsync-tmp; new scan_edited_since_upload (a `copy
+--update` dry run minus the ignore-existing dry run, fails closed) blocks with
+gate key edited_since_upload; UPLOAD_ONLY_TICK.md states an edit to an already
+uploaded file never goes up on an upload-only tick; a Settings advisory
+(tray._future_dated_line) names the first future-dated file and its date from
+a per-project map summed across projects, local only.
+
+Files: companion/src/ccsync_companion/sync/rclone_lane.py, app.py, tray.py,
+settings_window.py, sync/sequencer.py;
+companion/tests/test_removal_gate_cr366.py (new), tests/test_sync_halt.py;
+docs/UPLOAD_ONLY_TICK.md.
+
+Tests: 1038 passed across the gate, sync, rclone, upload-only, tray, Settings
+and telemetry files (real rclone 1.74.4 included).
+
+Deploy order: companion only; the new gate keys are local and additive.
+Upload-only machines on 0.9.86 start uploading non-video files into the
+project folder on the NAS (owner-accepted). Older companions keep the
+video-only behaviour and the old gate.
+
+Deferred at round 1 (superseded by the round-2 list below): uploading future-dated files through lane A's age floor (detected,
+shown, logged and blocking removal, but not uploaded); a dashboard chip (needs
+a sync_guard report key, telemetry rows and a dashboard-first deploy);
+PL-RES-07 and bug-sync-4/5 are outside GL-12..14; the edited-since-upload
+check assumes the server keeps upload mtimes (false blocks are overridable,
+never deletions).
+
+**Round 2 (2026-10-07), passed oversight (pass after 1 refix):** Round 2 pass
+2 (CR-366): the future-date advice now tells the truth (a few hours ahead
+uploads by itself; further ahead needs the modified date reset; a copy or
+re-import keeps the date; fixing the camera clock only helps future
+recordings). The Settings warning keeps future-dated files in borrowed include
+folders and is not wiped when no selection is cached. The removal gate
+force-fetches the selection first so a recent full -> upload_only switch is
+seen. The gate tests now pin exact counts.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- GL-12 upload half: lane A's age floor still refuses far-future files (design
+  change to lane A on the live fleet).
+- GL-12 dashboard chip (sync_guard report key): needs a dashboard model,
+  telemetry rows, a TELEMETRY.md line and a dashboard-first deploy.
+- Having the companion touch a future-dated file's mtime to now: an owner
+  choice, so the advice only says to ask whoever looks after the computers.
+- Polish 6: a per-call filter file for the gate to remove the millisecond
+  window with the shared filter_up.txt. This was already in the code before
+  round 1 and is not a regression.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: app.future_dated_report (app.py ~5880-5896) cannot tell 'no
+  selection known' from 'a selection known to be empty', because both become
+  ticked=None. A one-project editor who unticks their only project (the folder
+  stays on disk) therefore keeps the Settings WARNING naming a file in a
+  project that is no longer ticked, until the companion restarts. That is the
+  round-1 LOW defect's untick case, and it also puts a warning on a computer
+  with nothing ticked (the 'nothing ticked is fine' rule). Probed: an empty
+  live selection plus a kept folder gives {'count': 1, ...}. Fix: use the
+  source from selection_client.get(). When it is 'live' or 'cache', pass the
+  list (even if empty). Pass None only when the source is 'none'.
+- POLISH: the prune keys in future_dated_report are built from the raw
+  rel_path (strip() only), but the sequencer builds the scan key with
+  normalized_safe_rel, which also strips trailing '/' and '\'. A rel_path that
+  arrives with a trailing separator makes the key miss the keep set, and the
+  warning is popped. That hides it, which is the unsafe direction for an
+  advisory. Probed: rel_path '2026/X/' turns the report into None. Fix:
+  normalise ticked rels with normalized_safe_rel, the same way the sequencer
+  does.
+- POLISH: two of this pass's fixes have no test. Nothing exercises
+  removal_blockers' forced selection_client.fetch(force=True): every gate test
+  monkeypatches removable_projects or uses fakes without fetch. Nothing
+  exercises app.future_dated_report's borrowed-include keys or its None
+  fallback either. My scratchpad probe (a2r2p2/test_probe.py) uses a real
+  SelectionClient with a stubbed http_get. With a full -> upload_only switch
+  inside the 30 s TTL, the gate asks lane A with carry_all=True, and
+  include-scoped future-dated entries are kept. Both work today, but the brief
+  asked for a test that pins each fix.
+- POLISH: when the forced fetch fails (dashboard down, NAS SFTP up), the gate
+  falls back to the cached mode with only a debug log. The brief says to
+  prefer blocking on doubt. In practice a stale 'full' still gets Syncthing
+  completion, which comes in under 100% for an unshared folder, so this is not
+  a demonstrated deletion. Consider adding an 'unknown' block, or at least the
+  plan's age, when the forced fetch failed and the cached plan is older than
+  the TTL.
+
+## CR-367 - a removed editor's computer kept fleet access, OIDC sites accepted NAS passwords on the JSON login, and a new site could not turn the shared fleet token off - FIXED in repo (dashboard 0.7.74 + companion 0.9.86, unshipped)
+
+2026-10-07, wave A3a: GL-15, GL-16 and the token half of GL-19 / COM-H15. Two
+builder rounds; failed round-1 oversight.
+
+Symptom: (GL-15) a suspended, disabled or deleted editor's computer kept fleet
+access: the shared fleet token was on by default, the identity token never
+expires (CR-86) and could not be revoked, and a deleted smb/oidc editor was
+re-registered by their next report because forget_editor erased the only row
+carrying the suspension. (GL-16) On an OIDC site POST /api/v1/login accepted
+any NAS SMB password, skipping the IdP, MFA and the allowed-groups rule.
+(COM-H15) A new site could not leave the shared token off; with it off /verify
+handed out nothing usable. Round 1 also left the studio's site.toml with two
+[security] tables (invalid TOML, crashing every server/ script at import),
+worded a deleted person's report "sign in again", omitted the leaver docs, and
+retired the oldest-created sign-in token at the cap.
+
+Cause: identity tokens had no server-side state; smb/oidc delete left no
+tombstone; the three mounted fleet gates trusted the sub-app's own signature
+check; api_login lacked ui.page_login_submit's OIDC rule; Settings.from_env
+treated unset as on.
+
+Fix:
+
+- GL-16: auth.oidc_password_refused and auth.password_login_refusal are one
+  rule for both login routes, plus the plaintext refusal on the JSON login.
+- Per-person revocation with no schema bump: db.revoke_identity,
+  identity_generation, identity_floor, identity_removed,
+  clear_identity_removal, one meta row per person (identity_gen:<user>). A
+  token's issued-at is expiry minus IDENTITY_TTL_SECONDS, so the five-field
+  wire shape is unchanged; make_identity_token(floor=) makes a fresh sign-in
+  pass; auth.identity_status refuses a token older than valid_after and fails
+  open if the DB cannot be read.
+- Tombstone: delete_user_everywhere calls revoke_identity(removed=True) in the
+  delete transaction; api._account_refusal returns REFUSED_ACCOUNT_REMOVED on
+  every auth method and is asked before the "revoked" wording in api_report;
+  /verify 403s a removed, suspended or disabled person; only
+  record_known_editor(source='admin') lifts it.
+- The b-roll, music and ytdl gates drop X-CCSync-Identity for a revoked or
+  barred identity (api.identity_bar / strip_barred_identity).
+- POST /api/v1/admin/users/{u}/identity/revoke (admin, API only; API.md,
+  SERVER.md and TENANCY.md Offboarding).
+- COM-H15: Settings.from_env unset = off; compose templates say "0";
+  install_dashboard_app order is environment, then site.toml [security]
+  shared_report_token, then "0". With it off, /verify mints a per-computer
+  cce1 token returned as report_token and editor_report_token; VerifyIn takes
+  an optional machine and the same computer replaces its own token; at 16 live
+  tokens per person the least recently used is retired. The companion's
+  identity.verify_credentials sends machine = platform.node().
+- Studio: site.toml (local, ignored) has ONE [security] table with
+  shared_report_token = true, so the live fleet stays on the shared token;
+  server test_every_repo_site_toml_parses loads every site*.toml.
+
+Files:
+dashboard/src/ccsync_dashboard/{auth,api,db,ui,settings,broll,music,ytdl}.py;
+dashboard/deploy/compose.yaml, compose.image.yaml;
+server/install_dashboard_app.py,
+server/tests/{test_site_manifest,test_compose_template}.py,
+server/tests/fixtures/compose.truenas.golden.yaml;
+companion/src/ccsync_companion/identity.py; site.example.toml;
+docs/{CONFIG,SERVER,TENANCY,API}.md.
+
+Tests: dashboard/tests/test_cr367_trust_tokens.py (34), the adjusted
+dash-core-2 test in test_bug_hunt_2026_08_21.py, a compose test for the
+site.toml path, server test_every_repo_site_toml_parses.
+
+Deploy order: dashboard first, then companions. Old companions keep working
+(unchanged identity wire shape, minted cce1 adopted via report_token; the
+studio stays on the shared token through site.toml and its compose-stored
+"1"). Per-computer replacement needs companion 0.9.86. Rolling the dashboard
+back to an older image leaves identity_gen:* rows unread, so revocations stop
+being enforced there.
+
+Deferred at round 1 (superseded by the round-2 list below): retiring the studio's shared token (owner: delete the site.toml
+line, redeploy, watch the boot log's list); Disable is deliberately not an
+identity revocation and a password reset does not revoke identity tokens
+(policy to confirm); no Users-page button for the revoke route; app.py's boot
+wording still says the shared token "defaults to true"; the wizard's verify
+does not send machine.
+
+**Round 2 (2026-10-07), passed oversight (pass):** Round 2 (A3a, CR-367):
+compose templates take {{DASH_SHARED_REPORT_TOKEN_ENABLED}} from one shared
+helper (file and dict agree, Synology/hand-pasted YAML no longer force 0 on a
+shared-token site); the delete tombstone and identity generation rows are
+keyed by HMAC(pseudonym salt, name) so a deleted person's name leaves meta;
+browser sign-in (JSON login, form login, OIDC callback) now refuses a removed
+person via auth.removed_signin_refused (config admins exempt, fails open,
+suspension still allowed per DCORE-4); companion test pins verify 'machine';
+onboarding wizard verify also sends machine; boot-log wording fixed. Tests:
+test_cr367_round2.py new, plus additions to test_admin_delete.py,
+test_compose_template.py, companion test_identity.py, onboarding
+test_steps.py.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- Studio retirement of the shared token (delete the shared_report_token = true
+  line from the studio site.toml, redeploy, watch the boot log): owner
+  decision on timing, unchanged.
+- Disable and password reset not revoking identity tokens: policy choice for
+  the owner (DCORE-1 refusal covers disable and keeps 'comes straight back on
+  re-enable').
+- Membership check (_require_fleet_member) on browser password sign-in for smb
+  accounts that were never deleted (bookkeeper, guest share): not done.
+  Applying it to /login could lock out admins and non-editor users, and
+  DCORE-4 left sign-in independent of membership, so this is an owner choice.
+  Deleted people are now covered by the tombstone.
+- No UI button on the Users page for the identity-revoke route (API only,
+  documented): UI-owner work, not touched.
+- Rollback of the dashboard to an older image leaves identity_gen:* rows
+  unread, and the old plaintext-keyed rows from round 1 are not migrated
+  (round 1 was never deployed, so none exist live). Wizard and tray changes
+  only reach editors with the next companion/installer build.
+- test_safety::test_env_keys_match_compose failure (DASH_VENDOR_CUSTOMER in
+  compose_config but not compose.yaml) belongs to whichever package added that
+  key.
+
+**Disputed by the builder in round 2:**
+
+- Part of defect 3 asks for _require_fleet_member on password sign-ins. I did
+  not add it: it is a membership gate, not a removal gate, and it would change
+  who may open the browser UI (admins not in the editors group,
+  guest/bookkeeper accounts) which DCORE-4 left independent. The removal
+  tombstone, which is the GL-15 concern, is enforced on all three browser
+  sign-in paths.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: The dispute over adding _require_fleet_member to the password
+  sign-ins is acceptable as a deferral, but the reason given is wrong. DCORE-4
+  (KNOWN_BUGS) decided only about suspension. It says nothing about membership
+  at sign-in, and the CR-56 trust-model-5 entry even describes password
+  sign-in as enforcing membership. The real reason to hold off is that the
+  change decides who may open the browser UI: on local sites it would lock out
+  browse-only roles (the DCORE-6 docstring in api._require_fleet_member
+  mentions these accounts), and on the live studio it would lock out any smb
+  browser user outside the editors group. That makes it an access-policy
+  change, so it is an owner call. The membership half of bug-dash-auth-2 (the
+  bookkeeper or guest SMB account browsing b-roll, music and Cards) is still
+  OPEN. GL-15's status line must carry it as deferred and must not read
+  bug-dash-auth-2 as closed.
+- POLISH: The computer's label for token replacement is platform.node() (tray
+  in identity.py:312, now also onboarding/steps.py verify_account). If one
+  person has two computers with the same hostname (for example two identical
+  Macs on different networks, both 'Alexs-MacBook-Pro.local'), each sign-in
+  revokes the other's cce1 token and the two can ping-pong through
+  re-sign-ins. The companion-minted machine_id (~/.ccsync/machine.json) would
+  be a sturdier key. Rare, and the design dates from round 1.
+- POLISH: The boot-log advice in app._log_shared_token_migration still says
+  'mint per-editor tokens on Admin > Users, then set
+  DASH_SHARED_REPORT_TOKEN_ENABLED=0'. On the studio, a bare env var is
+  overwritten by the next deploy, which now reads site.toml [security]
+  shared_report_token. Since round 1, a tray sign-in mints the per-editor
+  token itself. The advice should name the site.toml line.
+- POLISH: ui.page_login_submit (async) calls auth.removed_signin_refused
+  synchronously on the event loop (ui.py:1080), so a sqlite open and three
+  meta reads run there. WAL reads do not wait on writers and the setup_engine
+  read just below already does the same, so this is negligible, but
+  run_in_threadpool would match the verifier call above it.
+
+## CR-368 - new sites shipped insecure defaults a buyer's security review would fail (NAS TLS, Postgres password, editor host keys, per-project ACL, tree keys) - FIXED in repo (dashboard 0.7.74 + companion 0.9.86 + installer 1.0.47, unshipped)
+
+2026-10-07, wave A3b: GL-18 and the rest of GL-19 / COM-H15 except tokens (NAS
+TLS verify by default with a fingerprint option, a random Postgres password
+bound to LAN and tailnet, editor-lane NAS host-key pinning, per-project ACL
+instead of project_acl=shared for new sites, canonical_prefix/tree_name
+read-only once machines exist, a docs/TAILNET_POLICY.md grants template).
+Round 1 built the defaults; round 2 fixed six overseer defects; failed round-1
+oversight on GL-19.
+
+Symptom after round 1: (1) on every new site editors' lanes A and B failed
+with `knownhosts: key mismatch`; (2) an appliance's NAS calls failed with a
+certificate error, because unset verify meant "system CA bundle"; (3)
+appliance sites got no lane pin, no admin separation and no API-key-only rule;
+(4) per-project ACL was only a default flip in base-rig tooling; (5) the boot
+seed raised AttributeError once a computer existed; (6) an existing Postgres
+volume kept "DaVinci" while the deploy told the admin to type a new password.
+
+Cause: (1) one ed25519 key in known_hosts with no host_key_algorithms, while
+rclone prefers ECDSA; (2) a NAS ships a self-signed certificate and the only
+pin source was the base-rig deploy; (3) sftp_hostkey came only from
+DASH_SITE_SFTP_HOSTKEY and the admin and NAS checks lived only in
+install_dashboard_app; (4) nothing on the dashboard side maintained
+proj-<slug> membership; (5) check_tree_lock ran for the seed with
+settings=None; (6) POSTGRES_PASSWORD is read only by initdb on an empty data
+directory.
+
+Fix:
+
+- Both installers write `host_key_algorithms = <key type>` and require it in
+  the stanza check, so existing pinned stanzas are rewritten; a real-rclone
+  test against a multi-key paramiko sshd pins it.
+- nas/tls_pin.py: unset verify resolves, when the client is built, to a
+  `sha256:` pin recorded on first connect in <data>/secrets/nas_cert_pins.json
+  (0600); a different certificate is refused, an unreachable first connect
+  falls back to CA verification (fails closed). The wizard's nas_connect form
+  gains an optional sha256: field and cannot turn verification off. The studio
+  keeps "0" explicitly.
+- The sftp entrypoint publishes its public ed25519 key to
+  `${CCSYNC_DATA}/sftp-hostkey-pub`, mounted read-only into the dashboard;
+  /api/v1/site serves it as sftp_hostkey when the deploy value is empty.
+  appliance_config refuses a dashboard admin equal to the NAS admin and a
+  TrueNAS DASH_NAS_PW.
+- project_groups.py plus TrueNASClient group capabilities reconcile
+  proj-<slug> membership after each enforce cycle and make a project created
+  at /project-setup 2770 <owner>:proj-<slug>; inert under `shared` (the
+  studio) and on DSM; DASH_PROJECT_ACL and DASH_NAS_PROJECTS_ROOT reach the
+  container.
+- site_store.set_many skips check_tree_lock for the `seed:env` write.
+- The compose postgres command re-keys the role in single-user mode on an
+  initialised volume and refuses to start if that fails.
+
+Files: installer/windows_bootstrap.ps1, installer/macos_bootstrap.sh;
+server/install_dashboard_app.py,
+server/tests/fixtures/compose.truenas.golden.yaml;
+dashboard/deploy/compose{,.image,.appliance}.yaml, sftp/entrypoint.sh;
+dashboard/src/ccsync_dashboard/{site_store,settings,api,collector,appliance_config,project_groups
+(new)}.py, nas/{tls_pin,truenas,synology}.py; docs/TENANCY.md,
+docs/APPLIANCE_INSTALL.md.
+
+Tests: server/tests/test_lane_hostkey_rclone_real.py (3),
+dashboard/tests/test_cr368_appliance_secure_defaults.py (6),
+dashboard/tests/test_cr368_project_groups.py (8); additions to
+test_nas_tls_pin, test_tree_keys_lock, test_site_sftp_hostkey, companion
+test_lane_hostkey_pin and server test_secure_defaults.
+
+Deploy order: dashboard first, then companions and installers; the new keys
+are additive. The studio is unchanged (site.toml says shared and
+skip_lane_host_key_pin; verify "0" in its env). Existing appliances need the
+sftp-hostkey-pub mount and an sftp restart; editors installed earlier re-run
+the installer once. A site that ran the project-server profile gets its
+postgres role re-keyed on the next start.
+
+Deferred at round 1 (superseded by the round-2 list below): live-NAS verification of all of it (first-use fetch, pinned REST and
+JSON-RPC, the group reconcile and filesystem.setperm, the single-user ALTER
+ROLE); per-project groups on DSM; a Windows bootstrap end-to-end run; a tray
+line on a host-key mismatch; runtime enforcement of the admin and password
+rules outside the wizard and deploy; PL-RES-27 Postgres backup row; the DSM
+non-admin service account.
+
+**Round 2 (2026-10-07), STILL FAILING oversight:** Round 2c of CR-368:
+deleting a user (db.forget_editor) now drops them from every explicit project
+grant, so a reused sign-in name inherits no projects. The reconcile ledger
+entry is kept so the deleted account's NAS membership is still revoked. A
+create that is retried after a failed register also grants the creator.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- Dashboard UI for listing, adding and removing project grants (API only).
+- Cross-project file move keeps the old proj-<from> gid: needs a live-NAS
+  check.
+- Appliance SFTP per-editor bind views (owner security choice).
+- All live-NAS verification: TLS pin, group reconcile and setperm, Postgres
+  ALTER ROLE, windows_bootstrap.ps1.
+- DSM per-project groups and the DSM non-admin service account.
+- PL-RES-27 Postgres backup row.
+- After merging, re-run server/tests/test_truenas_rpc.py and
+  dashboard/tests/test_nas_tls_pin.py.
+
+**Disputed by the builder in round 2:**
+
+- The overseer asked that forget_editor also clear the ledger entry. I
+  deliberately kept it. The ledger records which NAS groups the dashboard
+  added for that account. With it kept, the next reconcile removes the NAS
+  membership of a deleted person who is no longer wanted. If it were cleared,
+  that membership would be orphaned and never revoked. A reused name with no
+  grants is revoked in the new test. Grants are what carried the reuse risk,
+  and those are cleared.
+- Round-1 sticky-container defect stays disputed: create_tree_project requires
+  an existing parent and rejects slashes, so only the leaf folder is ever
+  created.
+
+**Open after round-2 oversight (closed in round 3, see below; kept for history):**
+
+- MEDIUM (new in this pass, privilege escalation;
+  dashboard/src/ccsync_dashboard/api.py create_tree_project, the
+  `retry_of_own_create` branch ~4296-4308): the branch grants the CALLER
+  whenever the folder already exists with a matching marker and no projects
+  row exists. It never checks that the caller made the folder. POST
+  /api/v1/projects and the /project-setup create are open to any signed-in
+  editor, so an editor who is not in proj-<slug> can 'create' a project that
+  already exists, has a marker and has no projects row yet, and get a grant.
+  The next reconcile then adds them to the group of a project that is supposed
+  to be private. A project gets its projects row only from the collector's
+  Syncthing config pass. So the window covers every project setup_tree.py or
+  write_marker.py just made (2770 svc:proj-<slug>, about 5 minutes until
+  provisioning). It never closes on a project whose provisioning the collector
+  refuses (folder-id divergence REFUSING, collector._creatable). I proved it
+  with scratchpad/a3b_p3/test_probe_retry_grant.py: the marker says
+  created_by='setup_tree', `create_tree_project(s, c, '', 'Secret', '',
+  'bea')` runs, and grants == {'secret': ['bea']}. write_marker then also
+  overwrites created_by with the caller, so the evidence is lost. Fix: read
+  the marker's created_by BEFORE write_marker and grant only when it equals
+  `user`, or drop the branch. Add the test the builder skipped: the creator's
+  own retry is granted, a stranger's is not.
+- LOW (dispute on keeping the ledger REJECTED on evidence; db.forget_editor
+  plus project_groups.reconcile): the stated reason, 'the next reconcile
+  removes the NAS membership of a deleted person', is false. reconcile only
+  loops over `want`, which is db.known_editor_usernames. forget_editor deletes
+  the known_editors row, so a deleted person is never visited. Probe
+  scratchpad/a3b_p3/test_probe_ledger.py::test_deleted_person_not_revoked_without_reuse:
+  after forget plus reconcile, proj-alpha still holds ['bea'] and the ledger
+  still holds {'bea': ['proj-alpha']}. On TrueNAS the membership goes anyway,
+  because delete_user_everywhere deletes the NAS account. The kept ledger does
+  something else: it brings back round-1 HIGH defect 2 for a reused sign-in
+  name. The new person is given proj-alpha the documented way
+  (setup_editor_account.py --project or the NAS UI). The stale ledger entry
+  then makes the next reconcile revoke it. Probe
+  test_reused_name_cli_membership_revoked_by_stale_ledger fails with 'stale
+  ledger revoked a --project membership'. Fix: either revoke and drop the
+  ledger groups of editors who are no longer known, inside reconcile, or clear
+  the ledger entry in forget_editor (the NAS account deletion already removes
+  the membership).
+- POLISH: project grants can only be managed through the API (PUT/DELETE
+  /api/v1/projects/{slug}/access/{editor}, which needs a session plus the CSRF
+  and Origin headers). On a self-installed per-project TrueNAS site, a wired
+  editor can therefore reach a colleague's project only if a non-technical
+  admin hand-crafts API calls. This is recorded as deferred; it should have a
+  UI before launch.
+- POLISH: per-project membership follows a SELF-SERVICE tick
+  (_require_selection_write lets an editor tick any active project for
+  themselves). Under per-project ACL any editor can still join any project's
+  group by ticking it, so COM-H15's 'any editor can delete any project' is
+  narrowed to accidental access, not closed. This matches the documented
+  design ('a tick should mean in the group'), but it should be stated in
+  TENANCY.md or GL-49 as an accepted limitation rather than left implicit. Not
+  an owner decision I can make.
+
+**Round 3 (2026-10-07), passed oversight (pass):** CR-368 round 3
+(2026-10-07): the retry_of_own_create grant is now gated on marker created_by
+== caller, read before write_marker, and a stranger no longer overwrites
+created_by. forget_editor clears the project_group_ledger entry, so the
+round-2 "keep the ledger" dispute is rejected. Still open as POLISH/deferred:
+UI for project grants (API only), and TENANCY.md should state that
+self-service ticks still join any project's group, so COM-H15 is narrowed, not
+closed. Live NAS checks remain deferred.
+
+Central gate, round 3 (2026-10-07): dashboard 6342 passed, 42 skipped; server/
+(Git Bash) 869 passed, 2 skipped; tools 602 passed, 2 skipped; companion 8228
+passed, 58 skipped; 0 failed anywhere, nothing changed by the gate;
+select_suites.py --audit clean.
+
+**Polish noted at round-3 oversight (not blocking; the overseer's findings):**
+
+- POLISH: create_tree_project's `created_by=prior_creator or user` (api.py
+  ~4277) still forges the creator when an existing marker has no created_by
+  key (a hand-dropped {"slug": ...} marker). A stranger can POST once with a
+  resolve_project name they cannot claim. _register_project then raises after
+  write_marker, so the marker now says created_by=<stranger> and no row
+  exists. A second POST is then treated as 'their own retry' and earns the
+  grant. Probe:
+  scratchpad/a3b_r3/test_probe_r3.py::test_stranger_two_posts_on_marker_without_created_by.
+  Every tool that writes markers (provision.write_marker,
+  common.build_marker_write_cmd, write_marker.py) always sets created_by, and
+  the folder must also have been made private, so this needs an admin-written
+  marker. Cheap fix: when the folder existed, write prior_creator unchanged,
+  or a fixed 'unknown', never the caller.
+- POLISH: the default created_by values 'dashboard' (collector self-heal),
+  'setup_tree' and 'write_marker' all pass USERNAME_RE. An editor account with
+  one of those names would pass the retry_of_own_create test on any marker
+  that tool wrote. Probe: test_editor_named_like_tool_sentinel. Fix: exclude
+  those three names in the comparison, or reserve them as usernames.
+- POLISH: a stranger's plain POST on a creator's half-finished create (folder
+  closed, marker created_by=alice, no projects row because _register_project
+  raised) registers the row with no grant. Alice's later retry then fails the
+  'no projects row' condition, and only an admin grant through the API gives
+  her access to her own project. This narrow lock-out matters more because
+  grants still have no UI (deferred).
+- POLISH (carried, deferred): project grants are API-only (PUT/DELETE
+  /api/v1/projects/{slug}/access/{editor}) and need a UI before launch.
+- POLISH (carried): TENANCY.md / GL-49 should say that a self-service tick
+  still joins any active project's group, so COM-H15 is narrowed, not closed.
+
+**Follow-up (2026-10-07): the grant UI.** The "project grants are API only" deferral is closed. Each project page has an admin-only `project_access` window (`templates/partials/project_access.html`, loaded once into `#project-access`, not inside the 10 s `#project-detail` poll so a half-chosen name is not wiped): who an admin has given access, who is in by a tick, a person picker with [ GIVE ACCESS ] and a [ REMOVE ] per grant. Routes `GET/POST /partials/project/{slug}/access` (ui.py) and the JSON `PUT/DELETE /api/v1/projects/{slug}/access/{editor}` now share `api.set_project_access`, which also writes `project.access.grant` / `project.access.revoke` audit rows (COM-M30). A shared site shows the list as remembered for a later switch to per-project. Tests: `dashboard/tests/test_project_access_window.py`.
+
+## CR-369 - a dashboard update that crash-looped was reverted and re-applied for ever, and one that booted but could not serve was never reverted - FIXED in repo (dashboard 0.7.74, unshipped)
+
+2026-10-07, GL-20, GL-21 (bug-dash-release-1, PL-RES-04). Two builder rounds;
+failed round-1 oversight on GL-20.
+
+Symptom: an OTA bundle that crash-looped on boot was reverted by
+select_code_root and re-applied by the release-feed poller about 10 s later,
+for ever, at every policy=current site. A bundle that booted but could not
+serve (a 500ing health route, a lifespan deadlock) was never reverted. Round 1
+then turned the 75-exit into an endless restart loop when select_code_root
+refuses the revert on schema, and an admin's own ROLLBACK was re-applied by
+the poller like the revert.
+
+Cause: the auto-apply guard only read update_state step=='failed' (a boot
+crash ends at 'done'); the boot watchdog only logged a failed probe;
+exit_for_revert did not ask whether the next start could revert; rollback()
+wrote no do-not-auto-apply marker.
+
+Fix: select_code_root.revert writes /data/code/no_auto_apply.json;
+release_feed._dashboard_auto_apply_reason refuses a version matching that
+marker or current.json reverted_from, in words (a rollback-specific message
+for rolled-back markers); dashboard_update.rollback writes the same marker; an
+admin APPLY clears it and a newer version is taken as usual. exit_for_revert
+exits 75 for a volume tree with a boot_attempts record when the boot probe
+fails, but stays log-only when revert_would_be_refused() (revert_refused_from
+equals the running VERSION, or the live schema is above the previous tree's)
+says the revert would be refused. arm_lifespan_deadline (600 s, volume trees
+only) catches a hang before the watchdog is armed. The central gate reworded
+two release_feed copy strings from "[ APPLY ]" to the real button label,
+"Update now" on the Packages page (D8).
+
+Files: dashboard/deploy/select_code_root.py;
+dashboard/src/ccsync_dashboard/{dashboard_update,release_feed,app}.py;
+dashboard/tests/test_cr369_dashboard_rollback.py.
+
+Tests: test_cr369_dashboard_rollback.py (15) plus test_dashboard_update.py and
+test_select_code_root.py, 115 passed.
+
+Deploy order: dashboard only; old companions unaffected. The 75-exit and the
+marker only help a tree that already carries this code, so this protects the
+update AFTER this one. A transient probe failure on two consecutive restarts
+of a good volume tree can still revert it and block it from auto-apply until
+an admin APPLY.
+
+**Round 2 (2026-10-07), passed oversight (pass):** Round 2: the GL-20 marker
+is now per version. A second revert or an admin ROLLBACK adds an entry instead
+of overwriting, and an admin APPLY of version X clears only X's entry. The
+poller refuses any offered version in the set. The old single-key marker is
+still read, and the newest entry's single keys are still written for an older
+reader. I did not touch current.json's reverted_from guard.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: the 'newest entry' that clear_no_auto_apply mirrors into the legacy
+  single keys is picked with next(reversed(entries)). Both _write_json and
+  select_code_root.write_json write with sort_keys=True, so after one round
+  trip that is simply the last key in string order (for example '0.9.5' sorts
+  above '0.10.0'), not the newest entry. Nothing reads the single keys any
+  more (round 1 never shipped), so the impact is cosmetic.
+- POLISH: select_code_root.revert() has its own copy of the legacy-to-map
+  merge instead of sharing dashboard_update.no_auto_apply_entries. That is
+  unavoidable because the selector is stdlib-only and standalone, but if the
+  two copies drift the marker can be read differently by each. A test that
+  writes with one and reads with the other would pin it. Today that is covered
+  only indirectly, through the revert-then-rollback tests.
+
+## CR-370 - a companion build that died at start-up was never rolled back, and Quit/Restart/self-upgrade exited before teardown finished - FIXED in repo (companion 0.9.86, unbuilt, unshipped)
+
+2026-10-07, GL-22, GL-23 (PL-RES-03, bug-comp-ui-1). Two builder rounds; GL-23
+judged correct, GL-22 failed round-1 oversight.
+
+Symptom: a self-upgraded build that died at import time, in __init__, or with
+exit 1 was never counted as a failed start and never rolled back, while its
+working predecessor sat unused as .old; sync and reporting stopped until a
+human renamed a file on each machine. No release step ever launched the built
+exe. The 2 s hand-off grace was shorter than a onefile extraction. Quit,
+Restart and self-upgrade ran shutdown() on a worker thread and the repeat call
+from run()'s finally returned at once, so the interpreter exited under the
+teardown thread and an rclone child outlived the process.
+
+Cause: the start counter lived in CompanionApp.run(), after every import; the
+supervisor reads exit 1 as deliberate; the hand-off watched the child for a
+fixed 2 s; shutdown() treated a repeat call as done.
+
+Fix. GL-23: the repeat shutdown() waits on _shutdown_done up to 40 s, the
+owner thread never waits for itself, the event is set in a finally. GL-22: new
+startguard.py. begin() runs before the app import, writes start_attempt.json
+and counts a same-version attempt as failed when its pid is dead and it never
+reached the lock, or reached it, never booted and was not a lock-losing
+duplicate (an old record without `booted` is not judged); two failures restore
+the predecessor via revert_to_previous_build. reached_lock() only records the
+lock; mark_booted() just before the main loop resets the count. note_started()
+writes handoff_started.json with pid AND ppid, and
+upgrade.watch_child_takeover waits up to 30 s for a marker whose pid or ppid
+equals Popen.pid (in a onefile exe Popen.pid is the bootloader). The run
+marker carries fresh_build and booted, and supervisor.decide relaunches an
+exit-1 death of a fresh, never-booted build within the three-an-hour ceiling.
+--self-test (startguard.self_test) runs in tools/release.ps1 before signing
+and tools/release_macos.sh before codesign.
+
+Files: companion/src/ccsync_companion/{startguard.py (new), app.py,
+upgrade.py, supervisor.py, crash_report.py, __main__.py},
+companion/launcher.py, tools/release.ps1, tools/release_macos.sh.
+
+Tests: companion/tests/test_gl22_gl23_startup_rollback.py.
+
+Deploy order: companion only. The hand-off is performed by the OLD build, so
+it protects upgrades FROM 0.9.86 onward; builds already on machines keep the 2
+s grace.
+
+Deferred at round 1 (superseded by the round-2 list below): no frozen exe built or launched here (--self-test from source only;
+PyInstaller pkgutil support unverified until the next release.ps1/CI run); no
+macOS verification, and release_macos.sh's working copy was CRLF on 1011 of
+1012 lines (check `git ls-files --eol` before committing); a launch that dies
+at import outside an upgrade rolls back only when something launches the exe
+again; a child alive but silent for 30 s is treated as slow and the
+predecessor stands down.
+
+**Round 2 (2026-10-07), passed oversight (pass after 1 refix):** Round 2
+narrowed the GL-22 hand-off exclusion. start_attempt.json now records the
+spawner pid, and a dead hand-off-child attempt is skipped only while that
+spawner is alive, so a plain relaunch counts it and the revert fires on the
+third launch, inside the supervisor's 3-an-hour ceiling. After a revert, the
+dying build no longer overwrites a record the restored build has already
+written. Two tests were added or replaced.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- No frozen exe was built or launched, so --self-test and the PyInstaller
+  module listing are verified from source only.
+- No macOS verification. The working copy of release_macos.sh is CRLF, so
+  whoever commits must re-check git ls-files --eol.
+- Builds already on machines keep the old hand-off grace, because the hand-off
+  logic runs in the old build during a self-upgrade.
+- A launch that dies at import outside an upgrade has no supervisor, so it
+  only rolls back if something launches the exe again.
+- release-windows.yml and release-macos.yml were not edited, because GL-25
+  owns the workflows.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: startguard.begin() checks only that the recorded spawner pid is
+  alive, not that it is still a companion. If Windows reuses v1's pid inside
+  the supervisor's 10 s relaunch delay after a hand-off child dies past the
+  lock, launch 2 is wrongly skipped. The revert then needs a fourth launch,
+  which the 3-an-hour supervisor ceiling refuses, so the machine has no
+  companion until the next logon (that logon counts the death and reverts).
+  The odds are low. Checking the image name, as app._pid_looks_like_companion
+  does on posix, would close it.
+- POLISH: the startguard.py module docstring still says only a death 'before
+  it reached the single-instance lock' is counted. It does not describe the
+  booted/duplicate rule or the hand-off-child and spawner exclusion that
+  begin() now applies.
+- POLISH: when startguard triggers revert_to_previous_build, it logs 'vX has
+  restarted 3 times in under 10 minutes'. That is the crash-loop wording, and
+  it is false for a revert after two failed starts (a pre-existing message,
+  seen in the probe output).
+- POLISH: the 'rewrite only while the record is ours' check after a revert is
+  a read followed by a write, not atomic. The restored build can write its
+  record between the two and have it overwritten. Harmless: the next launch is
+  a different version, and the restored build's reached_lock/mark_booted then
+  just skip.
+
+## CR-371 - the customer release was not one gated event, the image and bundle published with no test gate, and customers rode a moving `:1` tag - FIXED in repo (dashboard 0.7.74 + base-rig tools, unshipped)
+
+2026-10-07, work package A4c: GL-24, GL-25, GL-25b and the GL-50 decision
+(customers pinned by digest, with vendor soak). Two builder rounds; failed
+round-1 oversight. The round 1 build (one release_customers.py command, the
+image.yml gate, smoke and promote, check_feed_freshness.py and
+feed-freshness.yml, the raised downgrade floor) stands; round 2 closed six
+holes.
+
+Symptom (round 1 holes): a digest-pinned customer had no way to apply a
+runtime update (the banners said to press the NAS's Update or Build, which
+re-pulls the same digest) and DOCKER.md contradicted itself about `:1`; "the
+studio soaks it first" was a claim, not a check; `ship.cmd -PublishFeed`
+reached the vendor feed with --make-current and no CI, ancestry or dirty-tree
+check; a publish from a machine with a fast clock would wedge every customer
+behind the new replay refusal; RELEASE_FEED.md called a stale or replayed
+channel harmless; a missing `customer-release` environment is auto-created by
+GitHub with no reviewer.
+
+Cause: the gates sat in wrapper scripts instead of where every route converges
+(publish_feed); the publisher stamped generated_at from the local clock; the
+image hint was written for floating tags; the environment's protection was
+assumed.
+
+Fix:
+
+- release_feed.image_refs / image_update_hint build the replacement
+  `<image>:<tag>@<digest>` lines from the signed channel's dashboard_image;
+  feed_status exposes refs, update_hint and sftp_digest;
+  dashboard_update.nas_update_hint(settings, app_state) calls it, so the
+  Packages page, the Dashboard-update panel, the fleet banner and the alert
+  mail share one wording (the old platform click is kept when the channel
+  carries no digest).
+- publish_feed.py: --set-sftp-digest, --allow-red-ci, and a CI gate on
+  --github-upload --make-current (clean git sha, green ci.yml, ancestor of the
+  remote main head, fails closed); stamp_generated_at stamps max(now, previous
+  + 1 s) and warns when the previous stamp is more than 60 s ahead.
+- publish_latest.py passes --allow-red-ci through; ship.ps1 -PublishFeed
+  passes --git-sha and --git-dirty for the wizard.
+- release_customers.py: environment_refusal (required reviewers, before the
+  tag), soak_refusal / soak_check (the studio's /api/v1/health version and
+  commit, a first-seen ledger at ~/.ccsync/release_soak.json, --soak-hours 24,
+  --allow-no-soak), and it passes --git-sha and --set-sftp-digest.
+- Docs: DOCKER.md, APPLIANCE_INSTALL.md (updating a digest-pinned image),
+  RELEASE_FEED.md threat model.
+
+Files: tools/{release_customers,publish_feed,publish_latest}.py,
+tools/ship.ps1, tools/tests/conftest.py,
+tools/tests/test_release_pipeline_cr371.py;
+dashboard/src/ccsync_dashboard/{release_feed,dashboard_update}.py, templates
+admin_dashboard_update.html, admin_packages.html, fleet_grid.html,
+dashboard/tests/test_release_feed_freshness.py;
+docs/{DOCKER,APPLIANCE_INSTALL,RELEASE_FEED}.md.
+
+Tests: TestOverseerRound2 (9) in test_release_pipeline_cr371.py; four new
+tests in test_release_feed_freshness.py (hint wording, legacy fallback, parity
+with pin_compose_images output, nas_update_hint reading the channel).
+tools/tests/conftest.py stubs publish_feed.ci_gate_refusal for older
+fake-runner tests.
+
+Deploy order: dashboard first (templates and hint), then base-rig tools;
+companions unaffected; older dashboards ignore dashboard_image.sftp_digest.
+Before the first customer release: create the customer-release environment
+with a required reviewer, add FEED_READ_TOKEN for feed-freshness.yml, set
+CCSYNC_STUDIO_URL and DASH_REPORT_TOKEN on the base rig, run
+`release_customers.py --dry-run`, and expect the first real run to start the
+soak clock and refuse.
+
+Deferred at round 1 (superseded by the round-2 list below): the companion half of the vendor soak (nothing the fleet token can
+read exposes it); the soak clock is a first-seen ledger, not the studio's
+deploy time; tools/release_floor.json launch floors are placeholders
+(companion 0.9.75, onboard 1.0.44); compose.appliance.yaml still carries `:1`
+until the first real release_customers run pins it; no live run against
+GitHub, GHCR or a real feed; COM-H10's pip-audit, SBOM and provenance; GL-26
+by owner decision; no dashboard override for a channel already stamped in the
+future; older channels carry no sftp digest.
+
+**Round 2 (2026-10-07), STILL FAILING oversight:** Round 2 A4c, third pass.
+The GL-24 doc is corrected on three points. First, the feed half is already
+live on the studio. Second, apply_dashboard_policy does auto-apply the current
+dashboard bundle on an image-mode site once soak_minutes has passed; the
+earlier doc text and ledger note said it never does, and that was wrong.
+Third, ship.cmd -DashboardOnly is a no-op in image mode, so the soak route is
+now either a staged vendor-feed publish applied with Update now, or [stack]
+image pointed at the :<short-sha> build followed by an installer re-run. A new
+runtime needs the second route, because the v* tag is pushed only after the
+soak. The _apply_policy comment now says it is true of that loop only. The
+image_update_hint now says to set [stack] image in site.toml to the dashboard
+ref, and that --container-image or $CCSYNC_IMAGE override it.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- GL-24 move of the live studio's soak onto a working image-mode route (staged
+  publish + Update now, or [stack] image to :<short-sha>): owner's act, on a
+  quiet day.
+- Round-1 deferrals that need hardware or owner setup, still open: the
+  customer-release GitHub environment with a required reviewer, the
+  FEED_READ_TOKEN secret, confirming the placeholder launch floors, committing
+  the digest pin after the first real release_customers run, a live run of
+  release_customers.py, and COM-H14 fresh-install.
+- Companion half of the vendor soak needs an owner choice on an admin-readable
+  endpoint.
+- COM-H10 extras (pip-audit/osv, SBOM, provenance attestation) not built.
+  GL-26 signing is deferred by owner decision.
+
+**Open after round-2 oversight (closed in round 3, see below; kept for history):**
+
+- MEDIUM - GL-24 soak route a in docs/RELEASE_PATHWAYS.md (step 2a) makes the
+  customer release fail half-way, after the tag is pushed and the owner has
+  approved the image. Route a says to publish the dashboard bundle STAGED with
+  `publish_feed.py --kind dashboard` and apply it on the studio with Update
+  now. It does not say WHICH bundle. tools/release_customers.py later
+  downloads the bundle from the latest green release-dashboard.yml run for the
+  sha (read_bundle) and publishes it with --make-current and no
+  --allow-replace. build_dashboard_bundle.build() stamps `built_at =
+  utcnow_iso()` into manifest.json, so two builds of the same commit and
+  version have different bytes: a local build, a re-run CI build, anything
+  other than that exact artefact. publish_feed then refuses: '<kind>/linux
+  <version> is already published with DIFFERENT bytes'. That refusal comes at
+  step 4, AFTER `git push origin v<VERSION>` and after image.yml promoted
+  :<VERSION>/:1 on the customer-release approval. The dashboard bundle,
+  companion and installers are then not published. --dry-run does not catch
+  it, because the dry run never compares the bundle with the channel's
+  existing record. Probe: scratchpad/a4c_r2p3/test_probe_route_a.py builds two
+  bundles of one repo and version 9.9.9 (built_at an hour apart), publishes
+  the first staged and the second with --make-current, and gets rc 2 with
+  'DIFFERENT bytes'. The studio, and any customer who pressed APPLY on the
+  staged row, would also then hold a different build under the same version
+  number. What the fix must do: route a must name the exact artefact, i.e. `gh
+  run download <the release-dashboard.yml run release_customers will pick for
+  that sha> -n ccsync-dashboard-bundle`, and warn that re-running that
+  workflow afterwards breaks the match. Better, release_customers' verify step
+  should compare the CI bundle's sha256 with any record of that version
+  already on the channel and refuse BEFORE tagging, naming the mismatch. Add a
+  test that pins this.
+- POLISH: docs/RELEASE_PATHWAYS.md step 3 still says 'on current, ship the
+  dashboard with -DashboardOnly / no -MakeCurrent', but step 2 now says
+  correctly that -DashboardOnly deploys nothing on the image-mode studio. On
+  the live studio step 3's advice is a no-op and contradicts step 2.
+- POLISH: release_feed._apply_policy comment (around line 1077) now says in
+  parentheses that apply_dashboard_policy DOES auto-apply the current
+  dashboard bundle under policy = current. The next sentence is unchanged:
+  'Replacing the code the container is running is ... an admin's decision, not
+  a consequence of a policy'. That sentence now contradicts the parenthetical;
+  it should be scoped to this loop.
+- POLISH: route b (and any image-mode soak) soaks the image built by the push
+  to main (:<short-sha>, digest X). The v* tag push makes image.yml rebuild
+  the same commit (sbom/provenance make the digest differ) and customers are
+  pinned to that digest Y. soak_refusal compares only the version and
+  code.commit, so the digest customers get was never itself run on the studio.
+  The base image is digest-pinned and deps are hash-locked, so the two builds
+  should be functionally the same, but 'customers pinned by digest with vendor
+  soak' does not soak the pinned digest. Either note this in the doc or have
+  the tag build retag the main-push digest instead of rebuilding.
+- POLISH: the studio's own site.toml [releases] comment says 'manual: ...'
+  above `policy = "current"` (the file is gitignored and not in the repo;
+  noted for the owner).
+
+**Round 3 (2026-10-07), passed oversight (pass):** CR-371 round 3b:
+bundle_channel_refusal in release_customers.py now refuses a version on the
+channel's signed `retracted` list (the publish_feed.retracted_keys check),
+before the tag push. Its different-bytes message no longer offers "retire the
+staged record". The only remedy is a VERSION bump, because retiring puts the
+version on the RECALL list, which publish_feed refuses. The new test is
+test_bundle_channel_refusal_names_a_recalled_version. POLISH not done: moving
+the route-b digest caveat under route b, a main()-level call-order test, and
+the studio's site.toml comment (the owner's).
+
+Central gate, round 3 (2026-10-07): dashboard 6342 passed, 42 skipped; server/
+(Git Bash) 869 passed, 2 skipped; tools 602 passed, 2 skipped; companion 8228
+passed, 58 skipped; 0 failed anywhere, nothing changed by the gate;
+select_suites.py --audit clean.
+
+**Polish noted at round-3 oversight (not blocking; the overseer's findings):**
+
+- POLISH: docs/RELEASE_PATHWAYS.md: the route-b digest caveat ('Route b soaks
+  the :<short-sha> image...') sits at the end of step 3, not under route b in
+  step 2. The builder already noted this.
+- POLISH: release_customers.py checks only the published (remote) channel.
+  publish_feed checks the remote channel with this rig's local feed-dir
+  overlay merged on top. So a local-only dashboard record whose upload failed
+  would still be refused late. That case cannot happen after a working route
+  a: the studio could not have applied a record that never uploaded.
+- POLISH: publish_feed's different-bytes refusal tells you to bump the
+  COMPANION VERSION files even when the kind is dashboard. This is old text
+  and outside this package; release_customers' own message now names the
+  dashboard VERSION.
+- POLISH (owner): the studio's gitignored site.toml still has the stale
+  'manual:' comment above policy = "current".
+
+## CR-372 - a Windows wizard install left the companion's state files with an empty permission list, and on stock Windows 11 the first install ended with no Syncthing and versioned winget paths baked in - FIXED in repo (companion 0.9.86 + installer 1.0.47, unshipped)
+
+2026-10-07, GL-27, GL-28 (bug-installer-1/-2/-3, PL-RES-42/45). Two builder
+rounds; GL-27 had no open defect, GL-28 failed round-1 oversight.
+
+GL-27 symptom: after a Windows wizard install the files and folders already
+inside ~/.ccsync had an empty permission list: the EULA dialog re-asked, the
+install log stopped, and the latches (lane B breaker, fleet halt, drive
+reminder) could not be saved. Cause: Protect-CCSyncPath ran icacls
+/inheritance:r with no (OI)(CI). Fix: directories are granted (OI)(CI)(F);
+Repair-CCSyncStateAcl re-grants the folder and runs `icacls dir\* /reset /T /C
+/Q` on the children, from the bootstrap, from windows_upgrade.ps1 (the studio
+fleet's repair) and from the companion's new state_acl.repair_if_needed at
+start.
+
+GL-28 symptom: on a stock Windows 11 machine the first install ended NOT READY
+with no Syncthing, and a versioned WinGet\Packages path was baked into the
+logon shim and config and broke on the next winget upgrade. Cause: winget was
+tried before the pinned download, its PATH change never reached the running
+process, a Packages hit counted as "installed", and the wizard's ensure_config
+wrote rclone_path = "rclone" before the bootstrap ran, so the seed branch
+never did. Fix: the pinned sha256-verified download is tried first for rclone
+and Syncthing, then winget (after a PATH refresh and a WinGet\Links probe),
+then scoop for rclone; a Packages-only hit is not "installed" and is used only
+as a last resort with a warning (Get-SyncthingExePath -AllowVersioned);
+Find-WingetInstalledTool prefers Links, then a non-versioned PATH hit;
+Update-ConfigRclonePath repairs a bare or dead rclone_path in an existing
+config (TOML literal string) and leaves an owner-chosen existing path alone; a
+versioned winget path is never written to config.
+
+Files: installer/windows_bootstrap.ps1, installer/windows_upgrade.ps1,
+companion/src/ccsync_companion/state_acl.py (new),
+companion/src/ccsync_companion/app.py, companion/tests/test_state_acl.py
+(new), installer/tests/Test-StateAclAndWinget.ps1 (new).
+
+Tests: Test-StateAclAndWinget.ps1 all PASS; companion test_state_acl.py 5
+passed.
+
+Deploy order: no dashboard involvement; reaches editors with the next editor
+package and companion publish; windows_upgrade.ps1 repairs the studio's
+machines.
+
+Deferred at round 1 (superseded by the round-2 list below): a live check on a stock Windows 11 VM; moving the companion's ACL
+repair above setup_logging and startguard.note_started (harmless, later);
+icacls /reset also resetting files secretfile.harden had made owner-only
+(security-neutral in practice); Syncthing self-upgrade (PL-RES-45) belongs to
+the M group.
+
+**Round 2 (2026-10-07), passed oversight (pass):** Round 2 (CR-372): macOS
+bootstrap now installs the pinned, sha256-verified rclone and Syncthing first,
+with brew only as a warned fallback (PL-RES-42 macOS half). Windows
+Update-ConfigRclonePath now repairs a dead absolute rclone_path to the bare
+name after an uninstall that kept config.toml. Both are pinned by tests.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- Live check of the winget and network paths on a stock Windows 11 VM, and the
+  macOS bootstrap on a real Apple silicon Mac (hardware).
+- Moving the companion's state_acl repair above setup_logging/startguard
+  (overseer note a): cosmetic, harmless.
+- icacls /reset also resetting files secretfile.harden made owner-only
+  (overseer note b): security-neutral.
+- Syncthing self-upgrade (PL-RES-45) belongs to the M group.
+- A Mac that already has rclone or syncthing on PATH (for example a brew copy)
+  is still accepted as installed and not replaced by the pinned build. This is
+  deliberate, to avoid clobbering an existing install.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: installer/windows_bootstrap.ps1 Update-ConfigRclonePath (line
+  ~2352-2353) calls Test-Path -LiteralPath $cur with no empty-string guard.
+  With a hand-edited config.toml line `rclone_path = ""`, PowerShell throws
+  'Cannot bind argument to parameter LiteralPath because it is an empty
+  string', and under $ErrorActionPreference = 'Stop' that aborts the whole
+  bootstrap at line 2379. I probed it: both NewPath='rclone' and an absolute
+  NewPath throw. Round 1 already threw for an absolute NewPath; round 2's
+  bare-name branch now reaches the same call. Only a hand edit produces an
+  empty value (the companion default and the wizard both write "rclone"), so
+  this is not a blocker. Fix: treat an empty $cur as bare.
+- POLISH: the header comment of installer/macos_bootstrap.sh (lines 6-9) still
+  says 'rclone (brew, else a PINNED, sha256-verified zip)' and 'Syncthing
+  (brew, else the same pinned + verified route)'. The order is now pinned
+  first, then brew.
+- POLISH: the new macOS test in test_macos_first_steps.sh only compares grep
+  line numbers (verify_sha256 appears before brew install). It does not run
+  the flow. My scratchpad probe (a5a_r2/run.sh, which sources the extracted
+  section with stub curl/brew/uname) shows the behaviour is right, but nothing
+  in the suite would catch, say, a brew fallback that also runs after a
+  successful pinned install.
+
+## CR-373 - the wizard said DONE while Resolve was not connected, the tray looped "quit and reopen Resolve", and the installer page had no Gatekeeper guidance and no version resource - FIXED in repo (companion 0.9.86 + onboard/installer 1.0.47 + dashboard 0.7.74 page, unshipped)
+
+2026-10-07, GL-29, GL-30 in the beta form (builds stay UNSIGNED during the
+free open beta; the certificate half of GL-30 and GL-26 are deferred by owner
+decision). Two builder rounds; failed round-1 oversight.
+
+Symptom: the wizard said DONE while Resolve was not connected: the editor
+still had to add the PostgreSQL project library and switch on External
+scripting (Resolve's default is None, which silently disables the watcher,
+fixer, popup and Send to Resolve). The tray told a never-connected seat to
+"quit and reopen Resolve" for ever. The installer page taught "Run anyway" for
+Windows only, had no macOS Gatekeeper guidance, and the exes had no version
+resource. Round 1 also: detect_resolve raised a swallowed NameError on Windows
+(missing _WINDOWS_RESOLVE_REL); "never connected" was per process while the
+companion restarts after every Resolve quit; Apps & features Publisher
+followed the customer's org_name; winversion's CompanyName fell back to "CC
+Sync".
+
+Fix: resolve_prefs handles System.Scripting.Mode (1 = Local, observed live)
+via detect_resolve, scripting_status and enable_scripting, with the constant
+defined and the except narrowed to (OSError, ValueError, UnicodeError);
+app.setup_resolve_prefs_cli writes the preference at install; the wizard runs
+enable_resolve_scripting and both finish pages carry a connect-Resolve
+checklist. resolve_bridge keeps a machine-level marker
+(<state>/resolve_ever_connected, written on the first note_connection(True),
+kept across reset_session_state) read by machine_ever_connected();
+scripting_advice() branches on it and the tray dialog plus all notify
+fallbacks (tray.py x3, app.py) use it, with NO_SCRIPTING_MESSAGE unchanged as
+the state key; nothing calls scriptapp outside resolve_bridge.connect (CR-68).
+GL-30: installer.html and START_HERE.md walk through SmartScreen (Unblock,
+Smart App Control) and Gatekeeper (Open Anyway); tools/winversion.py plus both
+specs add a VERSIONINFO resource with CompanyName/LegalCopyright "Cablewrap
+Creative Ltd" (CCSYNC_LEGAL_ENTITY overrides); windows_bootstrap.ps1 sets
+Publisher to the vendor entity with the customer org_name in DisplayName only.
+
+Files:
+companion/src/ccsync_companion/{resolve_prefs,resolve_bridge,tray,app}.py,
+companion/build.spec;
+companion/tests/{conftest,test_resolve_prefs,test_gl29_scripting_advice,test_tray}.py;
+onboarding/{steps,onboard}.py, onboarding/build_onboard.spec,
+onboarding/tests/test_gl29_resolve_connect.py;
+installer/{windows_bootstrap.ps1, macos_bootstrap.sh, START_HERE.md};
+dashboard/templates/installer.html; tools/winversion.py and
+tools/tests/test_winversion.py.
+
+Tests: Windows detection with and without Resolve.exe and no env override; the
+restart-survives-marker test; winversion's default entity and the Publisher
+string pin; installer page notes.
+
+Deploy order: no dashboard API change; the installer page text ships with the
+dashboard; companion and wizard changes reach editors with the next builds;
+old companions unaffected.
+
+Deferred at round 1 (superseded by the round-2 list below): Mode values 0 and 2 are inferred; a live fresh-seat check and a
+macOS wizard run are owed; the PyInstaller version= wiring is unverified until
+a Windows build; the unsigned-beta notes go the day a signed build ships;
+macos_bootstrap.sh does not write the preference itself; reporting the reason
+to the dashboard as an alert kind (PL-RES-58) needs a report-schema change.
+
+**Round 2 (2026-10-07), passed oversight (pass):** Round 2 (A5b, CR-373): the
+tray menu row no longer shows the restart loop to a never-connected machine,
+and uses the machine-level ever-connected marker. detect_resolve reads the
+registry and the prefs directory, and the wizard writes scripting even when
+Resolve.exe is not at the default path. Scripting reports OK or ALREADY only
+when both config.dat and .config.data agree, and a missing .config.data keeps
+the manual step on the checklist. START_HERE's Mac advice now points at Open
+Anyway, with the right-click cutoff at macOS 15. A Studio licence file is a
+positive edition sighting. The --setup-resolve-prefs exit code counts only the
+LUT/stills pair again.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- System.Scripting.Mode values 0 and 2 are still inferred, and only 1 (Local)
+  was seen live. Live fresh-seat and macOS wizard runs need hardware.
+- PyInstaller version= wiring is unverified until a Windows build is run
+  (needs a build).
+- Unsigned-beta installer notes should be dropped when a signed build ships
+  (the beta decision defers the certificate).
+- macos_bootstrap.sh does not write the scripting preference itself; the
+  wizard step does. This is unchanged.
+- Reporting ever_connected/reason to the dashboard as an alert kind
+  (PL-RES-58) needs a report-schema change and deploy-dashboard-first
+  ordering, so it is outside GL-29.
+- Studio vs Free: only positive Studio detection is possible. Free cannot be
+  detected, because a dongle install has no licence file.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: the never-connected tray menu row is now resolve_bridge_line wrapped
+  around the full scripting_advice() text. It is 441 characters for the
+  'already Local' branch and about 470 for the 'None' branch, as a single
+  disabled menu item. tray_native does not truncate or wrap menu labels, so on
+  Windows and macOS the right-click menu stretches as wide as the screen.
+  Round 1 allowed scripting_advice(), and the old restart row was already
+  about 240 characters, so I would not block on this. A short row such as
+  "Resolve: never connected on this computer - set Preferences > System >
+  General > External scripting using: Local (needs Studio)" with the full text
+  kept for the dialog would read better
+  (companion/src/ccsync_companion/tray.py _menu_bridge_state).
+- POLISH: the edition sighting reaches only the wizard note (an appended
+  '(Resolve Studio licence found.)'). The tray's scripting_advice() still
+  always adds the 'Scripting needs Studio... free edition has no scripting
+  interface' sentence and 'If this is Studio' on a machine whose Studio
+  licence file is present. Round 1 accepted the docstring and deferral
+  correction as the minimum, and both are now accurate. Passing
+  detect_resolve()['edition'] into scripting_advice would drop the Free branch
+  where Studio is known.
+- POLISH: scripting_mode() (used by scripting_status and the tray advice)
+  still reads config.dat first and .config.data only as a fallback. A seat
+  with config.dat=1 and .config.data=0 is described as 'already Local' in the
+  tray, while ensure_scripting_local now correctly treats that seat as
+  disagreeing and rewrites both files. This is display-only, and the
+  install-time write is correct.
+
+## CR-374 - the Claude Code and Codex CLI providers were one site flag away on every customer site, and nothing told a person where to send a problem - FIXED in repo (dashboard 0.7.74 + companion 0.9.86 + onboard 1.0.47, unshipped)
+
+2026-10-07, A6a: GL-31 (reshaped by the owner: one codebase, the
+vendor/customer build HARD-DISABLES the CLI providers, the studio's own site
+keeps them), GL-34. Two builder rounds; failed round-1 oversight, including a
+live-studio deploy hazard.
+
+Symptom: (GL-31) the CLI providers, their SET UP wizard and subscription
+sign-in relay, the CLI auto-update and the CLI-only triage agent were one
+`[features] ai_cli_providers` flag away on every customer site, driving a
+personal subscription (COM-H1). (GL-34) nothing told a person where to send a
+problem, though a dozen fix lines said "send us" or "send it to support"
+(COM-H12, PRAC-49).
+
+Cause: the CLI gate was a site feature flag, i.e. customer-owned data; there
+was no vendor-versus-studio distinction and no support_contact in the
+manifest.
+
+Fix, GL-31: new build_flavor.py, asked by site_store.feature_enabled before
+any DB row or env; only a literal DASH_STUDIO_CLI_PROVIDERS=1 in the container
+env (written by install_dashboard_app.py from the studio's site.toml `[studio]
+allow_cli_providers`) opens the lock. On a locked build the wizard routes 409,
+the provider rows and Test say "not available in this build", the Settings
+Features panel does not render the two CLI checkboxes (so a Save cannot
+overwrite a stored ai_cli_auto_update), triage runs on an Anthropic API key
+plus a host-installed Claude Code binary only (triage.cli_gate, triage.run_env
+drops the wizard HOME and any setup-token), and boot logs a warning for a
+stored features.ai_cli_providers=1 (build_flavor.stranded_cli_rows) without
+rewriting it.
+
+Fix, GL-34: manifest key support_contact; blank resolves to
+site_store.DEFAULT_SUPPORT_CONTACT (provisional, awaiting the owner); a
+reseller overrides it by site.toml `[site] support_contact`,
+DASH_SITE_SUPPORT_CONTACT or a Settings row; the Settings box and export_toml
+use the raw stored value so a Save never pins the vendor default; published
+additively in GET /api/v1/site; shown on /help, the Health header, beside the
+crash-report lines, on every fix line (with_support, and alerts._transmit for
+every mailed alert, digest, weekly report and triage mail), on the setup
+Checklist, in the companion Settings HELP section and on both wizard Done
+pages.
+
+Files: dashboard/src/ccsync_dashboard/{build_flavor (new), site_store,
+ai_providers, cli_tools, triage, alerts, app, settings, api, ui}.py,
+static/cc/site_settings.js, templates (help, setup, admin_health,
+admin_settings, partials); dashboard/deploy/compose.yaml, compose.image.yaml;
+server/install_dashboard_app.py and its golden; site.example.toml; companion
+site.py, settings_window.py; onboarding steps.py, onboard.py;
+docs/{STUDIO_BUILD,CONFIG,COMMERCIAL_READINESS}.md (the central gate added
+STUDIO_BUILD.md to docs/README.md).
+
+Tests: dashboard/tests/test_build_flavor.py (33),
+companion/tests/test_support_contact.py,
+onboarding/tests/test_support_line.py, server/tests/test_studio_flag.py, the
+test_site.py key list; the dashboard conftest runs the suite as the studio
+flavour.
+
+Deploy order: dashboard first. **Add `[studio] allow_cli_providers = true` to
+the studio's site.toml BEFORE deploying, and make the first 0.7.74 delivery to
+the studio a full `server/install_dashboard_app.py` redeploy (ship.cmd), never
+an OTA bundle or an app-manager image swap**: both keep the old container env
+and would land the studio LOCKED (Cards AI, ytdl AI and triage down).
+Companions after; an old companion ignores support_contact.
+
+Deferred at round 1 (superseded by the round-2 list below): owner question whether Claude Code on an API key only counts as a
+"CLI provider" for triage (one block in triage.cli_gate closes it); the
+support address is a placeholder; the wizard's "Your studio" step and the
+bootstrap scripts' closing text do not show the contact; CLAUDE.md still calls
+ai_cli_providers a site flag.
+
+**Round 2 (2026-10-07), STILL FAILING oversight:** CR-374 round 2, third pass.
+cli_lock_stranded clears only once a Claude provider (claude_code or
+anthropic_api) resolves, since Cards and the locked triage gate need one;
+OpenAI/DeepSeek-only sites stay flagged. On locked builds the Claude Code
+publisher-fetch install stays open (per the owner's Round-2 ruling that triage
+ships on the site's own Anthropic API key); codex install, signin, setup-token
+and relay remain locked, and triage.cli_gate finds the wizard-installed
+binary. The 'owner question' on triage is closed. publish_latest's warning no
+longer promises a Ctrl-C pause.
+
+Central gate fix (round 2): the locked-build server-check path box in
+dashboard/static/cc/site_settings.js saves through PUT
+/api/v1/admin/ai-providers/claude_code/path (the existing
+ai_providers.api_set_ai_cli_path route, not a new write path), which
+test_cc_settings_site_packages.py::test_cc_site_settings_js_writes_only_the_classic_routes
+did not allow. The test now allows that one route (comment cites CR-374 /
+GL-31, 2026-10-07); a full dashboard re-run passed (6372 passed).
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- OWNER CHOICE: one-time grandfather record so the first CR-374 delivery
+  cannot strand the studio (a persisted bypass of the hard lock; not built).
+- OPS: studio site.toml needs [studio] allow_cli_providers = true; first
+  deploy must be a full install_dashboard_app.py run.
+- GL-34: support line missing from the closing text of
+  installer/macos_bootstrap.sh and installer/windows_bootstrap.ps1 (outside
+  GL-34's listed surfaces; not edited this round).
+- DPA and beta-agreement drafts should name support@thecreatorsclub.co; they
+  stay out of the published set until counsel clears them.
+- server/tests/test_compose_template.py has 2 golden-compose failures caused
+  by the CR-362/GL-02 package, not this one.
+- Central stage: CLAUDE.md wording, ticking GL-31/GL-34, KNOWN_BUGS entry.
+
+**Open after round-2 oversight (closed in round 3, see below; kept for history):**
+
+- GL-31 / triage, locked build (medium): the page and cli_gate disagree again,
+  which is the exact thing round-1 defect 1 asked to fix. On a locked build
+  triage.cli_gate (triage.py ~214) now answers 'use SET UP under Settings, AI
+  providers to install it, or type the full path', and
+  test_triage_gate_on_a_locked_build_needs_a_binary pins 'SET UP' in that
+  text. But the locked page has no SET UP anywhere. renderAi
+  (static/cc/site_settings.js ~175) filters out every kind=='cli' row and
+  draws only drawLockedCheck's path box. Its copy says 'This build does not
+  include Claude Code or sign in to it. The check runs only if you installed
+  it on this server (path below)', and
+  test_the_locked_page_offers_a_path_box_and_no_wizard pins that too. The
+  newly opened POST /api/v1/admin/ai-providers/claude_code/install
+  (cli_tools.api_install) can therefore only be reached with a raw API call.
+  The builder justified opening it with 'a self-installing customer cannot
+  otherwise get the binary', and that is still true with no UI. A customer
+  admin who gets the triage fallback mail is sent to a button that does not
+  exist. Fix: either draw a Claude Code install button (install only, no
+  sign-in) in the locked check line, poll install-status, and make the page
+  copy say the same; or drop 'SET UP' from the gate text and keep the install
+  route behind the lock. Either way, pin the page, the gate and the mailed
+  text to one wording.
+- GL-31 / cli_lock_stranded notice copy is false for the cases this pass newly
+  keeps open (medium). The body still says 'no AI API key is set up, so
+  Timeline Cards' AI, the YouTube downloader's AI and the server check do not
+  run'. Since the fix, the notice also stays open on an OpenAI- or
+  DeepSeek-only site, where an API key IS set up and the YouTube AI works. It
+  also stays open when an Anthropic key exists but openai_api is pinned. My
+  probe (scratchpad/a6a_r2p3/probe.py) showed that case: notice open with that
+  body, while triage.cli_gate passed, so the server check does run. The fix
+  line says 'Add a Claude API key', but the key is already there and the real
+  cure (unpin, or pin Claude) is never named. That is a self-diagnosis that
+  misstates the problem and its next action (the CLAUDE.md SELF_DIAGNOSIS
+  rule). The docstring also still says the notice closes 'once any API
+  provider resolves'. Fix: write the body and fix from the resolved provider:
+  no key at all / a non-Claude key only / a non-Claude pin hiding a Claude
+  key. Add a test for the pinned case.
+- POLISH: drawLockedCheck's state text 'blank: the server looks for claude on
+  PATH' leaves out that ai_providers.cli_path also finds a copy installed
+  under <data>/tools (the now-open install). It should match whatever the gate
+  says.
+
+**Round 3 (2026-10-07), passed oversight (pass):** CR-374 round 3: the pinned
+branch of the cli_lock_stranded notice no longer claims the server check is
+dark, because the locked triage gate ignores the pin. Not done (POLISH): the
+notice's no-key and non-Claude-key wording for a DeepSeek key behind an OpenAI
+pin, the gate's "Anthropic API key" vs the page's "Claude API" naming, and
+mentioning the <data>/tools copy in the locked page's PATH text. Still
+deferred from before: the grandfather-record choice, the studio site.toml
+allow_cli_providers setting, the GL-34 support line in the bootstrap scripts,
+and the DPA/beta drafts.
+
+Central gate, round 3 (2026-10-07): dashboard 6342 passed, 42 skipped; server/
+(Git Bash) 869 passed, 2 skipped; tools 602 passed, 2 skipped; companion 8228
+passed, 58 skipped; 0 failed anywhere, nothing changed by the gate;
+select_suites.py --audit clean.
+
+**Polish noted at round-3 oversight (not blocking; the overseer's findings):**
+
+- POLISH: if ai_providers.resolved() raises inside _check_cli_lock_stranded,
+  has_claude_key stays False and res_name_other() catches the same failure and
+  returns False. The notice then says 'no AI API key is set up', which is a
+  guess presented as fact. A neutral 'cannot tell' body would be accurate.
+- POLISH (known, deferred by the builder): a DeepSeek key behind an OpenAI pin
+  that has no OpenAI key falls into the no-key branch. The probe showed the
+  body saying 'no AI API key is set up' and the fix saying 'Add a Claude API
+  key', but the cure is to unpin. With both an OpenAI key and a DeepSeek key
+  set, 'the only AI API key is not a Claude one' is also slightly off.
+- POLISH: POST /api/v1/admin/ai-providers/claude_code/install stays open on a
+  locked build and the locked page draws no button for it, so only a raw API
+  call reaches it. Nothing says it exists any more: the gate text no longer
+  mentions SET UP. drawLockedCheck's 'blank: the server looks for claude on
+  its PATH' still leaves out the <data>/tools copy that cli_path also finds.
+
+## CR-375 - psycopg2 (LGPL) was frozen into the one-file companion with no LGPL text, and the customer "product repo" tool could not be produced - FIXED in repo (companion 0.9.86, unbuilt, unshipped)
+
+2026-10-07, GL-32, GL-35. Passed oversight and the gate.
+
+Symptom: psycopg2 (LGPL-3.0-or-later) was frozen into the one-file companion
+exe and unpacked to a fresh temp directory on every launch, so a recipient
+could not replace it without rebuilding our exe (LGPL section 4), while the
+allow-list and notices called it "separate, replaceable"; the LGPL-3.0 text
+was not in the bundle. Separately, the customer "product repo" tool could not
+be produced and its withheld list missed most internal docs (PRAC-13,
+COM-M42); the owner decided no customer gets source.
+
+Cause: build.spec named psycopg2 as a hidden import in a single-file EXE, and
+the LGPL text existed only as a pointer in the wheel's own LICENSE.
+
+Fix: tools/notices_extra/lgpl-3.0.txt added to the companion and onboarding
+bundles (gen_notices.py) and the bundles regenerated. build.spec excludes
+psycopg2 from analysis and ships it unmodified as plain files under
+ccsync_lib/ (plus psycopg2_binary.libs on Linux wheels), failing hard if it is
+not installed. New ccsync_companion/lgpl_libs.py prepends ~/.ccsync/lib
+(CCSYNC_LGPL_LIB_DIR wins) and then the bundled ccsync_lib/ to sys.path;
+timeline_cards_role.load_engine calls it before the Cards engine, the only
+psycopg2 importer. license_allowlist.toml and THIRD_PARTY_NOTICES.md
+corrected, with a "Replacing psycopg2" how-to. GL-35:
+tools/make_product_repo.ps1 and docs/PRODUCT_REPO.md moved to
+E:\Projects\legacy\ccsync-product-repo (staged git rm, history intact),
+INSTALL.md step 1's clone replaced by "unpack the install package you were
+given", and the Projects README "Where things went" and docs/README rows
+updated. The central gate changed lgpl_libs' logger to
+getLogger("ccsync.lgpl_libs"), because a logger outside "ccsync" gets no
+handlers from setup_logging (test_shutdown_guard B8).
+
+Files: companion/build.spec, companion/src/ccsync_companion/{lgpl_libs.py
+(new), timeline_cards_role.py}, tools/notices_extra/lgpl-3.0.txt,
+tools/gen_notices.py, tools/license_allowlist.toml,
+docs/legal/THIRD_PARTY_NOTICES.md,
+docs/legal/licenses/*/THIRD_PARTY_LICENSES.txt, docs/INSTALL.md,
+docs/README.md, E:\Projects\README.md.
+
+Tests: companion/tests/test_lgpl_libs_cr375.py (6),
+tools/tests/test_gen_notices.py (+2), tools/tests/test_scan_frozen.py (parser
+test updated). check_licenses.py OK, gen_notices --check up to date.
+
+Deploy order: companion only, no dashboard or wire dependency. The studio's
+Cards role keeps working because ccsync_lib/ is on the path by default.
+
+Deferred: a real frozen build on Windows and on a Mac must confirm
+ccsync_lib/psycopg2 lands with its libpq and OpenSSL, PyInstaller 6.x leaves
+datas binaries unrewritten (switch to binaries if not), `import psycopg2`
+resolves from both dirs, and scan_frozen.py passes on the real TOC; inspect
+the macOS .dylibs layout; counsel re-review under GL-51; no installer step
+creates ~/.ccsync/lib; how a self-installing customer gets the server/ scripts
+is GL-03 / GL-60.
+
+**Round 2 (2026-10-07):** no open defects after round 1 and no round-2 change.
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+## CR-376 - more than 3 share removals in one enforce cycle froze every untick and Suspend fleet-wide - FIXED in repo (dashboard 0.7.74, unshipped)
+
+2026-10-07, GL-33 (PRAC-12: suspending one editor with 6 projects on 2
+computers tripped it). Two builder rounds; failed round-1 oversight.
+
+Symptom: more than 3 share removals in one cycle froze every untick and
+Suspend fleet-wide, and only the DASH_ENFORCE_MAX_REMOVALS container setting
+undid it. Cause: collector._run_enforce counted every (folder, device) removal
+alike against enforce_max_share_removals.
+
+Fix: (a) removals traced to an audited admin act are not counted: an archived
+project, a suspended editor's devices, a STANDING audited untick
+(db.standing_untick_devices: the latest plan audit row for (editor, slug,
+machine) is an untick, no plan.undo names it, and the plan still lacks the
+pair; round 1's reuse of recent_plan_change_devices authorised a bare removal
+after untick plus re-tick or undo), and pairs an admin approved; _enforce_loop
+applies authorised removals even while the brake holds the rest. (b) POST
+/api/v1/enforce/approve-removals {count} plus a fleet grid button: admin only,
+audited enforce.approve_removals, the count must match the standing refusal,
+good for 1 h (meta collector_enforce_approval). (c) Site setting
+enforce_removals_per_computer (0-100, default 0 = flat limit), limit = max(env
+limit, per_computer x computers), set from Settings > Sharing safety (POST
+/partials/admin/enforce/allowance) or POST /api/v1/enforce/allowance, audited
+enforce.allowance; the banner and notice point there. B16 holds: an unaudited
+mass unshare is still refused.
+
+Files: dashboard/src/ccsync_dashboard/{db,collector,api,ui,notices}.py,
+templates/partials/fleet_grid.html, templates/admin_settings.html.
+
+Tests: dashboard/tests/test_gl33_enforce_removal_preauthorised.py (16); the
+central gate updated the Settings tab count in
+test_cc_settings_site_packages.py (5 to 6).
+
+Deploy order: dashboard only, no schema or companion change.
+
+Deferred at round 1 (superseded by the round-2 list below): unticks that touched only an unmapped person-level device are not
+pre-authorised (Apply button); the suspended and archived traces trust the
+persisted state; the Sharing safety tab is tested by markup and route, not a
+browser click.
+
+**Round 2 (2026-10-07), passed oversight (pass after 1 refix):** Round 2b: an
+approval is now spent by the single cycle that follows it, including pairs
+whose folder had converged (re-ticked or healed snapshot), which the
+plans-only check missed. Added a converged-folder re-tick test and a
+collector-cycle test of a bare removal after an upload-only to full round
+trip. Apply button title now points at "Problems the server found" on the home
+page.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- Audited-untick pre-authorisation covers only computers the registry maps to
+  a Syncthing device. Unmapped person-level devices still need the Apply
+  button. This is a registry limitation.
+- Suspended and archived traces trust persisted state written in the same
+  transaction as the audit row.
+- A live browser click-through of the Sharing safety tab and Apply button
+  needs a running dashboard.
+- If the applying cycle's Syncthing call fails for a folder, the approval is
+  already spent, so the refusal returns and the admin re-approves. That is the
+  safe direction.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: An approval is spent only when a cycle reaches the spend at
+  collector.py:1723. A cycle that raises or returns early before that point
+  leaves it live for up to the full hour: client.config() failing while
+  Syncthing is down, or the 'empty myID' skip. The round-1 rule 'a pair the
+  plan holds again stops counting as approved' therefore holds only from the
+  first completed cycle after a re-tick. The only exposure is a pair the admin
+  already approved by name, and it needs a re-tick plus a removal-producing
+  bad snapshot on the first cycle back, so it is not a release blocker.
+  Spending (or re-checking against selections) on the early-skip path would
+  close it.
+- POLISH: The approval is spent wholesale even when the applying cycle could
+  not act on a pair. One case is the 60 s plan freeze (frozen_devices) keeping
+  that share because the project had a plan change within the minute. Another
+  is a lost race where an approve lands between the cycle's
+  approved_enforce_pairs read and its spend. In both cases the refusal comes
+  back and the admin has to press Apply again. This is the safe direction, but
+  the button title's 'Good for one hour' slightly over-promises: the approval
+  is good for the next cycle only, and expires after one hour if no cycle
+  runs.
+- POLISH: spend_enforce_approval now ignores its `plans` and `whole`
+  parameters, and the collector comment above the call still describes
+  per-pair spending ('spent as soon as any approved pair is applied ... a pair
+  the plan holds again no longer counts'). The comment should describe the
+  actual rule: the next cycle spends the whole approval.
+
+## CR-377 - no beta terms, DPA, support data procedure or platform matrix, and PRIVACY said "DPA on request", "no sub-processor" and "no phone-home" - FIXED in repo as drafts for counsel (docs only, ship in the image's docs tree)
+
+2026-10-07, package L1: legal and policy DRAFTS the owner asked for "as part
+of the work" (COM-M4, COM-H12, COM-M39, COM-M52, PRAC-40; Track B GL-43,
+GL-50, GL-51). DRAFT FOR COUNSEL. Two rounds; failed round-1 oversight.
+
+Symptom and cause: the legal paperwork was written for a self-hosted,
+no-contact model, before the free open beta, unsigned builds, self-install and
+the vendor-default release feed (CR-362 / GL-02).
+
+Fix (docs only): new docs/legal/BETA_AGREEMENT.md (a supplement to EULA 1.1,
+EULA marker untouched, the platform list quoted inline), docs/legal/DPA.md (an
+Art. 28 template, SCC Module 2 and UK placeholders, a Taiwan note, Annex III
+Google Workspace and GitHub), docs/legal/SUPPORT_DATA_PROCEDURE.md (AI tools
+reading support data default NO, an open owner question),
+docs/SUPPORTED_PLATFORMS.md (Windows 10 22H2/11 x64, Apple silicon, Resolve
+Studio 20, TrueNAS 25.x/26 or DSM 7.2.1, paid Tailscale). PRIVACY.md 1.1 says
+no Customer data leaves in normal operation, discloses the vendor-build
+release-feed check and how to turn it off (DASH_RELEASE_FEED_URL empty), names
+Google for support email, points deletion to the [30]-day procedure, and says
+no executable is OS-signed in the beta. The support mailbox is a bracketed
+placeholder. docs/README.md indexes the docs and flags COM-M2 (PRIVACY 1.1
+carries a draft banner in a shipped policy).
+
+Files: docs/legal/{BETA_AGREEMENT,DPA,SUPPORT_DATA_PROCEDURE,PRIVACY}.md,
+docs/SUPPORTED_PLATFORMS.md, docs/README.md,
+dashboard/tests/test_legal_drafts.py.
+
+Tests: test_legal_drafts + test_legal_docs + test_help_page, 65 passed, 1
+skipped.
+
+Deploy order: none of its own; PRIVACY and the rest of docs/legal ship in the
+image's docs tree with dashboard 0.7.74.
+
+Deferred at round 1 (superseded by the round-2 list below): the support address (COM-H12 / GL-43); the minimum macOS version is
+not pinned in the build scripts; the [30]-day deletion period, named access
+and the AI-tools question need the owner; counsel placeholders in the DPA (SCC
+clauses, UK Addendum vs IDTA, supervisory authority, Art. 27 representative,
+liability, Taiwan PDPA); the COM-M2 banner decision; INSTALL.md's SmartScreen
+and System Settings click-through guide (GL-30 doc half);
+APPLIANCE_INSTALL.md's "free Tailscale tier is enough" (COM-M39); PRIVACY's AI
+row after the CLI hard-disable; TrueNAS 26 stays unverified until CR-365 runs
+live.
+
+**Round 2 (2026-10-07), passed oversight (pass after 1 refix):** Round 2b: DPA
+Annex III states the no-AI-on-support-data commitment (no "by default", no
+open decision); the unpublished drafts are now refused by /help to admins as
+well as editors (casefolded match via published_docs.is_unpublished_draft),
+though they still ship in the legal tree on disk; BETA_AGREEMENT s9 counsel
+question matches email sign-up; PRIVACY says the cited drafts are available
+from the Licensor on request until released.
+
+Owner decisions (Round-2 answers, 2026-10-07) applied: the support mailbox is
+support@thecreatorsclub.co (no longer a bracketed placeholder); no AI tool
+reads support data, and it is deleted 30 days after the ticket closes; the
+three drafts stay out of the in-product published set until counsel clears
+each one. The drafts still physically ship in the legal tree (image COPY, OTA
+bundle, bind mode); only /help serving is blocked, for everyone.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- The three drafts still physically ship in the legal tree (image COPY, OTA
+  bundle, bind mode); only /help serving is blocked, for everyone. Excluding
+  them from the shippers is optional hardening in other packages' code. The
+  CR-377 entry should say this.
+- Engineering item: a /setup or wizard acceptance step for the beta terms with
+  a BETA-AGREEMENT-VERSION marker; until then acceptance is by email at
+  sign-up.
+- GL-34: support_contact in product code should use
+  support@thecreatorsclub.co.
+- Minimum macOS version not pinned in build scripts (open owner item).
+- Counsel placeholders in DPA (SCCs, UK Addendum vs IDTA, supervisory
+  authority, Art. 27 representative, liability, Taiwan PDPA) remain bracketed.
+- COM-M2: PRIVACY 1.1 Draft-for-counsel banner on the wizard-linked policy is
+  an owner/counsel call, flagged in docs/README.md.
+- INSTALL.md SmartScreen/System Settings guide (GL-30 doc half) still owed.
+- APPLIANCE_INSTALL.md 'free Tailscale tier is enough' (COM-M39) not edited
+  here.
+- PRIVACY s5 AI row to be revisited after the CLI-provider hard-disable lands
+  and to mention the triage agent on the site's own API key.
+- TrueNAS 26 stays unverified until A1d is checked on a live box.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: docs/README.md lines 91-93 link to legal/BETA_AGREEMENT.md, DPA.md
+  and SUPPORT_DATA_PROCEDURE.md. In a dev checkout an admin's /help render of
+  README.md shows those as /help/legal/... links, and they now always answer
+  'not found' because the drafts are refused to everyone. README is not
+  published, so no customer sees this. A short note, or code spans in place of
+  the links, would avoid the dead links.
+- POLISH: PRIVACY.md section 1 now says the same thing twice in back-to-back
+  bullets: 'the one automatic request ... is the release-feed check in section
+  5 ... carries no Customer data' appears in the first bullet and again in the
+  second. It is accurate, just repetitive. Worth tidying before counsel
+  review.
+
+## CR-378 - the release signing key was a plaintext file on the everyday, agent-running base rig; it is now passphrase-protected for the beta - FIXED in repo (base-rig release tools + docs, nothing shipped to the fleet)
+
+2026-10-07, prelaunch review `docs/PRELAUNCH_REVIEW_2026-10-06.md` GL-17 (the
+beta half), owner decision GL-42 of 2026-10-07 ("Beta: a passphrase-protected
+key file", two offline backups, a hardware token before the paid release).
+Package K1, built in the round-2 run; one refix.
+
+Symptom: `%USERPROFILE%\.ccsync-release\release.key` held the 32-byte Ed25519
+seed that every companion and dashboard trusts as a plain base64 line. Anything
+that could read the owner's profile on the base rig (which runs agents every
+day) could sign a build the whole fleet would install. `bug-comp-trust-1`,
+`COM-H4`, `PL-RES-41`.
+
+Cause: the v1 key format was plaintext by design (2026-08-17), and no signing
+path could ask for a secret.
+
+Fix:
+
+- tools/release_key.py: a v2 format, `ccsync-release-key-v2 <base64 JSON
+  envelope>`, holding the PUBLIC key in the clear (pubkey, trusted, bake and
+  the release rig's probes never need the passphrase), a scrypt salt and cost
+  (N=2^17, r=8, p=1, stored in the file), and the seed under an
+  encrypt-then-MAC construction (HMAC-SHA256 counter keystream plus an
+  HMAC-SHA256 tag) over keys scrypt derives. Stdlib only, so the release
+  tooling grows no dependency. New subcommands `encrypt` (passphrase-protect
+  the file in place, 12+ characters, verified to decrypt to the same seed and
+  public key before the swap), `status` (encrypted | plaintext | missing, no
+  passphrase) and `check` (decrypt only). `backup --to` copies an encrypted
+  key byte for byte. A plaintext key still loads.
+- The passphrase is asked once per process (getpass, never echoed, never
+  logged); a release spans several processes, so tools/ship.ps1 and
+  tools/publish_latest.py ask once up front and hand the signing children
+  CCSYNC_RELEASE_KEY_PASSPHRASE for that run only (`unlock_for_run`). A run
+  with no terminal and no variable refuses with the action to take.
+- docs/RELEASE.md "Encrypting the release key" (the one-time procedure: two
+  USB copies of the encrypted file, the passphrase on paper kept apart,
+  destroy every older plaintext copy, encrypt the rotation neighbours);
+  docs/SECRETS.md "The release signing key's passphrase".
+
+Files: tools/release_key.py, tools/ship.ps1, tools/publish_latest.py,
+docs/RELEASE.md, docs/SECRETS.md, tools/tests/test_release_key.py,
+tools/tests/test_release_key_encrypted.py (new, 16 tests), tools/test_map.toml.
+
+Tests: tools/tests/test_release_key_encrypted.py (encrypt keeps the public key
+and removes the plaintext, a short passphrase or a failed verification changes
+nothing, a wrong passphrase and a tampered file refuse, asked once per
+process, no terminal refuses, plaintext loads and warns, the non-signing
+commands need no passphrase and stay silent, backup copies the encrypted file,
+unlock_for_run, check, a failed swap leaves the plaintext intact, ship asks
+once and skips -DashboardOnly).
+
+Deploy order: none. Nothing reaches a companion or a dashboard: the public key
+is unchanged, so nothing is rebaked and DASH_RELEASE_PUBKEYS stays as it is.
+The protection exists only once the owner runs the one-time `encrypt` step.
+
+Not done (the rest of GL-17, waiting on GL-42's paid-release half): a new
+production key on a hardware token, retiring the 2026-08-17 key in an overlap
+release, a second cold recovery public key, and a key-compromise runbook.
+
+**Round 2 (2026-10-07), passed oversight (pass after 1 refix):** Round 2 of K1
+(CR-378) changed three things. (1) The unencrypted-key warning is now emitted
+only by the signing path (read_secret warn=True); read_public, backup record
+and the other non-signing commands are silent, so release.ps1's EAP=Stop
+pubkey probe no longer dies on a plaintext key. (2) New `release_key.py check`
+subcommand; ship.ps1 runs it after the prompt and aborts before the dashboard
+deploy on a wrong passphrase. ship.ps1 also skips the prompt for
+-DashboardOnly and clears the env var at the end of a run. (3) ask_passphrase
+checks for a real console on Windows (GetConsoleMode) so NUL stdin refuses
+instead of hanging, and `encrypt` swaps first and scrubs the moved-aside
+plaintext after, restoring it if the swap fails. Four tests added.
+
+Central gate, round 2 (2026-10-07): tools\run_all_tests.ps1 failed 1 of 13
+suites on the first run and was green on all 13 after one fix;
+check_licenses.py OK; select_suites.py --audit clean.
+
+**Deferred after round 2 (current list):**
+
+- Owner one-time step: run `python tools\release_key.py encrypt`, make two
+  `backup --to` USB copies, write the passphrase down separately, and destroy
+  every older plaintext copy.
+- Mac scripts release_macos.sh and build_onboard_macos.sh: they discard
+  stderr, so a wrong passphrase shows as 'key missing'. This is fixed when the
+  Mac half of the passphrase flow is done; a Mac signing run also still asks
+  per signing call, and the Mac copy of the key needs `encrypt` run on it too.
+- build_editor_package.ps1 run standalone (-Publish) still asks for the
+  passphrase twice, once for each sign_release process. Once per run holds
+  only under ship.ps1 or publish_latest. A fix would add the same prompt to
+  that script.
+- The cmd_backup docstring that says 'no passphrase wrap' was not touched. It
+  is accurate for the plaintext path only.
+
+**Polish noted at round-2 oversight (not blocking; the overseer's findings):**
+
+- POLISH: after `encrypt`, ~/.ccsync-release/backup.json still records the old
+  PLAINTEXT backup (same pubkey_id, `where` = a copy the tool then tells the
+  owner to destroy). So ship.ps1's 'no recorded backup' note never fires
+  again. If the owner destroys the old copies (step 3) and skips the new
+  `backup --to` (step 1), the on-disk encrypted file is the only copy and
+  nothing warns about it. Fix: cmd_encrypt should move the record aside or
+  mark it as predating encryption.
+- POLISH: a damaged v2 envelope that is missing a field (`tag`, `ct`, `salt`
+  or `pub`) gives an uncaught KeyError traceback from
+  decrypt_seed/read_public, not the 'damaged, restore from backup' message.
+  Probe: delete `tag` from the JSON envelope, then call read_secret, which
+  raises KeyError 'tag'.
+- POLISH: docs/RELEASE.md is out of date in three places. Line ~730 says
+  encrypt 'overwrites the plaintext and swaps the encrypted file in', but the
+  code now swaps first and scrubs the moved-aside copy after. Line ~760 says
+  'every process that loads it prints an UNENCRYPTED warning', but now only
+  the signing path warns. Line ~1153 (REL-14 paragraph) still says 'there is
+  no passphrase wrap, and the tool says so'. The cmd_backup docstring also
+  still says 'NO PASSPHRASE WRAP'.
+- POLISH: ship.ps1 skips both the prompt and the new `check` when
+  CCSYNC_RELEASE_KEY_PASSPHRASE is already set in the environment. A wrong
+  pre-set value is then only caught at the first signing step, after step 1
+  has deployed the dashboard. ship.ps1 also removes a pre-set value at the end
+  of the run, though only inside its own child process.
+- POLISH: publish_latest.preflight unlocks the hard-coded
+  ~/.ccsync-release/release.key, but its signing children resolve key_path(),
+  which honours CCSYNC_RELEASE_KEY. When that variable points somewhere else,
+  the up-front check covers a different file than the one that gets signed
+  with (the same mismatch existed before this package).
+- POLISH (deferred by the builder, accepted): the Mac scripts send stderr to
+  /dev/null, so a wrong passphrase shows as 'key missing', and a Mac signing
+  run prompts once per sign_release call. build_editor_package.ps1 run on its
+  own asks twice. Neither breaks a plaintext-key studio ship.
+
+## CR-379 - a new Resolve project named after an old one was auto-linked into the old project's folder, so the NEW PROJECT prompt never came - FIXED, dashboard (unreleased)
+
+**Seen 2026-10-31 on the base rig.** Resolve project "Beyond Nights LUSTY" got no
+NEW PROJECT prompt. The report route's sticky auto-map
+(`db.match_project_label_confident`) only scores REGISTERED projects: the name
+shares 'beyond' + 'nights' with `2026/Beyond Nights`, two tokens is "confident",
+and the mapping was written permanently. The folder made for the new episode,
+`2026/Beyond Night LUSTY`, scored just as well ('beyond' + 'lusty') but had no
+marker, so it was never consulted. Once mapped, /project-setup says ALREADY SET
+UP and the tray has no "Set up..." item; only an admin can re-point it.
+
+**Fix.** Before writing the sticky mapping, `api._auto_map_has_rival` walks the
+tree for folders that are not projects, not inside one and hold none
+(`provision.scan_unregistered_dirs`, depth = deepest label, pruned at markers,
+60 s cache) and asks `db.unregistered_rivals`: a folder whose token overlap is
+>= the match's, or whose last segment IS the name, blocks the auto-map and the
+reply carries `resolve_project_unmapped`, so the editor is asked. An exact-name
+match (name == the registered folder's last segment) only loses to another
+exact-name folder. A tree that cannot be read means ask (a sticky mapping is
+permanent, a prompt is cheap); no `projects_dir` configured keeps the old
+behaviour. Containers of the match are never rivals. Tests:
+`dashboard/tests/test_project_root.py` (CR-379 block). Real tree: 0.5 s over
+SMB from the base rig, 42 candidate folders.
+
+**Not fixed by this:** mappings already written stay as they are. The live
+"Beyond Nights LUSTY" -> `2026/Beyond Nights` row needs an admin to remove it
+on the project page's roots window, then /project-setup to link the right folder.
+
+**Tightened the same evening (owner: auto-linking a project into one it does
+not match "is not useful behaviour").** The rival check alone still let a
+partial name through whenever no closer folder existed. The auto-map now needs
+the EXACT name: `db.match_project_label_confident` maps only when the Resolve
+name equals (NFC, case-folded, '-'/'_' as spaces, whitespace collapsed) the
+final segment of exactly ONE registered project's label, or the whole label.
+Any partial overlap, however many words, and any name two folders share, is
+left unmapped and the editor gets the NEW PROJECT prompt.
+`db.unregistered_rivals` is now the same-name check for folders that are not
+projects yet (a registered 2025/Shinto, an unregistered 2026/FF5/Shinto).
+`MIN_CONFIDENT_TOKENS` is retired. Side effect, the safe direction:
+`alerts._synced_project` uses the same function, so fewer open projects count
+as "this is a tree project". Tests updated in `test_project_root.py` and
+`test_project_setup.py` (258 passed across the six affected files).
+
+## CR-380 - a timeline whose originals were VP9 failed its full-resolution render, and nothing said so until then - FIXED in repo 2026-11-01 (companion, unshipped)
+
+**Seen 2026-10-31/11-01, FF5 submission renders.** Resolve Studio 21 on Windows
+refused a full-resolution render with "Error decoding full resolution media for
+<clip>.mp4 ... Please check that the file is accessible and has a valid codec"
+when a timeline clip's ORIGINAL was VP9 (YouTube downloads in MP4: VP9 + Opus).
+Editing looked fine because every such folder also held H.264 proxies, so the
+problem surfaced only at render. AV1 and HEVC originals rendered fine on the
+same rig; only VP9 failed. Write-up:
+`Editing/Resolve/MontagePipeline/docs/VP9_MONTAGE_DOWNLOADS_2026-11-01.md`.
+The cure is converting the original to H.264 (`montage_editready.py "<folder>"`,
+or ccsync's edit-ready rule) and relinking or remaking the proxy.
+
+**Fix: `vp9_guard.py`.** The watcher gained an `on_timeline_scanned` hook that
+hands every successful poll's answer to `VP9Guard.observe()`, which does no I/O:
+it hashes the video clips and wakes the guard's own thread only when the
+timeline changed or `CHECK_INTERVAL_SECONDS` (120) passed. That thread stats and
+ffprobes (`ffmpeg_tools.probe_video`, so the managed ffprobe is found) each
+distinct ORIGINAL path once; the codec is cached by (path, size, mtime) in
+memory and in `~/.ccsync/state/vp9_codec_cache.json`. A probe that fails, times
+out or names no codec is UNKNOWN: never VP9, never remembered as fine (retried
+after 10 minutes), and a path not on this computer (a proxy-only rig) is simply
+unknown. When VP9 originals are found the guard shows `popup.confirm_dialog`
+(new `cancel_label` argument) on that thread, under `_popup_active_lock`, listing
+clip name, file name and track + clip number, saying the timeline will fail to
+render at full resolution and how to fix it. [ STOP WARNING FOR THIS TIMELINE ]
+stores the acknowledged VP9 path set per project + timeline uid in
+`~/.ccsync/state/vp9_guard.json`; a VP9 path outside that set warns again, and
+within a session the same set is not shown twice. If the dialog could not be
+shown (another window open) the warning stays owed and is retried.
+Config `vp9_guard` (default true) turns the whole guard off. It never calls
+Resolve (CR-68): it reads the walk the watcher already did. Known limit: the
+position is the track and the clip's number on it, not a timecode, because the
+walk carries no clip start. Tests: `tests/test_cr380_vp9_guard.py`.

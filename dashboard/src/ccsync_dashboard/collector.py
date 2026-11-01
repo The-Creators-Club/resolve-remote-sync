@@ -405,6 +405,19 @@ class Collector:
             cli_tools.auto_update_tick(conn, self.settings)
         except Exception:  # noqa: BLE001 - a cycle must never die here
             log.exception("the Claude Code auto-update tick failed; continuing")
+        # CR-363 (2026-10-07). Two small watchdogs on things that fail without
+        # a single sync error: the tailnet node's Serve config (GL-04/GL-09: a
+        # node that lost it is a dashboard no editor can reach) and the sync
+        # engine's admin page login (GL-08). Both are rate limited inside,
+        # inert with no sidecar / no engine, and never raise.
+        try:
+            from . import syncthing_gui_guard, tailnet_serve
+
+            tailnet_serve.tick(conn, self.settings)
+            if self.settings.syncthing_url:
+                syncthing_gui_guard.tick(self.settings, self.client)
+        except Exception:  # noqa: BLE001 - a cycle must never die here
+            log.exception("the tailnet / sync engine guards failed; continuing")
         # Completion/remoteneed need the config caches; hydrate first if empty.
         if not self._project_ids and any(k in kinds for k in ("completion", "remoteneed")):
             if "config" not in kinds:
@@ -412,7 +425,7 @@ class Collector:
         runners = {
             "provision": self._run_provision,
             "config": self._run_config,
-            "enforce": self._run_enforce,
+            "enforce": self._run_enforce_and_groups,
             "inventory": self._run_inventory,
             "connections": self._run_connections,
             "completion": self._run_completion,
@@ -1314,6 +1327,22 @@ class Collector:
             return f"refused deactivating {refused['would_deactivate']} project(s)"
         return None
 
+    def _run_enforce_and_groups(self, conn) -> str | None:
+        """The enforce pass, then per-project NAS group membership (CR-368
+        follow-up, 2026-10-07). Inert unless project_acl is per-project, and a
+        failure there is logged inside project_groups.reconcile, never the
+        cycle's."""
+        note = self._run_enforce(conn)
+        try:
+            from . import project_groups
+
+            if project_groups.enabled(self.settings):
+                conn.commit()    # no write transaction open across NAS calls
+                project_groups.reconcile(conn, self.settings)
+        except Exception:  # noqa: BLE001 - never the enforce cycle's failure
+            log.exception("project group reconcile failed; continuing")
+        return note
+
     def _run_enforce(self, conn) -> str | None:
         """Reconcile Syncthing folder shares with the selections table.
 
@@ -1631,8 +1660,38 @@ class Collector:
         # the shape of the B16 failure it was supposed to catch: the setting
         # is named max_share_removals and now measures share removals.
         removals = [(slug, d) for slug, desired, actual in plans for d in (actual - desired)]
+        # GL-33 / CR-376 (2026-10-07): a removal an admin caused on purpose is
+        # not what the brake is for. The brake exists for the removal NOBODY
+        # asked for (a bad snapshot, B16), so the count that is compared with
+        # the limit is the removals with no audited act behind them. Three
+        # traces, each a state written in the same transaction as its audit
+        # row: an archived project, a suspended person's computers, and an
+        # audited untick; plus the pairs an admin approved by name from the
+        # refusal banner. Everything else still counts, and a snapshot that
+        # unshares a fleet has none of these.
+        now_iso = self.now_fn()
+        approved = db.approved_enforce_pairs(conn, now_iso)
+        audited_unticks = db.standing_untick_devices(
+            conn, now_iso, machine_devices,
+            window_seconds=db.ENFORCE_UNTICK_AUTH_SECONDS)
+        suspended_devices = {
+            d for d, editor in id_to_editor.items() if editor in suspended}
+        suspended_devices |= {d for (editor, _m), d in machine_devices.items()
+                              if editor in suspended}
+        authorised = {
+            (slug, d) for slug, d in removals
+            if slug in archived
+            or d in suspended_devices
+            or d in audited_unticks.get(slug, frozenset())
+            or (slug, d) in approved
+        }
+        removals = [r for r in removals if r not in authorised]
         removal_devices = {d for _slug, d in removals}
-        limit = self.settings.enforce_max_share_removals
+        # A site may let the limit grow with the fleet: 3 is right for 4
+        # computers and wrong for 40. 0 (the default) keeps the flat limit.
+        n_computers = sum(1 for e in id_to_editor.values() if e)
+        limit = max(self.settings.enforce_max_share_removals,
+                    db.enforce_removals_per_computer(conn) * n_computers)
         skip_removals = len(removals) > limit
         # DASH-3 (resilience sweep 2026-08-28): the diff this cycle was about
         # to apply, and the refusal if it refused, are PERSISTED before the
@@ -1657,12 +1716,19 @@ class Collector:
             note = f"refused {len(removals)} share removal(s)"
         else:
             db.clear_enforce_refusal(conn)
+        # An approval is for ONE application of ONE refusal (CR-376 round 2,
+        # 2026-10-07): spent as soon as any approved pair is applied, in a
+        # refused cycle too, and a pair the plan holds again no longer counts.
+        if approved:
+            db.spend_enforce_approval(conn, plans, whole=not skip_removals)
         conn.commit()
 
-        return self._enforce_loop(plans, skip_removals, note)
+        return self._enforce_loop(plans, skip_removals, note,
+                                  authorised=frozenset(authorised))
 
     def _enforce_loop(
         self, plans, skip_removals: bool, note: str | None = None,
+        authorised: frozenset = frozenset(),
     ) -> str | None:
         """Apply the plan folder by folder. -> this cycle's note.
 
@@ -1692,7 +1758,11 @@ class Collector:
         failures: list[str] = []
         for slug, desired, actual in plans:
             if skip_removals:
-                desired = desired | actual
+                # Only the removals that were COUNTED are held back; an
+                # authorised one (GL-33) goes through while the brake holds
+                # the rest, so Suspend still works during a refusal.
+                desired = desired | {d for d in actual - desired
+                                     if (slug, d) not in authorised}
                 if desired == actual:
                     continue
             attempted += 1

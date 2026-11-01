@@ -764,6 +764,35 @@ else {
     }
 }
 
+# --- 3a2. launch what was built ---------------------------------------------
+# GL-22 / PL-RES-03 (CR-370, 2026-10-07). Nothing ever LAUNCHED the frozen exe
+# before it was published: every check above reads the source or PyInstaller's
+# TOCs. A build missing a lazily imported module, or one that cannot start for
+# any import-time reason, shipped and then died on every machine that took it.
+# `--self-test` imports the whole package from inside the exe, takes no
+# single-instance lock and starts nothing (startguard.self_test). Before the
+# signature, so a refused build is never signed. The exe is windowed, so the
+# verdict is the exit code plus a result file.
+$SelfTestOut = Join-Path $CompanionDir "build\self-test.txt"
+if ($DryRun) {
+    Write-Step "[dry-run] would launch: $ExePath --self-test"
+}
+else {
+    Remove-Item -LiteralPath $SelfTestOut -ErrorAction SilentlyContinue
+    $st = Start-Process -FilePath $ExePath -ArgumentList @("--self-test", "--self-test-out", "`"$SelfTestOut`"") -PassThru -WindowStyle Hidden
+    if (-not $st.WaitForExit(180000)) {
+        try { $st.Kill() } catch {}
+        Write-Fail "the built exe did not finish --self-test in 180 s; NOT signing or writing a manifest"
+        exit 1
+    }
+    $verdict = if (Test-Path -LiteralPath $SelfTestOut) { (Get-Content -LiteralPath $SelfTestOut -Raw).Trim() } else { "(no result file)" }
+    if ($st.ExitCode -ne 0) {
+        Write-Fail "the built exe FAILED its own --self-test (exit $($st.ExitCode)): $verdict -- NOT signing or writing a manifest"
+        exit 1
+    }
+    Write-Step "self-test: $verdict"
+}
+
 # --- 3b. Authenticode --------------------------------------------------------
 # COMMERCIAL_READINESS.md item 4 (2026-08-17). Two DIFFERENT signatures matter
 # here and they are not substitutes:

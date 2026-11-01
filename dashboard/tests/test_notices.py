@@ -140,6 +140,8 @@ def test_run_checks_never_raises_with_every_check_broken(conn, monkeypatch):
                 "_check_contention", "_check_broll_archive",
                 # CR-309 (2026-09-24): the unattended CLI updater's card.
                 "_check_ai_cli_update",
+                # GL-31 / CR-374 round 2 (2026-10-07): the stranded-lock card.
+                "_check_cli_lock_stranded",
                 # CR-320 (2026-09-24): the event-shaped resolution sweep.
                 "_check_resolved",
                 "_check_pending_devices", "_check_plan_without_share"):

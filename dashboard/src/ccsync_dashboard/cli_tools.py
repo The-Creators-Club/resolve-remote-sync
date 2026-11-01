@@ -2417,6 +2417,11 @@ def _require_cli_enabled(conn, settings: Any) -> None:
     from . import ai_providers
 
     if not ai_providers.cli_enabled(conn, settings):
+        from . import build_flavor
+
+        if build_flavor.cli_build_locked():
+            # GL-31 / CR-374: no notice can fix this one; say so.
+            raise HTTPException(status_code=409, detail=build_flavor.LOCKED_DETAIL)
         raise HTTPException(
             status_code=409,
             detail=("CLI providers are off for this site. Accept the notice in "
@@ -2488,7 +2493,16 @@ async def api_install(name: str, request: Request, conn=Depends(get_conn)) -> di
     admin = _admin(request)
     _tool(name)
     settings = request.app.state.settings
-    _require_cli_enabled(conn, settings)
+    from . import ai_providers, build_flavor
+
+    if build_flavor.cli_build_locked() and name == ai_providers.CLAUDE_CODE:
+        # Round 2 (2026-10-07, GL-31 / CR-374): the owner's ruling keeps triage
+        # on a customer build on the site's Anthropic API key, and a
+        # self-installing customer cannot otherwise get the binary. Only the
+        # install is open; sign-in, setup-token and relay stay locked.
+        pass
+    else:
+        _require_cli_enabled(conn, settings)
     try:
         status = start_install(settings, name)
     except ToolError as exc:

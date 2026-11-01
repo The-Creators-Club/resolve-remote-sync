@@ -126,7 +126,7 @@ Ranked by the orchestrator across reports. Effort is the agent's estimate.
 | 9 | DUI-2 | no `htmx:responseError` handler anywhere, and the only freshness stamp is in a topbar that is never re-rendered | S |
 | 10 | DUI-1 | a one-time password and a one-time fleet token are painted into panels a 30 s / 60 s poll erases, with no [ COPY ] | S |
 | 11 | APP-1 | the tray icon and tooltip never read `sync_guard.blocked`; green and "up to date" while nothing has synced for days | S |
-| 12 | RES-2 | `[ ALWAYS LEAVE THIS FOLDER ALONE ]` destroys the popup and releases the lock while FIX ALL is still copying | S |
+| 12 | RES-2 | `[ ALWAYS LEAVE THIS FOLDER ALONE ]` destroys the popup and releases the lock while FIX ALL is still copying (button removed 2026-09-30, CR-356) | S |
 | 13 | OPS-1 | a machine whose tree drive could not be mapped exits 0 and the wizard shows the green DONE page | S |
 | 14 | RES-1 / SYS-4 | `GOTCHAS.md` section 15 hands every other Resolve client the `is_starting()` guard that CR-68 proved broken; `ready_to_connect` appears nowhere in `docs/` | S |
 | 15 | RES-3 | the proxy ATTACH half has zero user-visible surface; `apply_relinks`'s summary is discarded and `_REFUSALS` is a permanent invisible skip list | S/M |

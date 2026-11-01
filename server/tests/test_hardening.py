@@ -270,6 +270,7 @@ def test_the_rest_api_uses_a_bearer_key_when_one_is_configured(monkeypatch):
     monkeypatch.setattr(requests, "request", fake_request)
     monkeypatch.setenv("TRUENAS_API_KEY", "1-abcdef")
     monkeypatch.setenv("TRUENAS_VERIFY_SSL", "1")
+    monkeypatch.setenv("TRUENAS_API_TRANSPORT", "rest")   # CR-365: this pins the REST half
     common.truenas_api("GET", "/user")
     assert calls["headers"] == {"Authorization": "Bearer 1-abcdef"}
     assert calls["auth"] is None, (
@@ -289,6 +290,7 @@ def test_without_a_key_the_rest_api_still_uses_basic_auth(monkeypatch):
                         lambda method, url, **kw: (calls.update(kw), FakeResp())[1])
     monkeypatch.delenv("TRUENAS_API_KEY", raising=False)
     monkeypatch.setenv("TRUENAS_PW", "pw")
+    monkeypatch.setenv("TRUENAS_API_TRANSPORT", "rest")   # CR-365: this pins the REST half
     common.truenas_api("GET", "/user")
     assert calls["headers"] is None
     assert calls["auth"] == ("truenas_admin", "pw")

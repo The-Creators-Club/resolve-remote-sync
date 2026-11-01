@@ -1,0 +1,1228 @@
+[
+  {
+    "id": "PL-RES-01",
+    "sources": [
+      "res-dataloss-1"
+    ],
+    "severity": "high",
+    "verdict": "CONFIRMED by verifier",
+    "title": "Remove from this machine deletes an upload-only project's non-video files (WAVs, stills, docs) under a dialog promising nothing will be lost",
+    "where": "companion app.py:6131-6274 (removal_blockers), app.py:6380-6390 (rmtree); tray.py:1925-1932; sync/rclone_lane.py:941-974",
+    "recommendation": "For upload-only projects, enumerate files no lane carries and block naming them behind the typed override; never claim everything reached the server when only video was checked. Decide UPLOAD_ONLY_TICK.md section 5 (widen lane A for upload-only) before launch."
+  },
+  {
+    "id": "PL-RES-02",
+    "sources": [
+      "res-dataloss-2"
+    ],
+    "severity": "high",
+    "verdict": "CONFIRMED by verifier",
+    "title": "Removal gate ignores the WON'T UPLOAD set: a name collision or same-name re-export passes and the only copy is deleted",
+    "where": "companion sync/rclone_lane.py:1792-1854 (scan_pending_uploads keeps --ignore-existing), :1857 (scan_size_mismatches, report-only); app.py:6131-6274; tray.py:1925-1938",
+    "recommendation": "Run scan_size_mismatches for the project and each borrowed subpath inside removal_blockers; block on any non-zero count with names behind the typed override; fail closed if it cannot run."
+  },
+  {
+    "id": "PL-RES-03",
+    "sources": [
+      "res-upgrade-1"
+    ],
+    "severity": "high",
+    "verdict": "CONFIRMED by verifier",
+    "title": "A companion build that fails at start-up is never rolled back, and no release step ever launches the frozen exe",
+    "where": "companion app.py:12036-12139 (run() before the start record), app.py:11758 (note_version_start); supervisor.py:132-137,184 (exit 1 not relaunched); upgrade.py:97 (2 s takeover grace), :253-329, :981-1040; tools/release.ps1; .github/workflows/release-windows.yml; tools/release_macos.sh",
+    "recommendation": "Gate release.ps1, release-windows.yml and release_macos.sh on a --self-test launch of the frozen exe. Record the start at the very top of run() in a stdlib helper and count any unclean exit as a failed start. Have the supervisor relaunch exit-1 deaths of a just-upgraded build. Replace the 2 s grace with a 'started' marker waited for up to ~30 s."
+  },
+  {
+    "id": "PL-RES-04",
+    "sources": [
+      "res-upgrade-3"
+    ],
+    "severity": "high",
+    "verdict": "CONFIRMED by verifier",
+    "title": "A dashboard update that boots but cannot serve is never reverted, because nothing restarts the wedged process",
+    "where": "dashboard dashboard_update.py:488-514 (start_boot_watchdog logs and returns); deploy/select_code_root.py (revert only at the next start); deploy/compose.image.yaml:345-356 (healthcheck only marks unhealthy)",
+    "recommendation": "In volume-tree mode, exit the process (os._exit, even 75) when the boot probe fails so run.sh/Docker re-runs select_code_root and the counter advances to a revert. Add a lifespan deadline so a hang before arming is caught. Keep log-only for image code."
+  },
+  {
+    "id": "PL-RES-05",
+    "sources": [
+      "res-deps-4",
+      "res-network-4"
+    ],
+    "severity": "high",
+    "verdict": "CONFIRMED by verifier (res-deps-4); res-network-4 not verified (hunter: CONFIRMED)",
+    "title": "Nothing watches the server's own tailnet: the appliance node joins interactively and expires on Tailscale's schedule, taking the whole fleet with it; a fleet-wide disconnect surfaces only as per-machine machine_silent after 24 h",
+    "where": "dashboard/deploy/compose.appliance.yaml:357-421; dashboard tailscale_local.py:105-122 (summarise drops Self.KeyExpiry); setup_engine.py:1029-1126; alerts.py ALERT_KINDS (no tailnet kind, no correlated-silence rule)",
+    "recommendation": "Read Self.KeyExpiry/BackendState/Serve in the collector and alert 14 days ahead with the fix ('disable key expiry for this node'). Have the wizard tell the admin to disable expiry or use a tagged key. Add one correlated fleet-silence alert (e.g. >=50 % of machines active in the last day silent for 30 min) naming the server's network. Have companions report their own KeyExpiry. See also PL-RES-52 (heartbeat off by default)."
+  },
+  {
+    "id": "PL-RES-06",
+    "sources": [
+      "res-dataloss-3",
+      "res-time-scale-3"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier (res-dataloss-3); res-time-scale-3 not verified (hunter: CONFIRMED)",
+    "title": "Future-dated clips (camera clock ahead or on home timezone) silently never upload or get proxies, and they and files under 120 s old are invisible to the removal gate",
+    "where": "companion sync/rclone_lane.py:470-479, :2038-2049 (--min-age 120s), :1820-1824 (gate reuses argv), :6792 (express age gate); proxy_scan.py:446; proxy_gen.py:1836",
+    "recommendation": "Drop --min-age from the removal gate's dry run. Detect mtime > now + tolerance in the manifest walk, report the files by name (sync_guard field, tray line, grid chip), and upload them via the express path using size stability alone."
+  },
+  {
+    "id": "PL-RES-07",
+    "sources": [
+      "res-dataloss-4"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "Removal gate's lane C half trusts Syncthing's index without a scan: unscanned edits and paused (halted) folders read as 100 %",
+    "where": "companion app.py:6234-6268; sync/syncthing_admin.py:757-769, 593-600; sync/lane_guard.py HaltState",
+    "recommendation": "Fail closed when the folder is paused or not idle; otherwise POST /rest/db/scan, wait bounded for idle, then read completion."
+  },
+  {
+    "id": "PL-RES-08",
+    "sources": [
+      "res-dataloss-5"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "Every editor's SMB login can delete camera originals on the NAS; no recycle bin, no shadow copies, and the grade swap puts editors straight on the tree",
+    "where": "server/setup_tree.py:21-27,183 (2770 editors); server/backends/synology.py:90-92 (EDITORS_ACE has d/D), :1091 (recycle bin off); companion drive_swap.py:445-470; docs/SYNC_SAFETY.md section 7",
+    "recommendation": "Enable an admin-only SMB recycle bin and shadow copies on the tree share and show their state on the protection panel; warn in the grade swap that deletes there are permanent for everyone; correct SYNC_SAFETY section 7. Consider deny-delete on Projects/** only as a later option."
+  },
+  {
+    "id": "PL-RES-09",
+    "sources": [
+      "res-dataloss-6"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "publish_db.py --which music still overwrites every fleet-ingested track and pending queue row in the live index",
+    "where": "server/publish_db.py:93-134 (drain False for music), :375-416; music/web/musicweb/ingest_batches.py:983-1000",
+    "recommendation": "Refuse with names when pending queue rows or live tracks missing from the candidate exist (unless --allow-clobber-queue); better, a music drain-and-merge like broll_drain.py."
+  },
+  {
+    "id": "PL-RES-10",
+    "sources": [
+      "res-storage-3"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "Lane A storage errors arrive as raw rclone text, and an error that recurs every pass never meets the one-hour alert clocks",
+    "where": "companion sync/rclone_lane.py:4312-4313, :4517-4550; sync/base.py:81-84; dashboard alerts.py:1760-1780, :3882-3914",
+    "recommendation": "Per-project failure streak keyed by subpath and error class, reported in sync_guard (upload_blocked with since); classify the storage errno family into sentences naming who must act; base lane_error on a since-time that holds across passes; add an 'originals owed to the server > 24 h' alert."
+  },
+  {
+    "id": "PL-RES-11",
+    "sources": [
+      "res-storage-4"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "On Windows a sync drive back under another letter reads 'disconnected' forever, and any drive that takes the old letter is accepted as the tree",
+    "where": "companion root_guard.py:50-52, :426-432; tray.py:519-560",
+    "recommendation": "Record volume serial/GUID in volume.json on Windows; when absent, search other letters and report 'misplaced'; refuse a different volume. Better: a .ccsync-tree identity marker checked before any lane runs."
+  },
+  {
+    "id": "PL-RES-12",
+    "sources": [
+      "res-storage-5"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "Windows long paths: the installer never enables them, and Python-side walks silently skip or fail on deep trees",
+    "where": "installer/windows_bootstrap.ps1; companion manifest.py:186-210; sync/lane_guard.py:1155-1170, :1353-1360",
+    "recommendation": "Set LongPathsEnabled=1 in the (elevated) bootstrap, confirm the exe is longPathAware, report the value in diagnostics; pass onerror to the walks so skipped subtrees are counted."
+  },
+  {
+    "id": "PL-RES-13",
+    "sources": [
+      "res-storage-6"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A read-only sync root reads as present, and only the Mac installer checks the filesystem type",
+    "where": "companion root_guard.py; app.py _BLOCKED_ORDER; installer/windows_bootstrap.ps1:470-510; installer/macos_bootstrap.sh:2254-2257",
+    "recommendation": "Cheap write probe per root-guard cycle mapping EROFS/EACCES/EPERM to a root_readonly state and blocked reason; both installers refuse or warn on FAT32 and read-only volumes, and macOS refuses NTFS."
+  },
+  {
+    "id": "PL-RES-14",
+    "sources": [
+      "res-crash-3"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "Companion safety state is not fsynced; a torn latch after power loss reads as 'no state' and fails open",
+    "where": "companion sync/lane_guard.py:171-215; file_moves.py:1042-1088; resolve_journal.py:351-388; upgrade.py:713-760; sync/rclone_lane.py:359-367; selection.py:388",
+    "recommendation": "One atomic_write_json helper (write, flush, fsync, replace, dir fsync on POSIX) for every latch, ledger and journal; readers distinguish absent from unreadable, an unreadable latch stays TRIPPED, unreadable ledgers are renamed aside before rewrite."
+  },
+  {
+    "id": "PL-RES-15",
+    "sources": [
+      "res-crash-4"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "Footage and proxies written without fsync can survive a power loss full-size but zeroed, and size-only comparisons then spread the damage fleet-wide permanently",
+    "where": "companion fixer.py:566-686, :1438-1442; ytdl_executor.py:1787-1822; jobs_media.py:401-425; proxy_gen.py:1794; broll_ingest.py:2611; sync/rclone_lane.py:2016-2055, :1877-1896, :2312-2345",
+    "recommendation": "fsync the destination before every tmp/.partial -> final rename of media; sampled-hash (or --checksum) on lane A's first upload of files this machine wrote; re-verify recent fixer copies after an unclean shutdown."
+  },
+  {
+    "id": "PL-RES-16",
+    "sources": [
+      "res-crash-6"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A case-only rename interrupted between its two renames strands the file as .ccsync-move-<pid>-<name>, and the redelivered command reports success",
+    "where": "companion file_moves.py:340-370 (_rename_case_only), :686-724 (missing-src branch); sync/rclone_lane.py:115-123, :2133",
+    "recommendation": "Before answering 'nothing at the old path', look for .ccsync-move-*-<name> beside src and finish or restore the rename; add the check to the startup tmp sweep and the tray."
+  },
+  {
+    "id": "PL-RES-17",
+    "sources": [
+      "res-concurrency-5"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The server-side file move checks the destination then renames, and a Linux rename silently replaces anything that arrived in between",
+    "where": "dashboard api.py:3159-3265 (move_project_files)",
+    "recommendation": "os.link + os.unlink (EEXIST is atomic) or renameat2 RENAME_NOREPLACE for files; a module lock around check-record-rename; same for directories."
+  },
+  {
+    "id": "PL-RES-18",
+    "sources": [
+      "res-time-scale-6"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The 14-day media age-out deletes the only record that a silent laptop holds originals the NAS never got",
+    "where": "dashboard db.py:39, :10273-10275, :5157-5190, :11262; api.py:1340-1347",
+    "recommendation": "Snapshot the last owed-upload summary onto the machines row before pruning; show it on the LOST row and in the weekly report; alert on a lost machine with owed originals."
+  },
+  {
+    "id": "PL-RES-19",
+    "sources": [
+      "res-storage-1"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "The NAS footage pool's free space is never measured, and data_disk's ZFS percentages understate a full pool",
+    "where": "dashboard alerts.py:136-139, :2143-2163; notices.py:58, :1065-1095; protection.py:682-690; server/check_health.py",
+    "recommendation": "Add a nas_pool alert/notice measuring projects_dir in absolute bytes plus pool and usedbysnapshots via the API; warn at 80 % or 1 TB free, red at 90 %, name the snapshot share; give data_disk an absolute floor; add the check_health capacity line."
+  },
+  {
+    "id": "PL-RES-20",
+    "sources": [
+      "res-storage-2"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The system drive's free space is measured and never acted on, and a full system drive silently removes Resolve's undo net",
+    "where": "companion sync/lane_guard.py:890-947; resolve_bridge.py:2236-2335; resolve_journal.py:528-534, :543-560; dashboard api.py:8208-8213; fleet_grid.html:143; notices.py:615-691; alerts.py:1537-1580",
+    "recommendation": "Own floor for system free bytes (health, machine_disk_low, system_disk_low alert, system_disk_full blocked reason); refuse unprompted Resolve mutations when the journal cannot be written; claim the save-point slot only after a successful export."
+  },
+  {
+    "id": "PL-RES-21",
+    "sources": [
+      "res-crash-5"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A damaged dashboard.db has no integrity check, no automatic recovery and no message outside the container log",
+    "where": "dashboard app.py:736-738; db.py:716-726; dashboard_update.py:997-1040, :1263-1288; notices.py:270-273",
+    "recommendation": "PRAGMA quick_check before migrate; on failure quarantine with -wal/-shm, try .recover or the newest backup, serve a minimal DEGRADED page and alert from it; daily backup_database into /data/backups."
+  },
+  {
+    "id": "PL-RES-22",
+    "sources": [
+      "res-upgrade-2"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "When a dashboard update has migrated the database, a failing boot can never get back without a shell",
+    "where": "dashboard/deploy/select_code_root.py main() (MAX_BOOT_ATTEMPTS branch, check_tree refusal path), revert_refusal(); db.py:2291-2335; app.py:736-738; dashboard_update.py:1263-1290",
+    "recommendation": "When a revert is refused on schema and current.json names this apply's backup, have select_code_root restore it (stdlib sqlite3 backup), set the failed copy aside, then revert; ask revert_refusal on every 'boot the image' exit; consider one transaction per bundle."
+  },
+  {
+    "id": "PL-RES-23",
+    "sources": [
+      "res-upgrade-6"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Image and runtime updates migrate the live database with no backup and no way back",
+    "where": "dashboard app.py:736-738; dashboard_update.py:1016-1037; db.py:2306-2313",
+    "recommendation": "Before db.migrate, when user_version < SCHEMA_VERSION, take backup_database into /data/backups/<ts>-pre-migrate-v<n>/ and record it for select_code_root and the Packages page; pair with PL-RES-22's automatic restore."
+  },
+  {
+    "id": "PL-RES-24",
+    "sources": [
+      "res-recovery-1"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "A local-auth (appliance) site whose only admin forgets the password has no supported way back in",
+    "where": "dashboard auth.py:150-180, :936-960; setup_api.py:64-104; account_password.py:165-172; local_users.py:223; docs/APPLIANCE_INSTALL.md",
+    "recommendation": "Ship a documented, audited reset CLI (one-time password, sessions revoked) or a reset file in /data/secrets consumed at boot; link it from sign-in; nudge for a second admin in the wizard."
+  },
+  {
+    "id": "PL-RES-25",
+    "sources": [
+      "res-recovery-2"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "A missing or empty dashboard.db is silently recreated: the anonymous first-admin window reopens and accounts, SFTP keys and ticks are gone with no alarm",
+    "where": "dashboard app.py:736-738; db.py:710-730; setup_routes.py:91-119; internal_sftp.py; secrets_boot.py",
+    "recommendation": "Record an instance id in the DB and /data/secrets; refuse to initialise a fresh DB when backups/, secrets/ or code/ exist; show a 'this is not this site's database' page with restore choices; keep the anonymous window closed without an explicit first-run flag."
+  },
+  {
+    "id": "PL-RES-26",
+    "sources": [
+      "res-recovery-3"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "When the NAS Syncthing gets a new identity, lane C stops on every editor computer and only a per-machine reinstall fixes it",
+    "where": "installer/windows_bootstrap.ps1:1849-1932; installer/macos_bootstrap.sh; companion site.py:14,75; sync/syncthing_admin.py; dashboard collector.py:1244-1265; server/install_syncthing_app.py:54-60; docs/BACKUP_RESTORE.md s1, s8",
+    "recommendation": "Companion adds a missing manifest nas_syncthing_id on each refresh (keep the old one until the new connects); collector records myID and raises a notice on change; back up the cert/key into apps secrets at install; extend section 8."
+  },
+  {
+    "id": "PL-RES-27",
+    "sources": [
+      "res-recovery-4"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "The Resolve Project Server database (every timeline) is outside the backup story, and the bundled profile defaults to Resolve's well-known password",
+    "where": "docs/BACKUP_RESTORE.md s1; dashboard protection.py, recovery.py; dashboard/deploy/compose.yaml:752-772 (PG_PASSWORD:-DaVinci); docs/SERVER.md:460,547; docs/HOW_IT_WORKS.md:58-60",
+    "recommendation": "NOT COVERED row in the backup table; a protection/RECOVERY line when [stack] project_server is on (optionally a scheduled pg_dumpall into the snapshotted dataset); randomise the Postgres password at install."
+  },
+  {
+    "id": "PL-RES-28",
+    "sources": [
+      "res-recovery-5"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "Dashboard DB restore exists only as a code rollback: image mode only, the before-last-update copy only, and it rolls b-roll and music back too",
+    "where": "dashboard dashboard_update.py:1263-1287, :1589-1660, :1885-1928; templates/partials/admin_dashboard_update.html:105-112; static/cc/dashboard_update.js:255-275; recovery.py:976-1003; docs/BACKUP_RESTORE.md s4c",
+    "recommendation": "Standalone restore: list every backup, restore dashboard.db alone by default (indexes opt-in), always take a before-restore copy; daily backup_databases; make RECOVERY's copy match what the deployment can do."
+  },
+  {
+    "id": "PL-RES-29",
+    "sources": [
+      "res-recovery-7"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "ytdl.db is migrated by an update but never backed up, and rollback checks only the dashboard's schema",
+    "where": "dashboard dashboard_update.py:659-686, :1016-1039, :1570-1587; ytdl/web/ytdlweb/db.py:448-481; docs/BACKUP_RESTORE.md s3",
+    "recommendation": "Add ytdl.db and client_shares.db to _db_paths; record and check every sub-app user_version in the manifest and schema_rollback_check; fix runbook section 3."
+  },
+  {
+    "id": "PL-RES-30",
+    "sources": [
+      "res-recovery-8"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Every customer dashboard shows a permanent BROKEN 'release key not backed up' line it cannot truthfully fix",
+    "where": "dashboard protection.py:483-505; docs/RELEASE.md:830-845; dashboard/deploy/compose.appliance.yaml:36",
+    "recommendation": "Show the line only on sites that sign their own builds; otherwise render 'vendor-held'; track the vendor key backup vendor-side."
+  },
+  {
+    "id": "PL-RES-31",
+    "sources": [
+      "res-recovery-9"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A dead NAS takes every original not on an editor's disk, and nothing in the product says offsite is missing",
+    "where": "dashboard protection.py; docs/BACKUP_RESTORE.md:122-125, :596-599; docs/HOW_IT_WORKS.md:826-827",
+    "recommendation": "Protection line 'a copy exists off this NAS' from replication/cloudsync tasks with recent success (DSM: admin-acknowledged date); name the gap in the install checklist and contract."
+  },
+  {
+    "id": "PL-RES-32",
+    "sources": [
+      "res-recovery-10"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A deploy-mode site's site.toml exists only on the operator's PC and is in no backup list",
+    "where": ".gitignore:15; server/install_dashboard_app.py:2154-2175, :2254; docs/BACKUP_RESTORE.md s1",
+    "recommendation": "Upload the resolved site.toml (no secrets) to <apps>/data/site.toml.deployed at each deploy, offer a download, warn on drift, list it in section 1."
+  },
+  {
+    "id": "PL-RES-33",
+    "sources": [
+      "res-crash-1"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "A zero-byte config.toml silently loads all defaults and overwrites the good backup with an empty one",
+    "where": "companion config.py:1803-1862 (load_config), :1766-1787 (_refresh_backup); installer/windows_upgrade.ps1:440 (WriteAllText)",
+    "recommendation": "Treat empty/whitespace config as a load failure (load backup, set _config_load_error); never refresh the backup from a parse with no keys or replace one holding dashboard_url/local_root with one lacking them; add a 0-byte test."
+  },
+  {
+    "id": "PL-RES-34",
+    "sources": [
+      "res-crash-2"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A power cut during a self-upgrade can leave a machine with no runnable companion, and nothing restarts it",
+    "where": "companion upgrade.py:1810-1830 (no fsync), :1920-1960 (two renames); supervisor.py:346-388, :700-708; installer/windows_bootstrap.ps1:645-680; installer/macos_bootstrap.sh:2580-2597",
+    "recommendation": "fsync the download before the swap; move recovery outside the binary (Run-key shim / task / LaunchAgent wrapper restores .old when the exe is missing or fails a recorded size/sha check)."
+  },
+  {
+    "id": "PL-RES-35",
+    "sources": [
+      "res-upgrade-4"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "The appliance stack has no release key and no feed URL, so a zero-touch customer can never be updated, and its compose comment says the key is generated at boot",
+    "where": "dashboard/deploy/compose.appliance.yaml:36-41, :153-173; secrets_boot.py:52-58; settings.py:910-919; deploy/select_code_root.py ENV_REFUSALS",
+    "recommendation": "Fix the false comment; bake the vendor public key(s) into the image (env still wins); set DASH_RELEASE_FEED_URL with policy=manual; state plainly in APPLIANCE_INSTALL.md that updates do not work until then."
+  },
+  {
+    "id": "PL-RES-36",
+    "sources": [
+      "res-upgrade-5"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "'Deploy the dashboard before the companions' is not enforced at customer sites: requires_dashboard is opt-in and its value is stale",
+    "where": "tools/sign_release.py:360-389; tools/publish_latest.py:500-525; companion config.py:158-174 (REQUIRES_DASHBOARD 0.7.23); dashboard release_feed.py:930-980",
+    "recommendation": "Emit kind extras by default in the vendor publish; raise REQUIRES_DASHBOARD to the real dependency; add a check that fails when report/reply keys change without a bump."
+  },
+  {
+    "id": "PL-RES-37",
+    "sources": [
+      "res-upgrade-7"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A licence-version bump parks all syncing on every auto-updating machine, with no warning at publish and no re-prompt after a decline",
+    "where": "companion eula.py:220-250; app.py:6697-6790 (_start_lanes EULA gate), :~6503-6540 (_licence_watch); tools/publish_latest.py; tools/sign_release.py",
+    "recommendation": "Sign the EULA version into records, show it on Packages and in publish_latest, require confirmation to make such a build current and never install it unattended; grace period with nagging (counsel to confirm); re-offer daily."
+  },
+  {
+    "id": "PL-RES-38",
+    "sources": [
+      "res-upgrade-8"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Unattended and pushed updates restart the companion in the middle of transfers and jobs",
+    "where": "companion app.py:6948-6966 (_standing_down_would_kill_work), :8426-8470, :8541+",
+    "recommendation": "For unattended/pushed updates also defer while a lane transfers or a job is held, capped (e.g. 6 h); tray clicks proceed with a warning naming the transfer."
+  },
+  {
+    "id": "PL-RES-39",
+    "sources": [
+      "res-network-2"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Transient network failures spend REL-8's permanent per-version upgrade budget, and an admin's UPDATE NOW cannot override it",
+    "where": "companion upgrade.py:125-141, :371-463, :1704-1859; app.py:7077-7108, :7167-7184, :8382-8425, :8500-8540",
+    "recommendation": "Keep transport failures out of the permanent cap (own back-off, or reset on a successful report); let a pushed update with a new requested_at clear 'given up' once; add Range resume for .partial."
+  },
+  {
+    "id": "PL-RES-40",
+    "sources": [
+      "res-security-adversity-5"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "Every signed build ever published can be pushed back onto the fleet: the downgrade floor is 0.0.0 everywhere",
+    "where": "installer/build_editor_package.ps1:1043-1044; tools/publish_feed.py:1042; dashboard package_store.py:373-456; companion app.py:8361-8371 + _apply_pushed_update; upgrade.py:726-776",
+    "recommendation": "Tracked MIN_VERSION constant read by every signer, raised with each security fix and set to the launch build; dashboard refuses records below the highest floor seen. Mind PL-RES-96 (a floor equal to the release disables rollback)."
+  },
+  {
+    "id": "PL-RES-41",
+    "sources": [
+      "res-recovery-6",
+      "res-security-adversity-6"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier (both)",
+    "title": "One plaintext release key on the owner's daily workstation signs companions and dashboard code for every customer, with no revocation path or compromise runbook",
+    "where": "tools/release_key.py:1-27, :88-108; companion release_pubkey.py:169-182; dashboard release_feed.py:499-525, :1138-1260; docs/RELEASE.md:700-835; docs/RELEASE_FEED.md:526-540; docs/COMMERCIAL_READINESS.md:144",
+    "recommendation": "Write a compromise runbook now; design a cold revocation key baked into builds that can sign a distrust list; move signing offline or to a hardware token; consider a separate dashboard-bundle key; allow a trusted signed record to update DASH_RELEASE_PUBKEYS; buy code-signing certs."
+  },
+  {
+    "id": "PL-RES-42",
+    "sources": [
+      "res-deps-1"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "The rclone and Syncthing pins are a last resort; each site runs whatever version PATH, winget, scoop or brew supplies",
+    "where": "installer/windows_bootstrap.ps1:1075-1112, :1257-1300; installer/macos_bootstrap.sh:1740-1760; companion config.py:353, :1108; sync/rclone_lane.py:1108-1145, :2423-2476",
+    "recommendation": "Make the verified pin the default, installed into the ccsync bin dir with absolute paths in config; report the rclone version in capabilities and park lane B outside a tested range; add OPS-15's cross-file pin test."
+  },
+  {
+    "id": "PL-RES-43",
+    "sources": [
+      "res-network-1",
+      "res-concurrency-1"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED) (both)",
+    "title": "A dashboard outage longer than the job lease kills every running fleet job and local YouTube download, and a result posted during the outage is never retried",
+    "where": "companion jobs_runner.py:815-923, :1269-1366; dashboard db.py:11607, :12153-12330, :10300; api.py:12126-12181; ytdl/web/ytdlweb/db.py:1175-1202, config.py:240",
+    "recommendation": "Let heartbeat_job re-extend an expired lease still held by the same (editor, machine) and not re-queued; do not count a restart-spanning expiry as an attempt or cooldown (or extend held leases by measured downtime at boot); persist and retry result POSTs; same for ytdl heartbeat_download."
+  },
+  {
+    "id": "PL-RES-44",
+    "sources": [
+      "res-network-3"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "An idle machine on a slow uplink can never deliver its heavy report: the 30 s timeout bounds the whole upload",
+    "where": "companion reporter.py:107-120, :417-443, :535-541, :1523-1571; manifest.py:36",
+    "recommendation": "gzip report bodies (dashboard accepts Content-Encoding: gzip); scale the heavy timeout with body size or fall back to a light tick after a heavy timeout; optional lane A bandwidth cap."
+  },
+  {
+    "id": "PL-RES-45",
+    "sources": [
+      "res-deps-2",
+      "res-network-7"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED) (res-deps-2); res-network-7 PLAUSIBLE",
+    "title": "Editor-side Syncthing runs on upstream defaults: self-upgrade every 12 h (defeating the pin) and crash reporting on",
+    "where": "installer/windows_bootstrap.ps1:333, :1945-2028; installer/macos_bootstrap.sh:1848-1877, :~2012; nothing sets autoUpgradeIntervalH / STNOUPGRADE / crashReportingEnabled; this rig's config.xml reads autoUpgradeIntervalH=12",
+    "recommendation": "Set autoUpgradeIntervalH=0 and crash reporting off after generate and enforce from the companion on every start (PATCH /rest/config/options); ship Syncthing upgrades through the vendor channel; report the running version; update PRIVACY.md for anything left on."
+  },
+  {
+    "id": "PL-RES-46",
+    "sources": [
+      "res-concurrency-6"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "Two of one editor's computers with the same hostname merge into one registry row, and the enforce cycle follows whichever reported last",
+    "where": "dashboard db.py:5108-5133; api.py:7777-7890; companion reporter.py:900, selection.py:38, jobs_runner.py:768; installer/macos_bootstrap.sh",
+    "recommendation": "Raise a duplicate_hostname notice and refuse to overwrite id/device when a recent row has a different machine_id; read the hostname once per process; pin the macOS name from scutil."
+  },
+  {
+    "id": "PL-RES-47",
+    "sources": [
+      "res-concurrency-2"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Deleting a user in local mode holds the SQLite write lock across every Syncthing call, so the fleet's writes fail with 'database is locked'",
+    "where": "dashboard api.py:5146-5258; local_users.py:339-340; syncthing_client.py:194-228; db.py:697-722",
+    "recommendation": "Guard checks read-only, Syncthing removals with no transaction open, then one short transaction; test that conn.in_transaction is False at every external call from a route."
+  },
+  {
+    "id": "PL-RES-48",
+    "sources": [
+      "res-concurrency-3"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Nothing stops two dashboard processes from running on one /data",
+    "where": "dashboard/deploy/run.sh:592-608; dashboard app.py:810-840; docs/ZERO_DOWNTIME_DEPLOY.md section 3.3",
+    "recommendation": "Exclusive fcntl.flock on <data>/dashboard.lock for the process lifetime; a second process refuses (or runs read-only with a banner). Ship before launch, separate from zero-downtime work."
+  },
+  {
+    "id": "PL-RES-49",
+    "sources": [
+      "res-concurrency-4"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "One editor with the Cards agent on two computers: edits reported lost, the page flips between timelines, edits go to whichever computer polls first",
+    "where": "dashboard cards_pool.py:417-488; cards_tunnel.py:456-529; MulticamPipeline cards/agent.py:1167-1200, :340-360",
+    "recommendation": "Route by (editor, machine); hand edits to one machine only and name both on the page; at minimum refuse the role on a second machine while one holds it."
+  },
+  {
+    "id": "PL-RES-50",
+    "sources": [
+      "res-observability-1"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "An alert that fails to send during a channel outage is not retried: warns until they clear and recur, errors for 24 h, 'cleared' messages never",
+    "where": "dashboard alerts.py:448-496, :4894-4922, :5084-5091; db.py:7477-7497",
+    "recommendation": "Count a failed row as not yet said, with a bounded retry (_retry_due); re-file failed rows when channel settings or SMTP password are saved and after the first success that follows a failure; retry recoveries the same way."
+  },
+  {
+    "id": "PL-RES-51",
+    "sources": [
+      "res-observability-2"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The dashboard restarting itself leaves no durable trace, so a crash-looping server looks healthy",
+    "where": "dashboard app.py:432-511; notices.py:1010-1062; collector.py:2409-2430; alerts.py:4248-4261",
+    "recommendation": "Write a durable meta row/file before exiting; at boot count exits in the last 24 h and raise an error notice/alert; make _check_server_crashes look back 24 h."
+  },
+  {
+    "id": "PL-RES-52",
+    "sources": [
+      "res-observability-3"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "'The server itself is down' reaches nobody by default: the dead-man heartbeat is off and setup never offers it",
+    "where": "dashboard alerts.py:280-297, :880-918; setup_engine.py:1567-1614; api.py:1579-1620",
+    "recommendation": "Heartbeat on by default once a sink is set (or a setup step saying 'if these stop, the server is down'); optional outbound check-in URL per successful pass; document an uptime monitor on /api/v1/health."
+  },
+  {
+    "id": "PL-RES-53",
+    "sources": [
+      "res-observability-4"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A notice check that starts failing keeps showing [ OK ] for ever",
+    "where": "dashboard db.py:3775-3809; ui.py:1835-1855; templates/partials/health_notices.html:48, home_problems.html:38; notices.py:198-207",
+    "recommendation": "Compare stamp age and render NOT CHECKED since <date> after ~3 cycles; file a notice_check_failed error notice from run_checks' except branch."
+  },
+  {
+    "id": "PL-RES-54",
+    "sources": [
+      "res-observability-5"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Warn-severity notices are never pushed to anyone, not even in the weekly report",
+    "where": "dashboard alerts.py:2197-2222, :4512-4700; db.py:3495-3615",
+    "recommendation": "Weekly 'open on the dashboard' block listing warn notices with age and fix; promote editor-blocking ones to a warn alert after a day."
+  },
+  {
+    "id": "PL-RES-55",
+    "sources": [
+      "res-observability-6"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A report the dashboard rejects as malformed (422/413) leaves no trace; the admin is told the computer is switched off",
+    "where": "dashboard api.py:10144-10147, :10202-10208; app.py:936-941; alerts.py:1580-1606; companion tray.py:3581-3626",
+    "recommendation": "RequestValidationError and 413 handlers for /api/v1/report that stamp report_refused_at/reason when credentials verify and file a version-mismatch notice; companion words non-auth 4xx as a version mismatch."
+  },
+  {
+    "id": "PL-RES-56",
+    "sources": [
+      "res-observability-7"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The alerts page suggests SMTP port 465, which the sender cannot speak",
+    "where": "dashboard templates/partials/admin_alerts.html:134; alerts.py:4761-4821",
+    "recommendation": "SMTP_SSL with a verified context on 465 (or an explicit implicit-TLS option); until then drop 465 from the hint and make a 465 timeout say 'use 587 with STARTTLS'."
+  },
+  {
+    "id": "PL-RES-57",
+    "sources": [
+      "res-time-scale-5"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A wrong NAS clock turns the whole fleet red with 'this computer's clock is out' and sends every editor to fix a correct clock",
+    "where": "companion reporter.py:794-822; tray.py:159, :3620-3636; app.py:7808-7815; dashboard health.py:709-715; alerts.py:1628-1648",
+    "recommendation": "When >=3 machines report skew of the same sign and size, raise one 'server clock looks wrong' notice and suppress per-machine reasons; check the server clock against an HTTPS Date header; word the remedy for both cases."
+  },
+  {
+    "id": "PL-RES-58",
+    "sources": [
+      "res-resolve-1"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "A seat with Resolve Free or 'External scripting = None' is never detected and is told every 5 minutes to restart Resolve",
+    "where": "companion resolve_bridge.py:362-432, :536-633; app.py:4704-4785; tray.py:1806-1824; installer/windows_bootstrap.ps1; onboarding/steps.py; docs/EDITOR_SETUP.md:7-18",
+    "recommendation": "A 'never connected while server READY' state with Studio/Local guidance; check Resolve and the preference in the wizard/bootstrap (set it via resolve_prefs if that works live); report ever_connected and reason to the dashboard with an alert kind."
+  },
+  {
+    "id": "PL-RES-59",
+    "sources": [
+      "res-resolve-2"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "Library walk validated on one Resolve build with no sanity check; a blob format difference silently blinds the out-of-tree guard",
+    "where": "companion library.py:144-216, :691-725; resolve_bridge.py:1427-1508, :1810-1847; config.py:803",
+    "recommendation": "Raise LibraryUnavailable when rows exist but none decode to a path; periodically cross-check one API walk and disable the walk on disagreement; record GetVersionString and gate to measured builds."
+  },
+  {
+    "id": "PL-RES-60",
+    "sources": [
+      "res-resolve-6"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "Companion launches Resolve -pg (BPG) without the CR-68 guard, and a BPG-only machine reads as Resolve running",
+    "where": "companion bpg.py:763-835; script_server.py:94-110; resolve_prefs.py:128-162; app.py:4787-4815",
+    "recommendation": "Measure whether -pg opens 1144 once; exclude -pg processes from resolve_process_state via bpg._cim_command_lines; refuse a BPG launch unless script_server.state() is ABSENT. Raise to high if -pg proves to open 1144."
+  },
+  {
+    "id": "PL-RES-61",
+    "sources": [
+      "res-resolve-3"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Relinks overwrite whatever the clip points at now, with no check it still points at the judged path",
+    "where": "companion resolve_bridge.py:2341-2467; app.py:3559-3615; fixer.py:1531-1561",
+    "recommendation": "Add expected_old to replace_clip, refuse with 'changed_since' on mismatch, pass it from every automatic caller and fix_clip."
+  },
+  {
+    "id": "PL-RES-62",
+    "sources": [
+      "res-resolve-4"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Undo marks a journal done after a partial replay and blames 'no longer in the media pool' for transient refusals",
+    "where": "companion resolve_bridge.py:2662-2815; resolve_undo.py:200-212",
+    "recommendation": "Normal retry budget; count refusals separately from missing clips; mark undone only when nothing was refused; answer 'retrying' while any are refused."
+  },
+  {
+    "id": "PL-RES-63",
+    "sources": [
+      "res-resolve-5"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Undo over-counts and leaves clips unrestored when one file is in the pool twice",
+    "where": "companion resolve_bridge.py:2745-2770",
+    "recommendation": "Map each path to a list of items and pop one per entry; do not count 'Already linked' as undone."
+  },
+  {
+    "id": "PL-RES-64",
+    "sources": [
+      "res-resolve-7"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED) (Resolve-18 part PLAUSIBLE)",
+    "title": "Bridge import/environment failures are DEBUG-only and misreported as 'restart Resolve'; older DaVinciResolveScript likely fails under Python 3.12",
+    "where": "companion resolve_bridge.py:408-432, :505-513, :586-604",
+    "recommendation": "Log import/env failures at WARNING once with path and exception and give them their own message; load fusionscript via ExtensionFileLoader; find the install dir from the registry; publish a minimum Resolve version."
+  },
+  {
+    "id": "PL-RES-65",
+    "sources": [
+      "res-resolve-8"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Disk-library locator falls back to Local Database and takes the first same-named project",
+    "where": "companion library.py:315-338 (contrast :631-651)",
+    "recommendation": "Search only the named library, return '' outside Support, refuse on multiple candidates, verify the open timeline's uid exists in that DB."
+  },
+  {
+    "id": "PL-RES-66",
+    "sources": [
+      "res-resolve-9"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "No supported Resolve version is stated, recorded or reported",
+    "where": "companion (no GetVersionString/GetProductName); docs/INSTALL.md; docs/EDITOR_SETUP.md; library.py",
+    "recommendation": "Read version/product once per connection into resolve_health, diagnostics and the fleet grid; publish and test a supported range; warn outside it."
+  },
+  {
+    "id": "PL-RES-67",
+    "sources": [
+      "res-resolve-10"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A third-party scripting client on a customer seat can kill Resolve scripting at launch, and nothing names it",
+    "where": "companion script_server.py:126-158; app.py:9545-9547; docs/GOTCHAS.md section 15",
+    "recommendation": "Record non-companion, non-Resolve clients on 1144 and the launch phase timeline into diagnostics; name the program when a session never connected after another client was seen during STARTING."
+  },
+  {
+    "id": "PL-RES-68",
+    "sources": [
+      "res-resolve-11"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The macOS CR-68 probe has still never run against a live Mac",
+    "where": "companion script_server.py:247-302; KNOWN_BUGS CR-68 'Not done (a)'",
+    "recommendation": "Run the CR-68 harness once on a Mac before selling to Mac seats; count UNKNOWN probe answers in resolve_health."
+  },
+  {
+    "id": "PL-RES-69",
+    "sources": [
+      "res-deps-3"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "Every NAS operation uses TrueNAS's REST /api/v2.0, which iXsystems has deprecated for removal; no version probe and no supported-version statement",
+    "where": "dashboard nas/truenas.py:111-140; server/common.py:1339, :1992-2044; server/install_dashboard_app.py:143-155; server/install_syncthing_app.py; server/setup_editor_account.py; server/create_api_key.py",
+    "recommendation": "Document supported TrueNAS versions now; detect 404/405 on known routes and name the likely NAS upgrade; plan a JSON-RPC (WebSocket /api/current) backend chosen from system.version before iX's removal release."
+  },
+  {
+    "id": "PL-RES-70",
+    "sources": [
+      "res-deps-5"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "An AI provider that stops working (revoked key, exhausted credit, outage) stays selected, fails every job, and nobody who can fix it is told",
+    "where": "dashboard ai_providers.py:866-880, :953-972, :1113-1137; ytdl/web/ytdlweb/ai_backend.py:477-497; worker.py:380-387; claude_cli.py:1130-1146; dashboard ytdl.py:825-871",
+    "recommendation": "Record each provider's last real-call outcome and treat auth/billing failures as unavailable for ~1 h so the chain falls through; live check on key save; re-queue on 429/529/5xx with backoff; ai_provider_failing alert kind."
+  },
+  {
+    "id": "PL-RES-71",
+    "sources": [
+      "res-deps-6"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Model ids are compiled in, so an upstream model retirement becomes a dated outage that only a new build fixes",
+    "where": "ytdl/web/ytdlweb/config.py:65,82,85; broll/indexer/broll_index/claude_client.py:51-66; dashboard triage.py:77; ytdl/web/ytdlweb/ai_backend.py:466-497",
+    "recommendation": "Resolve models like cards_ai (family alias, newest via Models API, cached, pin as fallback); classify a model 404 as 'model retired'; per-provider model field in Settings; track deprecation dates in the release checklist."
+  },
+  {
+    "id": "PL-RES-72",
+    "sources": [
+      "res-deps-7"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The server's yt-dlp nightly (CR-361) has no way back from a bad build, can shadow a newer image copy, and waits for a restart nobody is prompted to do",
+    "where": "dashboard/deploy/run.sh:382-424; ytdl/web/ytdlweb/ytdlp_nightly.py:285-385, :446-471; dashboard alerts.py:3575-3604",
+    "recommendation": "At boot skip a nightly older than the image's; revert to previous/image copy on canary failure; alert on pending_restart while downloads fail with a restart action; fix the alert text; put the switch in Settings."
+  },
+  {
+    "id": "PL-RES-73",
+    "sources": [
+      "res-deps-8"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The appliance's Syncthing, Tailscale and SFTP images are pinned in compose with no update path",
+    "where": "dashboard/deploy/compose.appliance.yaml:237, :291, :363; compose.yaml:711; compose.image.yaml:387",
+    "recommendation": "Carry sidecar digests in the signed release manifest with a dashboard-offered stack update (snapshot, stage, verify, swap); report sidecar versions on /admin/health; move server Syncthing to 2.x."
+  },
+  {
+    "id": "PL-RES-74",
+    "sources": [
+      "res-time-scale-1"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "The fleet-wide owed-files diff costs ~6 s per call at 50 editors; the admin home page polls it every 2 s and its cache never hits",
+    "where": "dashboard db.py:11098 (fetch_sync_backlog); api.py:975-1060; ui_home.py:423; templates/fleet.html:99-100; alerts.py:1142",
+    "recommendation": "Maintain per-pair owed counts in the writers; key the cache on a writer-bumped generation; single-flight; in admin scope show live transfers only with hx-sync drop and move queued totals to a slower poll."
+  },
+  {
+    "id": "PL-RES-75",
+    "sources": [
+      "res-time-scale-2"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The b-roll semantic index is rebuilt whole, in the dashboard process and under a lock, after every ingest write (7 s and 1.7 GB peak at 500k embeddings)",
+    "where": "broll/web/app/semantic.py:207-250, :318; routes_ingest.py:289; ingest_batches.py:1141, :1336",
+    "recommendation": "Append incrementally above the high-water mark, rebuild only on deletes; stream rows, consider float16/memmap; rebuild off the request path with an atomic swap; publish a memory ceiling per 100k clips; check the music CLAP index too."
+  },
+  {
+    "id": "PL-RES-76",
+    "sources": [
+      "res-time-scale-4"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Past 2000 files per project, per-file sync truth is permanently 'uncertain', which at commercial project sizes is every project",
+    "where": "companion manifest.py:36, :206-247; dashboard db.py:37, :11055-11095, :11160-11260",
+    "recommendation": "List originals newest first and send per-directory digests (count, bytes, max mtime) for the rest; or send only files not confirmed on the NAS."
+  },
+  {
+    "id": "PL-RES-77",
+    "sources": [
+      "res-time-scale-7"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Every Cards episode switch leaks the engine's threads and memory for the container's life",
+    "where": "dashboard cards_pool.py:28-34, :615-627, :707-731; docs/CARDS_TWO_PROJECTS.md section 6.1",
+    "recommendation": "Land a real upstream stop() before selling Cards; meanwhile count leaked engines and raise a 'restart to reclaim N MB' notice or recycle at a quiet hour."
+  },
+  {
+    "id": "PL-RES-78",
+    "sources": [
+      "res-security-adversity-1"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "A stolen editor laptop cannot be cut off per computer, and there is no lost-or-stolen runbook",
+    "where": "onboarding/steps.py:1432, :1474 (passphraseless key); installer/windows_bootstrap.ps1:2064-2068; docs/TENANCY.md:49-58; dashboard auth.py:375-392; api.py:5392-5435, :4864-4916, :2437-2451",
+    "recommendation": "Write a 'lost or stolen computer' runbook (remove tailnet node, --revoke-key --lock, revoke sessions); later one admin action per machine (remove its SSH key, Syncthing device, blocklist machine_id); say in the SUSPEND confirm that the NAS account stays live; default the shared report token off for new sites."
+  },
+  {
+    "id": "PL-RES-79",
+    "sources": [
+      "res-security-adversity-2"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "Suspended or deleted editors on the SHARED fleet token still pass the b-roll, music and ytdl fleet doors, and a deleted smb editor's machine re-registers",
+    "where": "dashboard broll.py:338-339; music.py:208-209; ytdl.py:265-266; broll/web/app/fleet_auth.py; api.py:233-242, :10229-10240; db.py:9032",
+    "recommendation": "Apply account_bar_reason on the AUTH_SHARED branch using the verified identity, refusing when missing; write a deleted tombstone in forget_editor and refuse it on every auth method; per-mount tests."
+  },
+  {
+    "id": "PL-RES-80",
+    "sources": [
+      "res-security-adversity-4"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Any signed-in editor can mint a public, non-expiring link to any archive clip and read every other folder's link",
+    "where": "broll/web/app/routes_client_folders.py:62-121; client_folders.py:90-93, :525-526; routes_share.py",
+    "recommendation": "Default expiry (e.g. 30 days); hide others' tokens from non-admins; alert on creation and bulk adds; per-token rate cap; record first-seen IP/UA."
+  },
+  {
+    "id": "PL-RES-81",
+    "sources": [
+      "res-security-adversity-7"
+    ],
+    "severity": "medium",
+    "verdict": "DOWNGRADED from high by verifier",
+    "title": "No Content-Security-Policy anywhere, so any stored XSS in a dashboard-hosted SPA could drive the 8899 loopback on every editor's machine",
+    "where": "dashboard/src, broll/web/app, music/web, ytdl/web (no CSP / frame-ancestors / nosniff); companion loopback_guard.py origins_for_url",
+    "recommendation": "Strict CSP from dashboard middleware (default-src 'self', hashed inline scripts, object-src 'none', frame-ancestors 'none') plus nosniff; drop the http twin on https-only sites."
+  },
+  {
+    "id": "PL-RES-82",
+    "sources": [
+      "res-security-adversity-8"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The admin-editable site dashboard_url becomes a trusted loopback origin and the tray's 'Open dashboard' target on every editor machine",
+    "where": "dashboard site_store.py:779; companion loopback_guard.py:244; tray.py:858-881; site.py:150-190",
+    "recommendation": "Companion accepts a manifest dashboard_url only if its host matches the reporting host (or an install-time list) and alerts on change; dashboard adds a confirm step and an alert kind for the key."
+  },
+  {
+    "id": "PL-RES-83",
+    "sources": [
+      "res-security-adversity-9"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "The triage agent reads fleet-supplied text with no untrusted-data fence and mails the owner a paste-ready Claude Code prompt",
+    "where": "dashboard triage.py:380-405, :432, :519-521; triage_actions.py:326-370",
+    "recommendation": "Fence evidence as untrusted; cap/strip companion strings in scrub; never mail an execution-ready free-text prompt (link to the finding); remove the two latches from the reply catalogue or require a dashboard click."
+  },
+  {
+    "id": "PL-RES-84",
+    "sources": [
+      "res-security-adversity-10"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Adding an address to alerts_smtp_to grants a mail control channel that survives session revocation",
+    "where": "dashboard triage_mail.py:14-22, :120-122; ui.py:2542-2561",
+    "recommendation": "Separate the reply-authorised list from alert recipients (owner-only, changes confirmed to the previous owner address); notify all recipients when the list changes."
+  },
+  {
+    "id": "PL-RES-85",
+    "sources": [
+      "res-security-adversity-11"
+    ],
+    "severity": "medium",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "No second factor and no step-up re-auth for admin actions on local or smb sites",
+    "where": "dashboard auth.py:61 (7-day sessions); sessions.py:48; admin routes guarded only by _require_admin",
+    "recommendation": "TOTP or WebAuthn for admins on local and smb; step-up password for fleet-wide or credential-changing actions."
+  },
+  {
+    "id": "PL-RES-86",
+    "sources": [
+      "res-security-adversity-3"
+    ],
+    "severity": "low",
+    "verdict": "DOWNGRADED from high to low by verifier",
+    "title": "Suspension does not stop browser sign-in, so a suspended smb editor keeps the archive, the downloader and client links (deliberate per DCORE-4; UI labels say 'cannot sync')",
+    "where": "dashboard api.py:2256 api_login, :4863-4910",
+    "recommendation": "Offer an smb toggle that pauses sync and blocks sign-in together, or make the 'suspend = sync only' scope louder; Set password + session revoke already locks someone out."
+  },
+  {
+    "id": "PL-RES-87",
+    "sources": [
+      "res-network-5"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "remote_down (second lane B route, e.g. a Cloudflare tunnel) has no failover to the primary route",
+    "where": "companion sync/rclone_lane.py:839-881; broll_fetch.py:268-297",
+    "recommendation": "After N transport failures on remote_down, run the pass on the primary route and report the fallback, or mark remote_down unsupported for customers."
+  },
+  {
+    "id": "PL-RES-88",
+    "sources": [
+      "res-network-6"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A laptop with an http LAN-address dashboard sends its fleet credential in cleartext on whatever network it joins",
+    "where": "companion transport.py:1-30, :204-260; docs/EDITOR_SETUP.md:234-235",
+    "recommendation": "Default new sites to https (Serve has certificates) and require it; until then hold credentials when a 100.64/10 target has no Tailscale interface or the address class changed."
+  },
+  {
+    "id": "PL-RES-89",
+    "sources": [
+      "res-storage-7"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "A case-only folder rename on Windows re-uploads every original under the new casing to a case-sensitive NAS dataset",
+    "where": "companion sync/rclone_lane.py:2030-2042; server/ (casesensitivity never recorded)",
+    "recommendation": "Record dataset casesensitivity at setup; add --ignore-case-sync to lane A's copy when sensitive; flag case-only duplicate siblings in the inventory."
+  },
+  {
+    "id": "PL-RES-90",
+    "sources": [
+      "res-storage-8"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "No antivirus exclusion guidance, and sharing-violation renames in proxy_gen/jobs_media are not retried",
+    "where": "companion proxy_gen.py:1792-1799; jobs_media.py:419-424; installer/windows_bootstrap.ps1; docs/EDITOR_SETUP.md",
+    "recommendation": "Retry os.replace with backoff on WinError 5/32; document exclusions (sync root, %LOCALAPPDATA%\\ccsync, rclone/Syncthing); optionally offer the Defender exclusion."
+  },
+  {
+    "id": "PL-RES-91",
+    "sources": [
+      "res-crash-7"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A package row committed without its file cannot be healed by publishing again (the same-sha branch deletes the new .part)",
+    "where": "dashboard package_store.py:477-489, :536-552; api.py:7403-7406",
+    "recommendation": "In the same-sha branch move the verified .part into place when the served file is missing; add a collector check that every package row has its file."
+  },
+  {
+    "id": "PL-RES-92",
+    "sources": [
+      "res-crash-8"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Three hard power losses within ten minutes in the hour after an update count as a crash loop and revert a healthy build",
+    "where": "companion upgrade.py:116-117, :253-330; app.py:11760-11771, :7083-7100",
+    "recommendation": "Do not count a start whose predecessor predates the OS boot time (GetTickCount64 / kern.boottime)."
+  },
+  {
+    "id": "PL-RES-93",
+    "sources": [
+      "res-dataloss-7"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Single-file server move trashes this machine's copy without checking the server holds the same bytes; the trash then expires",
+    "where": "companion file_moves.py:766-826 vs :567-615; sync/lane_guard.py:1260-1350",
+    "recommendation": "Route the single-file branch through the same server (name, size) check; keep the file and answer retrying/kept-local on mismatch."
+  },
+  {
+    "id": "PL-RES-94",
+    "sources": [
+      "res-dataloss-8"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "File moves keep renaming and trashing local files while a local or fleet halt is engaged",
+    "where": "companion app.py:8680-8800 (_apply_file_moves); docs/SYNC_SAFETY.md section 4",
+    "recommendation": "Hold commands.file_moves while HaltState.active (answer retrying without spending attempts) and say so on the halt panel."
+  },
+  {
+    "id": "PL-RES-95",
+    "sources": [
+      "res-dataloss-9"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "SYNC_SAFETY.md section 7 still says nothing reports a missing snapshot schedule, understates who can delete, and omits the 4b trash",
+    "where": "docs/SYNC_SAFETY.md section 7; dashboard protection.py",
+    "recommendation": "Point section 7 at the protection panel/alert, state that editors can delete, add the file-move 4b trash and its 14-day expiry to the recovery list."
+  },
+  {
+    "id": "PL-RES-96",
+    "sources": [
+      "res-upgrade-9"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "A min_version floor equal to the release disables that release's automatic rollback everywhere",
+    "where": "companion upgrade.py:~1546-1560, :1083-1086; tools/publish_latest.py:381; installer/build_editor_package.ps1:1039-1052",
+    "recommendation": "Refuse (or flag) a min_version above the build currently CURRENT for that platform so the floor trails by one release; document in RELEASE.md. Coordinate with PL-RES-40."
+  },
+  {
+    "id": "PL-RES-97",
+    "sources": [
+      "res-upgrade-10"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "After a package install, a stale .old from an earlier self-upgrade is restored under the wrong version name",
+    "where": "installer/windows_upgrade.ps1:204-263; companion upgrade.py:1043-1100",
+    "recommendation": "Have windows_upgrade.ps1 remove or fold .old into .prev, or record the .old's real version in a sidecar and use it in the revert."
+  },
+  {
+    "id": "PL-RES-98",
+    "sources": [
+      "res-concurrency-7"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "macOS single-instance guard is check-then-write, and the Windows mutex is per logon session (second session's loopback serves the other user's browser)",
+    "where": "companion app.py:599-638, :307; broll_server.py:2888-2897",
+    "recommendation": "Hold fcntl.flock on posix for the process lifetime; choose Global\\ deliberately on Windows or require the per-user token header on the loopback."
+  },
+  {
+    "id": "PL-RES-99",
+    "sources": [
+      "res-concurrency-8"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "Closing and reopening the same Cards episode runs two engines' unstoppable workers against one episode",
+    "where": "dashboard cards_pool.py:371-392, :557-595, :707-730; cards.py:239-260",
+    "recommendation": "Refuse to reopen a slug while the previous engine's workers live, or per-engine tmp names and per-path doc_save serialisation."
+  },
+  {
+    "id": "PL-RES-100",
+    "sources": [
+      "res-concurrency-9"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The new (uncommitted) alert-kind switches mute kinds the page never showed: a tab drawn before an update, or a second admin's save",
+    "where": "dashboard ui.py partial_admin_alerts_kinds; templates/partials/admin_alerts.html; app.py:1125-1130",
+    "recommendation": "Post the kinds the page rendered and mute only shown-minus-send, or refuse a save from a different build with a reload prompt."
+  },
+  {
+    "id": "PL-RES-101",
+    "sources": [
+      "res-concurrency-10"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "A lane A pass before a server-side move command arrives re-uploads the file at the old path, and the duplicate is dropped without a word",
+    "where": "docs/FILE_MOVES.md:76-83; dashboard collector.py:2800-2822",
+    "recommendation": "Raise a notice naming the move and machine when a comeback hits a recently moved path; offer remove-old-copy (to .trash) once every holder answered applied."
+  },
+  {
+    "id": "PL-RES-102",
+    "sources": [
+      "res-resolve-12"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "FIX ALL keeps copying for hours after Resolve has gone away; an empty open-project name passes the mismatch guard",
+    "where": "companion popup.py:737-830; fixer.py:1531-1561",
+    "recommendation": "Stop the batch after the first disconnection relink failure and treat an empty project answer as 'stop'."
+  },
+  {
+    "id": "PL-RES-103",
+    "sources": [
+      "res-resolve-13"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Undo journal rewrites the whole file per entry and silently stops journalling at 5000",
+    "where": "companion resolve_journal.py:490-534",
+    "recommendation": "Append-only JSON lines; WARNING at the cap; stop the burst at the cap rather than make edits nobody can undo."
+  },
+  {
+    "id": "PL-RES-104",
+    "sources": [
+      "res-deps-9"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "Any ffmpeg on PATH wins over the pinned sidecar with no version floor, and the pinned sidecar comes from one individual's GitHub repo",
+    "where": "companion ffmpeg_tools.py:101-142; sidecar_tools.py:95, :607",
+    "recommendation": "Report ffmpeg version/flags in capabilities and gate media kinds on a floor or the managed copy; mirror pinned assets to the vendor feed."
+  },
+  {
+    "id": "PL-RES-105",
+    "sources": [
+      "res-deps-10"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The Claude Code CLI auto-updater flips without a working-call check and prunes the previous version an hour later",
+    "where": "dashboard cli_tools.py:1366-1405, :1430-1663",
+    "recommendation": "Run a one-token probe call before flipping, keep the previous version until N successful calls, add a go-back button."
+  },
+  {
+    "id": "PL-RES-106",
+    "sources": [
+      "res-deps-11"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "The dashboard address is fixed into every machine at install, so a tailnet rename or NAS move strands the fleet with no channel to repoint it",
+    "where": "companion config.py:374, :1128; settings_window.py:1248-1284; installer rclone.conf host, Syncthing NAS address",
+    "recommendation": "Site manifest publishes an ordered address list the companion caches and tries; derive rclone and Syncthing hosts from it; document a planned-rename procedure."
+  },
+  {
+    "id": "PL-RES-107",
+    "sources": [
+      "res-time-scale-8"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "The base rig re-walks its whole NAS tree over SMB every 300/900 s with an extra stat round trip per video file",
+    "where": "companion manifest.py:117, :206-253, :393-400; proxy_scan.py:400-440",
+    "recommendation": "os.scandir with entry.stat(); skip per-file lists in base mode; skip projects whose directory mtimes are unchanged."
+  },
+  {
+    "id": "PL-RES-108",
+    "sources": [
+      "res-time-scale-9"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The site timezone is never asked for, so weekly reports, triage and the heartbeat run on UTC for every customer",
+    "where": "dashboard alerts.py:719-746; triage.py:130-136; admin_alerts.html:68",
+    "recommendation": "Timezone step in the setup wizard pre-filled from the browser's Intl timeZone."
+  },
+  {
+    "id": "PL-RES-109",
+    "sources": [
+      "res-time-scale-10"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "The snapshot policy assumes the apps dataset changes by kilobytes per hour; at fleet scale dashboard.db churn is pinned in 54 snapshots",
+    "where": "server/setup_snapshots.py:19-27, :73-93; dashboard db.py:10676",
+    "recommendation": "Measure on the reference NAS; move rebuildable volatile tables to a separate SQLite on a short-retention dataset; add usedbysnapshots to the capacity check."
+  },
+  {
+    "id": "PL-RES-110",
+    "sources": [
+      "res-recovery-11"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: CONFIRMED)",
+    "title": "The Android signing keystore's password exists only as a DPAPI blob on one Windows profile, with no backup record",
+    "where": "docs/ANDROID.md:128-133; %USERPROFILE%/.ccsync-release/android.keystore.pw.dpapi; tools/release_key.py",
+    "recommendation": "Extend release_key.py backup (or an Android twin) to export the keystore and print its password for the password manager, write a backup record, list it in the vendor checklist."
+  },
+  {
+    "id": "PL-RES-111",
+    "sources": [
+      "res-observability-8"
+    ],
+    "severity": "low",
+    "verdict": "not verified (hunter: PLAUSIBLE)",
+    "title": "Unreadable inputs to the alerts scan read as 'nothing wrong', so open alerts are mailed as cleared and then raised again",
+    "where": "dashboard alerts.py:1166-1171, :1236-1255, :1308-1320, :5132-5170",
+    "recommendation": "Narrow _rows to 'no such table' so other errors become check_failed; make swallowed Ctx reads mark dependent checks as failed."
+  }
+]

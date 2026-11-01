@@ -239,6 +239,8 @@ class Harness:
             "databaseId": 7, "headSha": "b" * 40, "createdAt": "2026-09-25T00:00:00Z",
             "displayTitle": "t"})
         monkeypatch.setattr(pl, "commit_is_on_main", lambda sha, tip="": True)
+        # GL-25 (CR-371): publish_latest now also asks for a green ci.yml run.
+        monkeypatch.setattr(pl, "ci_green_for", lambda sha: True)
         monkeypatch.setattr(pl, "run", self)
 
     @property

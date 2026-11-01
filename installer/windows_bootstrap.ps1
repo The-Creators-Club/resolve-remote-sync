@@ -286,7 +286,9 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.46"
+# 1.0.47 (2026-10-07): CR-368 host_key_algorithms, CR-372 ACL + pinned-first
+# tools, CR-373 Publisher and Resolve scripting.
+$InstallerVersion = "1.0.47"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see
@@ -560,8 +562,18 @@ function Protect-CCSyncPath {
         # 2>&1 into $null: icacls writes its "processed 1 files" chatter to
         # stdout and any per-ACE complaint to stderr, and a native stderr write
         # is fatal under $ErrorActionPreference = 'Stop'.
+        #
+        # GL-27 / CR-372 (2026-10-07): a DIRECTORY is granted with (OI)(CI).
+        # Without them /inheritance:r left every file and folder already inside
+        # (eula_accepted.json, logs\, state\) with only ACEs it had inherited
+        # from this directory, i.e. an EMPTY permission list: the EULA re-asked,
+        # the install log stopped, and the safety latches under state\ (lane B
+        # breaker, fleet halt, drive reminder) could no longer be saved. A file
+        # has no children and keeps the plain (F).
         $me = "$env:USERDOMAIN\$env:USERNAME"
-        cmd /c "icacls `"$Path`" /inheritance:r /grant:r `"$me`":(F) `"*S-1-5-18`":(F) `"*S-1-5-32-544`":(F) >nul 2>&1"
+        $flags = ""
+        if (Test-Path -LiteralPath $Path -PathType Container) { $flags = "(OI)(CI)" }
+        cmd /c "icacls `"$Path`" /inheritance:r /grant:r `"$me`":${flags}(F) `"*S-1-5-18`":${flags}(F) `"*S-1-5-32-544`":${flags}(F) >nul 2>&1"
         if ($LASTEXITCODE -eq 0) {
             if ($What) { Write-Step "restricted $What to you, SYSTEM and Administrators" }
         }
@@ -571,6 +583,39 @@ function Protect-CCSyncPath {
     }
     catch {
         Write-Warn2 "could not tighten the permissions on $Path ($($_.Exception.Message)) -- it holds your fleet token, so check it by hand if this machine has other local accounts"
+    }
+}
+
+# GL-27 / CR-372 (2026-10-07): the REPAIR for a ~/.ccsync that an older
+# bootstrap already damaged (and the second half of the fix for a fresh one:
+# Protect-CCSyncPath's inheritable grant reaches children by propagation, this
+# makes it certain). Order matters: the directory is granted first, then every
+# child is reset to "inherit from the folder", which is the ACL a file in a
+# restricted folder should have. The directory itself is NOT reset (that would
+# put the profile's default ACL, and the fleet token's exposure, back).
+# `icacls dir\* /reset /T /C /Q`: /C continues past one locked file. Quiet and
+# best-effort like Protect-CCSyncPath: a permissions repair never stops an
+# install.
+function Repair-CCSyncStateAcl {
+    param([string]$Dir)
+
+    if ($DryRun) {
+        Write-Step "[dry-run] would re-grant $Dir and reset every file and folder inside it to inherit (icacls /reset /T)"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { return }
+    try {
+        Protect-CCSyncPath -Path $Dir
+        cmd /c "icacls `"$Dir\*`" /reset /T /C /Q >nul 2>&1"
+        if ($LASTEXITCODE -eq 0) {
+            Write-Step "repaired permissions on everything inside $Dir"
+        }
+        else {
+            Write-Warn2 "could not reset every file inside $Dir (icacls exit $LASTEXITCODE) -- the EULA record or the sync safety state may not save until it is fixed; re-run this installer as the same user"
+        }
+    }
+    catch {
+        Write-Warn2 "could not repair the permissions inside $Dir ($($_.Exception.Message))"
     }
 }
 
@@ -679,6 +724,96 @@ function Register-HiddenRunEntry {
         Write-Warn2 "could not write autostart registry value ${Name}: $($_.Exception.Message)"
         return $false
     }
+}
+
+# GL-28 / CR-372 (2026-10-07): winget changes the REGISTRY path, never this
+# process's $env:Path, and its portable packages land under
+# %LOCALAPPDATA%\Microsoft\WinGet\Links (a stable shim) or a versioned
+# Packages\...\vX.Y.Z folder. Both helpers exist so a tool winget just
+# installed is FOUND by the same run, instead of the install ending NOT READY
+# with "rclone not found" on a stock Windows 11 machine.
+function Update-SessionPathFromRegistry {
+    try {
+        $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $user = [Environment]::GetEnvironmentVariable("Path", "User")
+        $have = @($env:Path -split ";" | Where-Object { $_ })
+        $add = @(("$machine;$user") -split ";" | Where-Object { $_ -and ($have -notcontains $_) })
+        if ($add.Count -gt 0) { $env:Path = (($have + $add) -join ";") }
+    }
+    catch { }
+}
+
+# A path inside winget's versioned package folder moves on the next
+# `winget upgrade`, so it is never baked into a config or a logon shim
+# (CR-372 / GL-28 / bug-installer-3, 2026-10-07).
+function Test-WingetVersionedPath {
+    param([string]$Path)
+    return [bool]($Path -and ($Path -match '\\WinGet\\Packages\\'))
+}
+
+function Find-WingetInstalledTool {
+    param([string]$ExeName)
+    Update-SessionPathFromRegistry
+    # Links (stable shim) first, then a PATH hit outside the versioned folder,
+    # and the versioned folder only as the last resort.
+    $links = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\$ExeName.exe"
+    if (Test-Path -LiteralPath $links) { return $links }
+    $cmd = Get-Command $ExeName -ErrorAction SilentlyContinue
+    if ($cmd -and -not (Test-WingetVersionedPath $cmd.Source)) { return $cmd.Source }
+    if ($cmd) { return $cmd.Source }
+    $pkgs = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
+    if (Test-Path -LiteralPath $pkgs) {
+        $hit = Get-ChildItem -Path $pkgs -Filter "$ExeName.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($hit) { return $hit.FullName }
+    }
+    return $null
+}
+
+# The pinned, sha256-verified download into $BinDir (COMMERCIAL_READINESS.md
+# item 13). GL-28: this is now the FIRST route, not the fallback -- winget's
+# build was never the one the pin was checked against. Returns the installed
+# exe path or $null.
+function Install-PinnedBinary {
+    param([string]$What, [string]$Version, [string]$Url, [string]$Sha256, [string]$ExeName, [string]$Slug)
+
+    if ($DryRun) {
+        Write-Step "[dry-run] would download $Url, verify sha256 $Sha256, extract, and copy $ExeName to $BinDir"
+        return $null
+    }
+    $zipPath = "$env:TEMP\$Slug-$Version.zip"
+    $extractDir = "$env:TEMP\$Slug-extract"
+    Write-Step "downloading $What $Version from $Url ..."
+    # -UseBasicParsing skips the IE DOM parser; SilentlyContinue on
+    # $ProgressPreference removes PS 5.1's per-chunk progress render, which
+    # costs an order of magnitude on a multi-MB download; and -TimeoutSec stops
+    # a half-open TCP connection hanging until the wizard's 1800s timeout kills
+    # the whole install (INST-19).
+    $prevProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
+    }
+    catch {
+        Write-Warn2 "$What download failed: $($_.Exception.Message)"
+        return $null
+    }
+    finally {
+        $ProgressPreference = $prevProgress
+    }
+    # Verified BEFORE Expand-Archive: a tampered or truncated archive must never
+    # be inflated onto the disk, let alone into the bin dir the companion runs
+    # things out of.
+    $exe = $null
+    if (Test-PinnedDownload -Path $zipPath -ExpectedSha256 $Sha256 -What "$What $Version") {
+        if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
+        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+        $exe = Get-ChildItem -Path $extractDir -Filter $ExeName -Recurse | Select-Object -First 1
+        if ($null -eq $exe) { Write-Warn2 "could not find $ExeName inside the downloaded zip" }
+    }
+    if ($null -eq $exe) { return $null }
+    Copy-Item -Path $exe.FullName -Destination "$BinDir\$ExeName" -Force
+    Write-Step "installed $What to $BinDir\$ExeName"
+    return "$BinDir\$ExeName"
 }
 
 # TLS 1.2 for winget-less direct downloads on older Windows/.NET defaults.
@@ -1019,10 +1154,15 @@ if (-not $DryRun -and $UninstallScriptPath) {
     # the site publishes one, the product name otherwise -- no customer's name
     # is ever compiled in (CLAUDE.md).
     $brandOrg = Get-SiteValue "org_name"
+    # CR-373 / GL-30 / COM-M59 (2026-10-07): Publisher is the VENDOR legal
+    # entity (the owner decision "Cablewrap Creative Ltd signs and contracts"),
+    # never the customer's org_name, which stays in DisplayName only. Same
+    # value as tools/winversion.py's CompanyName default.
+    $VendorPublisher = "Cablewrap Creative Ltd"
     $entryName = if ($brandOrg) { "CC Sync ($brandOrg)" } else { "CC Sync" }
     $registered = Register-UninstallEntry -KeyRoot $UninstallKeyRoot -KeyName $UninstallKeyName `
         -DisplayName $entryName -UninstallScript $UninstallScriptPath `
-        -Publisher $(if ($brandOrg) { $brandOrg } else { "CC Sync" }) `
+        -Publisher $VendorPublisher `
         -Version $InstallerVersion -InstallLocation $BinDir -IconPath $CompanionExePath
     if ($registered) {
         Write-Step "CC Sync is listed in Apps & features (Settings > Apps > Installed apps)"
@@ -1074,83 +1214,53 @@ else {
 # --------------------------------------------------------------------
 Write-Step "checking rclone..."
 $rclonePath = $null
-if (Test-CommandExists "rclone") {
-    $rclonePath = (Get-Command rclone).Source
-}
-elseif (Test-Path "$BinDir\rclone.exe") {
+$rcloneVersionedFallback = $null
+if (Test-Path "$BinDir\rclone.exe") {
     $rclonePath = "$BinDir\rclone.exe"
+}
+elseif (Test-CommandExists "rclone") {
+    $found = (Get-Command rclone).Source
+    if (Test-WingetVersionedPath $found) {
+        # CR-372 / GL-28 (2026-10-07): a versioned winget folder is not "installed"
+        # for our purposes; the pinned copy goes in $BinDir. This one is kept only
+        # as the last resort if the pinned download cannot be had.
+        $rcloneVersionedFallback = $found
+    }
+    else { $rclonePath = $found }
 }
 
 if ($rclonePath) {
     Write-Skip "rclone already installed: $rclonePath"
 }
 else {
-    $installed = $false
-    if (Test-CommandExists "winget") {
-        if ($DryRun) {
-            Write-Step "[dry-run] would run: winget install --id Rclone.Rclone -e --accept-source-agreements --accept-package-agreements"
-            $installed = $true
+    # GL-28 / CR-372 (2026-10-07): the pinned, verified download first; winget
+    # then scoop only if it could not be had, each followed by a PATH refresh
+    # and a probe of WinGet\Links, because winget never updates THIS process's
+    # $env:Path (the first install on a stock Windows 11 ended NOT READY).
+    $rclonePath = Install-PinnedBinary -What "rclone" -Version $RcloneVersion -Url $RcloneZipUrl `
+        -Sha256 $RcloneZipSha256 -ExeName "rclone.exe" -Slug "rclone-windows-amd64"
+    if ((-not $rclonePath) -and (-not $DryRun) -and (Test-CommandExists "winget")) {
+        Write-Step "installing rclone via winget (fallback)..."
+        try {
+            winget install --id Rclone.Rclone -e --accept-source-agreements --accept-package-agreements --disable-interactivity
+            if ($LASTEXITCODE -ne 0) { Write-Warn2 "winget install of rclone exited with code $LASTEXITCODE, trying next method" }
         }
-        else {
-            Write-Step "installing rclone via winget..."
-            winget install --id Rclone.Rclone -e --accept-source-agreements --accept-package-agreements
-            if ($LASTEXITCODE -eq 0) { $installed = $true }
-            else { Write-Warn2 "winget install of rclone exited with code $LASTEXITCODE, trying next method" }
-        }
+        catch { Write-Warn2 "winget install of rclone failed: $($_.Exception.Message)" }
+        $rclonePath = Find-WingetInstalledTool "rclone"
     }
-    if ((-not $installed) -and (Test-CommandExists "scoop")) {
-        if ($DryRun) {
-            Write-Step "[dry-run] would run: scoop install rclone"
-            $installed = $true
-        }
-        else {
-            Write-Step "installing rclone via scoop..."
+    if ((-not $rclonePath) -and (-not $DryRun) -and (Test-CommandExists "scoop")) {
+        Write-Step "installing rclone via scoop (fallback)..."
+        try {
             scoop install rclone
-            if ($LASTEXITCODE -eq 0) { $installed = $true }
-            else { Write-Warn2 "scoop install of rclone exited with code $LASTEXITCODE, falling back to direct download" }
+            if ($LASTEXITCODE -ne 0) { Write-Warn2 "scoop install of rclone exited with code $LASTEXITCODE" }
         }
+        catch { Write-Warn2 "scoop install of rclone failed: $($_.Exception.Message)" }
+        Update-SessionPathFromRegistry
+        if (Test-CommandExists "rclone") { $rclonePath = (Get-Command rclone).Source }
     }
-    if (-not $installed) {
-        $zipUrl = $RcloneZipUrl
-        $zipPath = "$env:TEMP\rclone-$RcloneVersion-windows-amd64.zip"
-        $extractDir = "$env:TEMP\rclone-extract"
-        if ($DryRun) {
-            Write-Step "[dry-run] would download $zipUrl to $zipPath, verify sha256 $RcloneZipSha256, extract, and copy rclone.exe to $BinDir"
-        }
-        else {
-            Write-Step "downloading rclone $RcloneVersion from $zipUrl ..."
-            # -UseBasicParsing skips the IE DOM parser; SilentlyContinue on
-            # $ProgressPreference removes PS 5.1's per-chunk progress render,
-            # which costs an order of magnitude on a multi-MB download; and
-            # -TimeoutSec stops a half-open TCP connection hanging until the
-            # wizard's 1800s timeout kills the whole install (INST-19).
-            $prevProgress = $ProgressPreference
-            $ProgressPreference = 'SilentlyContinue'
-            try {
-                Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
-            }
-            finally {
-                $ProgressPreference = $prevProgress
-            }
-            # Verified BEFORE Expand-Archive: a tampered or truncated archive
-            # must never be inflated onto the disk, let alone into the bin dir
-            # the companion runs things out of.
-            $exe = $null
-            if (Test-PinnedDownload -Path $zipPath -ExpectedSha256 $RcloneZipSha256 -What "rclone $RcloneVersion") {
-                if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
-                Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-                $exe = Get-ChildItem -Path $extractDir -Filter "rclone.exe" -Recurse | Select-Object -First 1
-                if ($null -eq $exe) { Write-Warn2 "could not find rclone.exe inside the downloaded zip" }
-            }
-            if ($null -eq $exe) {
-                Write-Warn2 "rclone was not installed from the direct download"
-            }
-            else {
-                Copy-Item -Path $exe.FullName -Destination "$BinDir\rclone.exe" -Force
-                Write-Step "installed rclone to $BinDir\rclone.exe"
-                $rclonePath = "$BinDir\rclone.exe"
-            }
-        }
+    if ((-not $rclonePath) -and $rcloneVersionedFallback) {
+        Write-Warn2 "the pinned rclone could not be installed; using winget's versioned copy at $rcloneVersionedFallback (it moves on the next winget upgrade)"
+        $rclonePath = $rcloneVersionedFallback
     }
 }
 
@@ -1240,8 +1350,10 @@ if (-not (($env:Path -split ";") -contains $BinDir)) {
 # this process's PATH, so re-probe rather than trust which branch ran.
 if (-not $DryRun) {
     $rcloneFinal = $null
-    if (Test-CommandExists "rclone") { $rcloneFinal = (Get-Command rclone).Source }
+    if ($rclonePath -and (Test-Path -LiteralPath $rclonePath)) { $rcloneFinal = $rclonePath }
+    elseif (Test-CommandExists "rclone") { $rcloneFinal = (Get-Command rclone).Source }
     elseif (Test-Path "$BinDir\rclone.exe") { $rcloneFinal = "$BinDir\rclone.exe" }
+    $script:rcloneFinalPath = $rcloneFinal
     if (-not $rcloneFinal) {
         Add-CapabilityMiss "rclone is NOT installed. Lanes A and B -- every video upload and every proxy download -- cannot run at all on this machine. Install rclone from https://rclone.org/downloads/ (or 'winget install Rclone.Rclone') and re-run this script."
     }
@@ -1256,10 +1368,28 @@ if (-not $DryRun) {
 # (syncthing-windows-amd64-v2.1.3.zip), so the unversioned alias 404s -- which
 # is why the pinned URL above names the version explicitly.
 function Get-SyncthingExePath {
-    if (Test-CommandExists "syncthing") { return (Get-Command syncthing).Source }
+    # -AllowVersioned: last resort only (the pinned download failed); the
+    # default never returns a path under WinGet\Packages (defect 1, CR-372).
+    param([switch]$AllowVersioned)
+    # GL-28 / bug-installer-3 (2026-10-07): OUR pinned copy first, then a PATH
+    # hit that is not a versioned winget package folder, then winget's stable
+    # Links shim. A path under WinGet\Packages\...\vX.Y.Z is baked into the
+    # logon shim and the supervisor, and the next `winget upgrade` moves it.
     if (Test-Path "$BinDir\syncthing.exe") { return "$BinDir\syncthing.exe" }
+    $cmd = Get-Command syncthing -ErrorAction SilentlyContinue
+    if ($cmd -and ($cmd.Source -notmatch '\\WinGet\\Packages\\')) { return $cmd.Source }
+    $links = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\syncthing.exe"
+    if (Test-Path -LiteralPath $links) { return $links }
     if (Test-Path "$env:ProgramFiles\Syncthing\syncthing.exe") { return "$env:ProgramFiles\Syncthing\syncthing.exe" }
     if (Test-Path "${env:ProgramFiles(x86)}\Syncthing\syncthing.exe") { return "${env:ProgramFiles(x86)}\Syncthing\syncthing.exe" }
+    if ($cmd -and $AllowVersioned) { return $cmd.Source }
+    if ($AllowVersioned) {
+        $pkgs = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
+        if (Test-Path -LiteralPath $pkgs) {
+            $hit = Get-ChildItem -Path $pkgs -Filter "syncthing.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hit) { return $hit.FullName }
+        }
+    }
     return $null
 }
 
@@ -1277,62 +1407,35 @@ if ($syncthingPath) {
     Write-Skip "Syncthing already installed: $syncthingPath"
 }
 else {
-    $installed = $false
-    if (Test-CommandExists "winget") {
-        if ($DryRun) {
-            Write-Step "[dry-run] would run: winget install --id Syncthing.Syncthing -e --accept-source-agreements --accept-package-agreements"
-            $installed = $true
+    # GL-28: pinned and verified first; winget only as a fallback, and a winget
+    # "success" counts only when an exe was actually located afterwards
+    # ($installed used to be set on exit code alone, which skipped the pinned
+    # route and left Get-SyncthingExePath null on a stale PATH).
+    $syncthingPath = Install-PinnedBinary -What "Syncthing" -Version $SyncthingVersion -Url $SyncthingZipUrl `
+        -Sha256 $SyncthingZipSha256 -ExeName "syncthing.exe" -Slug "syncthing-windows-amd64"
+    if ((-not $syncthingPath) -and (-not $DryRun) -and (Test-CommandExists "winget")) {
+        Write-Step "installing Syncthing via winget (fallback)..."
+        try {
+            winget install --id Syncthing.Syncthing -e --accept-source-agreements --accept-package-agreements --disable-interactivity
+            if ($LASTEXITCODE -ne 0) { Write-Warn2 "winget install of Syncthing exited with code $LASTEXITCODE" }
         }
-        else {
-            Write-Step "installing Syncthing via winget..."
-            winget install --id Syncthing.Syncthing -e --accept-source-agreements --accept-package-agreements
-            if ($LASTEXITCODE -eq 0) {
-                $installed = $true
-                # winget doesn't tell us where it put the exe (and doesn't
-                # refresh this process's PATH) -- re-probe the usual
-                # locations rather than assuming a well-known path.
-                $syncthingPath = Get-SyncthingExePath
-                if (-not $syncthingPath) {
-                    Write-Warn2 "winget reported success but Syncthing's exe could not be located afterwards -- open a new terminal (PATH may need a refresh) and re-run this script"
-                }
+        catch { Write-Warn2 "winget install of Syncthing failed: $($_.Exception.Message)" }
+        Update-SessionPathFromRegistry
+        $syncthingPath = Get-SyncthingExePath
+        if (-not $syncthingPath) {
+            $syncthingPath = Find-WingetInstalledTool "syncthing"
+            if ($syncthingPath -and (Test-WingetVersionedPath $syncthingPath)) {
+                Write-Warn2 "using winget's versioned Syncthing at $syncthingPath (it moves on the next winget upgrade; re-run this script once the pinned download works)"
             }
-            else { Write-Warn2 "winget install of Syncthing exited with code $LASTEXITCODE, falling back to direct download" }
+        }
+        if (-not $syncthingPath) {
+            Write-Warn2 "winget did not leave a Syncthing exe this script can find"
         }
     }
-    if (-not $installed) {
-        if ($DryRun) {
-            Write-Step "[dry-run] would download $SyncthingZipUrl, verify sha256 $SyncthingZipSha256, extract, and copy syncthing.exe to $BinDir"
-        }
-        else {
-            $zipUrl = $SyncthingZipUrl
-            $zipPath = "$env:TEMP\syncthing-windows-amd64-$SyncthingVersion.zip"
-            $extractDir = "$env:TEMP\syncthing-extract"
-            Write-Step "downloading Syncthing $SyncthingVersion from $zipUrl ..."
-            # See the rclone download above for why all three of these
-            # matter (INST-19).
-            $prevProgress = $ProgressPreference
-            $ProgressPreference = 'SilentlyContinue'
-            try {
-                Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
-            }
-            finally {
-                $ProgressPreference = $prevProgress
-            }
-            $exe = $null
-            if (Test-PinnedDownload -Path $zipPath -ExpectedSha256 $SyncthingZipSha256 -What "Syncthing $SyncthingVersion") {
-                if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
-                Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-                $exe = Get-ChildItem -Path $extractDir -Filter "syncthing.exe" -Recurse | Select-Object -First 1
-                if ($null -eq $exe) {
-                    Write-Warn2 "could not find syncthing.exe inside the downloaded zip -- install Syncthing manually"
-                }
-            }
-            if ($exe) {
-                Copy-Item -Path $exe.FullName -Destination "$BinDir\syncthing.exe" -Force
-                Write-Step "installed Syncthing to $BinDir\syncthing.exe"
-                $syncthingPath = "$BinDir\syncthing.exe"
-            }
-        }
+    if ((-not $syncthingPath) -and (-not $DryRun)) {
+        # Only a versioned winget copy exists and the pinned download failed.
+        $syncthingPath = Get-SyncthingExePath -AllowVersioned
+        if ($syncthingPath) { Write-Warn2 "using the only Syncthing found, a versioned winget copy: $syncthingPath" }
     }
 }
 if ($DryRun -and (-not $syncthingPath)) {
@@ -2059,6 +2162,41 @@ $ShellType = Get-SiteValue "sftp_shell_type"
 if (-not $ShellType) { $ShellType = "unix" }
 # port: 22 unless the site says otherwise. DSM commonly runs sshd elsewhere,
 # and rclone's sftp backend silently assumes 22 when the key is absent.
+# GL-19 (CR-368, 2026-10-07): "editor lanes trust any NAS host key". rclone's
+# sftp backend verifies NOTHING unless `known_hosts_file` is set, so a machine
+# on a hostile network could answer for the NAS and take the editor's key
+# handshake and every upload. When the site publishes the NAS sshd's host key
+# (/api/v1/site `sftp_hostkey`), write it to a known_hosts file of our own and
+# point the stanza at it; a CHANGED key is then a refusal in rclone, never a
+# re-trust. A site that publishes none (the studio's legacy) leaves the stanza
+# exactly as it always was.
+$SftpHostKey = Get-SiteValue "sftp_hostkey"
+$KnownHostsPath = ""
+$KnownHostsAlgo = ""
+if ($SftpHostKey -match '^(ssh-|ecdsa-|sk-)\S+\s+\S+') {
+    $KnownHostsPath = "$env:USERPROFILE\.ccsync\nas_known_hosts"
+    # CR-368 follow-up (2026-10-07): rclone prefers ECDSA over ed25519 and the
+    # NAS sshd offers all of them, so a known_hosts holding ONE key type is a
+    # "knownhosts: key mismatch" on every connect (probed live against the
+    # studio NAS). Pin the algorithm to the type of the key we hold.
+    $KnownHostsAlgo = ($SftpHostKey -split '\s+')[0]
+    # CR-368 round 2 (2026-10-07): OpenSSH 8.8+ no longer offers SHA-1 ssh-rsa;
+    # an RSA pin negotiates as rsa-sha2-*. rclone takes a space-separated list.
+    if ($KnownHostsAlgo -eq 'ssh-rsa') { $KnownHostsAlgo = 'rsa-sha2-512 rsa-sha2-256' }
+    $knownHostId = if ($SftpPort -eq 22) { $TailnetHost } else { "[$TailnetHost]:$SftpPort" }
+    if ($DryRun) {
+        Write-Step "[dry-run] would write the NAS host key for $knownHostId to $KnownHostsPath and pin rclone to it"
+    }
+    else {
+        Ensure-Dir (Split-Path -Parent $KnownHostsPath)
+        $utf8NoBomKh = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($KnownHostsPath, "$knownHostId $SftpHostKey`n", $utf8NoBomKh)
+        Write-Step "pinned the NAS SSH host key for $knownHostId in $KnownHostsPath"
+    }
+}
+else {
+    Write-Skip "the site publishes no NAS SSH host key: rclone will not verify the NAS's identity (ask the admin to redeploy the dashboard with the host key pinned)"
+}
 $Stanza = @"
 [$RemoteName]
 type = sftp
@@ -2068,11 +2206,14 @@ port = $SftpPort
 key_file = $KeyFilePath
 shell_type = $ShellType
 "@
+if ($KnownHostsPath) { $Stanza += "`r`nknown_hosts_file = $KnownHostsPath`r`nhost_key_algorithms = $KnownHostsAlgo" }
 
 $hasSection = $false
 $stanzaMatches = $false
 $existingHost = ""
 $existingUser = ""
+$existingKnownHosts = ""
+$existingKhAlgo = ""
 if (Test-Path -LiteralPath $RcloneConfPath) {
     # -Encoding UTF8 explicitly: this script APPENDS to rclone.conf as
     # no-BOM UTF-8 (below), and Get-Content with no -Encoding falls back to
@@ -2095,8 +2236,15 @@ if (Test-Path -LiteralPath $RcloneConfPath) {
             if ($hostMatch.Success) { $existingHost = $hostMatch.Groups[1].Value }
             $userMatch = [regex]::Match($body, '(?m)^\s*user\s*=\s*(.*?)\s*$')
             if ($userMatch.Success) { $existingUser = $userMatch.Groups[1].Value }
+            $khMatch = [regex]::Match($body, '(?m)^\s*known_hosts_file\s*=\s*(.*?)\s*$')
+            if ($khMatch.Success) { $existingKnownHosts = $khMatch.Groups[1].Value }
+            $khaMatch = [regex]::Match($body, '(?m)^\s*host_key_algorithms\s*=\s*(.*?)\s*$')
+            if ($khaMatch.Success) { $existingKhAlgo = $khaMatch.Groups[1].Value }
         }
-        $stanzaMatches = ($existingHost -ceq $TailnetHost) -and ($existingUser -ceq $EditorName)
+        # A stanza written before the site published a host key lacks the pin, and
+        # that alone is a reason to rewrite it (the pin is the point of GL-19).
+        $stanzaMatches = ($existingHost -ceq $TailnetHost) -and ($existingUser -ceq $EditorName) -and
+            ((-not $KnownHostsPath) -or (($existingKnownHosts -ceq $KnownHostsPath) -and ($existingKhAlgo -ceq $KnownHostsAlgo)))
     }
 }
 
@@ -2171,13 +2319,54 @@ else {
     $RemoteRootToml = "# remote_root NOT SET -- ask your admin for the absolute NAS tree path"
 }
 
+# GL-28 (2026-10-07): the config names the rclone this run LOCATED, absolute,
+# so the companion never depends on a PATH that winget, scoop or a fresh logon
+# may not have refreshed. Literal TOML string (single quotes): backslashes stay
+# backslashes. Falls back to the bare name when nothing was located.
+$RcloneConfigPath = "rclone"
+if ($script:rcloneFinalPath) { $RcloneConfigPath = "$($script:rcloneFinalPath)" }
+elseif ($rclonePath) { $RcloneConfigPath = "$rclonePath" }
+if ($RcloneConfigPath -match "'") { $RcloneConfigPath = "rclone" }
+# CR-372 defect 3: a versioned winget folder is never baked in. The bare name
+# follows PATH across a `winget upgrade`; an absolute versioned path does not.
+if (Test-WingetVersionedPath $RcloneConfigPath) { $RcloneConfigPath = "rclone" }
+
+# CR-372 defect 2: in the wizard flow onboarding's ensure_config has ALREADY
+# written config.toml (rclone_path = "rclone") before this script runs, so the
+# fresh-seed branch below is not the main path. Replace ONLY a bare "rclone" or
+# a path that names a missing file; an owner-chosen absolute path stays
+# (same rule as macos_bootstrap.sh INST-7).
+function Update-ConfigRclonePath {
+    param([string]$ConfigPath, [string]$NewPath)
+    if ((-not (Test-Path -LiteralPath $ConfigPath)) -or ($NewPath -match "'")) { return $false }
+    $text = [System.IO.File]::ReadAllText($ConfigPath)
+    $m = [regex]::Match($text, '(?m)^[ \t]*rclone_path[ \t]*=[ \t]*(?:"([^"\r\n]*)"|''([^''\r\n]*)'')[ \t]*(?:#[^\r\n]*)?\r?$')
+    if (-not $m.Success) { return $false }
+    $cur = $m.Groups[1].Value
+    if (-not $m.Groups[1].Success) { $cur = $m.Groups[2].Value }
+    else { $cur = $cur -replace '\\\\', '\' }
+    $bare = ($cur -eq "rclone") -or ($cur -eq "rclone.exe")
+    # CR-372 round 2: a bare NewPath (rclone resolved only via PATH or winget) must
+    # still heal a DEAD absolute path left by an uninstall that kept config.toml;
+    # it never rewrites a bare or still-valid current value.
+    if (($NewPath -eq "rclone") -and ($bare -or (Test-Path -LiteralPath $cur) -or ($cur -notmatch '[\\/]'))) { return $false }
+    if ((-not $bare) -and (Test-Path -LiteralPath $cur)) { return $false }
+    if ((-not $bare) -and ($cur -notmatch '[\\/]')) { return $false }
+    $line = "rclone_path = '$NewPath'"
+    $new = $text.Substring(0, $m.Index) + $line + $text.Substring($m.Index + $m.Length)
+    [System.IO.File]::WriteAllText($ConfigPath, $new, (New-Object System.Text.UTF8Encoding $false))
+    return $true
+}
+
 # Tighten ~/.ccsync itself before anything is written into it, so identity.json
 # -- which the companion, not this script, creates on first run -- inherits a
 # restricted ACL instead of the profile's default one. Re-running this on an
 # already-provisioned machine is how existing editors get the fix (2026-08-17,
 # COMMERCIAL_READINESS.md item 15).
 if (Test-Path -LiteralPath $CCSyncConfigDir) {
-    Protect-CCSyncPath -Path $CCSyncConfigDir -What "$CCSyncConfigDir"
+    # GL-27 (2026-10-07): the repair re-grants the folder (OI)(CI) AND resets
+    # what an older build of this script already stripped inside it.
+    Repair-CCSyncStateAcl -Dir $CCSyncConfigDir
 }
 foreach ($secretFile in @($CCSyncConfigPath, "$CCSyncConfigDir\identity.json")) {
     if (Test-Path -LiteralPath $secretFile) {
@@ -2187,6 +2376,9 @@ foreach ($secretFile in @($CCSyncConfigPath, "$CCSyncConfigDir\identity.json")) 
 
 if (Test-Path -LiteralPath $CCSyncConfigPath) {
     Write-Skip "companion config already exists: $CCSyncConfigPath"
+    if ((-not $DryRun) -and (Update-ConfigRclonePath -ConfigPath $CCSyncConfigPath -NewPath $RcloneConfigPath)) {
+        Write-Step "  set rclone_path to $RcloneConfigPath (it was the bare name or a missing file)"
+    }
     Write-Step "  confirm these values match, the companion will not fix them for you:"
     Write-Host "      editor_name = `"$EditorName`""
     Write-Host "      local_root  = `"$LocalRootToml`""
@@ -2237,7 +2429,7 @@ syncthing_url = "http://127.0.0.1:8384"
 syncthing_api_key = ""
 syncthing_folder_ids = []
 
-rclone_path = "rclone"
+rclone_path = '$RcloneConfigPath'
 
 log_path = "~/.ccsync/companion.log"
 log_level = "INFO"
@@ -2502,7 +2694,12 @@ else {
     foreach ($setupLine in (Get-FirstSetupSteps -FromWizard ($env:CCSYNC_FROM_WIZARD -eq "1") -KeyFilePath $KeyFilePath)) {
         Write-Host $setupLine
     }
-    Write-Host "   4. connect DaVinci Resolve to the Project Server"
+    # CR-373 / GL-29 (2026-10-07): step 4 names its two halves. External
+    # scripting is None out of the box; the --setup-resolve-prefs step above
+    # writes Local when Resolve was closed, and this line is the fallback.
+    Write-Host "   4. connect DaVinci Resolve (Studio) to the Project Server: add the"
+    Write-Host "      PostgreSQL project library, and check Preferences > System >"
+    Write-Host "      General > External scripting using = Local"
     Write-Host "   5. Playback > Proxy Handling > Prefer Proxies"
     Write-Host "   6. do NOT map any NAS share to another drive letter -- see the"
     Write-Host "      drive-letter warning in docs/EDITOR_SETUP.md"

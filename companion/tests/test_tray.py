@@ -2326,6 +2326,7 @@ def test_scripting_warning_yields_to_an_open_window(monkeypatch):
     from ccsync_companion import resolve_bridge
     from ccsync_companion import tray as tray_mod
 
+    resolve_bridge.note_connection(True)   # a machine that connected before
     app = _UpgradeApp()
     app._popup_active_lock.acquire()          # e.g. the fixer popup is open
     opened = []
@@ -2370,6 +2371,7 @@ def test_a_broken_scripting_warning_dialog_still_tells_the_editor(monkeypatch):
     from ccsync_companion import resolve_bridge
     from ccsync_companion import tray as tray_mod
 
+    resolve_bridge.note_connection(True)   # a machine that connected before
     app = _UpgradeApp()
     broken = types.ModuleType("tkinter")
 
@@ -3080,29 +3082,26 @@ def test_the_tooltip_names_what_is_owed_and_stays_short():
 def test_ignored_line_names_the_way_back():
     from ccsync_companion.tray import _ignored_line
 
-    line = _ignored_line({"resolve_health": {"ignored_this_session": 14,
-                                             "ignored_folders": 0}})
+    line = _ignored_line({"resolve_health": {"ignored_this_session": 14}})
     assert line.startswith("\u26a0 14 clips skipped this session")
     assert "SCAN WHOLE PROJECT" in line
     assert "\u2014" not in line
 
 
-def test_ignored_line_mentions_the_folders_left_alone_on_purpose():
+def test_ignored_line_ignores_an_old_folder_count():
+    """CR-356: the folder clause went with the folder layer. A stale
+    `ignored_folders` (an old snapshot) says nothing."""
     from ccsync_companion.tray import _ignored_line
 
-    line = _ignored_line({"resolve_health": {"ignored_this_session": 0,
-                                             "ignored_folders": 2}})
-    # comp-ui-4 (2026-09-11): "folder(s)" -> ui_copy.count, verb agreeing.
-    assert "2 folders are set to be left alone" in line
-    assert "skipped this session" not in line
+    assert _ignored_line({"resolve_health": {"ignored_this_session": 0,
+                                             "ignored_folders": 2}}) is None
 
 
 def test_ignored_line_is_silent_on_a_healthy_machine():
     from ccsync_companion.tray import _ignored_line
 
     assert _ignored_line({}) is None
-    assert _ignored_line({"resolve_health": {"ignored_this_session": 0,
-                                             "ignored_folders": 0}}) is None
+    assert _ignored_line({"resolve_health": {"ignored_this_session": 0}}) is None
     assert _ignored_line({"resolve_health": {"ignored_this_session": "x"}}) is None
 
 
@@ -3421,3 +3420,22 @@ def test_the_quit_question_names_the_file_and_the_batch():
     # A batch that has not published its first chunk yet still says something
     # true about what is at stake.
     assert "69" in quit_confirm_text({"index": 0, "total": 69})
+
+
+def test_the_menu_row_never_gives_the_restart_loop_to_a_never_connected_machine(monkeypatch):
+    """CR-373 / GL-29 round 2: the row and the dialog must not contradict."""
+    from ccsync_companion import resolve_bridge, tray
+
+    monkeypatch.setattr(resolve_bridge.resolve_prefs, "scripting_status",
+                        lambda: {"mode": 0, "mode_name": "None", "prefs": "ok"})
+    app = _BridgeApp(_bridge(False, ever=False,
+                             reason=resolve_bridge.NO_SCRIPTING_MESSAGE))
+    snap = tray._tray_snapshot(app)
+    assert snap["resolve_line"].startswith("Resolve: NOT CONNECTED this session")
+    assert "restart the companion" not in snap["resolve_line"]
+    # A machine that has connected before keeps the launch-race advice.
+    resolve_bridge.note_connection(True)
+    resolve_bridge.reset_session_state()
+    snap = tray._tray_snapshot(app)
+    assert snap["resolve_line"].startswith("Resolve: not connected right now")
+    assert "restart the companion" in snap["resolve_line"]

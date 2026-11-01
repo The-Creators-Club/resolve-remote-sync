@@ -85,7 +85,7 @@
 
     {% for u in dash_update.runtime_updates %}
       <div class="note warn"><span class="grow"><span class="tag warn solid">runtime update</span>
-        dashboard <b>{{ u.version }}</b> needs a new container image: it brings dependencies this container does not have. Apply it in your NAS's own UI: <b>{{ dash_update.nas_hint }}</b></span></div>
+        dashboard <b>{{ u.version }}</b> needs a new container image: it brings dependencies this container does not have. To apply it: <b>{{ dash_update.nas_hint }}</b></span></div>
     {% endfor %}
 
     {% if dash_update.current.version %}

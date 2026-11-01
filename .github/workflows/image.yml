@@ -18,29 +18,31 @@
 #
 # TRIGGERS
 #   push to main       -> `:<short-sha>` and `:edge` (the floating "whatever
-#                          main currently is" tag compose.dev-style testing
-#                          would pull; the appliance compose never uses it).
-#   push tag `v*`       -> `:<VERSION>` (read from
-#                          dashboard/src/ccsync_dashboard/__init__.py, NOT
-#                          from the git tag string -- the tag is what triggers
-#                          the build, the VERSION constant is the ground
-#                          truth for what that build actually is) plus `:1`,
-#                          the FLOATING MAJOR TAG. `:1` is deliberately not
-#                          "whatever VERSION's leading digit says" (VERSION is
-#                          0.5.0 today, a `:0` tag would be actively
-#                          misleading) -- it is the one long-lived tag
-#                          `compose.appliance.yaml` and DOCKER.md pin
-#                          (ZERO_TOUCH_PLAN.md 3.4: "the compose file pins a
-#                          floating minor tag (`ccsync:1`) so that click
-#                          [the platform's own image-update UI] is the whole
-#                          update"). Every 0.x/1.x release moves `:1` until a
-#                          deliberately breaking cut earns a `:2` -- that is a
-#                          decision made in this workflow's history, not a
-#                          formula on VERSION.
-#   workflow_dispatch   -> same as a push to main, so this can be exercised
-#                          from a feature branch with `gh workflow run
-#                          image.yml --ref <branch>` before it ever reaches
-#                          main.
+#                          main currently is" tag; the appliance compose never
+#                          uses it).
+#   push tag `v*`       -> builds `:<short-sha>` only, then SMOKE-TESTS the
+#                          pushed digest, and only then -- after the
+#                          `customer-release` environment's required reviewer
+#                          approves (the `promote` job) -- adds `:<VERSION>`
+#                          and `:1`. GL-25 / COM-H10 (CR-371, 2026-10-07): until
+#                          then any `v*` tag push moved `:1` with no test gate,
+#                          no ancestry check and no human, signed only by this
+#                          workflow's own OIDC identity. The `gate` job refuses
+#                          a tag that is not `v<VERSION>`, not the highest `v*`
+#                          tag, not on main, or has no green ci.yml run; the
+#                          build refuses to overwrite an existing `:<VERSION>`.
+#                          `:<VERSION>` is IMMUTABLE and the digest is what a
+#                          customer pins (GL-50, docs/RELEASE_PATHWAYS.md);
+#                          `:1` is only the studio's own floating convenience
+#                          and no customer compose reads it any more.
+#                          VERSION is read from
+#                          dashboard/src/ccsync_dashboard/__init__.py, NOT from
+#                          the git tag string -- the tag only triggers the
+#                          build, VERSION is the ground truth for what it is.
+#   workflow_dispatch   -> same as a push to the dispatched ref, except `:edge`
+#                          moves ONLY when that ref is main: a dispatch from a
+#                          feature branch pushes its short-sha tag and nothing
+#                          floating (bug-dash-release-2).
 #
 # IMAGE NAMES. `vars.CCSYNC_IMAGE` / `vars.CCSYNC_SFTP_IMAGE` (repo Settings ->
 # Secrets and variables -> Actions -> Variables) override the default
@@ -79,13 +81,69 @@ permissions:
   id-token: write
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # THE TAG GATE (GL-25 / COM-H10 / bug-dash-release-2, CR-371, 2026-10-07).
+  # Runs on every trigger, and only does work for a tag. Nothing that can push
+  # an image runs before it passes (`build` needs it).
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: a v* tag must be v<VERSION>, the newest tag, on main, with green CI
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="$(grep -oP '(?<=^VERSION = ")[^"]+' dashboard/src/ccsync_dashboard/__init__.py)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match the dashboard VERSION v$version in the tagged tree"
+            exit 1
+          fi
+          # Ancestry: a tag on a side branch or an old commit (0.7.50 code
+          # against a v58 schema) must not become every appliance's next pull.
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::$TAG ($SHA) is not an ancestor of origin/main"
+            exit 1
+          fi
+          # Newest: re-tagging an old commit as a hotfix must not move :1 back.
+          newest="$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n1)"
+          if [ "$newest" != "$TAG" ]; then
+            echo "::error::$TAG is not the newest v* tag (that is $newest)"
+            exit 1
+          fi
+          # The FULL suite, for exactly this commit: this workflow runs none.
+          n="$(gh run list --repo "$REPO" --workflow ci.yml --commit "$SHA" --status success \
+                 --limit 1 --json databaseId --jq 'length')"
+          if [ "$n" != "1" ]; then
+            echo "::error::no successful ci.yml run for $SHA - the image path has no test gate of its own"
+            exit 1
+          fi
+          echo "tag gate passed: $TAG = v$version, newest, on main, ci.yml green"
+
   build:
+    needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
-      owner: ${{ steps.names.outputs.owner }}
+      image: ${{ steps.names.outputs.image }}
+      sftp_image: ${{ steps.names.outputs.sftp_image }}
+      version: ${{ steps.names.outputs.version }}
+      dash_digest: ${{ steps.build_dashboard.outputs.digest }}
+      sftp_digest: ${{ steps.build_sftp.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # THE CRLF GATE, same reasoning as ci.yml's: a CRLF Dockerfile or
       # compose file is a crash-loop, not a style nit, and this is the first
@@ -141,27 +199,18 @@ jobs:
           echo "sftp_image=$sftp_image" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # Builds the TAG LIST for one image repo, given the trigger. Shared by
-      # both images so the dashboard and the sftp sidecar are always tagged
-      # in lockstep -- a customer's compose file pins `:1` on both, and a
-      # dashboard `:1` beside an sftp sidecar three versions behind is a
-      # support call waiting to happen.
+      # Tags pushed BY THE BUILD: the short sha always, `:edge` only from main.
+      # `:<VERSION>` and `:1` are NOT here: the promote job adds them after the
+      # smoke test and the reviewer's approval.
       - name: compute tags
         id: tags
         run: |
           image="${{ steps.names.outputs.image }}"
           sftp_image="${{ steps.names.outputs.sftp_image }}"
-          version="${{ steps.names.outputs.version }}"
           sha="$(git rev-parse --short HEAD)"
           dash_tags="$image:$sha"
           sftp_tags="$sftp_image:$sha"
-          # ref_type alone is enough: the `tags: ["v*"]` trigger above is
-          # what filters WHICH tags start this job at all, so any tag push
-          # that reaches this step already matched "v*".
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            dash_tags="$dash_tags,$image:$version,$image:1"
-            sftp_tags="$sftp_tags,$sftp_image:$version,$sftp_image:1"
-          else
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             dash_tags="$dash_tags,$image:edge"
             sftp_tags="$sftp_tags,$sftp_image:edge"
           fi
@@ -174,15 +223,29 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      # `:<VERSION>` is immutable (bug-dash-release-2): a tag build refuses to
+      # run at all when that version already exists in the registry.
+      - name: refuse to overwrite an existing :<VERSION>
+        if: ${{ github.ref_type == 'tag' }}
+        run: |
+          set -u
+          for ref in "${{ steps.names.outputs.image }}:${{ steps.names.outputs.version }}" \
+                     "${{ steps.names.outputs.sftp_image }}:${{ steps.names.outputs.version }}"; do
+            if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+              echo "::error::$ref already exists; a released version is never rebuilt. Bump VERSION."
+              exit 1
+            fi
+          done
 
       # --- the dashboard image ------------------------------------------
       #
@@ -195,7 +258,7 @@ jobs:
       # step is spike S4 (ZERO_TOUCH_PLAN.md section 7).
       - name: build + push dashboard image
         id: build_dashboard
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: dashboard/deploy/Dockerfile
@@ -211,6 +274,44 @@ jobs:
           cache-from: type=gha,scope=ccsync-dashboard
           cache-to: type=gha,mode=max,scope=ccsync-dashboard
 
+      # THE BOOT SMOKE TEST (GL-25, CR-371, 2026-10-07). The image had never
+      # been RUN by this workflow: a build that compiles but cannot start (a
+      # missing module, a bad entrypoint) went to the registry. The digest the
+      # push just produced is started with throwaway secrets and an empty data
+      # dir, and must answer /api/v1/health with ok + its own VERSION and serve
+      # the headless first-run /setup page. Nothing is promoted if it does not.
+      - name: smoke test - boot the pushed digest, health and /setup
+        env:
+          REF: ${{ steps.names.outputs.image }}@${{ steps.build_dashboard.outputs.digest }}
+          VERSION: ${{ steps.names.outputs.version }}
+        run: |
+          set -euo pipefail
+          data="$(mktemp -d)"; chmod 777 "$data"
+          docker run -d --name smoke -p 127.0.0.1:18480:8480 -v "$data:/data" \
+            -e DASH_DB_PATH=/data/dashboard.db -e DASH_PORT=8480 -e DASH_AUTH_METHOD=local \
+            -e DASH_SESSION_SECRET="$(openssl rand -hex 32)" \
+            -e DASH_REPORT_TOKEN="$(openssl rand -hex 32)" \
+            -e DASH_VENDOR_DEFAULTS=1 "$REF"
+          ok=0
+          for i in $(seq 1 60); do
+            if body="$(curl -fsS http://127.0.0.1:18480/api/v1/health 2>/dev/null)"; then ok=1; break; fi
+            sleep 2
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::the image never answered /api/v1/health"
+            docker logs smoke || true
+            exit 1
+          fi
+          echo "health: $body"
+          HEALTH="$body" python3 -c 'import json,os; b=json.loads(os.environ["HEALTH"]); v=os.environ["VERSION"]; assert b.get("version")==v, "image reports %s, expected %s" % (b.get("version"), v); assert "ok" in b, "health has no ok field"'
+          code="$(curl -sS -o /dev/null -w '%{http_code}' -L http://127.0.0.1:18480/setup)"
+          if [ "$code" != "200" ]; then
+            echo "::error::/setup answered $code, not 200 (the first-run wizard is how a customer starts)"
+            docker logs smoke || true
+            exit 1
+          fi
+          docker rm -f smoke >/dev/null
+
       - name: sign dashboard image (cosign keyless)
         env:
           COSIGN_EXPERIMENTAL: "1"
@@ -225,7 +326,7 @@ jobs:
       # for both images -- dashboard/deploy/sftp/README.md has the details.
       - name: build + push sftp image
         id: build_sftp
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: dashboard/deploy/sftp/Dockerfile
@@ -253,8 +354,54 @@ jobs:
             echo
             echo "Tags pushed: \`${{ steps.tags.outputs.dash_tags }}\` / \`${{ steps.tags.outputs.sftp_tags }}\`"
             echo
-            echo "Both signed keylessly with cosign (sigstore Fulcio/Rekor); verify with:"
+            echo "Both signed keylessly with cosign (sigstore Fulcio/Rekor). Verify against THIS"
+            echo "workflow's exact identity, never a wildcard (bug-dash-release-2):"
             echo '```'
-            echo "cosign verify --certificate-identity-regexp '.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com ${{ steps.names.outputs.image }}@${{ steps.build_dashboard.outputs.digest }}"
+            echo "cosign verify --certificate-identity '${{ github.server_url }}/${{ github.workflow_ref }}' --certificate-oidc-issuer https://token.actions.githubusercontent.com ${{ steps.names.outputs.image }}@${{ steps.build_dashboard.outputs.digest }}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # PROMOTE: tags only, behind the `customer-release` environment (a required
+  # reviewer is configured on it in repo Settings -> Environments: the owner
+  # click that makes a release a decision, GL-25). Adds the human-readable
+  # tags to the digests the build already pushed, signed and smoke-tested, and
+  # publishes digests.json, which tools/release_customers.py reads to put
+  # `dashboard_image` in the signed channel and to pin the compose file.
+  promote:
+    if: ${{ github.ref_type == 'tag' }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: customer-release
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: add :<VERSION> and :1 to the verified digests
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          SFTP_IMAGE: ${{ needs.build.outputs.sftp_image }}
+          VERSION: ${{ needs.build.outputs.version }}
+          DASH_DIGEST: ${{ needs.build.outputs.dash_digest }}
+          SFTP_DIGEST: ${{ needs.build.outputs.sftp_digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" --tag "$IMAGE:1" "$IMAGE@$DASH_DIGEST"
+          docker buildx imagetools create --tag "$SFTP_IMAGE:$VERSION" --tag "$SFTP_IMAGE:1" "$SFTP_IMAGE@$SFTP_DIGEST"
+          python3 -c 'import json,os; json.dump({"version": os.environ["VERSION"], "image": os.environ["IMAGE"], "digest": os.environ["DASH_DIGEST"], "sftp_image": os.environ["SFTP_IMAGE"], "sftp_digest": os.environ["SFTP_DIGEST"]}, open("digests.json", "w"), indent=2)'
+          cat digests.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-digests
+          path: digests.json
+          if-no-files-found: error

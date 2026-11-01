@@ -626,12 +626,22 @@ database, on a site that enables that page (`tools/license_allowlist.toml`,
 `[allow.psycopg2-binary]`).
 
 **`psycopg2` in the companion executable.** The companion's Timeline Cards
-role reads DaVinci Resolve's PostgreSQL project library, and for that
-`companion/build.spec` collects `psycopg2` (from `psycopg2-binary`, a
-dependency in `companion/pyproject.toml`) into the frozen companion, together
-with the `libpq` and OpenSSL libraries its wheel carries. They are packed as
-separate extension-module and shared-library files that the executable
-extracts and loads at run time, unmodified. The source of psycopg2 at the
+role reads DaVinci Resolve's PostgreSQL project library, and for that the
+companion bundle carries `psycopg2` (from `psycopg2-binary`, a dependency in
+`companion/pyproject.toml`) with the `libpq` and OpenSSL libraries its wheel
+carries. Since 2026-10-07 (GL-32, CR-375) these are NOT frozen into the
+executable's archive: `companion/build.spec` excludes psycopg2 from the frozen
+modules and bundles the package as plain, unmodified files under
+`ccsync_lib/`.
+
+*Replacing psycopg2.* The companion puts two directories ahead of everything
+else on its import path before it loads psycopg2: `~/.ccsync/lib` (or the
+directory named by the `CCSYNC_LGPL_LIB_DIR` environment variable), then the
+bundled `ccsync_lib/`. To use your own build of psycopg2, put its `psycopg2/`
+package (with the libpq it needs beside it) in `~/.ccsync/lib` and restart the
+companion; no rebuild of the executable and nothing of ours has to be
+re-signed. The LGPL-3.0 text is in the licence bundle every binary carries.
+The source of psycopg2 at the
 version in a given build is available without charge from
 <https://github.com/psycopg/psycopg2> and from PyPI, and Cablewrap Creative
 Ltd. makes the same written offer for it as for ffmpeg above, on the same

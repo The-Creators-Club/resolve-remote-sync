@@ -1000,7 +1000,7 @@ def test_the_pointer_rides_the_channel_signature(key, artifact, tmp_path):
 
 def _publish(feed_dir, artifact, version, *extra, min_version="0.0.0"):
     return pf.main(["--artifact", str(artifact), "--platform", "windows",
-                    "--version", version, "--min-version", min_version,
+                    "--version", version, "--min-version", min_version, "--allow-no-floor",
                     "--feed-dir", str(feed_dir), "--base-url", BASE_URL, *extra])
 
 
@@ -1091,7 +1091,7 @@ def test_the_floor_is_per_kind_and_platform(key, artifact, tmp_path):
     assert _publish(feed_dir, artifact, "0.9.44", min_version="0.9.40") == pf.EXIT_OK
     # macOS has published no floor of its own, so it is not held to Windows'.
     assert pf.main(["--artifact", str(artifact), "--platform", "macos",
-                    "--version", "0.9.44", "--min-version", "0.0.0",
+                    "--version", "0.9.44", "--min-version", "0.0.0", "--allow-no-floor",
                     "--feed-dir", str(feed_dir), "--base-url", BASE_URL]) == pf.EXIT_OK
 
 

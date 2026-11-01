@@ -31,10 +31,15 @@
           <div class="ver" title="The installer's version number. The file name carries it too, so you can always tell which one was run.">{{ pkg.version }}<small>{{ pkg.size_bytes | human_bytes }} &middot; published {{ pkg.published_at | ago }}</small></div>
           <dl class="kv"><dt title="The file's fingerprint. If the fingerprint of the file you downloaded matches this one, the file is exactly what was published.">sha256</dt><dd title="{{ pkg.sha256 }}"><span class="num">{{ pkg.sha256[:16] }}</span><span class="muted">...</span></dd></dl>
           <div><a class="key primary" href="/download/{{ plat }}" title="Downloads the installer. Save it to the editor computer's own disk, then run it there."><span class="t">Download for {{ name }}</span></a></div>
-          {# OPS-20 (usability sweep 2026-09-03), as classic: drop this the day
-             the package is signed, not before. #}
+          {# OPS-20 (usability sweep 2026-09-03) and CR-373 / GL-30 (2026-10-07):
+             the open beta is UNSIGNED on both platforms (no Authenticode, no
+             Apple Developer ID), so the page says so and walks through each
+             OS's prompt step by step. Drop these notes the day a signed build
+             ships, not before; installer/START_HERE.md carries the same text. #}
           {% if plat == "windows" %}
-          <div class="note warn"><span class="grow">Windows will say <b>Windows protected your PC</b> when you run this. Click <b>More info</b>, then <b>Run anyway</b>: the installer is not code-signed yet. The sha256 above is the file's own fingerprint if you want to check it first.</span></div>
+          <div class="note warn" id="unsigned-windows"><span class="grow">This beta is <b>not code-signed</b>, so Windows will not know the publisher: expect <b>Windows protected your PC</b> (SmartScreen) and, in the file's properties, no verified publisher. This is expected. 1. Run the file. 2. On the blue window click <b>More info</b>. 3. Click <b>Run anyway</b>. If there is no Run anyway button, right-click the downloaded file, choose <b>Properties</b>, tick <b>Unblock</b> at the bottom, click <b>OK</b> and run it again. Smart App Control (a Windows 11 setting that blocks unsigned programs outright) has to be turned off in Windows Security first. The sha256 above is the file's own fingerprint if you want to check it first.</span></div>
+          {% else %}
+          <div class="note warn" id="unsigned-macos"><span class="grow">This beta is <b>not notarised by Apple</b>, so macOS will refuse to open it the first time. This is expected. 1. Open the installer once and click <b>Done</b> on the warning. 2. Open <b>System Settings</b>, then <b>Privacy &amp; Security</b>, and scroll down to Security. 3. Next to the installer's name click <b>Open Anyway</b> and enter your Mac password. 4. Open the installer again and click <b>Open</b>. macOS may ask again after an update of the companion; repeat the same steps. The sha256 above is the file's own fingerprint if you want to check it first.</span></div>
           {% endif %}
         {% else %}
           {# Not an error: a fleet that never published a Mac package is normal. #}

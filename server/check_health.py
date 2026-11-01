@@ -58,6 +58,7 @@ from common import (  # noqa: F401 - synology_api/truenas_api/run_ssh are also
     require_site_value,
     run_ssh,
     set_host_key_pin,
+    sftp_transport_problem,
     shell_quote,
     site_bool,
     site_value,
@@ -425,6 +426,23 @@ def check_tree(projects_root: str, dry_run: bool):
         report(ok_acl, message)
 
 
+def check_sftp_transport(dry_run: bool):
+    """GL-10 / CR-364 (2026-10-07): a Synology site whose site.toml carries
+    an SFTP window DSM's sshd cannot serve. FAIL, not warn: every lane-B proxy
+    over 514 MiB arrives short while the lane reports green."""
+    if dry_run:
+        return
+    kind = backend().kind
+    problem = sftp_transport_problem(kind, site_value("net", "sftp_chunk_size"),
+                                     site_value("net", "sftp_concurrency"))
+    if problem:
+        report(False, f"SFTP transport unsafe for this NAS's sshd: {problem}. Set "
+                      f'sftp_chunk_size = "64Ki" and sftp_concurrency = 16 in [net], '
+                      f"redeploy, and re-download any proxy over 514 MiB.")
+    elif kind == "synology":
+        report(True, "SFTP transport is within DSM's sshd limits (64Ki / 16)")
+
+
 def check_editor_accounts(dry_run: bool):
     # A backend that can answer this itself does (Synology: two DSM calls);
     # the TrueNAS path below is the original two REST calls, unchanged, and
@@ -599,6 +617,7 @@ def main():
     check_syncthing_app(args.gui_url, args.api_key, args.dry_run)
     check_tree(args.projects_root, args.dry_run)
     check_editor_accounts(args.dry_run)
+    check_sftp_transport(args.dry_run)
     check_dashboard(args.dashboard_url, args.dry_run)
 
     if args.dry_run:

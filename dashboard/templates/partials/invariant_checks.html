@@ -18,7 +18,7 @@
       {% if bad %}<div class="cq">{{ inv.consequence }}</div>{% endif %}
       {% if inv.detail %}<div class="dt">{{ inv.detail }}</div>{% endif %}
       {% for s in inv.subjects %}<div class="subj">{{ s.subject }}{% if s.detail %}: {{ s.detail }}{% endif %}</div>{% endfor %}
-      {% if bad %}<div class="fix">{{ inv.fix }}</div>{% endif %}
+      {% if bad %}<div class="fix">{{ inv.fix | with_support }}</div>{% endif %}
     </div>
   </div>
 {% else %}

@@ -56,6 +56,7 @@ from typing import Any, Callable
 
 import requests
 
+from . import tls_pin
 from .base import EDITORS_GROUP, NasError, is_valid_username
 
 log = logging.getLogger("ccsync.dashboard.nas.synology")
@@ -159,13 +160,14 @@ def _verify_setting() -> bool | str:
     """
     raw = (os.environ.get("DASH_NAS_VERIFY_SSL", "").strip()
            or os.environ.get("TRUENAS_VERIFY_SSL", "").strip())
+    # Unset is VERIFY since 2026-10-07 (PR-GL19, CR-368); see truenas._verify_setting.
     if not raw:
+        return tls_pin.TOFU    # first-use pin; see truenas._verify_setting
+    if raw.lower() in ("0", "false", "no"):
         return False
-    if raw in ("0", "false", "no"):
-        return False
-    if raw in ("1", "true", "yes"):
+    if raw.lower() in ("1", "true", "yes"):
         return True
-    return raw  # a CA bundle path
+    return raw  # a CA bundle path, or a `sha256:` certificate pin (nas/tls_pin.py)
 
 
 def _ssh_port_setting() -> int:
@@ -311,6 +313,14 @@ class SynologyClient:
     _ssh: Any = field(default=None, init=False, repr=False)
     _key_probe_cache: dict[str, bool] | None = field(default=None, init=False, repr=False)
 
+    def __post_init__(self) -> None:
+        # CR-368 follow-up (2026-10-07): unset = record the certificate on first
+        # use, refuse a different one after (nas/tls_pin.py).
+        if self.verify_ssl == tls_pin.TOFU:
+            self.verify_ssl = (True if self.base_url else
+                               tls_pin.resolve_first_use(self.host, self.verify_ssl, self.port))
+        self._verify_arg = tls_pin.apply_verify(self.session, self.verify_ssl)
+
     # ------------------------------------------------------------- transport
 
     @property
@@ -365,11 +375,11 @@ class SynologyClient:
         try:
             if post:
                 resp = self.session.post(url, data=params, headers=headers,
-                                         verify=self.verify_ssl, timeout=self.timeout,
+                                         verify=self._verify_arg, timeout=self.timeout,
                                          allow_redirects=False)
             else:
                 resp = self.session.get(url, params=params, headers=headers,
-                                        verify=self.verify_ssl, timeout=self.timeout,
+                                        verify=self._verify_arg, timeout=self.timeout,
                                         allow_redirects=False)
         except requests.RequestException as exc:
             raise NasError(
@@ -1111,12 +1121,33 @@ class SynologyClient:
             # man-in-the-middle waiting to happen on a channel that carries the
             # NAS admin password (COMMERCIAL_READINESS.md H2); the log line is
             # what makes it an operator's decision rather than ours.
+            #
+            # PR-GL19 / bug-dash-ops-5 (CR-368, 2026-10-07): the first key is
+            # now RECORDED under <data>/secrets and every later connection is
+            # checked against it, so "trust on first use" really is first use
+            # only. Before, a fresh SSHClient with no stored keys trusted
+            # whatever answered on EVERY connection, i.e. not TOFU at all.
+            kh_path = _known_hosts_path()
+            if kh_path:
+                if os.path.exists(kh_path):
+                    try:
+                        client.load_host_keys(kh_path)
+                    except Exception as exc:  # a damaged file must not open the door
+                        raise NasError(
+                            f"the recorded NAS SSH host keys at {kh_path} cannot be read "
+                            f"({exc}); fix or delete the file, or pin the key with "
+                            "DASH_NAS_SSH_HOSTKEY") from exc
+                client.set_missing_host_key_policy(
+                    _RecordingPolicy(kh_path, _hostkey_name(self.host, self.ssh_port)))
+            else:
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             log.warning(
-                "SSH host key for %s:%s is NOT pinned -- accepting whatever the NAS presents "
-                "(trust on first use). Set DASH_NAS_SSH_HOSTKEY to the base64 host key from "
-                "`ssh-keyscan -t ed25519 %s` to pin it.",
-                self.host, self.ssh_port, self.host)
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                "SSH host key for %s:%s is NOT pinned -- %s. Set DASH_NAS_SSH_HOSTKEY to the "
+                "base64 host key from `ssh-keyscan -t ed25519 %s` to pin it.",
+                self.host, self.ssh_port,
+                "the first key presented is recorded and every later one must match"
+                if kh_path else "accepting whatever the NAS presents (trust on first use)",
+                self.host)
         try:
             client.connect(
                 hostname=self.host, port=self.ssh_port, username=self.user, password=self.pw,
@@ -1143,6 +1174,46 @@ def _split_stat(value: str | None) -> tuple[str | None, str | None]:
         return None, None
     parts = value.split()
     return (parts[0], parts[1]) if len(parts) >= 2 else (parts[0], None)
+
+
+def _known_hosts_path() -> str:
+    """Where the first NAS SSH host key this container saw is kept, or "" when
+    there is nowhere durable to put it (then the old warn-only TOFU applies).
+
+    Under <data>/secrets beside the other 0600 state, so it survives an image
+    update (PR-GL19, CR-368, 2026-10-07). DASH_NAS_KNOWN_HOSTS overrides.
+    """
+    explicit = (os.environ.get("DASH_NAS_KNOWN_HOSTS", "") or "").strip()
+    if explicit:
+        return explicit
+    db = (os.environ.get("DASH_DB_PATH", "") or "").strip()
+    return os.path.join(os.path.dirname(db), "secrets", "nas_known_hosts") if db else ""
+
+
+def _RecordingPolicy(path: str, name: str):
+    """A paramiko policy that accepts the FIRST key for `name`, writes it to
+    `path` (0600) and refuses any other key for that name afterwards -- including
+    a different key TYPE, which paramiko itself would hand to this policy as
+    "missing" and a naive AddPolicy would then quietly add."""
+    import paramiko
+
+    class _Policy(paramiko.MissingHostKeyPolicy):
+        def missing_host_key(self, client, hostname, key):
+            if client.get_host_keys().lookup(hostname):
+                raise paramiko.SSHException(
+                    f"the NAS at {hostname} presented a {key.get_name()} host key but a "
+                    f"different key is already recorded in {path}; refusing. If the NAS "
+                    "was rebuilt on purpose, delete that file or pin the new key with "
+                    "DASH_NAS_SSH_HOSTKEY")
+            client.get_host_keys().add(hostname, key.get_name(), key)
+            try:
+                os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+                client.get_host_keys().save(path)
+                os.chmod(path, 0o600)
+            except OSError as exc:
+                log.warning("could not record the NAS SSH host key at %s: %s", path, exc)
+
+    return _Policy()
 
 
 def _hostkey_name(host: str, port: int) -> str:

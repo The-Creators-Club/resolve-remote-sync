@@ -249,7 +249,8 @@ def test_the_api_key_replaces_basic_auth_on_every_call(monkeypatch):
             raise requests.RequestException("stop here")
 
     client = TrueNASClient("nas.example", "truenas_admin", "pw",
-                           session=FakeSession(), api_key="1-abcdef")
+                           session=FakeSession(), api_key="1-abcdef",
+                           transport="rest")   # CR-365: the REST half
     with pytest.raises(NasError):
         client.get("/user")
     assert seen["headers"] == {"Authorization": "Bearer 1-abcdef"}
@@ -267,7 +268,8 @@ def test_without_a_key_the_password_is_still_used(monkeypatch):
             raise requests.RequestException("stop")
 
     client = TrueNASClient("nas.example", "truenas_admin", "pw",
-                           session=FakeSession(), api_key="")
+                           session=FakeSession(), api_key="",
+                           transport="rest")   # CR-365: the REST half
     with pytest.raises(NasError):
         client.get("/user")
     assert seen["headers"] is None

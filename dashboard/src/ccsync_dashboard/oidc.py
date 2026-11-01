@@ -493,6 +493,15 @@ async def oidc_callback(request: Request):
     # separate question, and one the password path has always asked
     # (trust-model-5, 2026-08-21). Raises 403 before any session exists.
     await run_in_threadpool(require_fleet_member, settings, username, claims)
+    # GL-15 / bug-dash-auth-2 (CR-367 round 2, 2026-10-07): membership of the
+    # allowed group returns early above, so a person an admin DELETED whose IdP
+    # account is still in that group signed straight back in. The tombstone is
+    # asked on every path, before any session exists.
+    if await run_in_threadpool(auth.removed_signin_refused, settings, username):
+        log.warning("OIDC: %r was removed by an admin; sign-in refused", username)
+        raise HTTPException(
+            status_code=403,
+            detail="this account was removed from the dashboard - ask your admin")
 
     response = RedirectResponse(_safe_next(str(flow.get("next") or "/")), status_code=303)
     auth.start_session(request, response, username)

@@ -85,8 +85,9 @@ Do these in order. Each one is safe to re-run.
 ### Step 1 — write `site.toml`
 
 ```powershell
-git clone <your checkout of this repo>
-cd resolve-remote-sync
+# Unpack the CC Sync install package you were given into a folder and
+# open a shell there. No customer is given the source repository
+# (GL-35, 2026-10-07); the studio's own base rig works from its checkout.
 copy site.example.toml site.toml
 notepad site.toml
 ```
@@ -207,32 +208,42 @@ python server/secure_syncthing_gui.py --site site.toml
 That sets a GUI username/password and does **not** touch the API key, so
 nothing automated notices.
 
-### Step 6 — the release signing key, and `DASH_RELEASE_PUBKEYS`
+### Step 6 — pin the vendor's release key (`DASH_RELEASE_PUBKEYS`)
 
 The upgrade channel hands every editor machine an executable that gets renamed
 over the running companion. It is signed, and the dashboard verifies the
-signature **on publish**:
+signature before it accepts a build. **You do not make a key.** The vendor
+signs every build with its own key; your dashboard pins the vendor's PUBLIC
+half, and your editors' companions already carry it. (CR-362 / GL-03,
+2026-10-07: this step used to tell a customer to generate and bake a key of
+their own, which ends on a self-signed fork that rejects every vendor build and
+is cut off from the vendor feed and from recalls.)
 
-```powershell
-python tools\release_key.py new              # %USERPROFILE%\.ccsync-release\release.key (0600)
-python tools\release_key.py pubkey --quiet   # the value for DASH_RELEASE_PUBKEYS
-python tools\release_key.py bake             # bake the public half into the companion
-```
+1. In the shell that runs `install_dashboard_app.py` (or through
+   `tools/load_secrets.ps1`), export `DASH_RELEASE_PUBKEYS` to the vendor's
+   public key (base64, comma-separated when the vendor announces two during a
+   rotation), and put the vendor's feed address in `site.toml`
+   `[releases] feed_url`. The vendor gives you both. Do NOT set them by hand
+   inside the container: the deploy writes the container environment on every
+   run, so a hand-set value is overwritten and the feed goes dark again
+   (no updates, no recalls). Also `export DASH_VENDOR_DEFAULTS=1` in that shell: it says
+   "I am a customer of the vendor", so the Protection page shows the vendor
+   key as the vendor's (no "I have backed it up" form, no red line), and the
+   deploy uses the key and feed address baked into this checkout
+   (`dashboard/src/ccsync_dashboard/vendor_defaults.py`) for whichever of the
+   two you left blank. Leave it unset only if you really hold the private
+   half yourself, as the studio does. On the appliance both are already baked into the image
+   and you type nothing (`APPLIANCE_INSTALL.md`).
+2. Redeploy. With the key unset, `PUT /api/v1/admin/packages/...` answers
+   **503 and says so**; it never falls back to accepting unsigned builds. A
+   value that is not an Ed25519 public key is refused by the deploy itself.
 
-**Copy `release.key` into your password manager now.** It is on one Windows
-profile, it is never on the NAS, and no snapshot covers it. A companion trusts
-only the public keys baked into the build it is already running, so losing the
-private half means no signed publish is possible for the fleet until every
-machine is reinstalled by hand — and `RELEASE.md`'s key rotation needs the OLD
-key to publish the overlap release. The same goes for the **Android signing
-keystore** if you build the mobile app: same one-copy problem, same answer.
-`BACKUP_RESTORE.md` §1 lists both as protected by nothing.
-
-Put that public key in the container's environment as `DASH_RELEASE_PUBKEYS`
-(comma-separated; list two during a key rotation) and redeploy. With it unset,
-`PUT /api/v1/admin/packages/...` answers **503 and says so** — it does not
-fall back to accepting unsigned builds. Full detail:
-[`RELEASE.md`](RELEASE.md) "The release signing key".
+There is nothing for you to back up: the private key is the vendor's. Key
+generation, custody, backup and rotation are vendor-only and live in
+[`RELEASE.md`](RELEASE.md) "The release signing key". The **Android signing
+keystore**, if you build the mobile app yourself, is a different key and has
+the same one-copy problem; `BACKUP_RESTORE.md` §1 lists it as protected by
+nothing.
 
 ### Step 7 — the first editor
 
@@ -263,7 +274,7 @@ Run the checklist in [§6](#6-verification-checklist).
 
 ## 3. The secrets, and where they live
 
-Six values. **None of them belongs in `site.toml`, in the repo, or in a
+Five secrets and one public value. **None of them belongs in `site.toml`, in the repo, or in a
 `setx`-style persistent user environment variable** — read
 [`SECRETS.md`](SECRETS.md), which explains why and what to use instead
 (SecretManagement + a vault on Windows, the runner's own store in CI).
@@ -275,10 +286,13 @@ Six values. **None of them belongs in `site.toml`, in the repo, or in a
 | `DASH_REPORT_TOKEN` | `install_dashboard_app.py` | the shared secret companions present as `X-CCSync-Token`. ≥ 24 chars, checked at boot |
 | `DASH_SESSION_SECRET` | `install_dashboard_app.py` | signs dashboard session + companion identity tokens. ≥ 24 chars, and **must stay stable across deploys** — a new value logs everyone out |
 | `BROLL_INGEST_TOKEN` | `install_dashboard_app.py`, when b-roll is on | guards the indexer's write path into `broll.db`. Mandatory when `DASH_BROLL_ENABLED=1` |
-| `DASH_RELEASE_PUBKEYS` | `install_dashboard_app.py` | *public*, not secret — but it is passed the same way. Without it, publishing is refused |
+| `DASH_RELEASE_PUBKEYS` | `install_dashboard_app.py` | **not generated, not secret**: the *vendor's* public release key (base64, 44 characters), which the vendor gives you; see [Step 6](#step-6--pin-the-vendors-release-key-dash_release_pubkeys). It is exported in the shell like the others. A random value is refused by the deploy, because the dashboard would silently drop it |
 
-Generate each with `openssl rand -hex 24` — **except `SYNCTHING_API_KEY`,
-which depends on your NAS:**
+Generate `DASH_REPORT_TOKEN`, `DASH_SESSION_SECRET` and `BROLL_INGEST_TOKEN`
+(and `SYNCTHING_API_KEY` on a Synology, see below) with `openssl rand -hex 24`.
+`TRUENAS_PW` / `SYNO_PW` is your NAS admin password, which you already have:
+never invent it. **Never** use `openssl rand` for `DASH_RELEASE_PUBKEYS`,
+which is the vendor's value (Step 6):
 
 - **TrueNAS:** do NOT invent it. The catalog app generates its own key on
   first boot and nothing here can change it, so a value you made up can never
@@ -339,13 +353,26 @@ deployment:
 ```toml
 [stack]
 editor_shell = "sftp-only"   # or "shell" -- see docs/TENANCY.md before changing
-project_acl  = "shared"      # or "per-project"
+project_acl  = "per-project" # the default for a new site; or "shared"
 ```
 
-`project_acl = "shared"` (the default, and today's behaviour) means **every
-editor can read, write and delete every other editor's project**. If that is
-not acceptable to your customer, read [`TENANCY.md`](TENANCY.md) *before*
-flipping it — it rewrites ownership on an existing tree.
+`project_acl = "per-project"` is the default for a **new** site (2026-10-07,
+GL-19): each project belongs to its own `proj-<slug>` group and one editor
+cannot delete another's project. Add editors to their projects with
+`setup_editor_account.py --project <slug>` (the dashboard tick does not do it
+yet). `project_acl = "shared"` — one group, **every editor can read, write and
+delete every other editor's project** — is what a site that has always run that
+way keeps by saying so. Read [`TENANCY.md`](TENANCY.md) *before* changing it on
+an existing tree — it rewrites ownership.
+
+Secure defaults a new site inherits (the full list is in
+[`SERVER.md`](SERVER.md) and [`TAILNET_POLICY.md`](TAILNET_POLICY.md)): the NAS
+certificate is **pinned** (`[nas] verify_ssl`), TrueNAS needs a scoped
+`TRUENAS_API_KEY`, the dashboard admin is not the NAS admin
+(`DASH_ADMIN_USERS`), editors' rclone remotes pin the NAS host key, and the
+optional Postgres project server gets a generated password and binds the LAN and
+tailnet addresses only. A site that must keep an older posture names it in its
+own `site.toml` (`[security]`, `site.example.toml`).
 
 ### What is optional
 
@@ -424,6 +451,10 @@ Then check by hand:
 - [ ] `site.toml`'s `[net] sftp_chunk_size` is **`64Ki` on a Synology site**.
       At 255Ki, DSM 7.2's OpenSSH 8.2 truncates downloads at 539,000,832
       bytes and rclone reports success — a silent data-loss bug.
+      Since 2026-10-07 (GL-10) you do not have to remember: leave both
+      `[net]` lines unset and a Synology site gets `64Ki` / 16; a larger
+      value is refused by the deploy, by Settings, and flagged by
+      `check_health.py` and the `sftp_transport_unsafe` alert.
 - [ ] A snapshot exists, and you have restored one file from it once.
 - [ ] The first editor's tray shows all three lanes green, and a ticked
       project appears on their drive.

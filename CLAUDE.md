@@ -67,6 +67,17 @@ run alongside the tray app — it would hold port 8899.
   it re-execs the process, and here that process is the dashboard.
   Its three Claude features go through `ai_providers` (`cards_ai.py`), never a
   bundled CLI.
+  **Deploying it** (new Cards code, or just a restart to pick up new vault
+  data): follow `docs/CARDS_DEPLOY.md`, "The usual deploy (the recipe)" --
+  commit in `E:\Projects\Editing`, read the LIVE image digest off the NAS
+  (`site.toml [stack] image` is stale; a bare run rolls the dashboard back),
+  then `. .\tools\load_secrets.ps1; dashboard\.venv\Scripts\python.exe
+  server\install_dashboard_app.py --mode image --container-image
+  ghcr.io/the-creators-club/ccsync@sha256:<live> --cards-commit <sha>
+  --music-data none --yes` (`--dry-run` first), from creator-1. A "health
+  check FAILED" at the end is usually premature -- `docker ps` before any
+  rollback. Never pipe `TRUENAS_PW` into `bash -s` or put it on a command
+  line.
 - **One engine per EPISODE, and the URL is the key** (2026-09-14,
   `docs/CARDS_TWO_PROJECTS.md` phase 1): `/cards` is a LANDING page that needs
   no engine to draw (which is why it answers when every engine is busy), and

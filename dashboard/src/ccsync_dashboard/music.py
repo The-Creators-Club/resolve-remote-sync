@@ -278,6 +278,9 @@ class MusicGate:
         headers = [(k, v) for k, v in scope.get("headers", ())
                    if k.lower() not in (IDENTITY_HEADER, ADMIN_HEADER,
                                         FLEET_AUTH_HEADER)]
+        # CR-367 / GL-15 (2026-10-07): see api.strip_barred_identity.
+        from . import api as _api  # deferred: auth imports this module
+        headers = _api.strip_barred_identity(self._settings, headers, "music")
         stamp = self._fleet_stamp(headers)
         if stamp is not None:
             headers.append((FLEET_AUTH_HEADER, stamp))

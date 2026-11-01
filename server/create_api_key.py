@@ -10,6 +10,14 @@ editor can reach that dashboard, and it mounts three other web apps
 (/broll, /music, /ytdl) in-process. That was finding H3 of
 docs/COMMERCIAL_READINESS.md item 6.
 
+CR-365 (2026-10-07): the calls below are written as the REST routes they were
+born as. Both the dashboard and these scripts now send them as TrueNAS JSON-RPC
+over the websocket (REST is gone in TrueNAS 26); truenas_rpc.route() is the
+table that maps each route to its method (group.query, user.create,
+filesystem.setperm, core.get_jobs, ...), and its tests pin that this list and
+the table agree. A >= 25.04 key authenticates over the websocket by acting AS
+its account, so the roles below are what scope it.
+
 The dashboard's NAS client makes exactly these calls (dashboard/src/
 ccsync_dashboard/nas/truenas.py -- keep this list in step with it):
 
@@ -92,6 +100,40 @@ ALLOWLIST = [
 ROLES = ("ACCOUNT_WRITE", "FILESYSTEM_ATTRS_WRITE")
 
 
+# What a "scoped" key still is (bug-server-9, GL-18, CR-368, 2026-10-07).
+RESIDUAL_RISK = (
+    "NOTE: even a dedicated account is not harmless. ACCOUNT_WRITE lets the holder reset "
+    "ANY account's password and SSH keys (including the admin's) and "
+    "FILESYSTEM_ATTRS_WRITE lets it change permissions anywhere, so code execution inside "
+    "the dashboard container can still be turned into NAS control. The key's value is that "
+    "the admin PASSWORD is not in the container, that it can be revoked by name, and that "
+    "the account can be watched. Keep the dashboard on the tailnet and read "
+    "docs/SERVER.md, \"Scoped API key\", before relying on it.")
+
+
+def admin_key_refusal(username: str, nas_admin: str, allow_admin_key: bool,
+                      shape: str = "auto") -> str:
+    """"" when the key may be minted, else the sentence to print.
+
+    The username shape makes a key act AS an account; with no --username it was
+    minted as the NAS admin, which is the password's power under another name
+    (bug-server-9). A dedicated account is required unless the operator says
+    --allow-admin-key. The allowlist shape (<= 24.04) is scoped by its own list
+    and needs no account."""
+    if shape == "allowlist" or allow_admin_key:
+        return ""
+    if not username:
+        return ("--username is required: name the dedicated non-shell account the key "
+                f"acts AS (holding only {', '.join(ROLES)}). Without it the key would act "
+                "as the NAS admin, which is root-equivalent (bug-server-9). "
+                "--allow-admin-key overrides this deliberately.")
+    if username.strip().lower() == (nas_admin or "").strip().lower():
+        return (f"--username {username!r} is the NAS admin account. Make a dedicated "
+                f"account holding {', '.join(ROLES)} and pass that instead, or "
+                "--allow-admin-key to mint it as the admin on purpose.")
+    return ""
+
+
 def describe_scope() -> str:
     lines = ["The key will be limited to:"]
     for entry in ALLOWLIST:
@@ -137,7 +179,7 @@ def create_key(name: str, username: str, shape: str, dry_run: bool):
         return "", ""
     return "", (f"could not create an API key. Last answer -- {last}\n"
                 f"  This middleware takes neither shape this script knows. Do NOT guess: "
-                f"look at `GET /api/v2.0/api_key` and the API docs on the NAS itself "
+                f"look at `api_key.query` (JSON-RPC; REST `GET /api/v2.0/api_key` on 25.x) and the API docs on the NAS itself "
                 f"(System > API Keys / the /api/docs page), then update ALLOWLIST/ROLES "
                 f"in server/create_api_key.py.")
 
@@ -153,6 +195,10 @@ def main():
                          "dedicated non-shell account holding only "
                          + ", ".join(ROLES) + " -- defaults to $TRUENAS_USER, which is "
                          "the ADMIN and defeats the point.")
+    ap.add_argument("--allow-admin-key", action="store_true",
+                    help="mint the key AS the NAS admin account (root-equivalent) anyway. "
+                         "Refused by default since 2026-10-07 (bug-server-9 / GL-18): the "
+                         "studio's own legacy, never a customer default.")
     ap.add_argument("--shape", choices=("auto", "username", "allowlist"), default="auto",
                     help="which /api_key body to send. auto tries username then allowlist.")
     add_host_key_arg(ap)
@@ -171,13 +217,17 @@ def main():
 
     import os
 
+    refusal = admin_key_refusal(args.username, os.environ.get("TRUENAS_USER", ""),
+                                args.allow_admin_key, args.shape)
+    if refusal:
+        print(f"FAILED: {refusal}", file=sys.stderr)
+        return 2
     username = args.username or os.environ.get("TRUENAS_USER", "")
-    if not args.username:
-        print(f"WARNING: no --username given, so the key would act as the ADMIN "
-              f"({username or '<unset>'}). That is a key with root-equivalent rights -- "
-              f"better than a password only because it can be revoked without changing "
-              f"the login. Make a dedicated account holding {', '.join(ROLES)} and pass "
-              f"it with --username.", file=sys.stderr)
+    if not args.username or args.username == os.environ.get("TRUENAS_USER", ""):
+        print(f"WARNING: --allow-admin-key: the key acts as the ADMIN "
+              f"({username or '<unset>'}), i.e. with root-equivalent rights.",
+              file=sys.stderr)
+    print(RESIDUAL_RISK, file=sys.stderr)
 
     print(describe_scope())
     key, err = create_key(args.name, username, args.shape, args.dry_run)
@@ -193,6 +243,9 @@ def main():
     print("Put it in the deploy environment and redeploy; the admin password then "
           "stays out of the container:\n")
     print(f"    export TRUENAS_API_KEY={key}")
+    # CR-365 / GL-11 (2026-10-07): TrueNAS's JSON-RPC login names the account a
+    # key was made for, which is this one and not the admin.
+    print(f"    export TRUENAS_API_KEY_USER={username}")
     print("    python server/install_dashboard_app.py\n")
     print("Revoke it in Credentials > API Keys when it is no longer needed.")
     return 0

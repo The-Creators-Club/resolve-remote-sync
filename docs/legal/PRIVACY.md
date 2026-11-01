@@ -8,7 +8,11 @@
 
 # CC Sync: privacy policy
 
-**Version 1.0, 2026-09-25.**
+**Version 1.1, 2026-10-07.**
+
+*Draft for counsel: the changes since 1.0 are the plain no-telemetry statement, the support-mailbox sub-processor, the pointer to `docs/legal/DPA.md` and the Transfers paragraph (CR-377, COM-M4).*
+
+*The DPA, the beta agreement and the support-data procedure cited in this policy are drafts not yet released in the product; the Licensor provides them on request at support@thecreatorsclub.co until they are.*
 
 CC Sync ("the Software") is supplied by **Cablewrap Creative Ltd.**, a
 company registered in Taiwan (R.O.C.) ("the Licensor", "we"), and is defined
@@ -33,9 +37,18 @@ the consequences; that one holds the facts.
   Licensor. There is no vendor endpoint that receives Customer data.** The
   only outbound request the companion makes on its own is to the Customer's
   own `dashboard_url` (`reporter.py`, `identity.py`, `upgrade.py`), plus the
-  tool downloads listed in section 5. The one request a dashboard can make
-  to a Licensor-controlled location is the optional release-feed download in
-  section 5, which carries no Customer data.
+  tool downloads listed in section 5. The one automatic request a dashboard can
+  make to a Licensor-controlled location is the release-feed check in
+  section 5 (on by default in a vendor build, switchable off), which carries
+  no Customer data.
+- **In normal operation no Customer data leaves the Customer's network for
+  the Licensor.** There is no vendor telemetry and no Licensor server that
+  holds Customer data. The one automatic request to a Licensor-controlled
+  location is a vendor-build dashboard's check of the Licensor's release feed
+  (section 5), which carries no Customer data. The only way Customer data
+  reaches the Licensor is that the Customer chooses to send it for support
+  (section 3): it is emailed through Google Workspace, the support mailbox's
+  provider (section 9), or seen in a remote session the Customer starts.
 - **The Customer is the data controller** for everything the Software
   collects about its staff. See section 3.
 - **The Software can be used to monitor employees.** It records, per named
@@ -97,19 +110,24 @@ chooses the admins, and decides who is monitored and why. Every database the
 Software creates sits on its hardware.
 
 **The Licensor is not a processor in ordinary operation**, because ordinary
-operation involves no transfer of anything to us. There is no vendor telemetry
-endpoint and no phone-home.
+operation involves no transfer of Customer data to us. There is no vendor
+telemetry endpoint. (A vendor-build dashboard's release-feed check, section 5,
+carries no Customer data.)
 
 **The Licensor may become a processor during support**, and only then: if the
 Customer sends us a diagnostics bundle, a log, a database copy, or grants
 remote access to diagnose a problem, we process the personal data it
 contains. When we do, we process it only on the Customer's instructions and
 only to resolve that support request; we keep it confidential and limit it to
-the people working on the request; we engage no sub-processor for it; we
-delete it when the request is closed; and we tell the Customer without undue
-delay if a personal-data breach affects it. A Customer that needs these terms
-as a signed data-processing agreement (GDPR Art. 28) can request one at
-contact@thecreatorsclub.co.
+the people working on the request; we use only the sub-processors listed in
+section 9; we delete it within the period stated in
+`docs/legal/SUPPORT_DATA_PROCEDURE.md` and `docs/legal/DPA.md` (30
+days after the request is closed, and earlier on the Customer's request); and we tell the Customer
+without undue delay if a personal-data breach affects it. The terms are set
+out as a data-processing agreement (GDPR Art. 28) in **`docs/legal/DPA.md`**,
+which a Customer can sign by writing to the Licensor at the contact address in section 11. How
+support handles what it receives is in
+`docs/legal/SUPPORT_DATA_PROCEDURE.md`.
 
 The Customer decides what it sends us, and is responsible for sending only
 what the support request needs.
@@ -145,7 +163,7 @@ carries Customer data to the Licensor.**
 | **Tailscale** | If the Customer uses Tailscale for remote access: device names, users, IPs and connection metadata reach Tailscale's coordination service. Content is end-to-end encrypted between nodes. If the Customer publishes client share links with Tailscale Funnel, those pages are reachable from the public internet through Tailscale's servers | Whenever the tailnet is used | `docs/SERVER-SYNOLOGY.md`, `docs/CLIENT_FOLDERS.md`. The Customer's own Tailscale account |
 | **The Customer's mail server or webhook** | Alert and weekly-report mail (machine names, editor names, what is wrong), and the triage report | Only if the Customer configures an alert sink (none by default) | `dashboard/src/ccsync_dashboard/alerts.py` |
 | **GitHub, downloads.rclone.org, johnvansickle.com, downloads.claude.ai** | Nothing but the download request itself | At install, when the companion refreshes yt-dlp, ffmpeg or deno, and when an admin installs a CLI tool from the dashboard | `installer/windows_bootstrap.ps1`, `installer/macos_bootstrap.sh`, `companion/src/ccsync_companion/sidecar_tools.py`, `ytdlp_manager.py`, `dashboard/src/ccsync_dashboard/cli_tools.py` |
-| **The Licensor's release feed** (a static file host, currently GitHub Releases) | A plain download request with no credential and no Customer data. The host, as with any web request, sees the dashboard's IP address | Only if the Customer's site is configured with a release feed URL (`[releases] feed_url`; empty by default) | `dashboard/src/ccsync_dashboard/release_feed.py`, `dashboard_update.py` |
+| **The Licensor's release feed** (a static file host, currently GitHub Releases) | A plain download request with no credential and no Customer data. The host, as with any web request, sees the dashboard's IP address | A vendor-build dashboard (the self-install appliance image) checks the Licensor's release feed by default: shortly after each start of the dashboard, then about once a day (or as the site configures it), and whenever an admin asks for a check. A site can turn it off by setting `DASH_RELEASE_FEED_URL` to empty; a site that sets its own `[releases] feed_url` uses that instead | `dashboard/src/ccsync_dashboard/release_feed.py`, `dashboard_update.py` |
 | **Sentry (or another error-tracking service), if the Customer opts in** | Dashboard crash reports: stack traces, which can contain file paths and usernames | Only if the Customer sets `DASH_SENTRY_DSN` **and** installs `sentry_sdk`, which the shipped image does not include | `dashboard/src/ccsync_dashboard/crash_report.py`. Off by default. If the Customer turns it on, the account is theirs |
 | **The Licensor** | **Nothing**, except what the Customer chooses to send us for support (section 3) | | No vendor endpoint exists |
 
@@ -297,6 +315,15 @@ us, we will refer it to the Customer.
 The Licensor engages **no sub-processor** in the ordinary operation of the
 Software, because we receive no Customer data.
 
+**For support only**, when the Customer sends us a bundle, log or other
+material, the Licensor uses **Google Workspace** (Google Ireland Limited for
+customers in the EEA and UK, otherwise Google LLC), which provides the
+support mailbox (support@thecreatorsclub.co) where that material arrives and is
+kept until deletion. The full list, with purpose and location, is in
+`docs/legal/DPA.md` Annex III. A Customer that does not want its support data
+to pass through that mailbox can say so and arrange another route with us
+before sending anything.
+
 The recipients in section 5 are **the Customer's own** suppliers, under the
 Customer's own accounts and agreements: its AI providers, Google/YouTube,
 Tailscale, its mail or webhook provider, and the Syncthing project's discovery
@@ -305,6 +332,20 @@ processing.
 
 The Licensor does not offer the Software as a hosted or managed service. This
 policy describes self-hosted deployments only.
+
+### Transfers
+
+In normal operation the Licensor receives no personal data, so no
+international transfer to or from the Licensor takes place. When the Customer
+sends support material, it goes to a Licensor based in Taiwan (R.O.C.) through
+Google's infrastructure. If the Customer is in the EEA or the UK, that is a
+restricted transfer: Taiwan has no EU adequacy decision, so `docs/legal/DPA.md`
+incorporates the EU Standard Contractual Clauses (Module 2, controller to
+processor) and, for the UK, the ICO's Addendum or the IDTA. Support is
+requested only for what the problem needs, and a Customer can redact a bundle
+before sending it. The Customer's own transfers to its AI providers, Tailscale
+and the other recipients in section 5 are governed by its own agreements with
+them.
 
 ## 10. Security
 
@@ -324,10 +365,11 @@ policy describes self-hosted deployments only.
   `secretfile.harden`).
 - Non-admin editors can see only their own data (`auth.Scope`).
 - Updates are signed: every build offered through the upgrade channel carries
-  an Ed25519 signature from the Licensor's offline release key, and the
+  an Ed25519 signature from the Licensor's release key (a passphrase-protected key file held by the Licensor, with offline backups), and the
   companion and dashboard refuse a build that does not verify against the
-  public keys already built into them. The executables themselves do not yet
-  all carry an operating-system code-signing certificate.
+  public keys already built into them. During the free beta the executables
+  carry no operating-system code-signing certificate (no Authenticode, no
+  Apple Developer ID); see `docs/legal/BETA_AGREEMENT.md` section 4.
 - **Transport.** The companion refuses to send anything, including an
   editor's password, to a dashboard whose address is plain `http://` on the
   public internet, and says so on the tray. The setup wizard will not accept

@@ -43,6 +43,7 @@ line above is machine-checkable and nothing was checking it.
 | [`STAGE_A_FOLDER.md`](STAGE_A_FOLDER.md) | Stage a folder: a project folder on the NAS to a client link in one click (the one-folder share the owner asked for on 2026-09-10) |
 | [`CLIENT_DELIVERY.md`](CLIENT_DELIVERY.md) | Runbook for handing a client terabytes of footage to download once, without joining the tailnet: stage in Backblaze B2 near the client (TrueNAS Cloud Sync task, scoped read-only key, what to tell them), the shared-Tailscale-node direct route, and why not Funnel, Syncthing, MASV or a port-forward |
 | [`DOCKER.md`](DOCKER.md) | The two ways the dashboard container gets its code and its dependencies |
+| [`ZERO_DOWNTIME_DEPLOY.md`](ZERO_DOWNTIME_DEPLOY.md) | Investigation (not built): updating the dashboard's code with no outage by handing the listening socket to the new process |
 | [`MODULAR_UPDATES.md`](MODULAR_UPDATES.md) | Plan (2026-10-06; M0 + M1 built): a change gets only the tests that can see it (one path-to-suites map, a smoke set, full gate nightly and before any customer release), and b-roll, music or ytdl ships alone as a bundle on the live core with a module API check; how it fits the zero-downtime work |
 | [`CARDS_DEPLOY.md`](CARDS_DEPLOY.md) | Refreshing Timeline Cards on the NAS: the one code mount that is another repo's checkout, why a copy without a restart changes nothing, and the rollback |
 | [`CARDS_TWO_PROJECTS.md`](CARDS_TWO_PROJECTS.md) | Two people in two episodes at once: the landing page, one engine per episode keyed by a slug in the URL, why the cap is a refusal and not an eviction, and the two-engine measurement (section 12) |
@@ -50,6 +51,7 @@ line above is machine-checkable and nothing was checking it.
 | [`FILE_MOVES.md`](FILE_MOVES.md) | Moving a file on the server without it coming straight back: the project page's move button, the two-phase command, and why nothing in that path deletes |
 | [`HAND_MOVES_ON_THE_SERVER.md`](HAND_MOVES_ON_THE_SERVER.md) | A folder moved by hand on the NAS becomes a recorded move every machine follows: the server diffs its own inventory walks, lane B asks the server where a vanished file went before it trashes anything, and why the breaker still has the last word |
 | [`UPLOAD_ONLY_TICK.md`](UPLOAD_ONLY_TICK.md) | The upload-only tick: originals up, nothing down, and why it is "no share" rather than a send-only folder |
+| [`SELECTIVE_ORIGINALS.md`](SELECTIVE_ORIGINALS.md) | Originals on request: picking camera originals for one computer from the Resolve Scripts menu or the project page, the `lane_b_originals_down` copy, and why it is neither Syncthing nor lane B |
 | [`ACCOUNT_PAGE_FEATURES.md`](ACCOUNT_PAGE_FEATURES.md) | The spec for the personal /account page (2026-09-25): display name, changing your own password, your browsers, your sync keys, asking a computer to change its fleet-job settings, three new read-only machine settings; schema v58, the wire, and six builder groups with disjoint files |
 | [`LEGAL_GAP_FEATURES_PLAN.md`](LEGAL_GAP_FEATURES_PLAN.md) | The features the final legal documents (2026-09-25) say CC Sync does not have yet (every `ENG-GAP` marker): telemetry switches, export and erase a person's data, refusing a public plain-http dashboard address, psycopg2 in the lock, retention visibility; builder groups, owner decisions, and three adversarial audits |
 | [`UI_REDESIGN_PORT_PLAN.md`](UI_REDESIGN_PORT_PLAN.md) | How the CC Terminal redesign (`dashboard/design/`) reaches the live dashboard: page by page, the backend each new control needs, the tests that pin markup, nine phases behind a site switch and a preview cookie, and the adversarial review log |
@@ -59,7 +61,6 @@ line above is machine-checkable and nothing was checking it.
 | [`ANDROID.md`](ANDROID.md) | The Android APK half of the phone story, and the one symptom it exists for (the app showing a URL bar) |
 | [`YTDL_TERMS_AND_QUEUE.md`](YTDL_TERMS_AND_QUEUE.md) | The YouTube downloader's term review and search queue |
 | [`CI.md`](CI.md) | What runs on a runner, and what still only runs on the base rig |
-| [`PRODUCT_REPO.md`](PRODUCT_REPO.md) | The customer-facing repo, how it is exported, and what is withheld |
 | [`PROJECTS_CLEANUP_PLAN.md`](PROJECTS_CLEANUP_PLAN.md) | **A plan, not yet done.** Renaming this repo's folder to `E:\Projects\Editing\ccsync` and sorting the rest of `E:\Projects` into categories: the five things that break silently (the tray's rclone path, the Claude memory directory, the five venvs), what does not change, and the rollback |
 
 ## Not losing footage
@@ -79,6 +80,8 @@ line above is machine-checkable and nothing was checking it.
 |---|---|
 | [`SECRETS.md`](SECRETS.md) | The operator secrets: where they live, and where they must not |
 | [`TENANCY.md`](TENANCY.md) | Who can reach whose footage: one container per customer, `project_acl`, `editor_shell` |
+| [`STUDIO_BUILD.md`](STUDIO_BUILD.md) | The studio flavour (GL-31, CR-374, 2026-10-07): one image, and why the vendor build hard-disables the Claude Code and Codex CLI providers while the studio's own dashboard keeps them |
+| [`TAILNET_POLICY.md`](TAILNET_POLICY.md) | The Tailscale grants template that makes the tailnet a real perimeter: which tag reaches which port |
 | [`LOOPBACK_API.md`](LOOPBACK_API.md) | The companion's `127.0.0.1:8899` listener, and who may call it |
 
 ## Legal
@@ -86,11 +89,17 @@ line above is machine-checkable and nothing was checking it.
 | Doc | What it is |
 |---|---|
 | [`legal/EULA.md`](legal/EULA.md) | End user licence agreement (version 1.1). Three byte-identical copies ship: this one, `companion/src/ccsync_companion/assets/EULA.md` and `onboarding/assets/EULA.md` |
+| [`legal/BETA_AGREEMENT.md`](legal/BETA_AGREEMENT.md) | DRAFT FOR COUNSEL: the free open beta terms, a supplement to the EULA (does not touch its version) |
+| [`legal/DPA.md`](legal/DPA.md) | DRAFT FOR COUNSEL: GDPR Art. 28 data processing agreement template, with SCC and UK Addendum placeholders; applies only when support receives customer data |
+| [`legal/SUPPORT_DATA_PROCEDURE.md`](legal/SUPPORT_DATA_PROCEDURE.md) | DRAFT FOR COUNSEL: one page on what support may ask for, where it is kept, for how long, and who may see it |
 | [`legal/PRIVACY.md`](legal/PRIVACY.md) | Privacy policy: what the product collects, where it lives and what leaves the network |
 | [`legal/TELEMETRY.md`](legal/TELEMETRY.md) | What is reported, by whom, and how to turn it off |
 | [`legal/THIRD_PARTY_NOTICES.md`](legal/THIRD_PARTY_NOTICES.md) | Bundled and downloaded third-party components and their licences (generated by `tools/gen_notices.py`; edit the hand-maintained block or the script) |
 | [`legal/YOUTUBE_FEATURE_NOTICE.md`](legal/YOUTUBE_FEATURE_NOTICE.md) | **Read before enabling `[features] youtube_download`** |
+| [`SUPPORTED_PLATFORMS.md`](SUPPORTED_PLATFORMS.md) | The platforms we test and help with: Windows, macOS, Resolve Studio, TrueNAS, Synology, Tailscale plan (draft 2026-10-07) |
 
+> **Owner call needed (COM-M2):** `legal/PRIVACY.md` 1.1 was edited after the legal clearance below and still shows a "Draft for counsel" banner, which the wizard-linked policy would show to customers on the next image; the three DRAFT FOR COUNSEL rows above are likewise unreviewed. The three drafts travel in the legal tree (the shippers copy whole trees) but `published_docs.UNPUBLISHED_DRAFTS` keeps them out of /help for everyone, customer administrators included, until counsel clears each (the files still sit in a customer's legal tree on disk); remove the name from that tuple then. They are not shown in the wizard, and the Software does not yet present or record the beta terms (engineering item: a /setup acceptance step with a BETA-AGREEMENT-VERSION marker).
+>
 > **Final product text since 2026-09-25**, issued by Cablewrap Creative Ltd.
 > after the owner's legal review; before that they were in-house drafts.
 > Statements marked with an `<!-- ENG-GAP: ... -->` comment describe a
@@ -103,6 +112,7 @@ line above is machine-checkable and nothing was checking it.
 | Doc | What it is |
 |---|---|
 | [`COMMERCIAL_READINESS.md`](COMMERCIAL_READINESS.md) | The 2026-08-17 audit and the ranked list of what must change to sell this to other organisations |
+| [`PRELAUNCH_REVIEW_2026-10-06.md`](PRELAUNCH_REVIEW_2026-10-06.md) | The owner's go-live checklist: four read-only pre-launch passes (bugs, resilience, practicality, commercial; 56 Opus hunters, every critical and high adversarially verified, 0 refuted) merged across passes into 1 stop-ship, 36 code items in six fix waves, 12 owner / counsel / money decisions and 10 real-world proofs, with about 265 mediums by theme; pass reports and raw hunter files under `prelaunch-review-2026-10-06/`; nothing fixed yet |
 | [`RESILIENCE_SWEEP_2026-08-28.md`](RESILIENCE_SWEEP_2026-08-28.md) | The ten-agent resilience sweep: 201 findings in `resilience-sweep-2026-08-28/`, fourteen themes, and a ranked, waved build list ("green while dead" is one class; the guard usually exists in one of N places) |
 | [`USABILITY_RESILIENCE_SWEEP_2026-09-03.md`](USABILITY_RESILIENCE_SWEEP_2026-09-03.md) | The fifteen-agent usability + resilience sweep: 297 findings (16 critical) in `usability-resilience-sweep-2026-09-03/`, nine shapes ("computed, then discarded" is the biggest), a one-vocabulary table, and a six-wave build list; nothing built yet |
 | [`SYNOLOGY_PORT_PLAN.md`](SYNOLOGY_PORT_PLAN.md) | The plan behind the second NAS backend |

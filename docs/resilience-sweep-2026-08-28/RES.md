@@ -242,6 +242,14 @@ the tray line and the report makes a wedged Resolve visible fleet-wide for ~20 l
   tree" per machine. The owner currently cannot see this at all.
 - **Effort:** M   **Severity:** med   **Confidence:** high
 - **Related:** SPEC (per-session by design), CR-45's tray/dashboard pattern
+- **Status (2026-09-30): (a) REMOVED by CR-356.** The folder rule matched
+  recursively and for ever: on 2026-09-28 an editor set it on his Desktop for one
+  subtitle file, and 30 licensed music tracks he downloaded into a Desktop
+  subfolder the next day were never offered, never uploaded, and offline on every
+  other machine. Companion 0.9.85 has no folder button and no [ FORGET ]; an
+  existing `fixer_ignores.json` is logged and renamed to
+  `fixer_ignores.json.retired-cr356` at start-up and honoured by nothing. SKIP FOR
+  NOW (this session) is the only dismissal. (b) stands. See KNOWN_BUGS CR-356.
 
 ### RES-13: `save_point_due` burns the slot before it knows the export worked
 - **Lens:** pitfall

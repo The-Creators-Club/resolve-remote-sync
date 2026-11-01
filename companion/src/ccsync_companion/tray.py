@@ -113,6 +113,7 @@ LANE_LABELS = {
     "lane_a_video_up": "Uploads (your footage → server)",
     "lane_b_proxy_down": "Proxies (server → you)",
     "lane_c_syncthing": "Everything else, both ways (audio, graphics, subs)",
+    "lane_b_originals_down": "Originals you asked for (server → you)",
 }
 
 
@@ -1788,7 +1789,7 @@ def show_scripting_warning(app: "CompanionApp") -> bool:
         # repeats by design, so a skipped round costs nothing, while queueing
         # it would drop a stale nag on screen minutes after the fact.
         log.info("scripting warning: another CCSync window is open -- notifying instead")
-        _notify(app, resolve_bridge.NO_SCRIPTING_MESSAGE)
+        _notify(app, resolve_bridge.scripting_advice())
         return False
     try:
         return _show_scripting_warning_locked(app)
@@ -1810,12 +1811,16 @@ def _build_scripting_warning_dialog(app: "CompanionApp") -> bool:
         from . import theme
     except Exception as exc:
         log.warning("scripting warning dialog unavailable (%s) -- notifying instead", exc)
-        _notify(app, resolve_bridge.NO_SCRIPTING_MESSAGE)
+        _notify(app, resolve_bridge.scripting_advice())
         return False
 
     silenced = {"value": False}
     body = (
-        resolve_bridge.NO_SCRIPTING_MESSAGE + "\n\n"
+        # CR-373 / GL-29 (2026-10-07): a computer that has never connected is
+        # told to check the preference and the Studio requirement, not to
+        # restart Resolve forever. The prefs read happens on this dialog's
+        # thread, never on a render path.
+        resolve_bridge.scripting_advice() + "\n\n"
         "Until then CCSync can't see your timeline, so it can't warn you about "
         "media outside your project folder, attach proxies, or send b-roll, "
         "music and YouTube clips to Resolve. Your files and your sync are not "
@@ -1858,7 +1863,7 @@ def _build_scripting_warning_dialog(app: "CompanionApp") -> bool:
     except Exception as exc:
         _discard_half_built(root, "the scripting warning")  # bug-comp-ui-5
         log.warning("scripting warning dialog failed (%s) -- notifying instead", exc)
-        _notify(app, resolve_bridge.NO_SCRIPTING_MESSAGE)
+        _notify(app, resolve_bridge.scripting_advice())
         return False
 
     return bool(silenced["value"])
@@ -1880,6 +1885,47 @@ def remove_blocker_body(rel: str, blockers: dict) -> str:
         "If you have to delete it anyway (a dead server, a full disk), type the "
         "project's folder name exactly to confirm:\n"
         f"    {rel.split('/')[-1]}"
+    )
+
+
+def _project_is_upload_only(app: "CompanionApp", slug: str) -> bool:
+    """Whether `slug` is an upload-only tick on this computer. A question that
+    fails reads False: the wording then claims LESS (video and shared files),
+    never more."""
+    try:
+        return any(bool(p.get("upload_only")) for p in app.removable_projects()
+                   if p.get("slug") == slug)
+    except Exception:
+        return False
+
+
+def remove_ready_body(rel: str, upload_only: bool) -> str:
+    """The confirm dialog for a removal the gate found nothing to block.
+
+    GL-13 (CR-366, 2026-10-07): it used to say "everything on this computer
+    has reached the server" under an upload-only tick, where only video had
+    been checked, and then deleted the sound recordings and stills too. It
+    now claims only what the gate checked, and Proxy/ is named because the
+    server makes those again."""
+    if upload_only:
+        checked = (
+            "CCSync has checked every file in this project's folder, apart from "
+            "its Proxy folders (the server makes those again): each one is on "
+            "the server at the same size and has not been changed since it went "
+            "up, and none was left that CCSync does not upload."
+        )
+    else:
+        checked = (
+            "CCSync has checked this project's video files and its shared "
+            "project files: all of them have reached the server. Proxy folders "
+            "are not counted, because the server makes those again."
+        )
+    return (
+        "Remove '" + rel + "' from THIS computer?" + "\n\n"
+        "This unticks the project on the dashboard, stops syncing it here, "
+        "and deletes the local copy to free disk space." + "\n\n"
+        + checked + "\n\n"
+        "Tick the project again any time to sync it back."
     )
 
 
@@ -1923,14 +1969,7 @@ def _confirm_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
             confirmed = typed
             override = bool(typed)
         else:
-            body = (
-                "Remove '" + rel + "' from THIS computer?" + "\n\n"
-                "This unticks the project on the dashboard, stops syncing it here, "
-                "and deletes the local copy to free disk space." + "\n\n"
-                "CCSync has checked: everything on this computer has reached the "
-                "server, so nothing will be lost." + "\n\n"
-                "Tick the project again any time to sync it back."
-            )
+            body = remove_ready_body(rel, _project_is_upload_only(app, slug))
             confirmed = popup.confirm_dialog(
                 site_mod.notify_title("remove project"),
                 body,
@@ -2691,6 +2730,27 @@ def ytdl_download_line(progress: Optional[dict]) -> Optional[str]:
     return f"{line} ({', '.join(bits)})" if bits else line
 
 
+ORIGINALS_LANE = "lane_b_originals_down"
+
+
+def originals_line(statuses: Any) -> Optional[str]:
+    """"Bringing originals: 12 of 80, 140.0 GB to go" while the originals
+    lane runs, else None (SELECTIVE_ORIGINALS.md 4.2, 2026-10-31). The lane
+    writes the sentence itself on every stats tick, so this is a read; a
+    parked lane says why in Settings, not here."""
+    for status in statuses or []:
+        try:
+            if getattr(status, "name", "") != ORIGINALS_LANE:
+                continue
+            detail = str(getattr(status, "detail", "") or "")
+            if getattr(status, "state", "") == STATE_SYNCING and detail.startswith(
+                    "Bringing originals"):
+                return detail
+        except Exception:
+            continue
+    return None
+
+
 # RES-22: how long a fusionscript call may be in flight before the tray stops
 # calling the bridge "connected". A library enumeration on a big project is
 # seconds; twenty of them is a call that is not coming back on its own.
@@ -2817,6 +2877,32 @@ def resolve_bridge_line(state: Optional[dict], health: Optional[dict] = None,
     return f"Resolve: NOT CONNECTED this session ({reason})"
 
 
+def _menu_bridge_state(state: Optional[dict]) -> Optional[dict]:
+    """The bridge state the menu row is drawn from (CR-373 / GL-29, round 2,
+    2026-10-07).
+
+    A computer that has NEVER connected to Resolve (the per-machine marker,
+    not this session's flag) and is told NO_SCRIPTING_MESSAGE would see the
+    "quit and reopen Resolve, restart the companion" loop on the menu while
+    the dialog says to set the scripting preference. Swap the reason for
+    scripting_advice() (reads one preference file; call from the refresh
+    thread only, never a render path) and call it never-connected. A machine
+    that HAS connected before reads as ever-connected whatever this session
+    saw. Anything else passes through untouched.
+    """
+    try:
+        if isinstance(state, dict) and state.get("connected") is False:
+            if not resolve_bridge.machine_ever_connected():
+                if state.get("reason") == resolve_bridge.NO_SCRIPTING_MESSAGE:
+                    return {**state, "ever_connected": False,
+                            "reason": resolve_bridge.scripting_advice(False)}
+            else:
+                return {**state, "ever_connected": True}
+    except Exception:
+        pass
+    return state
+
+
 def _tray_snapshot(app: "CompanionApp") -> dict:
     """Everything the tray renders, gathered ONCE on the refresh thread.
 
@@ -2923,7 +3009,8 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
          lambda: resolve_wedge(snap.get("resolve_health"),
                                resolve_bridge.bridge_activity()), {})
     _get("resolve_line", lambda: resolve_bridge_line(
-        (getattr(app, "resolve_bridge_state", None) or resolve_bridge.session_state)(),
+        _menu_bridge_state(
+            (getattr(app, "resolve_bridge_state", None) or resolve_bridge.session_state)()),
         health=snap.get("resolve_health"), wedge=snap.get("resolve_wedge"),
     ), None)
     # The YouTube download this machine is running, if any: a dict read
@@ -2933,6 +3020,8 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     _get("ytdl_line", lambda: ytdl_download_line(
         (getattr(app, "ytdl_progress", None) or ytdl_executor.progress)()
     ), None)
+    # Originals on request: read off the statuses already in hand, no I/O.
+    _get("originals_line", lambda: originals_line(statuses), None)
     # CYT-15: the browser sign-in this machine is waiting on, if any. The
     # app's own getter where it has one, else this module's record of the
     # flow it is running itself.
@@ -2998,6 +3087,15 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     for _key in ("shared_folder_problems", "repath_events"):
         if snap.get(_key) and not (snap.get("sync_guard") or {}).get(_key):
             snap.setdefault("sync_guard", {})[_key] = snap[_key]
+    # CR-366 (GL-12, 2026-10-07): files lane A refuses because their date is
+    # ahead of this clock. A cached read (the lane refreshes it on the orphan
+    # scan's cadence), injected into the TRAY's copy of the guard only: it is
+    # not a report key, so no telemetry row and nothing on the wire.
+    _get("future_dated",
+         lambda: (getattr(app, "future_dated_report", None) or (lambda: None))() or {}, {})
+    if snap.get("future_dated"):
+        snap["sync_guard"] = {**(snap.get("sync_guard") or {}),
+                              "future_dated": snap["future_dated"]}
     # APP-5: the sentence validate_config wrote, so the lane lines can name
     # the setting instead of saying "isn't set up yet" three times.
     _get("problem_detail", lambda: _config_problem_detail(app), "")
@@ -3425,6 +3523,43 @@ def _skipped_exists_line(guard: dict, samples: Optional[list] = None) -> Optiona
             "your admin to remove the server's copy")
 
 
+def _future_dated_line(guard: dict) -> Optional[str]:
+    """Files lane A will never upload because their date is in the future
+    (GL-12, CR-366, 2026-10-07; bug-sync-1).
+
+    A camera whose clock is on another timezone, or reset to a future year,
+    writes files lane A's age floor never passes: nothing uploads and the
+    lane stays green. The report is LOCAL ONLY (injected into the tray's own
+    snapshot of the guard, never into app.sync_guard()'s reply), so it needs
+    no telemetry row; the removal gate also blocks on these files by name."""
+    report = (guard or {}).get("future_dated") or {}
+    try:
+        count = int(report.get("count") or 0)
+    except (TypeError, ValueError):
+        return None
+    if count <= 0:
+        return None
+    names = [str(n) for n in (report.get("samples") or []) if n]
+    example = ""
+    if names:
+        when = ""
+        try:
+            first = report.get("first_mtime")
+            if first is not None:
+                when = ", dated " + time.strftime("%Y-%m-%d", time.localtime(float(first)))
+        except (TypeError, ValueError, OverflowError, OSError):
+            when = ""
+        example = f" (first: {names[0]}{when})"
+    return (f"⚠ {count} file{'s' if count != 1 else ''} "
+            f"{'are' if count != 1 else 'is'} dated in the future, so "
+            f"{'they' if count != 1 else 'it'} will NOT upload{example}. A camera "
+            "clock is set wrong. One a few hours ahead uploads by itself once "
+            "that time passes. One dated further ahead needs its modified "
+            "date reset to now (a copy or re-import keeps the date); ask "
+            "whoever looks after your computers. Fixing the camera clock "
+            "only helps future recordings")
+
+
 # A stall older than this is history, not news: the lane has had many
 # healthy passes since, and the record is kept on disk for diagnostics
 # rather than for the menu.
@@ -3647,29 +3782,21 @@ def _ignored_line(guard: dict) -> Optional[str]:
     (the scan now clears the session set first, which is what makes that
     sentence true).
 
-    The persisted folder ignores get a clause of their own rather than a
-    line: they are a decision somebody made on purpose, not a warning.
+    The persisted folder ignores used to get a clause of their own here;
+    CR-356 (2026-09-30) retired them, so the line is the session count only.
     """
     health = (guard or {}).get("resolve_health") or {}
     if not isinstance(health, dict):
         return None
     try:
         session = int(health.get("ignored_this_session") or 0)
-        folders = int(health.get("ignored_folders") or 0)
     except (TypeError, ValueError):
         return None
-    parts: list[str] = []
-    if session:
-        # comp-ui-4 (2026-09-11): real plurals here too.
-        parts.append(
-            f"⚠ {ui_copy.count(session, 'clip')} skipped this session and still "
+    if not session:
+        return None
+    # comp-ui-4 (2026-09-11): real plurals here too.
+    return (f"⚠ {ui_copy.count(session, 'clip')} skipped this session and still "
             "not syncing - Settings > SCAN WHOLE PROJECT offers them again")
-    if folders:
-        parts.append(
-            f"{ui_copy.count(folders, 'folder')} "
-            f"{'is' if folders == 1 else 'are'} set to be left alone on this "
-            "computer - Settings can undo that")
-    return ". ".join(parts) if parts else None
 
 
 def _crashes_line(guard: dict) -> Optional[str]:
@@ -4954,6 +5081,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         tray_backend.MenuItem(line, None, enabled=False)
         for line in (_sync_line(snap), _two_stops_line(snap),
                      snap.get("resolve_line"),
+                     snap.get("originals_line"),
                      snap.get("ytdl_line"), snap.get("ytdl_login_line"),
                      jobs_forced_line(snap.get("jobs_status")),
                      # comp-ytdl-jobs-3 (2026-09-11): here and not only in

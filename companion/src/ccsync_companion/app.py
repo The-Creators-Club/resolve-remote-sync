@@ -38,6 +38,7 @@ from . import jobs_runner as jobs_runner_mod
 from . import timeline_cards_role as cards_role_mod
 from . import config as config_mod
 from . import crash_report
+from . import startguard
 from . import supervisor
 from . import eula as eula_mod
 from . import telemetry_policy
@@ -47,6 +48,7 @@ from . import machine_settings as machine_settings_mod
 from . import idle as idle_mod
 from . import luts as luts_mod
 from . import music_worker
+from . import originals_requests as originals_requests_mod
 from . import paths as paths_mod
 from . import popup
 from . import bpg as bpg_mod
@@ -64,6 +66,7 @@ from . import stills as stills_mod
 from . import theme
 from . import ui_copy
 from . import ui_dispatch
+from . import vp9_guard as vp9_guard_mod
 from . import upgrade as upgrade_mod
 from . import site as site_mod
 from . import youtube_import as youtube_import_mod
@@ -77,6 +80,7 @@ from .project_setup import ProjectSetupPrompter
 from .reporter import DashboardReporter
 from .selection import SelectionClient
 from .sync import lane_guard, server_locate
+from .sync import originals_lane as originals_lane_mod
 from .sync.base import STATE_ERROR, LaneAdapter, LaneStatus
 from .sync.rclone_lane import DIRECTION_DOWN, DIRECTION_UP, VIDEO_EXTS, RcloneLane, down_route
 from .sync.sequencer import PROJECTS_PREFIX, STATE_NO_SELECTION, Sequencer
@@ -222,6 +226,11 @@ def setup_logging(cfg: dict[str, Any]) -> None:
 # relaunch exits with "another ccsync-companion is already running" and the
 # machine has no companion until someone finds a terminal (2026-08-05).
 UI_SHUTDOWN_GRACE_SECONDS = 10.0
+
+# GL-23 (CR-370, 2026-10-07): the longest a REPEAT shutdown() waits for the
+# first teardown to finish. Teardown's own joins are 5 s each, so a healthy one
+# is well inside this; a wedged one is abandoned rather than held forever.
+SHUTDOWN_WAIT_SECONDS = 40.0
 
 # How long a thread that is about to let go of a work-progress window waits
 # for that window's OWN thread to finish tearing it down (CR-93, 2026-08-29).
@@ -1754,6 +1763,10 @@ class CompanionApp:
         # _stop_lanes()/reporter.stop() sequences against each other.
         self._shutdown_lock = threading.Lock()
         self._shutdown_started = False
+        # GL-23 (CR-370): set when the first teardown has FINISHED; a repeat
+        # shutdown() waits on it (bounded) instead of returning at once.
+        self._shutdown_done = threading.Event()
+        self._shutdown_owner: Optional[int] = None
         self._tray_icon = None
         # Config errors that STOP syncing. Computed HERE, not just in run(),
         # because the gates that consume it (the out-of-tree popup, FIX ALL,
@@ -2029,6 +2042,22 @@ class CompanionApp:
                 # `self.halt` is built above, before _build_lanes, precisely so
                 # this closure has something to read on the first pass.
                 halted=lambda: self.halt.active,
+            )
+            self.sequencer.on_selection = self._originals_lane.note_selection
+
+        # Request files from the Resolve menu scripts (SELECTIVE_ORIGINALS.md
+        # 12.2). The memory is fed by the watcher's own timeline walk, below.
+        self._clip_paths = originals_requests_mod.ClipPathMemory()
+        self.originals_inbox: Optional[Any] = None
+        if self.selection_client is not None:
+            self.originals_inbox = originals_requests_mod.OriginalsInbox(
+                cfg, selection_fn=self._originals_selection,
+                put_fn=lambda slug, add, remove: self.selection_client.put_originals(
+                    slug, add, remove, via="resolve"),
+                notify_fn=lambda msg: self._notify_tray(
+                    msg, site_mod.notify_title("originals")),
+                memory=self._clip_paths,
+                on_queued=self._originals_lane.wake,
             )
 
         # Local disk media manifest (per-project file rollups + per-file
@@ -2450,6 +2479,14 @@ class CompanionApp:
             halted_fn=lambda: bool(self.halt.active),
         )
 
+        # CR-380: built before the watcher, which holds its observe(). The
+        # probes and the popup run on the guard's own thread.
+        self._vp9_guard = vp9_guard_mod.VP9Guard(
+            enabled_fn=lambda: vp9_guard_mod.enabled(self.config),
+            ffmpeg_path_fn=lambda: str(self.config.get("ffmpeg_path") or "ffmpeg"),
+            state_dir=config_mod.resolved_log_path(cfg).parent / "state",
+            show_fn=self._show_vp9_warning,
+        )
         self.watcher = TimelineWatcher(
             local_root=cfg["local_root"],
             canonical_prefix=cfg["canonical_prefix"],
@@ -2471,6 +2508,14 @@ class CompanionApp:
             # server's instruction is a one-click relink, not a DEBUG line.
             moved_lookup=self.file_moves.moved_to,
             on_moved_clip=self._on_moved_clip_missing,
+            # The same walk as always, remembered on the way past: a multicam
+            # or compound clip in an originals request has no File Path of its
+            # own, and its angles are in this walk (SELECTIVE_ORIGINALS.md
+            # 12.2). No Resolve call is added (CR-68).
+            get_timeline_items=lambda: self._clip_paths.remember(
+                resolve_bridge.poll_timeline_items()),
+            # CR-380 (2026-11-01): VP9 originals fail a full-resolution render.
+            on_timeline_scanned=self._vp9_guard.observe,
         )
 
     def _on_report_response(self, resp: Any) -> None:
@@ -2631,6 +2676,19 @@ class CompanionApp:
         # behavior once on_change is set, so it must stay None in legacy
         # mode to preserve the original watchdog behavior.
         on_change = self._on_tree_change if self._managed else None
+        # Originals on request (docs/SELECTIVE_ORIGINALS.md 4.2, 2026-10-31):
+        # its own down-only lane, built BEFORE lane A because lane A's exclude
+        # hook reads it. The plan is late-bound: the selection client is built
+        # after the lanes. Managed machines with lane B only (a machine that
+        # reads the share directly has every original already).
+        self._originals_lane = originals_lane_mod.OriginalsDownLane(
+            cfg, state_dir,
+            selection_fn=self._originals_selection,
+            disk_floor=self.disk_floor,
+            halted_fn=lambda: bool(self.halt.active),
+            root_present_fn=self.root_is_present,
+            paused_fn=lambda: bool(getattr(self, "_paused", False)),
+        )
         lane_a = RcloneLane(
             direction=DIRECTION_UP,
             local_root=cfg["local_root"],
@@ -2663,7 +2721,18 @@ class CompanionApp:
             on_watch_blocked=self._notify_watch_state,
             # Old paths of files the server has moved away from stay out of
             # lane A for a day, or the copy still here re-uploads itself.
-            extra_excludes_fn=self.file_moves.recent_excludes,
+            # Plus the originals lane's in-flight and just-landed names
+            # (SELECTIVE_ORIGINALS.md 4.3): the NAS has every one of them, and
+            # the express watchdog would otherwise run a no-op for each.
+            extra_excludes_fn=self._lane_a_extra_excludes,
+            # GL-13 (CR-366, 2026-10-07): an upload-only project has no lane
+            # C, so lane A carries every file of it, not only video. Deferred
+            # like known_rels_fn: the sequencer is built after the lanes.
+            carry_all_fn=(
+                (lambda sub: bool(self.sequencer
+                                  and self.sequencer.is_upload_only_subpath(sub)))
+                if self._managed else None
+            ),
         )
         lane_b = RcloneLane(
             direction=DIRECTION_DOWN,
@@ -2771,7 +2840,31 @@ class CompanionApp:
         # attempt gets a verdict inside its own tick rather than 15 s later,
         # and it is bounded by the supervisor's own api_wait_seconds.
         self.syncthing_supervisor.probe = lane_c.api_reachable
-        return [lane_a, lane_b, lane_c]
+        lanes: list[LaneAdapter] = [lane_a, lane_b, lane_c]
+        if self._managed and self._lane_b_enabled:
+            # In self.lanes so every reader of lane statuses sees it: the
+            # tray, the report's lane block, the power guards (D6) and the
+            # drive reminder.
+            lanes.append(self._originals_lane)
+        return lanes
+
+    def _lane_a_extra_excludes(self, subpath: Optional[str]) -> list[str]:
+        """Lane A's exclude hook: the file-move ledger's old paths first, then
+        the originals lane's names. Each source fails on its own."""
+        out = list(self.file_moves.recent_excludes(subpath) or [])
+        lane = getattr(self, "_originals_lane", None)
+        if lane is not None:
+            out += [rel for rel in lane.lane_a_excludes(subpath) if rel not in out]
+        return out
+
+    def _originals_selection(self) -> Optional[list]:
+        """This computer's plan for the originals lane and the request inbox:
+        the selection client's TTL-throttled read, the cache when the
+        dashboard is away."""
+        client = getattr(self, "selection_client", None)
+        if client is None:
+            return None
+        return client.get()[0]
 
     # -- external-SSD root guard (root_guard.py) --------------------------
     def _demote_removable_root_problem(self) -> None:
@@ -3271,6 +3364,22 @@ class CompanionApp:
             target=self._show_out_of_tree_popup, args=(fresh,), kwargs={"snooze": True},
             name="ccsync-popup", daemon=True,
         ).start()
+
+    def _show_vp9_warning(self, title: str, body: str) -> Optional[str]:
+        """The VP9 guard's popup (CR-380). Runs on the guard's thread, under
+        the popup lock like every other Tk root here. None = not shown (another
+        window is open), so the guard asks again at its next check instead of
+        counting an unseen warning as delivered."""
+        if not self._popup_active_lock.acquire(blocking=False):
+            log.info("vp9 guard: another CCSync window is open -- will retry")
+            return None
+        try:
+            stop = popup.confirm_dialog(
+                title, body, ok_label=vp9_guard_mod.SUPPRESS_LABEL,
+                cancel_label=vp9_guard_mod.DISMISS_LABEL)
+            return vp9_guard_mod.SUPPRESS if stop else vp9_guard_mod.DISMISS
+        finally:
+            self._popup_active_lock.release()
 
     def _notify_trash_recovery(self, trash_dir: str) -> None:
         """Toast naming the recovery directory after a lane B run moved local
@@ -3903,8 +4012,8 @@ class CompanionApp:
         media is in the tree" from this scan at noon, with 65 clips hidden
         behind an in-memory set that had no clear() caller anywhere in the
         product -- the only cure was restarting the tray, which nobody knew.
-        The persisted FOLDER ignores (RES-12) survive: those are a standing
-        decision with a [ FORGET ] in Settings, not a dismissal.
+        There is nothing persisted left to survive it: RES-12's folder
+        ignores were retired by CR-356 (2026-09-30).
 
         Safe to call from the tray thread; blocks until any resulting popup
         is closed.
@@ -3964,15 +4073,9 @@ class CompanionApp:
         self._drain_held_relinks()
 
         if not out_of_tree:
-            # The folder ignores are named here because "all media is in the
-            # tree" is not true of a machine that has been told to look past
-            # a folder, and this is the one screen where the editor asked.
-            folders = self.ignore_tracker.folder_count()
-            extra = (f" ({ui_copy.count(folders, 'folder')} are set to be left alone - "
-                     f"Settings shows them)" if folders else "")
-            log.info("whole-project scan: all media is in the tree%s", extra)
+            log.info("whole-project scan: all media is in the tree")
             self._notify_tray(
-                f"Whole-project scan: all media is in the tree{extra}",
+                "Whole-project scan: all media is in the tree",
                 site_mod.notify_title())
             return
 
@@ -4641,8 +4744,40 @@ class CompanionApp:
         # Piggy-backed on this walk rather than given its own thread: it needs
         # exactly the same media pool enumeration, and that call is the
         # expensive part (one locked trip into fusionscript per clip).
+        #
+        # CR-358 (2026-09-30): each pass asks first whether the walk still
+        # describes the open project. The proxy relink can run for a minute
+        # (Resolve refusing link after link), and an editor who switched
+        # projects inside that minute got the OLD project's out-of-tree clips
+        # in a popup labelled with the old name: FIX ALL copied Reproductive
+        # Rights Fight's music into Framing Formosa's folder and relinked
+        # nothing, because those clips were not in the project that was open.
+        if not self._pool_walk_is_current(project_name, "proxy relink"):
+            return
         self._relink_proxies_once(result.get("items", []))
+        if not self._pool_walk_is_current(project_name, "out-of-tree check"):
+            return
         self._classify_pool_once(result.get("items", []))
+
+    def _pool_walk_is_current(self, project_name: str, what: str) -> bool:
+        """Is the project a pool walk was taken in still the one open?
+
+        Only a DIFFERENT name is a no: "" (no project, or the question could
+        not be asked) keeps today's behaviour, since both passes resolve every
+        clip by uid in the open project and find nothing when there is none.
+        Never raises."""
+        if not project_name:
+            return True
+        try:
+            now_open = resolve_bridge.current_project_name(max_age=0)
+        except Exception:
+            log.debug("could not re-read the open project", exc_info=True)
+            return True
+        if now_open and now_open != project_name:
+            log.info("media tree refresh: skipping the %s -- the pool was walked in %r "
+                     "and %r is open now", what, project_name, now_open)
+            return False
+        return True
 
     def _handle_bridge_state(self, connected: bool, reason: str) -> None:
         """Every poll's Resolve-bridge state, from the watcher. Never raises.
@@ -4749,7 +4884,7 @@ class CompanionApp:
         except Exception:
             log.exception("could not show the Resolve scripting warning")
             self._notify_tray(
-                resolve_bridge.NO_SCRIPTING_MESSAGE, site_mod.notify_title())
+                resolve_bridge.scripting_advice(), site_mod.notify_title())
         finally:
             with self._scripting_warn_lock:
                 self._scripting_warn_open = False
@@ -5400,7 +5535,10 @@ class CompanionApp:
             "proxy_gaps": self.proxy_gaps(),
             "stills": self.stills_state(),
             "ignored_this_session": self.ignore_tracker.session_count(),
-            "ignored_folders": self.ignore_tracker.folder_count(),
+            # `ignored_folders` left the wire with CR-356 (2026-09-30): the
+            # folder layer it counted is retired. The dashboard declares it
+            # optional (ResolveHealthIn, default None) and sums it with
+            # ignored_this_session as `or 0`, so its absence reads as zero.
             # Not in the reported contract (the dashboard drops what it does
             # not declare) -- it is the tray's own line: how many clips this
             # machine has EVER been told to leave un-synced, across restarts.
@@ -5819,6 +5957,40 @@ class CompanionApp:
             return 0
 
     # -- the upload lane's silent data-loss shape (SYNC-109) ---------------
+    def future_dated_report(self) -> Optional[dict[str, Any]]:
+        """Lane A's last scan for files dated in the future (CR-366, GL-12),
+        for the tray's own advisory line. Reads lane A's cached scan; the
+        only lookup is the TTL-throttled selection read (removable_projects)
+        used to prune projects no longer ticked. Never raises; None when
+        there is nothing to say."""
+        try:
+            lane = getattr(self, "_lane_a", None)
+            getter = getattr(lane, "future_dated_report", None)
+            if getter is None:
+                return None
+            ticked = None
+            if self.selection_client is not None and self._managed:
+                ticked = [f"{PROJECTS_PREFIX}{p['rel']}"
+                          for p in self.removable_projects()]
+                # Borrowed folders are scanned under their own subpath.
+                try:
+                    entries, _src = self.selection_client.get()
+                    for entry in entries or []:
+                        for inc in entry.get("includes") or []:
+                            sub = str((inc or {}).get("subpath") or "").strip()
+                            if sub:
+                                ticked.append(f"{PROJECTS_PREFIX}{sub}")
+                except Exception:
+                    log.debug("future_dated_report: includes read failed", exc_info=True)
+                # No selection known (nothing cached): prune nothing by
+                # selection rather than hide the warning.
+                if not ticked:
+                    ticked = None
+            return getter(ticked)
+        except Exception:
+            log.exception("future_dated_report() failed")
+            return None
+
     def size_mismatch_samples(self) -> list[dict[str, Any]]:
         """[{"path", "local_size", "server_size"}] for files that exist on
         the server at a different size, so this machine's newer version will
@@ -6125,6 +6297,16 @@ class CompanionApp:
             "blocked": False, "reasons": [], "pending_uploads": 0,
             "lane_c": {}, "unknown": False,
         }
+        # CR-366 round 2 (GL-13, 2026-10-07): the selection may be served up
+        # to selection_fetch_ttl old, long enough for a full -> upload_only
+        # switch to be invisible here. Ask the dashboard afresh; a failed
+        # fetch keeps the cached view (the lane A probe below fails closed
+        # on its own when the server cannot be reached).
+        try:
+            if self.selection_client is not None and self._managed:
+                self.selection_client.fetch(force=True)
+        except Exception:
+            log.debug("removal gate: forced selection fetch failed", exc_info=True)
         mine = next((p for p in self.removable_projects() if p["slug"] == slug), None)
         if mine is None:
             out["blocked"] = True
@@ -6172,12 +6354,13 @@ class CompanionApp:
 
         subpath = f"{PROJECTS_PREFIX}{rel}"
         try:
-            pending = self._lane_a.pending_uploads(subpath)
+            pending = self._lane_a.pending_uploads(subpath, carry_all=upload_only)
             for inc in my_includes:
                 inc_sub = str(inc.get("subpath") or "").strip()
                 if not inc_sub or pending is None:
                     continue
-                more = self._lane_a.pending_uploads(f"{PROJECTS_PREFIX}{inc_sub}")
+                more = self._lane_a.pending_uploads(
+                    f"{PROJECTS_PREFIX}{inc_sub}", carry_all=upload_only)
                 if more is None:
                     pending = None
                     break
@@ -6203,10 +6386,21 @@ class CompanionApp:
                 sample = ", ".join((pending.get("samples") or [])[:3])
                 out["blocked"] = True
                 out["reasons"].append(
-                    f"{ui_copy.count(count, 'video file')} have not been "
-                    f"uploaded yet"
+                    f"{ui_copy.count(count, 'file' if upload_only else 'video file')} "
+                    f"have not been uploaded yet"
                     + (f" (e.g. {sample})" if sample else "")
                 )
+
+        # GL-12 / GL-13 / GL-14 (CR-366, 2026-10-07): three more ways a file
+        # is NOT on the server that the lane A dry run above cannot see. All
+        # three fail CLOSED (an answer that could not be had blocks), and all
+        # three name files, because "N files" is not something an editor can
+        # act on.
+        gate_subpaths = [subpath] + [
+            f"{PROJECTS_PREFIX}{str(inc.get('subpath') or '').strip()}"
+            for inc in my_includes if str(inc.get("subpath") or "").strip()
+        ]
+        self._removal_extra_checks(out, gate_subpaths, upload_only)
         if self.syncthing_admin is not None and not upload_only:
             try:
                 completion = self.syncthing_admin.folder_completion(slug) or {}
@@ -6243,6 +6437,130 @@ class CompanionApp:
                     f"arrived on this computer yet"
                 )
         return out
+
+    def _removal_extra_checks(
+        self, out: dict[str, Any], subpaths: list[str], upload_only: bool,
+    ) -> None:
+        """The removal gate's questions that are not "what would lane A upload
+        right now" (CR-366, 2026-10-07). Mutates `out`.
+
+          * GL-14: a local file whose name the server already holds at a
+            different size never uploads (`copy --ignore-existing`), yet the
+            dry run counts it as done. `strict_size_mismatches` finds them and
+            says None when it could not run.
+          * GL-13: files NO lane carries (an upload-only tick has no lane C).
+            Lane A carries every file of such a project now, so what is left
+            is the names it still refuses; they are listed, not deleted.
+          * GL-12: files lane A would carry but whose date is in the future:
+            its age floor refuses them for ever.
+        """
+        mismatched = 0
+        mismatch_samples: list[str] = []
+        uncarried = 0
+        uncarried_samples: list[str] = []
+        future = 0
+        future_samples: list[str] = []
+        mismatch_unknown = False
+        scan_unknown = False
+        edited = 0
+        edited_samples: list[str] = []
+        edited_unknown = False
+        for sub in subpaths:
+            try:
+                found = self._lane_a.strict_size_mismatches(sub, carry_all=upload_only)
+            except Exception:
+                log.exception("removal gate: size-mismatch check failed for %s", sub)
+                found = None
+            if found is None:
+                mismatch_unknown = True
+            else:
+                mismatched += int(found.get("count") or 0)
+                mismatch_samples += list(found.get("samples") or [])
+            # GL-13 round 2: a same-size edit to a file lane A already
+            # carried (--ignore-existing never re-uploads it) is invisible to
+            # the size check; this compares modification times.
+            try:
+                changed = self._lane_a.edited_since_upload(sub, carry_all=upload_only)
+            except Exception:
+                log.exception("removal gate: edited-since-upload check failed for %s", sub)
+                changed = None
+            if changed is None:
+                edited_unknown = True
+            else:
+                edited += int(changed.get("count") or 0)
+                edited_samples += list(changed.get("samples") or [])
+            try:
+                scan = self._lane_a.local_tree_scan(sub, carry_all=upload_only)
+            except Exception:
+                log.exception("removal gate: local scan failed for %s", sub)
+                scan = None
+            if scan is None:
+                scan_unknown = True
+            else:
+                uncarried += int((scan.get("uncarried") or {}).get("count") or 0)
+                uncarried_samples += list((scan.get("uncarried") or {}).get("samples") or [])
+                future += int((scan.get("future") or {}).get("count") or 0)
+                future_samples += list((scan.get("future") or {}).get("samples") or [])
+
+        def _names(items: list[str]) -> str:
+            return ", ".join(items[:3])
+
+        out["size_mismatches"] = mismatched
+        out["not_carried"] = uncarried
+        out["future_dated"] = future
+        out["edited_since_upload"] = edited
+        if edited_unknown:
+            out["unknown"] = True
+            out["blocked"] = True
+            out["reasons"].append(
+                "CCSync could not check whether you changed a file after it was "
+                "uploaded"
+            )
+        if edited:
+            out["blocked"] = True
+            out["reasons"].append(
+                f"{ui_copy.count(edited, 'file')} changed after they were uploaded, "
+                f"and a changed file does not upload again on an upload-only "
+                f"project (e.g. {_names(edited_samples)}). Rename them first, so "
+                f"they upload as new files"
+            )
+        if mismatch_unknown:
+            out["unknown"] = True
+            out["blocked"] = True
+            out["reasons"].append(
+                "CCSync could not check whether the server already holds a different "
+                "file under the same name as one of yours"
+            )
+        if mismatched:
+            out["blocked"] = True
+            out["reasons"].append(
+                f"{ui_copy.count(mismatched, 'file')} share a name with a different "
+                f"file already on the server, so they will never upload "
+                f"(e.g. {_names(mismatch_samples)}). Rename them first"
+            )
+        if scan_unknown:
+            out["unknown"] = True
+            out["blocked"] = True
+            out["reasons"].append(
+                "CCSync could not read this project's folder to check what is in it"
+            )
+        if uncarried:
+            out["blocked"] = True
+            out["reasons"].append(
+                f"{ui_copy.count(uncarried, 'file')} in this folder are not carried by "
+                f"any sync, so the server will never have them "
+                f"(e.g. {_names(uncarried_samples)})"
+            )
+        if future:
+            out["blocked"] = True
+            out["reasons"].append(
+                f"{ui_copy.count(future, 'file')} are dated in the future (a camera "
+                f"clock set wrong), which CCSync will not upload "
+                f"(e.g. {_names(future_samples)}). One a few hours ahead "
+                f"uploads by itself once that time passes; otherwise its "
+                f"modified date has to be reset to now (ask whoever looks "
+                f"after your computers) before it can upload"
+            )
 
     def _note_removal_override(self, slug: str, rel: str, blockers: dict[str, Any]) -> None:
         """Remember an overridden removal so the dashboard sees it too.
@@ -6366,6 +6684,10 @@ class CompanionApp:
                 f"deleted ({exc}). Delete the folder by hand -- it is safe now."
             )
         log.info("remove_project: deleted %s", target)
+        try:
+            self._lane_a.forget_future_dated(f"{PROJECTS_PREFIX}{rel}")
+        except Exception:
+            log.debug("forget_future_dated failed", exc_info=True)
         return True, f"'{rel}' removed from this computer. The server copy is untouched."
 
     def editor_identity(self) -> Optional[str]:
@@ -6773,6 +7095,13 @@ class CompanionApp:
                 self._lane_a.start_watchdog_only()
             except Exception:
                 log.exception("failed to start lane A watchdog")
+            # Originals on request: its own thread, off the rotation
+            # (SELECTIVE_ORIGINALS.md 4.2). Only where lane B runs.
+            if self._lane_b_enabled:
+                try:
+                    self._originals_lane.start()
+                except Exception:
+                    log.exception("failed to start the originals lane")
         else:
             for lane in self._runnable_lanes():   # comp-app-6: the one predicate
                 try:
@@ -6824,6 +7153,13 @@ class CompanionApp:
                 self._lane_b.stop()
             except Exception:
                 log.exception("failed to stop lane %s", getattr(self._lane_b, "name", self._lane_b))
+            # Same reason as lane B above: stop() is what ends its rclone child.
+            lane = getattr(self, "_originals_lane", None)
+            if lane is not None:
+                try:
+                    lane.stop()
+                except Exception:
+                    log.exception("failed to stop the originals lane")
         else:
             for lane in self.lanes:
                 try:
@@ -9452,7 +9788,6 @@ class CompanionApp:
             f"{health['missing']} missing on disk",
             f"{health['ignored_this_session']} skipped this session",
             f"{health['skipped_ever']} skipped ever",
-            f"{health['ignored_folders']} folder(s) left alone on purpose",
         ]
         return ", ".join(parts) + f" (last scan {health['last_scan_at']})"
 
@@ -10077,6 +10412,11 @@ class CompanionApp:
             # the editor still pushing every new clip to the NAS -- the one
             # thing the button is for (AUDIT_3 M-3).
             self._toggle_express_pause()
+            # The originals lane reads _paused itself (and ends a run on it);
+            # a resume should not wait out its poll.
+            lane = getattr(self, "_originals_lane", None)
+            if lane is not None and not self._paused:
+                lane.wake()
             # Lane C's poll loop is read-only status reporting -- it keeps
             # running regardless of pause state.
         else:
@@ -10241,6 +10581,8 @@ class CompanionApp:
             ("computer id check", self._warn_if_machine_id_is_unreadable),
             ("b-roll server", self._start_broll_server),
             ("yt-dlp manager", self._start_ytdlp_manager),
+            ("Resolve menu scripts", self._start_resolve_menu_install),
+            ("originals requests", self._start_originals_inbox),
             # LAST: it supervises the threads everything above it started
             # (SYS-2). See _start_lane_watchdog.
             ("thread watchdog", self._start_lane_watchdog),
@@ -10369,6 +10711,40 @@ class CompanionApp:
             self, state_path=Path(self._state_dir) / WATCHDOG_STATE_FILENAME)
         watchdog.start()
         self._lane_watchdog = watchdog
+
+    def _start_resolve_menu_install(self) -> None:
+        """Write the originals menu scripts into Resolve's per-user Scripts
+        folder (SELECTIVE_ORIGINALS.md 12.1; D8: no feature flag, always
+        installed). File writes only, never a Resolve call (CR-68), so it is
+        safe while Resolve is open or rendering. Off the start path on its own
+        thread; the import is guarded so a build without the module still
+        starts."""
+        def _install() -> None:
+            try:
+                from . import resolve_menu_install
+            except Exception:
+                log.warning("resolve menu: the installer module is missing from this "
+                            "build -- the Resolve menu items are not installed")
+                return
+            try:
+                result = resolve_menu_install.install_menu_scripts()
+            except Exception:
+                log.exception("resolve menu: install_menu_scripts raised")
+                return
+            ok = bool((result or {}).get("ok")) if isinstance(result, dict) else False
+            (log.info if ok else log.warning)(
+                "resolve menu: %s", (result or {}).get("message", result)
+                if isinstance(result, dict) else result)
+            self._resolve_menu_result = result
+
+        threading.Thread(target=_install, name="ccsync-resolve-menu", daemon=True).start()
+
+    def _start_originals_inbox(self) -> None:
+        """Answer the Resolve menu scripts' request files (12.2). Runs whether
+        or not sync is paused: a pick is recorded on the dashboard, and the
+        originals lane honours the pause on its own."""
+        if self.originals_inbox is not None:
+            self.originals_inbox.start()
 
     def _start_ytdlp_manager(self) -> None:
         """Keep this machine's yt-dlp binary present and current.
@@ -11430,15 +11806,51 @@ class CompanionApp:
         # racing itself over `self._observer = None`.
         with self._shutdown_lock:
             if self._shutdown_started:
-                log.debug("shutdown() already ran -- ignoring the repeat call")
+                first = False
+            else:
+                first = True
+                self._shutdown_started = True
+                self._shutdown_owner = threading.get_ident()
+        if not first:
+            # GL-23 / bug-comp-ui-1 (CR-370, 2026-10-07): the REPEAT call used
+            # to return at once. Quit, Restart and the self-upgrade run the
+            # first teardown on a worker thread; it sets _stop_event early, the
+            # main loop wakes, run()'s finally lands here, returned, and the
+            # interpreter exited while the daemon worker was still stopping
+            # lanes -- an rclone child outlived us beside the new build's lane
+            # B, and the cut-off read as a crash loop. So the repeat waits for
+            # the first to FINISH, bounded so a wedged teardown still cannot
+            # hold the process (and the single-instance slot) forever. The
+            # owner thread never waits for itself (a signal handler re-entering
+            # shutdown on the thread that is mid-teardown).
+            if getattr(self, "_shutdown_owner", None) == threading.get_ident():
+                log.debug("shutdown() re-entered on its own thread -- ignoring")
                 return
-            self._shutdown_started = True
+            done = getattr(self, "_shutdown_done", None)
+            if done is None or done.wait(SHUTDOWN_WAIT_SECONDS):
+                log.debug("shutdown() already ran -- ignoring the repeat call")
+            else:
+                log.warning("shutdown(): the first teardown had not finished after "
+                            "%.0fs; exiting anyway", SHUTDOWN_WAIT_SECONDS)
+            return
+        try:
+            self._shutdown_teardown()
+        finally:
+            done = getattr(self, "_shutdown_done", None)
+            if done is not None:
+                done.set()
+
+    def _shutdown_teardown(self) -> None:
         # FIRST, before any teardown can wedge: this process has now DECIDED
         # to stop, so the next start must not report it as a crash. Everything
         # after this line -- including the hard-exit backstop for a thread that
         # will not join -- is a deliberate exit (CR-93).
         crash_report.mark_clean_exit(self.config)
         self._stop_event.set()
+        try:
+            self._vp9_guard.stop()
+        except Exception:
+            log.exception("failed to stop the VP9 guard")
         # BEFORE the guards below: its whole job is to START threads, and one
         # tick landing during teardown would spawn a sequencer into a process
         # that is exiting. check() reads _shutdown_started too, so this is
@@ -11533,6 +11945,11 @@ class CompanionApp:
                 self.ytdlp.stop()
         except Exception:
             log.exception("failed to stop the yt-dlp sidecar manager")
+        try:
+            if getattr(self, "originals_inbox", None) is not None:
+                self.originals_inbox.stop()
+        except Exception:
+            log.exception("failed to stop the originals request inbox")
         self._stop_lanes()
         try:
             self.reporter.stop()
@@ -11908,6 +12325,11 @@ class CompanionApp:
             )
             cleanup_thread.start()
 
+            # GL-22: past construction and every start-up step, the build is
+            # up. Until this the supervisor treats an exit-1 death of a
+            # just-upgraded build as a failed start and relaunches it.
+            crash_report.mark_booted(self.config)
+            startguard.mark_booted(self.config)
             dispatcher = ui_dispatch.active()
             if dispatcher is not None:
                 # macOS: the main thread belongs to Tk/AppKit from here until
@@ -11941,8 +12363,10 @@ def setup_resolve_prefs_cli(argv: Optional[list[str]] = None) -> int:
     reported and waited on rather than failed on, so the installer can ask
     the editor to quit it and carry straight on when they do.
 
-    Exit codes: 0 = everything applied or already correct, 1 = nothing was
-    applied. Deliberately NOT fatal to an install either way: the companion
+    Exit codes: 0 = something of the LUT/stills pair was applied or already
+    correct, 1 = neither was (the scripting preference is reported on its own
+    line and deliberately NOT counted: windows_bootstrap.ps1 warns "LUT/stills
+    preferences were not set" on a non-zero exit, CR-373 round 2). Deliberately NOT fatal to an install either way: the companion
     retries both on its own schedule, so the worst case is that these
     settings arrive the next time Resolve is closed rather than now.
     """
@@ -11984,6 +12408,20 @@ def setup_resolve_prefs_cli(argv: Optional[list[str]] = None) -> int:
         print("Resolve is closed -- continuing.", flush=True)
 
     applied = 0
+    # CR-373 / GL-29 (2026-10-07): "External scripting using" is None out of
+    # the box, which silently disables the watcher, fixer, popup and Send to
+    # Resolve. Resolve is closed at this point (the loop above), so this is
+    # the one safe moment to write it; Local only, never touched when Local or
+    # Network is already set, and never creates the files.
+    scripting = resolve_prefs_mod.enable_scripting()
+    if scripting == resolve_prefs_mod.OK:
+        print("  External scripting: set to Local", flush=True)
+    elif scripting == resolve_prefs_mod.ALREADY:
+        print("  External scripting: already on", flush=True)
+    else:
+        print(f"  External scripting: not set ({scripting}) -- in Resolve, "
+              "Preferences > System > General > External scripting using: "
+              "Local", flush=True)
     for label, manager in (
         ("LUT library", luts_mod.LutLinkManager(cfg, local_root)),
         ("stills/gallery", stills_mod.StillsManager(cfg, local_root)),
@@ -12035,6 +12473,12 @@ def run() -> None:
     theme.claim_app_identity()
 
     cfg = config_mod.load_config()
+    # GL-22 (CR-370, 2026-10-07): the "started" marker. Everything that can
+    # fail at IMPORT time is behind us (this module is imported), and the
+    # single-instance wait below can take 90 s behind a predecessor that is
+    # waiting to hear this very marker, so it has to be written first.
+    startguard.note_started(cfg)
+
     # Logging (and a first validate_config pass) must exist BEFORE
     # CompanionApp() is constructed -- a hand-edited bad value (e.g.
     # poll_interval = "fast") raises inside __init__, and in the windowed
@@ -12081,6 +12525,16 @@ def run() -> None:
         _win_trust.install()
     except Exception:
         log.debug("could not install the Windows trust filter", exc_info=True)
+    # GL-27 / CR-372 (2026-10-07): a ~/.ccsync an older Windows wizard stripped
+    # of inherited permissions cannot save the EULA record or the safety
+    # latches. Repaired here too because a tray-upgraded machine never runs an
+    # installer. Never raises; a healthy folder costs one bounded walk.
+    try:
+        from . import state_acl as _state_acl
+
+        _state_acl.repair_if_needed(config_mod.CONFIG_DIR)
+    except Exception:
+        log.debug("could not check the state folder's permissions", exc_info=True)
     errors, _warnings = config_mod.validate_config(cfg)
     if errors:
         log.error(
@@ -12089,7 +12543,11 @@ def run() -> None:
         )
         for problem in errors:
             log.error("  - %s", problem)
-    if not acquire_single_instance():
+    got_lock = acquire_single_instance()
+    # Whatever the outcome: this launch got far enough to be a real start or a
+    # clean duplicate, so it is not a start failure (startguard.begin).
+    startguard.reached_lock(cfg, got_lock)
+    if not got_lock:
         _warn_already_running()
         return
     # AFTER the single-instance lock, deliberately: install_native writes a

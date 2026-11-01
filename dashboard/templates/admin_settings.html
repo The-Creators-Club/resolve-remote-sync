@@ -33,6 +33,7 @@
 {% set FIELD_HINTS = {
   "org_name": "Your company's full name, shown in the header, on the login page and in every editor's tray. Example: Northlight Films Ltd.",
   "org_short": "The short form used where space is tight (the header, a browser tab). Example: Northlight.",
+  "support_contact": "Where your editors and admins are told to send a problem: an email address or a web page. Blank uses the vendor's own support address, shown in the box as a grey hint. Example: help@northlight.example.",
   "product_name": "What this software is called in your fleet. Leave it as the product's own name unless you have a reason. Example: CC Sync.",
   "brand_logo": "Your studio's mark in every editor's tray and window title. Blank wears the product's own. A bare name (cc_mark_white.png) selects a mark the companion build already ships; anything with a slash is a path on the EDITOR's computer. It must be WHITE on transparent: the tray tints it to carry sync status, so a pre-coloured logo comes out a solid blob.",
   "tree_name": "The name of the top folder that holds every project on the server, and the same folder on every editor's disk. Changing it does not move anything. Example: Studio_Projects.",
@@ -42,7 +43,7 @@
   "dashboard_url": "The address of THIS dashboard. It must be exactly the address editors type in their browser, or Send to Resolve stops working. Example: https://nas.example.ts.net",
   "sftp_host": "The address uploads and proxy downloads connect to. Usually the same server as this dashboard. Example: nas.example.ts.net",
   "sftp_port": "The port for that connection. 22 unless your server was set up differently. Example: 22",
-  "sftp_chunk_size": "How much data is sent at a time. Bigger is faster on a good link and worse on a poor one. Leave it alone unless we ask. Example: 64M",
+  "sftp_chunk_size": "How much data is sent at a time. Bigger is faster on a good link and worse on a poor one. Leave it blank unless we ask. On a Synology server use 64Ki (a larger value cuts big proxy downloads short).",
   "sftp_concurrency": "How many transfers run at once. Leave it alone unless we ask. Example: 8",
   "sftp_shell_type": "Which kind of shell the server offers. Leave it as it was set up; a wrong value stops every upload. Example: unix",
   "rclone_remote": "The internal name of the upload connection. It is generated for you; change it only if we ask. Example: ccnas",
@@ -64,7 +65,7 @@
   "nas_syncthing_id": "Syncthing is the sync engine that runs on the server and on every computer.",
 } %}
 {% set FIELD_LABELS = {
-  "org_name": "Org name", "org_short": "Short name",
+  "org_name": "Org name", "org_short": "Short name", "support_contact": "Support contact",
   "product_name": "Product name", "brand_logo": "Tray logo",
   "tree_name": "Tree name", "canonical_prefix": "Drive letter",
   "remote_root": "Remote root", "smb_unc": "SMB UNC",
@@ -81,9 +82,9 @@
   {% set flag = FIELD_FLAGS.get(key, "") %}
   <div class="form-row">
     <label class="lbl" for="f-{{ key }}"{% if LABEL_TIPS.get(key) %} title="{{ LABEL_TIPS[key] }}"{% endif %}>{{ FIELD_LABELS.get(key, key) }}
-      {%- if is_auto %}<small><span class="sf-auto" title="Read from the running server, so the box is locked. Change the thing it comes from instead.">auto-derived</span>: {{ auto_derived_reason.get(key, "") }}</small>{% endif %}</label>
+      {%- if is_auto %}<small><span class="sf-auto" title="Read from the running server, so the box is locked. Change the thing it comes from instead.">{{ "locked" if (tree_locked and key in ("tree_name", "canonical_prefix", "remote_root")) else "auto-derived" }}</span>: {{ auto_derived_reason.get(key, "") }}</small>{% endif %}</label>
     <div>
-      <input class="inp" type="text" id="f-{{ key }}" name="{{ key }}" value="{{ manifest[key] }}"
+      <input class="inp" type="text" id="f-{{ key }}" name="{{ key }}" value="{{ support_contact_raw if key == 'support_contact' else manifest[key] }}"{% if key == 'support_contact' %} placeholder="{{ support_contact_default }}"{% endif %}
              {% if hint %}title="{{ hint }}" aria-describedby="h-{{ key }}"{% endif %} {{ "readonly" if is_auto }}>
       {% if hint %}<div class="hint" id="h-{{ key }}">{{ hint }}</div>{% endif %}
       {% if flag %}<div class="hint sf-hint-warn">&#9650; {{ flag }}</div>{% endif %}
@@ -108,6 +109,7 @@
       <button type="button" role="tab" id="tab-features" aria-controls="panel-features" aria-selected="false" tabindex="-1" title="Optional parts of the product, switched on for this site only, and which model indexes b-roll.">features</button>
       <button type="button" role="tab" id="tab-ai" aria-controls="panel-ai" aria-selected="false" tabindex="-1" title="Which AI answers the YouTube downloader, Timeline Cards and the server check, and adding a new one.">ai providers</button>
       <button type="button" role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" tabindex="-1" title="Download or paste the whole settings file, and see or undo recent changes.">export and history</button>
+      <button type="button" role="tab" id="tab-sharing" aria-controls="panel-sharing" aria-selected="false" tabindex="-1" title="How many shares the server may take away from computers in one pass before it stops and asks.">sharing safety</button>
       <button type="button" role="tab" id="tab-android" aria-controls="panel-android" aria-selected="false" tabindex="-1" title="The proof the Android app needs before it opens without a browser address bar.">android</button>
     </div>
 
@@ -119,7 +121,7 @@
           {{ bar("your_studio", "header, login page, every tray") }}
           <div class="body form">
             <div class="lede">Who this deployment is. These names appear in the header, on the login page and in every editor's tray.</div>
-            {% for key in ["org_name", "org_short", "product_name", "brand_logo"] %}{{ field(key) }}{% endfor %}
+            {% for key in ["org_name", "org_short", "support_contact", "product_name", "brand_logo"] %}{{ field(key) }}{% endfor %}
           </div>
         </section>
         <section class="win" data-win="the_tree" id="win-the_tree">
@@ -137,6 +139,8 @@
           <details class="fold" data-key="site-connect">
             <summary title="Open the seven fields that say how editors' computers reach this server.">show the seven connection fields <span class="dim">Set up once when the server was installed. A wrong value here stops syncing for everybody.</span></summary>
             <div class="body form">
+              {# CR-364 / GL-10 (2026-10-07): the fields below show the DERIVED safe value while the stored row may still be unsafe; say so, and saving this form writes the safe pair. #}
+              {% if manifest._sftp_transport_problem %}<p class="dim" role="alert">The saved transfer setting is not safe for this server: {{ manifest._sftp_transport_problem }}. Editors already get the safe values shown below. Save this form to store them.</p>{% endif %}
               {% for key in ["sftp_host", "sftp_port", "sftp_chunk_size", "sftp_concurrency", "sftp_shell_type", "rclone_remote", "nas_syncthing_id"] %}{{ field(key) }}{% endfor %}
             </div>
           </details>
@@ -165,9 +169,14 @@
             <label class="check" title="Turns on the YouTube page and its download worker for this site."><input type="checkbox" name="features.youtube_download" {{ "checked" if manifest.features.youtube_download }}><span class="g"></span><span class="l">YouTube downloader</span></label>
             <label class="check" title="Adds the helpers that get past YouTube's bot checks. Only needed when YouTube refuses downloads."><input type="checkbox" name="features.youtube_unblock" {{ "checked" if manifest.features.youtube_unblock }}><span class="g"></span><span class="l">YouTube anti-automation bypass</span></label>
             <label class="check" title="A computer never goes backwards and never updates in the middle of a popup."><input type="checkbox" name="features.auto_update" {{ "checked" if manifest.features.auto_update }}><span class="g"></span><span class="l">Automatic companion updates<span class="dim"> - editors' computers take a newer published build without anyone clicking</span></span></label>
+            {# GL-31 / CR-374 (2026-10-07): on a vendor build the two CLI rows are not
+               rendered at all, so the page neither advertises Claude Code nor posts
+               features.ai_cli_auto_update (a Save would overwrite a stored value). #}
+            {% if not cli_build_locked %}
             {# No name: set on the AI providers tab, where accepting the notice turns it on. #}
             <label class="check" title="Lets this server use Claude Code or Codex. It is switched on from the AI providers tab, after its notice."><input type="checkbox" disabled {{ "checked" if manifest.features.ai_cli_providers }}><span class="g"></span><span class="l">AI CLI providers<span class="dim"> - set on <a class="hi" href="#ai-providers">AI providers</a>, where accepting the notice turns it on</span></span></label>
             <label class="check" title="Only does anything once Claude Code is installed from the AI providers tab."><input type="checkbox" name="features.ai_cli_auto_update" {{ "checked" if manifest.features.ai_cli_auto_update }}><span class="g"></span><span class="l">Keep Claude Code up to date<span class="dim"> - once a day, this server installs the publisher's newer Claude Code (checked against the publisher's checksum) so new Claude models work without anyone clicking update</span></span></label>
+            {% endif %}
           </div>
         </section>
         {# LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.1, 2026-09-25), carried from
@@ -266,6 +275,22 @@
           </div>
         </section>
       </div>
+    </div>
+
+    {# ======================================================== sharing safety
+       GL-33 / CR-376 (2026-10-07). A sibling panel with its own form, like the
+       others: the allowance is a dashboard-only row, not a site_store key, so
+       it must never ride #settings-form. #}
+    <div class="sf-stack sf-panel" id="panel-sharing" hidden>
+      <section class="win" data-win="sharing_safety" id="win-sharing_safety">
+        {{ bar("sharing_safety", "the stop on mass unsharing") }}
+        <form class="body form" id="enforce-allowance-form" hx-post="/partials/admin/enforce/allowance" hx-target="#enforce-allowance-result" hx-swap="innerHTML">
+          <div class="lede">The server stops and asks when one pass would take more shares away than this limit, because that is what a broken snapshot looks like. Removals an admin caused on purpose (an archived project, a suspended person, an unticked project) never count. The limit is at least the server's flat floor; set a number here to let it grow with the fleet: this many removals for every computer. 0 keeps the flat floor.</div>
+          <div class="form-row"><label class="lbl" for="f-enforce-per-computer">Removals per computer<small>0 to 100</small></label>
+            <div><input class="inp" type="number" min="0" max="100" id="f-enforce-per-computer" name="per_computer" value="{{ enforce_per_computer }}"></div></div>
+          <div class="sf-foot"><button class="key primary" type="submit"><span class="t">Save</span></button><span class="res" id="enforce-allowance-result" role="status" aria-live="polite"></span></div>
+        </form>
+      </section>
     </div>
 
     {# ============================================================== android #}

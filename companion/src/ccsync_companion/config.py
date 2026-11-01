@@ -153,7 +153,13 @@ log = logging.getLogger("ccsync.config")
 # and this loop claims it BY ID through a closed idle gate, and a whisper pass
 # finally reports progress -- its stdout is read on a drain thread instead of
 # being buffered until exit, so the fleet chip moves while the GPU works.
-VERSION = "0.9.84"
+# 0.9.86 (2026-10-07): the prelaunch-review wave CR-362..CR-377 (companion
+# halves of CR-366, CR-367, CR-370, CR-372, CR-373, CR-374, CR-375).
+# 0.9.87 (2026-10-31): originals on request (docs/SELECTIVE_ORIGINALS.md
+# section 12): the `lane_b_originals_down` lane, the Resolve menu scripts and
+# their request inbox. Needs dashboard 0.7.77 for the `originals` key and the
+# PUT route; against an older one it brings nothing down.
+VERSION = "0.9.87"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
@@ -605,7 +611,8 @@ DEFAULTS: dict[str, Any] = {
     "ytdl_local_downloads": True,
     # "" = the companion manages its own yt-dlp under
     # %LOCALAPPDATA%\ccsync\tools (macOS: ~/Library/Application Support/ccsync/
-    # tools), installing it once and letting `yt-dlp -U` keep it current --
+    # tools), installing it once and letting `yt-dlp --update-to nightly`
+    # keep it current (daily, from the nightly channel since CR-361) --
     # yt-dlp needs updating every few weeks (YouTube breaks it deliberately)
     # and the companion's own release cadence is months for some machines, so
     # the downloader must not be bundled with it. Set this to a yt-dlp you
@@ -619,7 +626,10 @@ DEFAULTS: dict[str, Any] = {
     # constant in a dashboard release, and CR-80/CR-83 were both "the whole
     # fleet cannot download and every companion logs `current` nightly". 0 or
     # negative switches the rule off. Never applies to `ytdlp_path`: a yt-dlp
-    # an editor manages is theirs.
+    # an editor manages is theirs. Since CR-361 (2026-10-05) the binary asks
+    # the yt-dlp NIGHTLY channel for an update every day whatever its age;
+    # this number only decides when a check that fails is reported as stale,
+    # and 0 still turns every self-initiated update off.
     "ytdlp_max_age_days": 21,
     # A Netscape cookies.txt exported from a signed-in YouTube session, or "".
     # Set = the local downloader sends it (yt-dlp --cookies), which is what
@@ -723,6 +733,10 @@ DEFAULTS: dict[str, Any] = {
     # the "still disconnected, plug it back in to finish syncing" balloons
     # after it, for as long as the drive stays out. 0 = first warning only.
     "drive_reminder_minutes": 30.0,
+    # Warn when the open Resolve timeline uses VP9 source media, which Resolve
+    # Studio cannot render at full resolution (CR-380, 2026-11-01,
+    # vp9_guard.py). ON by default; false stops the checks and the popup.
+    "vp9_guard": True,
     # False = no sync lanes at all: the machine works directly off the NAS
     # share (base rig). The companion still runs the timeline watcher, popup
     # fixer, and dashboard reporter; lanes report idle with a "disabled"
@@ -1366,13 +1380,13 @@ ytdl_local_downloads = true
 # weeks because YouTube deliberately breaks it, which is exactly why it is not
 # built into this app. Point this at a yt-dlp you install and update YOURSELF
 # and the companion will only read its version: it never installs over your
-# binary and never runs `yt-dlp -U` against it.
+# binary and never runs an update against it.
 ytdlp_path = ""
-# How many days old the copy of yt-dlp this app looks after may get before it
-# updates itself without waiting to be told to. yt-dlp's version numbers are
-# release dates, so this is just "if mine is older than three weeks, get the
-# new one" -- it is what stops a YouTube change from quietly breaking downloads
-# on every machine until somebody notices. Set 0 to turn it off. Ignored if you
+# The copy of yt-dlp this app looks after comes from yt-dlp's NIGHTLY builds
+# and checks for a newer one once a day, because YouTube changes land faster
+# than yt-dlp's stable releases. This number is how many days old it may get
+# before a failed daily check is reported as "out of date" (yt-dlp's version
+# numbers are dates). Set 0 to stop it updating itself at all. Ignored if you
 # set ytdlp_path above: a yt-dlp you installed is yours.
 ytdlp_max_age_days = 21
 
@@ -1476,6 +1490,13 @@ popup_snooze_seconds = 300
 # until the link recovers.
 resolve_scripting_warning = true
 resolve_scripting_warning_interval = 300
+
+# Warn when the open Resolve timeline uses VP9 source media (typically a
+# YouTube download). Resolve Studio cannot render a VP9 original at full
+# resolution, and the H.264 proxies hide the problem until render time. The
+# popup lists the clips and offers to stop warning for that timeline. Set
+# false to switch the check off.
+vp9_guard = true
 
 # Restart the companion when the Resolve it was connected to exits, so its
 # scripting link starts clean against the next one. Leave this on unless you

@@ -32,6 +32,9 @@ import install_dashboard_app as ida  # noqa: E402
 
 IMAGE_TEMPLATE = ida.LOCAL_DASHBOARD_DIR / "deploy" / "compose.image.yaml"
 HOST_ROOT = "/mnt/tank/apps/ccsync-dashboard"
+# A well-formed Ed25519 public key (32 bytes, base64): the preflight now refuses
+# anything else (CR-362 / GL-03, 2026-10-07). This is the vendor key.
+GOOD_KEY = "GKNmk8MktRkGkrBv+ziF7O6ZNKCnjXfC9/TwDiYwKDY="
 
 
 def _service(mode: str, **kw) -> dict:
@@ -255,14 +258,17 @@ def test_image_mode_refuses_an_empty_release_pubkey_set(monkeypatch, capsys):
     problem = ida.image_mode_preflight("ghcr.io/x/y:1", dry_run=True)
     assert problem
     assert "DASH_RELEASE_PUBKEYS" in problem
-    assert "release_key.py pubkey" in problem
+    # CR-362 / GL-03 (2026-10-07): the refusal sends an operator to the
+    # VENDOR's key, never to minting their own.
+    assert "release_key.py pubkey" not in problem
+    assert "VENDOR" in problem and "docs/INSTALL.md step 6" in problem
 
 
 def test_a_blank_release_feed_is_a_warning_not_a_refusal(monkeypatch, capsys):
     """Image mode without a feed is a valid deployment -- it just updates from
     the base rig, like bind mode does. Refusing it would make the migration
     conditional on a second, unrelated decision."""
-    monkeypatch.setenv("DASH_RELEASE_PUBKEYS", "key==")
+    monkeypatch.setenv("DASH_RELEASE_PUBKEYS", GOOD_KEY)
     assert ida.image_mode_preflight("ghcr.io/x/y:1", dry_run=True) == ""
     err = capsys.readouterr().err
     assert "feed_url is blank" in err
@@ -272,7 +278,7 @@ def test_the_preflight_prints_the_runtime_id_the_deploy_expects(monkeypatch, cap
     """So `docker exec <c> cat /venv/.runtime-id` has something to be compared
     against -- that comparison is what decides whether the Packages page offers
     a code update or says 'runtime update'."""
-    monkeypatch.setenv("DASH_RELEASE_PUBKEYS", "key==")
+    monkeypatch.setenv("DASH_RELEASE_PUBKEYS", GOOD_KEY)
     ida.image_mode_preflight("ghcr.io/x/y:1", dry_run=True)
     out = capsys.readouterr().out
     assert "expected runtime id: " in out
@@ -297,7 +303,7 @@ def test_the_expected_runtime_id_matches_the_dockerfile_and_the_lock():
 
 
 def test_a_tag_gets_a_digest_note_and_a_digest_does_not(monkeypatch, capsys):
-    monkeypatch.setenv("DASH_RELEASE_PUBKEYS", "key==")
+    monkeypatch.setenv("DASH_RELEASE_PUBKEYS", GOOD_KEY)
     ida.image_mode_preflight("ghcr.io/x/y:1", dry_run=True)
     assert "is a TAG, not a digest" in capsys.readouterr().err
     ida.image_mode_preflight("ghcr.io/x/y@sha256:abc", dry_run=True)
@@ -390,7 +396,7 @@ def _dry_run(monkeypatch, capsys, extra_argv=()):
 
     for name, value in (("SYNCTHING_API_KEY", "k"), ("DASH_REPORT_TOKEN", "t"),
                         ("DASH_SESSION_SECRET", "s"), ("TRUENAS_PW", "pw"),
-                        ("DASH_RELEASE_PUBKEYS", "testkey=="),
+                        ("DASH_RELEASE_PUBKEYS", GOOD_KEY),
                         ("BROLL_INGEST_TOKEN", "ingestTOKENsentinel4b7d1e9a03c6")):
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(ida, "run_ssh", record)
@@ -622,3 +628,90 @@ def test_bind_mode_pulls_nothing(monkeypatch, capsys):
     monkeypatch.setattr(ida, "install_tree", lambda *a, **k: True)
     _rc, transcript = _dry_run(monkeypatch, capsys, ("--mode", "bind"))
     assert "docker pull" not in transcript
+
+
+# --------------------------------------------------------------------------
+# CR-362 / GL-02 / GL-03 (2026-10-07): the vendor key and feed on the deploy path
+# --------------------------------------------------------------------------
+
+def test_a_pubkey_that_is_not_an_ed25519_key_is_refused(monkeypatch):
+    """`openssl rand -hex 24` on DASH_RELEASE_PUBKEYS used to deploy clean and
+    leave the dashboard with no key (Settings drops it): 503 on every publish."""
+    import secrets
+    monkeypatch.setenv("DASH_RELEASE_PUBKEYS", secrets.token_hex(24))
+    problem = ida.image_mode_preflight("ghcr.io/x/y:1", dry_run=True)
+    assert "not an Ed25519 public key" in problem
+    assert "VENDOR" in problem and "docs/INSTALL.md step 6" in problem
+
+
+def test_the_vendor_switch_supplies_key_and_feed_when_both_are_blank(monkeypatch):
+    monkeypatch.delenv("DASH_RELEASE_PUBKEYS", raising=False)
+    monkeypatch.setattr(ida, "site_value", lambda *a, **k: "")
+    assert ida.effective_release_pubkeys() == ""
+    assert ida.effective_release_feed_url() == ""
+    monkeypatch.setenv("DASH_VENDOR_DEFAULTS", "1")
+    vd = ida._vendor_defaults_module()
+    assert ida.effective_release_pubkeys() == ",".join(vd.VENDOR_RELEASE_PUBKEYS)
+    assert ida.effective_release_feed_url() == vd.VENDOR_FEED_URL
+    assert ida.image_mode_preflight("ghcr.io/x/y:1", dry_run=True) == ""
+
+
+def test_a_value_the_operator_set_beats_the_vendor_switch(monkeypatch):
+    monkeypatch.setenv("DASH_VENDOR_DEFAULTS", "1")
+    monkeypatch.setenv("DASH_RELEASE_PUBKEYS", GOOD_KEY)
+    monkeypatch.setattr(ida, "site_value", lambda *a, **k: "https://own.example/c.json")
+    assert ida.effective_release_pubkeys() == GOOD_KEY
+    assert ida.effective_release_feed_url() == "https://own.example/c.json"
+
+
+def test_a_customer_deploy_tells_the_container_the_vendor_holds_the_key(monkeypatch):
+    """CR-362 / GL-02 round 2: via the install_dashboard_app path the container
+    got the vendor key but no signal, so the Protection page asked a customer to
+    confirm a backup of a key they never had. The studio (switch unset) pins
+    the same key and must keep the form."""
+    monkeypatch.setenv("DASH_RELEASE_PUBKEYS", GOOD_KEY)
+    monkeypatch.delenv("DASH_VENDOR_DEFAULTS", raising=False)
+    studio = _service("image")["environment"]
+    assert studio["DASH_VENDOR_CUSTOMER"] == ""
+    monkeypatch.setenv("DASH_VENDOR_DEFAULTS", "1")
+    customer = _service("image")["environment"]
+    assert customer["DASH_VENDOR_CUSTOMER"] == "1"
+    # the broad switch must NOT reach the container (it lifts the Synology
+    # SFTP window limit, right only for the appliance's own sidecar sshd)
+    assert "DASH_VENDOR_DEFAULTS" not in customer
+
+
+def test_container_env_to_protection_page_show_key_ack(monkeypatch, tmp_path):
+    import sqlite3, sys
+    dash = str(Path(__file__).resolve().parents[2] / "dashboard" / "src")
+    monkeypatch.syspath_prepend(dash)
+    from ccsync_dashboard import protection, vendor_defaults
+    from ccsync_dashboard.settings import Settings
+    vkey = vendor_defaults.VENDOR_RELEASE_PUBKEYS[0]
+    monkeypatch.setenv("DASH_RELEASE_PUBKEYS", vkey)
+    monkeypatch.setenv("DASH_VENDOR_DEFAULTS", "1")
+    cust = Settings.from_env(_service("image")["environment"])
+    monkeypatch.delenv("DASH_VENDOR_DEFAULTS")
+    studio = Settings.from_env(_service("image")["environment"])
+    assert cust.vendor_defaults is False and cust.vendor_customer is True
+    assert protection.vendor_holds_the_key(cust) is True
+    assert protection.vendor_holds_the_key(studio) is False
+
+
+@pytest.mark.parametrize("mode", ["image", "bind"])
+def test_the_synology_compose_file_carries_the_vendor_key_and_flag(monkeypatch, mode):
+    """CR-362 / GL-02 round 2: the Synology deploy uploads the RENDERED template
+    file, not compose_config()'s dict; both templates once hard-coded an empty
+    DASH_RELEASE_PUBKEYS and had no DASH_VENDOR_CUSTOMER."""
+    import re
+    vd = ida._vendor_defaults_module()
+    monkeypatch.delenv("DASH_RELEASE_PUBKEYS", raising=False)
+    monkeypatch.setenv("DASH_VENDOR_DEFAULTS", "1")
+    text = ida.render_compose_yaml(ida.compose_variables(),
+                                   template=ida.compose_template_for(mode))
+    assert re.search(r'DASH_RELEASE_PUBKEYS: "%s"' % re.escape(",".join(vd.VENDOR_RELEASE_PUBKEYS)), text)
+    assert 'DASH_VENDOR_CUSTOMER: "1"' in text
+    monkeypatch.delenv("DASH_VENDOR_DEFAULTS")
+    text = ida.render_compose_yaml(ida.compose_variables(),
+                                   template=ida.compose_template_for(mode))
+    assert 'DASH_RELEASE_PUBKEYS: ""' in text and 'DASH_VENDOR_CUSTOMER: ""' in text

@@ -578,6 +578,59 @@ NO_SERVER_MESSAGE = (
     "(starting up or shutting down)"
 )
 NO_SERVER_GRACE_SECONDS = 600.0
+
+# CR-373 / GL-29 (2026-10-07): "Quit and reopen Resolve" cannot fix a seat
+# whose "External scripting using" is None (Resolve's default) or whose Resolve
+# is the Free edition, and those are the two states a brand-new customer
+# machine is most likely to be in. The state KEY stays NO_SCRIPTING_MESSAGE
+# (the watcher, tray and reporter compare against it); this is only the
+# sentence the editor is SHOWN, and it needs the preference file, so it is
+# built on demand and never on a render path.
+_STUDIO_NOTE = (
+    "Scripting needs DaVinci Resolve Studio, the paid edition. The free "
+    "edition has no scripting interface, and no setting can add it.")
+
+
+def scripting_advice(ever_connected: Optional[bool] = None,
+                     prefs_status: Optional[dict] = None) -> str:
+    """What to tell an editor whose Resolve is open but not scriptable.
+
+    `ever_connected` None reads the session state. `prefs_status` is
+    resolve_prefs.scripting_status()'s dict (read here when not given). Never
+    raises, never touches Resolve (only its preference file).
+    """
+    try:
+        if ever_connected is None:
+            ever_connected = machine_ever_connected()
+        status = prefs_status if prefs_status is not None else             resolve_prefs.scripting_status()
+        mode = status.get("mode") if isinstance(status, dict) else None
+        readable = isinstance(status, dict) and status.get("prefs") == "ok"
+    except Exception:
+        ever_connected, mode, readable = bool(ever_connected), None, False
+    if ever_connected:
+        # It worked before: the launch-time failure the restart advice was
+        # written for.
+        return NO_SCRIPTING_MESSAGE
+    pref = (
+        "In Resolve open Preferences > System > General and set "
+        "'External scripting using' to Local, click Save, then quit and "
+        "reopen Resolve.")
+    if readable and mode in (resolve_prefs.SCRIPTING_NONE, None):
+        return (
+            "DaVinci Resolve is open but this computer has never had a "
+            "scripting connection to it, and its 'External scripting using' "
+            "preference is set to None (Resolve's default). " + pref + " "
+            + _STUDIO_NOTE)
+    if readable:
+        return (
+            "DaVinci Resolve is open but this computer has never had a "
+            "scripting connection to it, although 'External scripting using' "
+            f"is already {status.get('mode_name')}. " + _STUDIO_NOTE + " If "
+            "this is Studio, quit and reopen Resolve; if that does not help, "
+            f"also restart the companion ({ui_copy.QUIT}, then relaunch it).")
+    return (
+        "DaVinci Resolve is open but this computer has never had a scripting "
+        "connection to it. " + _STUDIO_NOTE + " " + pref)
 _no_server_lock = threading.Lock()
 _no_server_since: Optional[float] = None
 
@@ -692,6 +745,52 @@ _session_ever_connected = False
 _session_reason = ""
 
 
+# CR-373 / GL-29 (2026-10-07): "this COMPUTER has never had a scripting
+# connection" is a machine fact, but _session_ever_connected is per process and
+# the companion restarts itself after every Resolve quit
+# (app._maybe_recover_stale_bridge), so at the next launch, exactly when the
+# CR-68 failure happens, the flag is always False. A marker file carries it
+# across restarts. Tests point the override at a tmp path (conftest).
+_EVER_MARKER_OVERRIDE: Optional[Path] = None
+_marker_written = False
+
+
+def _ever_marker_path() -> Optional[Path]:
+    if _EVER_MARKER_OVERRIDE is not None:
+        return _EVER_MARKER_OVERRIDE
+    try:
+        from . import startguard  # noqa: PLC0415
+        return startguard.state_dir_for() / "resolve_ever_connected"
+    except Exception:
+        return None
+
+
+def machine_ever_connected() -> bool:
+    """True when this computer has connected to Resolve in this or ANY earlier
+    companion process. Reads a file only; never raises, never touches Resolve."""
+    try:
+        if _session_ever_connected:
+            return True
+        p = _ever_marker_path()
+        return bool(p is not None and p.is_file())
+    except Exception:
+        return False
+
+
+def _write_ever_marker() -> None:
+    global _marker_written
+    try:
+        p = _ever_marker_path()
+        if p is None or p.is_file():
+            _marker_written = True
+            return
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(time.strftime("%Y-%m-%dT%H:%M:%S") + "\n", encoding="utf-8")
+        _marker_written = True
+    except Exception:
+        log.debug("could not write the ever-connected marker", exc_info=True)
+
+
 def note_connection(connected: bool, reason: str = "") -> None:
     """Record the bridge's connection state. Cheap, and never raises."""
     global _session_connected, _session_ever_connected, _session_reason
@@ -700,6 +799,8 @@ def note_connection(connected: bool, reason: str = "") -> None:
         _session_reason = "" if connected else str(reason or "")
         if connected:
             _session_ever_connected = True
+    if connected and not _marker_written:
+        _write_ever_marker()
 
 
 def session_state() -> dict[str, Any]:
@@ -723,10 +824,13 @@ def reset_session_state() -> None:
     """Forget everything recorded above -- for tests only; the companion has
     exactly one session and never calls this."""
     global _session_connected, _session_ever_connected, _session_reason
+    global _marker_written
     with _SESSION_LOCK:
         _session_connected = None
         _session_ever_connected = False
         _session_reason = ""
+    # The marker FILE survives on purpose: it is what a restart looks like.
+    _marker_written = False
 
 
 def _norm_path(p: str) -> str:
@@ -3586,6 +3690,55 @@ def _canonicalize_imported(
             )
 
 
+def _clips_in(folder: Any) -> list[Any]:
+    try:
+        return list(folder.GetClipList() or [])
+    except Exception:
+        return []
+
+
+def _same_folder(a: Any, b: Any) -> bool:
+    """Whether two Folder handles name one bin. Never raises.
+
+    fusionscript hands out a new proxy object per call, so `is` only ever
+    answers for the fakes; the folder's unique id is the real answer.
+    """
+    if a is None or b is None:
+        return False
+    if a is b:
+        return True
+    try:
+        ua, ub = a.GetUniqueId(), b.GetUniqueId()
+    except Exception:
+        return False
+    return bool(ua) and ua == ub
+
+
+def _move_into_bin(media_pool: Any, items: list[Any], bin_folder: Any,
+                   landing: Any) -> None:
+    """MoveClips `items` into `bin_folder`. Best-effort, never raises.
+
+    A refusal leaves the clips in the bin they were imported into; the
+    caller's re-read of `bin_folder` then reports them as not filed, and the
+    next scan finds them in the pool and skips them (the pool-wide dedupe).
+    Nothing here deletes: a clip in the wrong bin is the editor's to drag,
+    a clip removed from their project is not ours to have removed.
+    """
+    if not items:
+        return
+    try:
+        moved = media_pool.MoveClips(items, bin_folder)
+    except Exception:
+        log.warning("resolve: MoveClips raised for %d clip(s)", len(items), exc_info=True)
+        moved = False
+    if not moved:
+        log.warning(
+            "resolve: imported %d clip(s) but Resolve would not move them into %s; "
+            "they are in %s", len(items), _safe_folder_name(bin_folder),
+            _safe_folder_name(landing) if landing is not None else "the current bin",
+        )
+
+
 def _refused(message: str) -> dict[str, Any]:
     """An import that never got as far as ImportMedia.
 
@@ -3682,32 +3835,26 @@ def _import_files_to_bin_path_locked(
         return {"ok": False, "message": "could not create the bin",
                 "imported": [], "skipped_existing": skipped, "failed": []}
 
-    # Remember/restore the editor's current bin around the import
-    # (music_worker.import_clip's shape). ImportMedia files into whatever
-    # SetCurrentFolder last named, and leaving the media pool selection parked
-    # somewhere the editor did not put it is a visible, confusing side effect
-    # of a background job they never asked to see.
+    # Import where the editor IS, then MoveClips into the term bin. The
+    # current bin is never touched (2026-09-30): the old shape was
+    # SetCurrentFolder(term bin) -> ImportMedia -> SetCurrentFolder(back),
+    # and with a download feeding a Youtube folder that ran every 20-60 s --
+    # the editor's media pool visibly jumped to Master/Youtube/<term> and
+    # back all morning, and a bin they clicked into during the import was
+    # overwritten by the one captured before it. The cost of this shape is
+    # the new clips showing in the editor's bin for the length of one call.
     try:
-        previous = media_pool.GetCurrentFolder()
+        landing = media_pool.GetCurrentFolder()
     except Exception:
-        previous = None
+        landing = None
     imported_items: Any = []
     try:
-        media_pool.SetCurrentFolder(bin_folder)
         imported_items = media_pool.ImportMedia(to_import) or []
     except Exception as exc:
         log.warning("resolve: ImportMedia raised for %d file(s): %s",
                     len(to_import), exc, exc_info=True)
         return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE,
                 "imported": [], "skipped_existing": skipped, "failed": []}
-    finally:
-        # In a finally, and guarded: a raising ImportMedia must not leave the
-        # editor's media pool pointing at a bin this job made.
-        if previous is not None:
-            try:
-                media_pool.SetCurrentFolder(previous)
-            except Exception:
-                log.debug("resolve: could not restore the current bin", exc_info=True)
 
     landed = set()
     item_by_path: dict[str, Any] = {}
@@ -3720,6 +3867,22 @@ def _import_files_to_bin_path_locked(
         landed.add(_norm_path(fp))
         if fp:
             item_by_path.setdefault(_norm_path(fp), item)
+
+    missing_keys = {_norm_path(p) for p in to_import} - landed
+    if missing_keys:
+        # ImportMedia has been seen to file more than it returns (below), and
+        # an unreturned clip would otherwise stay in the editor's bin for
+        # good. Look for them where the import landed.
+        for clip in _clips_in(landing if landing is not None else root_folder):
+            try:
+                fp = ((clip.GetClipProperty() or {}).get("File Path") or "").strip()
+            except Exception:
+                continue
+            key = _norm_path(fp)
+            if fp and key in missing_keys and key not in item_by_path:
+                item_by_path[key] = clip
+    if not _same_folder(landing, bin_folder):
+        _move_into_bin(media_pool, list(item_by_path.values()), bin_folder, landing)
 
     imported = [p for p in to_import if _norm_path(p) in landed]
     missing = [p for p in to_import if _norm_path(p) not in landed]

@@ -32,6 +32,7 @@ and cross-checked against a second install with none (the base rig).
 
 from __future__ import annotations
 
+import glob
 import os
 import platform
 import re
@@ -86,6 +87,20 @@ DATA_DIO_KEY = "IoFsDirectIO_{n}"
 # ResolveVirtual pseudo-mount on Windows -- and expects it LAST. Ours goes in
 # front of it. Same constant, same reason, as the installer's mapping helper.
 TRAILING_ROOTS = ("/Volumes", "ResolveVirtual")
+
+# "External scripting using" (Preferences > System > General). OBSERVED, not
+# guessed: a working Resolve 21 rig on the base rig carries
+# `System.Scripting.Mode = 1` in BOTH files with the preference set to Local
+# (CR-373 / GL-29, 2026-10-07). 0 is None (Resolve's out-of-the-box value, and
+# the reason every Resolve-driven feature is dark on a fresh seat) and 2 is
+# Network; those two are inferred from the preference's three choices and are
+# never written by this module, only read.
+SCRIPTING_MODE_KEY = "System.Scripting.Mode"
+SCRIPTING_NONE = 0
+SCRIPTING_LOCAL = 1
+SCRIPTING_NETWORK = 2
+SCRIPTING_MODE_NAMES = {SCRIPTING_NONE: "None", SCRIPTING_LOCAL: "Local",
+                        SCRIPTING_NETWORK: "Network"}
 
 
 class PrefsError(Exception):
@@ -514,6 +529,53 @@ class ResolvePrefs:
         self._save_both(backup_suffix)
         return OK
 
+    # -- external scripting ---------------------------------------------
+    def scripting_mode(self) -> Optional[int]:
+        """The "External scripting using" setting, or None when the key is
+        absent (an install whose preferences never wrote it, which Resolve
+        reads as None) or not a number."""
+        raw = self.dat.get(SCRIPTING_MODE_KEY)
+        if raw is None and self.data is not None:
+            raw = self.data.get(SCRIPTING_MODE_KEY)
+        try:
+            return int(str(raw).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def ensure_scripting_local(self, backup_suffix: str = "") -> str:
+        """Switch "External scripting using" to Local in BOTH files unless it
+        already permits a local client (Local, or Network, which includes it).
+
+        Returns OK, ALREADY or RESOLVE_RUNNING. Same two absolute rules as
+        every other write here: Resolve must be quit (it rewrites both files
+        from memory on exit) and neither file is ever created. Resolve's
+        default is None, which silently disables the watcher, fixer, popup
+        and Send to Resolve (GL-29).
+        """
+        # CR-373 round 2 (GL-29, 2026-10-07): the key is only trusted when it
+        # is seen in BOTH files, as the LUT and media-storage writers do. A
+        # seat with config.dat alone cannot be verified (an unverified check
+        # is NOT CHECKED, never OK), so it keeps the manual step on the
+        # checklist; and two files that disagree are rewritten, not ALREADY.
+        if self.data is None:
+            return FORMAT_UNRECOGNISED
+
+        def _mode(pref: "PrefFile") -> Optional[int]:
+            try:
+                return int(str(pref.get(SCRIPTING_MODE_KEY)).strip())
+            except (TypeError, ValueError):
+                return None
+
+        ok_modes = (SCRIPTING_LOCAL, SCRIPTING_NETWORK)
+        if _mode(self.dat) in ok_modes and _mode(self.data) in ok_modes:
+            return ALREADY
+        if resolve_is_running():
+            return RESOLVE_RUNNING
+        self.dat.set(SCRIPTING_MODE_KEY, str(SCRIPTING_LOCAL))
+        self.data.set(SCRIPTING_MODE_KEY, str(SCRIPTING_LOCAL))
+        self._save_both(backup_suffix)
+        return OK
+
     # -- shared --------------------------------------------------------
     def _save_both(self, backup_suffix: str = "") -> None:
         suffix = backup_suffix or f".ccsync-bak-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -532,3 +594,105 @@ def _normcase(path: str) -> str:
 def _join(base: str, leaf: str, windows: bool = False) -> str:
     sep = "\\" if windows or ("\\" in base and "/" not in base) else "/"
     return f"{str(base).rstrip('/' + chr(92))}{sep}{leaf}"
+
+
+# -- install-time Resolve facts (CR-373 / GL-29, 2026-10-07) -----------------
+
+_WINDOWS_RESOLVE_EXE = (
+    r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe")
+_WINDOWS_RESOLVE_REL = r"Blackmagic Design\DaVinci Resolve\Resolve.exe"
+_MAC_RESOLVE_APP = "/Applications/DaVinci Resolve/DaVinci Resolve.app"
+
+
+def detect_resolve() -> dict:
+    """What the installer can honestly say about Resolve on this computer.
+
+    {"installed": True/False/None, "path": str, "version": str,
+     "edition": "studio"|None, "prefs_found": bool}. `installed` is None
+    when the platform is not one this knows; False means "could not find
+    Resolve at the usual places", NOT proof it is absent (a custom install
+    path), so callers check `prefs_found` (config.dat exists, i.e. Resolve
+    has been run here) before giving up. `edition` is "studio" only on a
+    POSITIVE sighting: Windows activation-key installs leave a
+    `.davinciresolvestudio_*.lic` under ProgramData (seen on a Resolve 21
+    Studio rig, 2026-10-07). A missing file proves nothing (dongle installs
+    have none), so the absence is None, never "free". Resolve.exe itself
+    carries the same version resource in both editions. Never raises.
+    """
+    system = platform.system()
+    out = {"installed": None, "path": "", "version": "", "edition": None,
+           "prefs_found": False}
+    try:
+        if system == "Windows":
+            exe = (os.environ.get("CCSYNC_RESOLVE_EXE")
+                   or os.path.join(os.environ.get("ProgramFiles")
+                                   or r"C:\Program Files", _WINDOWS_RESOLVE_REL))
+            out["installed"] = os.path.isfile(exe)
+            out["path"] = exe if out["installed"] else ""
+            if not out["installed"]:
+                # Resolve registers itself whatever the install path.
+                try:
+                    import winreg  # type: ignore[import-not-found]
+                    with winreg.OpenKey(
+                            winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Blackmagic Design\DaVinci Resolve") as k:
+                        out["installed"] = True
+                        try:
+                            out["version"] = str(winreg.QueryValueEx(k, "Version")[0])
+                        except OSError:
+                            pass
+                except (ImportError, OSError):
+                    pass
+            lic = os.path.join(
+                os.environ.get("ProgramData") or r"C:\ProgramData",
+                "Blackmagic Design", "DaVinci Resolve", "Support", ".license")
+            if glob.glob(os.path.join(glob.escape(lic), ".davinciresolvestudio*")):
+                out["edition"] = "studio"
+        elif system == "Darwin":
+            app = os.environ.get("CCSYNC_RESOLVE_APP") or _MAC_RESOLVE_APP
+            out["installed"] = os.path.isdir(app)
+            out["path"] = app if out["installed"] else ""
+        else:
+            return out
+        d = config_dir()
+        out["prefs_found"] = bool(d is not None and (d / CONFIG_DAT_NAME).is_file())
+        version_file = d / ".version" if d is not None else None
+        if version_file is not None and version_file.is_file():
+            m = re.search(r"^Resolve\.Version=(\S+)",
+                          version_file.read_text(encoding="utf-8", errors="replace"),
+                          re.M)
+            if m:
+                out["version"] = m.group(1)
+    except (OSError, ValueError, UnicodeError):
+        # Narrow on purpose: a NameError here once hid a missing constant and
+        # made every Windows seat answer installed=None (CR-373, 2026-10-07).
+        pass
+    return out
+
+
+def scripting_status() -> dict:
+    """{"mode": int|None, "mode_name": str, "prefs": "ok"|<PrefsError status>}.
+
+    Read only; never raises. Used by the tray's scripting explainer so a seat
+    whose preference is None is told THAT instead of "restart Resolve"."""
+    try:
+        mode = ResolvePrefs().scripting_mode()
+        return {"mode": mode,
+                "mode_name": SCRIPTING_MODE_NAMES.get(mode, "not set"),
+                "prefs": "ok"}
+    except PrefsError as exc:
+        return {"mode": None, "mode_name": "unknown", "prefs": exc.status}
+    except Exception:
+        return {"mode": None, "mode_name": "unknown", "prefs": IO_ERROR}
+
+
+def enable_scripting() -> str:
+    """Install-time write of "External scripting using = Local". Returns one
+    of OK, ALREADY, RESOLVE_RUNNING, CONFIG_MISSING, FORMAT_UNRECOGNISED,
+    IO_ERROR. Never raises, never creates a file."""
+    try:
+        return ResolvePrefs().ensure_scripting_local()
+    except PrefsError as exc:
+        return exc.status
+    except Exception:
+        return IO_ERROR

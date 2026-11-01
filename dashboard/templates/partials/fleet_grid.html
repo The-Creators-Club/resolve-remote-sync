@@ -56,11 +56,15 @@
   shares are frozen. No untick is being applied on
   {{ fleet.collector.enforce_refusal.folders | length }} folder{{ "s" if fleet.collector.enforce_refusal.folders | length != 1 }},
   {{ fleet.collector.enforce_refusal.devices | length }} computer{{ "s" if fleet.collector.enforce_refusal.devices | length != 1 }}. Approve the pending
-  devices (Settings, then Users), then this clears itself on the next cycle. To allow a
-  removal this large deliberately, ask whoever installed this server to raise the limit
-  ({{ fleet.collector.enforce_refusal.limit }}): it is a container setting, not something
-  this page can change.
-  <span class="dim">refused {{ fleet.collector.enforce_refusal.at | ago }}</span></span></div>
+  devices (Settings, then Users), then this clears itself on the next cycle. If these
+  removals are what you meant (limit {{ fleet.collector.enforce_refusal.limit }}), apply them here,
+  or have an admin raise the per-computer allowance so the limit grows with the fleet
+  (<a class="hi" href="/admin/settings#panel-sharing">Settings, Sharing safety</a>).
+  <span class="dim">refused {{ fleet.collector.enforce_refusal.at | ago }}</span></span>
+  {% if session_is_admin and not fleet.collector.enforce_refusal.truncated %}<form class="inline" hx-post="/partials/admin/enforce/approve-removals" hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML">
+    <input type="hidden" name="count" value="{{ fleet.collector.enforce_refusal.count }}">
+    <button class="key sm" type="submit" title="take these exact shares away on the next cycle. The list is under Problems the server found on the home page; check it first. Good for one hour."><span class="t">Apply these {{ fleet.collector.enforce_refusal.count }} removal{{ "s" if fleet.collector.enforce_refusal.count != 1 }}</span></button>
+  </form>{% endif %}</div>
 {% endif %}
 {% if fleet.collector and fleet.collector.deactivation_refusal %}
 <div class="alertline err">{{ hm.tag('err', 'refused', solid=true) }}<span class="grow">{{ fleet.collector.deactivation_refusal.message }}.
@@ -89,8 +93,8 @@
 <div class="alertline">{{ hm.tag('warn', 'new image') }}<span class="grow">Every dashboard build on offer needs a new container image.
   <span class="dim">{% for v in fleet.feed_alarm.runtime_mismatch.versions %}{{ v }}{{ ", " if not loop.last }}{% endfor %}
   {{ "brings" if fleet.feed_alarm.runtime_mismatch.versions | length == 1 else "bring" }} dependencies this container does not have,
-  so no update can be applied from this dashboard. Apply it in your NAS's own UI:
-  {{ fleet.feed_alarm.runtime_mismatch.nas_hint }}.</span></span></div>
+  so no update can be applied from this dashboard. To apply it:
+  {{ fleet.feed_alarm.runtime_mismatch.nas_hint }}</span></span></div>
 {% endif %}
 {% endset %}
 {% if banners | trim %}<div class="grid-banners">{{ banners }}</div>{% endif %}

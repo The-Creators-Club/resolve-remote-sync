@@ -51,6 +51,8 @@ PARTIALS = (
     "/partials/fleet", "/partials/projects-tree", "/partials/home-problems",
     "/partials/home-transfers", "/partials/home-queue", "/partials/computer-answer",
     "/partials/project/2026-ff5-elections", "/partials/project/2026-ff5-elections/bins",
+    "/partials/project/2026-ff5-elections/access",
+    "/partials/project/2026-ff5-elections/originals",
     "/partials/project-roots", "/partials/project-roots/browse",
     "/partials/transfers", "/partials/plan-changes",
     "/partials/person-queue", "/partials/account/computer",

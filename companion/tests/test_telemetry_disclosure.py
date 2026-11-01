@@ -93,13 +93,13 @@ STILL_SENT_SYNC_GUARD = {
 PARTLY_SWITCHABLE_SYNC_GUARD = {"resolve_health", "skipped_exists", "sync_conflicts"}
 
 PINNED_RESOLVE_HEALTH = sorted([
-    "bad_prefix", "connected", "ignored_folders", "ignored_this_session",
+    "bad_prefix", "connected", "ignored_this_session",
     "last_scan_at", "missing", "missing_clips", "non_canonical_refused",
     "open_project", "out_of_tree", "project_open", "proxy_attach", "proxy_gaps",
     "skipped_ever", "standins_owed", "stills", "wedged_call", "wedged_seconds",
 ])
 NOT_PERSONAL_RESOLVE_HEALTH = {
-    "bad_prefix", "connected", "ignored_folders", "ignored_this_session",
+    "bad_prefix", "connected", "ignored_this_session",
     "last_scan_at", "missing", "out_of_tree", "proxy_attach", "proxy_gaps",
     "skipped_ever", "standins_owed", "wedged_call", "wedged_seconds",
 }

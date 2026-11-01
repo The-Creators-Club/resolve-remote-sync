@@ -283,18 +283,8 @@ def test_start_supervisor_hands_on_the_count_it_was_relaunched_with(tmp_path, mo
 
 
 # -- comp-ui-3: the doubled "FOR YOUR ADMIN" ---------------------------------
-
-
-def test_the_fixer_s_could_not_save_line_is_not_garbled():
-    from ccsync_companion import popup, ui_copy
-
-    text = popup.IGNORE_FOLDER_FAILED
-    assert ui_copy.DIAGNOSTICS in text
-    assert "ADMINFOR YOUR ADMIN" not in text
-    assert text.count("FOR YOUR ADMIN") == 1
-    assert text.endswith(".")
-    assert " - " in text or "-" not in text  # no em dash, and no bare hyphen run
-    assert "—" not in text
+# The sentence it pinned, popup.IGNORE_FOLDER_FAILED, went with the folder
+# button (CR-356, 2026-09-30); tests/test_popup.py pins that it is gone.
 
 
 # -- comp-ui-4: the (s) plurals ----------------------------------------------

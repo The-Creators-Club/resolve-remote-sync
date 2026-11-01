@@ -211,6 +211,7 @@ Per machine (from the fleet view's `guard` section):
 | `versions_behind` | warn | 3 or more PUBLISHED, non-retracted builds newer than the one running (counts fixes missed, not version arithmetic) |
 | `retracted_running` | error | running a build that has been recalled |
 | `dashboard_reached_over_public_http` | error | the machine's last report reached this dashboard over plain http from the public internet (`machine_state.report_via = 'http_public'`, LG-4, 2026-09-25); only a companion older than the cleartext guard can do that, and its sign-ins send a password in clear. Plain http on the LAN or tailnet is never alerted (Settings shows the count as information). Past `SILENT_SECONDS` it is said once, not daily, and never dropped for age |
+| `sftp_transport_unsafe` | error | the stored SFTP chunk size/concurrency is above what DSM's own sshd serves (64Ki / 16) on a Synology site (GL-10, CR-364, 2026-10-07); proxies over 514 MiB fetched at the old value may be silently short. The manifest already serves the safe pair; refused at deploy and in Settings |
 | `red_unexplained` | error | red for 1 h and no kind above named it (fix: `[ ASK WHY ]`) |
 
 Fleet and server:
@@ -477,6 +478,33 @@ and the daily repeats are one email, not N.** Nothing is dropped to get there.
   WHAT WAS SENT groups by it: "one message, 3 finding(s)". Per-event rows
   carry no batch id, because they really were separate messages.
 
+### Choosing which kinds are sent (2026-09-29)
+
+The admin ticks which kinds reach them, on Settings, Alerts, in the WHAT THIS
+SERVER CHECKS list (grouped by `alerts.KIND_GROUPS`: editors' computers,
+sharing and fleet controls, this server, updates, projects and footage, fleet
+jobs, YouTube downloads, b-roll), with ALL / PROBLEMS ONLY / NONE presets.
+Route `POST /partials/admin/alerts/kinds`, audited as `alerts.kinds`.
+
+* **Only the message is withheld.** The scan, CURRENTLY OPEN, the topbar
+  count, `/api/v1/health` and the weekly report are unchanged. The weekly
+  report adds a standing `NOT SENT AS ALERTS` block naming every kind that is
+  off, so a switch flipped months ago cannot read as a quiet fleet.
+* **Stored as the kinds switched OFF** (`site_settings` row
+  `alerts_muted_kinds`, comma-separated), never as an allow-list, so a kind a
+  later build adds is sent from its first cycle. Unknown names are dropped on
+  read and refused on save. It is not in `SETTING_KEYS`: the channel form
+  carries exactly one field per key there (settings-1).
+* **In `deliver`:** a switched-off finding gets no `alert_log` row, so if it
+  is still true the day it is switched back on it goes out as new. An open row
+  of a switched-off kind that clears is closed with a `.ok` row, detail
+  "closed without a message: this kind of alert is switched off", and no
+  transmission, so no stale "cleared" is owed later. A `check_failed` whose
+  subject is a switched-off kind is withheld the same way; "the whole scan"
+  failing always sends.
+* The weekly report, the heartbeat and the server check have their own
+  switches under CHANNEL and SERVER CHECK and are not in this list.
+
 ## 8. The weekly report
 
 Monday 08:00 in `alerts_timezone` (an IANA name such as `Europe/London`,
@@ -604,7 +632,9 @@ per-machine queries; a table another work package owns is read through
 for any machine it names so the catch-all skips it. Nothing else changes: the
 dedup, the repeat rule, the recovery message, the Alerts page, the weekly
 report's checked list and the `/health` counts all pick the row up. Severity
-decides the repeat rule, not just the colour.
+decides the repeat rule, not just the colour. **Also add the kind to one group
+in `alerts.KIND_GROUPS`**: that is where its "send this as an alert" switch
+comes from, and `test_alert_kind_selection` fails on a kind with no group.
 
 ## 11. Fault injection: the chaos suites
 

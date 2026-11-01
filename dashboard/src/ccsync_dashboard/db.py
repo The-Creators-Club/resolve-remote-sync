@@ -608,8 +608,8 @@ MACHINE_STATE_MAX_AGE_DAYS = 30
 # reporting every 30s can never be the row that gets evicted. 20 is far above
 # any real editor's machine count (the fleet's busiest editor has 2).
 MAX_MACHINES_PER_EDITOR = 20
-# Shared non-trivial tokens required before an auto-match may be written as a
-# permanent sticky mapping -- see match_project_label_confident.
+# RETIRED 2026-10-31 (CR-379): the auto-map needs an exact name now, see
+# match_project_label_confident. Kept so an old import does not break.
 MIN_CONFIDENT_TOKENS = 2
 
 _DEVICE_ID_RE = re.compile(r"^[A-Z0-9]{7}(-[A-Z0-9]{7}){7}$")
@@ -2070,6 +2070,30 @@ ALTER TABLE machine_state ADD COLUMN report_via TEXT;
 ALTER TABLE machine_state ADD COLUMN eula_json TEXT;
 """
 
+# v60: originals on request (docs/SELECTIVE_ORIGINALS.md §3 and §12.3,
+# 2026-10-31). A pick belongs to ONE computer, keyed like the tick it rides
+# on plus the file, and never to the '' bucket: the bucket is a plan a new
+# computer inherits, and "put 400 GB on that laptop" is not something a
+# computer should inherit. rel_key is media_rel_key(rel) (NFC, CR-90) because
+# it is compared in SQL against nas_media and editor_media, which are both
+# stored NFC; rel_path keeps the spelling it was picked with and is never
+# opened by anything here (the companion re-lists the NAS and matches by key).
+SCHEMA_V60 = """
+CREATE TABLE IF NOT EXISTS original_picks (
+  editor_username TEXT NOT NULL,
+  machine         TEXT NOT NULL,
+  project_slug    TEXT NOT NULL,
+  rel_key         TEXT NOT NULL,
+  rel_path        TEXT NOT NULL,
+  is_dir          INTEGER NOT NULL DEFAULT 0,
+  picked_by       TEXT NOT NULL,
+  picked_via      TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  PRIMARY KEY (editor_username, machine, project_slug, rel_key)
+);
+CREATE INDEX IF NOT EXISTS ix_original_picks_project ON original_picks(project_slug);
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -2230,6 +2254,9 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # the telemetry switches' record, how a report arrived, and the accepted
     # licence. One step for one release, and gapless like every one before it.
     (59, SCHEMA_V59),
+    # 60: originals on request (docs/SELECTIVE_ORIGINALS.md, 2026-10-31). One
+    # new table, and gapless like every one before it.
+    (60, SCHEMA_V60),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -2385,6 +2412,12 @@ def record_known_editor(
     name = str(editor or "").strip().lower()
     if not name or not _USERNAME_RE.match(name):
         return
+    if source == "admin":
+        # CR-367 / GL-15 (2026-10-07): an admin creating or approving the name
+        # is the ONLY thing that lifts a delete tombstone. A report, a seed or
+        # a tick (the other sources) must never, or the removed person's
+        # laptop would re-admit itself on its next report.
+        clear_identity_removal(conn, name)
     conn.execute(
         "INSERT OR IGNORE INTO known_editors (editor_username, first_seen, source) "
         "VALUES (?, ?, ?)",
@@ -2832,6 +2865,139 @@ def editor_suspension(conn: sqlite3.Connection, editor: str) -> dict[str, Any] |
         return None
     return {"at": row["suspended_at"], "by": row["suspended_by"] or "",
             "reason": row["suspended_reason"] or ""}
+
+
+# --------------------------------------------- identity revocation (CR-367)
+#
+# GL-15 (prelaunch review, 2026-10-07). A companion's identity token is an HMAC
+# over (purpose, user, expiry) with a 100-year expiry (CR-86) and no server-side
+# row, so nothing a person's removal did could stop it. The wire shape is what
+# every deployed companion parses, so the generation lives HERE and the token
+# stays five fields: a token's ISSUED-AT is `expires - IDENTITY_TTL_SECONDS`
+# (auth.identity_issued_at), and it is valid only if that is not older than the
+# person's `valid_after`. Revoking bumps `gen` (the counter an admin reads) and
+# moves `valid_after` to the next whole second; a token minted afterwards is
+# stamped no earlier than `valid_after` (auth.make_identity_token floor=), so
+# signing in again always works and every older copy never does.
+#
+# `removed` is the DURABLE TOMBSTONE of a delete: `_account_refusal` reads it on
+# every auth method, because on smb/oidc the account lives elsewhere and
+# forget_editor deletes the only local row (known_editors) that carried the
+# suspension, so the next report from the deleted person's laptop used to
+# re-register them. It is cleared only by an admin re-creating or approving the
+# name (record_known_editor with source "admin").
+#
+# One `meta` row per person rather than a schema bump: a schema number is a
+# shared resource while waves build in parallel, the row is one small JSON
+# value, and a database that predates the meta table simply reads as "nobody
+# is revoked" (FAIL OPEN, like suspended_editors: a read that cannot answer
+# must never turn the fleet away). The row is keyed by an HMAC of the name,
+# never the name (CR-367 round 2, 2026-10-07): a deleted person leaves no
+# plaintext trace here, and the tombstone still finds them.
+
+IDENTITY_GEN_PREFIX = "identity_gen:"
+
+
+def _identity_gen_key(conn: sqlite3.Connection, editor: str, *,
+                      create: bool = True) -> str | None:
+    """The meta key of one person's generation row. It carries NO NAME
+    (CR-367 round 2, 2026-10-07): the first build keyed it by the username and
+    that row outlived delete_user_everywhere's pseudonymisation, which is the
+    one place the deleted person's name would have survived. It is the full
+    HMAC-SHA256 of the lowercased name under the never-rotated LG-3 salt
+    (stable, so a lookup still finds it; the full digest rather than
+    pseudonym()'s 10 hex so two people can never share a row). `create=False`
+    is the read path: it never mints the salt, and no salt means no row can
+    exist, so it answers None."""
+    name = str(editor or "").strip().lower()
+    if not create and not meta_get(conn, META_PSEUDONYM_SALT):
+        return None
+    digest = hmac.new(pseudonym_salt(conn), f"identity_gen:{name}".encode("utf-8"),
+                      hashlib.sha256).hexdigest()
+    return IDENTITY_GEN_PREFIX + digest
+
+
+def identity_generation(conn: sqlite3.Connection, editor: str) -> dict[str, Any]:
+    """{gen, valid_after, removed, at, by, reason} for `editor`; the zero
+    record (gen 0, valid_after 0, not removed) when nothing was ever revoked,
+    and also when the row cannot be read (fail open, see above)."""
+    zero: dict[str, Any] = {"gen": 0, "valid_after": 0, "removed": False,
+                            "at": "", "by": "", "reason": ""}
+    if not str(editor or "").strip():
+        return zero
+    try:
+        # Indexed, not by name: record_known_editor calls this from tests and
+        # tools that hold a plain connection with no Row factory.
+        key = _identity_gen_key(conn, editor, create=False)
+        if key is None:
+            return zero
+        row = conn.execute("SELECT value FROM meta WHERE key=?",
+                           (key,)).fetchone()
+        raw = row[0] if row else None
+    except sqlite3.OperationalError as exc:
+        if not _schema_predates(exc):
+            raise
+        return zero
+    if not raw:
+        return zero
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return zero
+    if not isinstance(data, dict):
+        return zero
+    out = dict(zero)
+    try:
+        out["gen"] = int(data.get("gen") or 0)
+        out["valid_after"] = int(data.get("valid_after") or 0)
+    except (TypeError, ValueError):
+        return zero
+    out["removed"] = bool(data.get("removed"))
+    for key in ("at", "by", "reason"):
+        out[key] = str(data.get(key) or "")
+    return out
+
+
+def revoke_identity(conn: sqlite3.Connection, editor: str, *, by: str,
+                    reason: str = "", removed: bool = False,
+                    now: float | None = None) -> dict[str, Any]:
+    """Invalidate every identity token minted for `editor` so far. The caller
+    commits. `removed=True` also writes the delete tombstone."""
+    import time as _time
+    name = str(editor or "").strip().lower()
+    current = identity_generation(conn, name)
+    stamp = int((_time.time() if now is None else now)) + 1
+    record = {
+        "gen": int(current["gen"]) + 1,
+        # Never move backwards: a clock step must not re-validate old tokens.
+        "valid_after": max(stamp, int(current["valid_after"])),
+        "removed": bool(removed or current["removed"]),
+        "at": utcnow_iso(), "by": str(by or "?"), "reason": str(reason or "")[:255],
+    }
+    meta_set(conn, _identity_gen_key(conn, name), json.dumps(record, sort_keys=True))
+    return record
+
+
+def clear_identity_removal(conn: sqlite3.Connection, editor: str) -> bool:
+    """Lift the delete tombstone (an admin re-created or re-approved the
+    name). The generation and `valid_after` stay: tokens minted before the
+    removal remain dead, which is the point of a removal."""
+    name = str(editor or "").strip().lower()
+    current = identity_generation(conn, name)
+    if not current["removed"]:
+        return False
+    current["removed"] = False
+    meta_set(conn, _identity_gen_key(conn, name), json.dumps(current, sort_keys=True))
+    return True
+
+
+def identity_removed(conn: sqlite3.Connection, editor: str) -> bool:
+    return bool(identity_generation(conn, editor)["removed"])
+
+
+def identity_floor(conn: sqlite3.Connection, editor: str) -> int:
+    """Earliest issued-at (epoch seconds) a token for `editor` may carry."""
+    return int(identity_generation(conn, editor)["valid_after"])
 
 
 def known_editor_usernames(conn: sqlite3.Connection) -> set[str]:
@@ -3701,6 +3867,14 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     "ai_cli_update_failed": {"severity": "warn", "what":
         "this server could not keep Claude Code up to date by itself",
         "href": "/admin/settings#ai-providers"},
+    # GL-31 / CR-374 round 2 (2026-10-07): written by
+    # `notices._check_cli_lock_stranded`. A dashboard that booted on the
+    # locked vendor build over a site whose stored settings say the Claude
+    # Code/Codex providers were ON: the studio's container lost
+    # DASH_STUDIO_CLI_PROVIDERS (an OTA bundle keeps the old env).
+    "cli_lock_stranded": {"severity": "error", "what":
+        "this server is the locked build but this site was using Claude Code or Codex, which are now off",
+        "href": "/admin/settings#ai-providers"},
     # The server triage agent (2026-09-24, docs/SERVER_TRIAGE_AGENT.md).
     # Written by `triage_mail._refuse` for a reply that failed one of the three
     # checks (sender, the receiving server's DKIM/DMARC verdict, the run's
@@ -4160,6 +4334,122 @@ def record_enforce_refusal(
 
 def clear_enforce_refusal(conn: sqlite3.Connection) -> None:
     meta_delete(conn, META_ENFORCE_REFUSAL)
+
+
+# GL-33 / CR-376 (prelaunch review, 2026-10-07; PRAC-12). The blast-radius
+# brake counted EVERY removal alike, so suspending one editor with 6 projects on
+# 2 computers (12 removals) froze every untick and Suspend fleet-wide until
+# somebody changed a container env var. Three ways out, none of which weakens
+# the B16 shape (a bad snapshot unsharing the fleet with no admin act behind it):
+#   1. a removal that traces to an audited admin act (archive, suspend, an
+#      audited untick) is PRE-AUTHORISED and does not count against the limit;
+#   2. an admin may APPROVE the exact removals a refusal names (one button,
+#      one hour, audited);
+#   3. the limit may scale with fleet size via a site setting.
+META_ENFORCE_APPROVAL = "collector_enforce_approval"
+ENFORCE_APPROVAL_TTL_SECONDS = 3600
+AUDIT_ENFORCE_APPROVE = "enforce.approve_removals"
+AUDIT_ENFORCE_ALLOWANCE = "enforce.allowance"
+SETTING_ENFORCE_PER_COMPUTER = "enforce_removals_per_computer"
+# How far back an audited untick still counts as the reason for a removal. The
+# 60 s PLAN_FREEZE_SECONDS is about [ UNDO ]; this is about "an admin did this",
+# which stays true until the removal has been applied.
+ENFORCE_UNTICK_AUTH_SECONDS = 24 * 3600
+
+
+def enforce_removals_per_computer(conn: sqlite3.Connection) -> int:
+    """Site allowance of share removals PER COMPUTER on top of nothing: the
+    brake limit becomes max(DASH_ENFORCE_MAX_REMOVALS, this x computers).
+    0 (also: absent, unreadable) is the legacy flat limit. Never raises: this
+    is read inside the enforce cycle."""
+    try:
+        row = conn.execute("SELECT value FROM site_settings WHERE key=?",
+                           (SETTING_ENFORCE_PER_COMPUTER,)).fetchone()
+        return max(0, int(str(row[0]).strip())) if row else 0
+    except (sqlite3.Error, ValueError, TypeError):
+        return 0
+
+
+def set_enforce_removals_per_computer(
+    conn: sqlite3.Connection, value: int, by: str, now: str | None = None,
+) -> int:
+    value = int(value)
+    if not 0 <= value <= 100:
+        raise ValueError("must be a whole number from 0 to 100")
+    now = now or utcnow_iso()
+    before = enforce_removals_per_computer(conn)
+    conn.execute(
+        "INSERT INTO site_settings (key, value, updated_at, updated_by) "
+        "VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
+        "value=excluded.value, updated_at=excluded.updated_at, "
+        "updated_by=excluded.updated_by",
+        (SETTING_ENFORCE_PER_COMPUTER, str(value), now, str(by or "?")))
+    audit(conn, by, AUDIT_ENFORCE_ALLOWANCE, SETTING_ENFORCE_PER_COMPUTER,
+          {"before": before, "after": value}, now=now)
+    return value
+
+
+def approve_enforce_removals(
+    conn: sqlite3.Connection, now: str, by: str, expected_count: int,
+) -> dict[str, Any]:
+    """Approve exactly the removals the standing refusal names. ValueError (a
+    sentence an admin reads) when there is no refusal, when the count the admin
+    saw is not the count now (the set changed under the click), or when the
+    refusal was truncated and so cannot name every pair."""
+    refusal = meta_get_json(conn, META_ENFORCE_REFUSAL)
+    if not isinstance(refusal, dict) or not refusal.get("count"):
+        raise ValueError("no share removals are waiting for approval")
+    if int(expected_count) != int(refusal["count"]):
+        raise ValueError(
+            f"the list changed: {refusal['count']} removal(s) are waiting now, "
+            f"not {int(expected_count)}. Reload and check them again.")
+    if refusal.get("truncated"):
+        raise ValueError("too many removals to approve one by one; raise the "
+                         "per-computer allowance under Settings, then Sharing safety, instead")
+    pairs = [{"folder": str(p["folder"]), "device": str(p["device"])}
+             for p in refusal.get("pairs") or [] if isinstance(p, dict)]
+    record = {"at": now, "by": str(by or "?"), "pairs": pairs,
+              "expires": (parse_iso(now) + dt.timedelta(
+                  seconds=ENFORCE_APPROVAL_TTL_SECONDS)).isoformat()}
+    meta_set_json(conn, META_ENFORCE_APPROVAL, record)
+    audit(conn, by, AUDIT_ENFORCE_APPROVE, "share removals",
+          {"count": len(pairs), "pairs": pairs[:50]}, now=now)
+    return record
+
+
+def approved_enforce_pairs(conn: sqlite3.Connection, now: str) -> set[tuple[str, str]]:
+    """(folder, device) pairs an admin approved and whose hour is not up."""
+    record = meta_get_json(conn, META_ENFORCE_APPROVAL)
+    if not isinstance(record, dict):
+        return set()
+    try:
+        if parse_iso(str(record.get("expires") or "")) <= parse_iso(now):
+            return set()
+    except (ValueError, TypeError):
+        return set()                    # unreadable expiry is no approval
+    return {(str(p.get("folder")), str(p.get("device")))
+            for p in record.get("pairs") or [] if isinstance(p, dict)}
+
+
+def spend_enforce_approval(
+    conn: sqlite3.Connection, plans: Iterable[tuple[str, set[str], set[str]]],
+    whole: bool = False,
+) -> None:
+    """Consume the approval a cycle has just used (CR-376 rounds 2 and 2b,
+    GL-33, 2026-10-07). An approval authorises ONE cycle: the one that follows
+    it. Every approved pair is spent by that cycle, whatever became of it: a
+    removal it applied, or a pair that is no longer a removal (re-ticked, or a
+    bad snapshot that healed). The second case is invisible in `plans`, since
+    the collector drops converged folders from it, so a test over `plans` alone
+    left such a pair live for the hour and let a later bare removal through.
+    `plans` and `whole` are kept for the caller's signature."""
+    record = meta_get_json(conn, META_ENFORCE_APPROVAL)
+    if isinstance(record, dict):
+        meta_delete(conn, META_ENFORCE_APPROVAL)
+
+
+def clear_enforce_approval(conn: sqlite3.Connection) -> None:
+    meta_delete(conn, META_ENFORCE_APPROVAL)
 
 
 def record_enforce_plan(
@@ -6273,6 +6563,12 @@ def record_file_move(
            "to": f"{to_project_rel}/{to_rel}", "is_dir": bool(is_dir),
            "source": str(source or FILE_MOVE_SOURCE_ADMIN),
            "machines": len({(e, m) for e, m in targets if e and m})}, now=now)
+    if state == FILE_MOVE_DONE:
+        # v60: a move recorded as already made (the detected hand move) takes
+        # its picks now; a pending one does so in complete_file_move, once the
+        # rename has really happened.
+        rewrite_original_picks_for_move(conn, from_slug=from_slug, from_rel=from_rel,
+                                        to_slug=to_slug, to_rel=to_rel)
     return move_id
 
 
@@ -6299,6 +6595,16 @@ def complete_file_move(
         "UPDATE file_moves SET state=?, proxies_moved=?, state_detail=? WHERE id=?",
         (state, int(proxies_moved), (detail or "")[:512] or None, int(move_id)),
     )
+    if state in (FILE_MOVE_DONE, FILE_MOVE_PARTIAL):
+        # v60: the original has moved in both states (PARTIAL is a proxy
+        # left behind), so the picks on it follow.
+        row = conn.execute(
+            "SELECT from_slug, from_rel, to_slug, to_rel FROM file_moves WHERE id=?",
+            (int(move_id),)).fetchone()
+        if row is not None:
+            rewrite_original_picks_for_move(
+                conn, from_slug=row["from_slug"], from_rel=row["from_rel"],
+                to_slug=row["to_slug"], to_rel=row["to_rel"])
 
 
 def unfinished_file_moves(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -6938,6 +7244,15 @@ def copy_machine_plan(
             (editor, target, row["slug"], position, now, copied_by,
              row.get("sync_mode") or SYNC_MODE_FULL),
         )
+    # v60: replacing the plan unticks whatever the source does not hold, and
+    # an untick takes that project's picks (remove_selection's rule). The
+    # source's own picks are NOT copied: a pick is about one disk.
+    kept = [row["slug"] for row in rows]
+    conn.execute(
+        "DELETE FROM original_picks WHERE editor_username=? AND machine=?"
+        f" AND project_slug NOT IN ({', '.join('?' for _ in kept)})",
+        (editor, target, *kept),
+    )
     return len(rows)
 
 
@@ -7002,6 +7317,19 @@ def adopt_renamed_machine(
             f"UPDATE {table} SET machine=? WHERE editor_username=? AND machine=?",
             (new_machine, editor, old_machine),
         )
+    # v60 (2026-10-31): the originals picks ride on the ticks just moved, so
+    # they move with them; left behind they would sit on a name the registry
+    # no longer holds, listed on the project page and read by nobody. The new
+    # name holds no plan of its own here (refused above), so it holds no
+    # picks a companion acts on either.
+    conn.execute(
+        "DELETE FROM original_picks WHERE editor_username=? AND machine=?",
+        (editor, new_machine),
+    )
+    conn.execute(
+        "UPDATE original_picks SET machine=? WHERE editor_username=? AND machine=?",
+        (new_machine, editor, old_machine),
+    )
     # res-fleet-4 (2026-09-18): THE OUTSTANDING COMMANDS COME WITH IT. Both
     # command tables are keyed on the HOSTNAME, and nothing re-keyed them, so
     # a rename stranded every file move and Resolve undo this computer had
@@ -7234,6 +7562,11 @@ def remove_selection(
                 WHERE editor_username=? AND machine=? AND project_slug=?""",
             (editor, machine, slug),
         )
+    # v60 (docs/SELECTIVE_ORIGINALS.md §3): a pick is about the tick it rides
+    # on, so the untick takes it, here rather than in the route so the htmx
+    # toggle and the tray's untick-before-delete cannot walk past it. Files
+    # already down stay where they are (D7).
+    drop_original_picks(conn, editor, slug, machine=machine)
     return cur.rowcount > 0
 
 
@@ -7710,6 +8043,89 @@ def recent_plan_change_devices(
             if device_id:
                 frozen.setdefault(slug, set()).add(device_id)
     return {slug: frozenset(ids) for slug, ids in frozen.items()}
+
+
+def standing_untick_devices(
+    conn: sqlite3.Connection, now: str, machine_devices: Mapping[tuple[str, str], str],
+    window_seconds: int = ENFORCE_UNTICK_AUTH_SECONDS,
+) -> dict[str, frozenset[str]]:
+    """{slug: {device id}} for removals an audited untick still explains.
+
+    GL-33 / CR-376 (2026-10-07, overseer defect 1). recent_plan_change_devices
+    answers "was there an untick lately", which is the safe question for a
+    freeze (a freeze only KEEPS a share). As AUTHORISATION to remove a share it
+    points the unsafe way: an untick that a later tick or [ UNDO ] replaced
+    would still wave through a bare, unaudited removal of that pair, which is
+    the bad-snapshot shape B16 exists to refuse. So a pair is explained only
+    when the LATEST plan audit row for (editor, slug, machine) is an untick,
+    no plan.undo names it, and the current plan still lacks the pair.
+    """
+    cutoff = _iso_minus(now, window_seconds)
+    keys_of: dict[int, set[tuple[str, str, str]]] = {}
+    # False: nothing explains a removal; "untick": the pair must be absent from
+    # the plan; "upload_only": the pair must be present, in upload-only mode
+    # (its share is removed by design, docs/UPLOAD_ONLY_TICK.md).
+    state: dict[tuple[str, str, str], Any] = {}
+    for row in conn.execute(
+        "SELECT id, action, subject, detail_json FROM fleet_audit "
+        "WHERE at >= ? AND action IN (?, ?, ?) ORDER BY id ASC",
+        (cutoff, AUDIT_TICK, AUDIT_UNTICK, AUDIT_PLAN_UNDO),
+    ).fetchall():
+        try:
+            detail = json.loads(row["detail_json"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(detail, dict):
+            continue
+        if row["action"] == AUDIT_PLAN_UNDO:
+            try:
+                undone = int(detail.get("undid") or 0)
+            except (ValueError, TypeError):
+                continue
+            for key in keys_of.get(undone, ()):
+                state[key] = False
+            continue
+        slug = str(detail.get("slug") or row["subject"] or "")
+        editor = str(detail.get("editor") or "")
+        if not slug or not editor:
+            continue
+        machines = {str(p.get("machine") or "")
+                    for side in ("before", "after")
+                    for p in (detail.get(side) or []) if isinstance(p, dict)}
+        machines.add(str(detail.get("machine") or ""))
+        keys = {(editor, slug, m) for m in machines}
+        keys_of[int(row["id"])] = keys
+        # A switch to upload-only is audited as a plan.tick whose AFTER
+        # placement for the computer is upload_only (CR-376 round 2,
+        # 2026-10-07): the same admin act, and a share removal by design.
+        upload_only = {str(p.get("machine") or "")
+                       for p in (detail.get("after") or [])
+                       if isinstance(p, dict)
+                       and p.get("mode") == SYNC_MODE_UPLOAD_ONLY}
+        for key in keys:
+            if row["action"] == AUDIT_UNTICK:
+                state[key] = "untick"
+            elif row["action"] == AUDIT_TICK and key[2] in upload_only:
+                state[key] = "upload_only"
+            else:
+                state[key] = False
+    out: dict[str, set[str]] = {}
+    for (editor, slug, machine), standing in state.items():
+        if not standing:
+            continue
+        device_id = machine_devices.get((editor, machine))
+        if not device_id:
+            continue
+        cur = conn.execute(
+            "SELECT sync_mode FROM selections WHERE editor_username=? AND "
+            "project_slug=? AND machine=?", (editor, slug, machine)).fetchone()
+        if standing == "untick" and cur:
+            continue                    # the plan has it again: not an untick any more
+        if standing == "upload_only" and (
+                not cur or cur["sync_mode"] != SYNC_MODE_UPLOAD_ONLY):
+            continue                    # switched back to full, or gone: not this act
+        out.setdefault(slug, set()).add(device_id)
+    return {slug: frozenset(ids) for slug, ids in out.items()}
 
 
 def selections_for_machine(
@@ -8880,6 +9296,8 @@ _MACHINE_STATE_TABLES = (
     # command for a computer, so it goes with the computer (the res-fleet-4
     # rule above).
     "machine_setting_requests",
+    # v60 (2026-10-31): a pick is about one computer's disk.
+    "original_picks",
 )
 
 
@@ -9037,6 +9455,31 @@ def forget_editor(conn: sqlite3.Connection, editor: str, *,
     deleted["user_profiles"] = conn.execute(
         "DELETE FROM user_profiles WHERE username=?",
         (str(editor or "").strip().lower(),)).rowcount
+    # CR-368 / GL-19 round 2 (2026-10-07): explicit project grants live in a
+    # meta blob, not a row keyed by editor, so nothing above reaches them. A
+    # reused sign-in name would otherwise inherit every project the departed
+    # person was granted or created.
+    deleted["project_grants"] = 0
+    # CR-368 round 3 (2026-10-07): the ledger entry goes too. reconcile only
+    # visits known editors, so a kept entry never revoked anything for a
+    # deleted person (deleting the NAS account removes the membership) and
+    # made the next reconcile revoke a reused name's --project membership.
+    raw_ledger = meta_get_json(conn, "project_group_ledger")
+    if isinstance(raw_ledger, dict) and user in raw_ledger:
+        raw_ledger.pop(user, None)
+        meta_set_json(conn, "project_group_ledger", raw_ledger)
+    raw_grants = meta_get_json(conn, "project_group_grants")
+    if isinstance(raw_grants, dict):
+        kept: dict[str, list[str]] = {}
+        for slug, members in raw_grants.items():
+            if not isinstance(members, list):
+                continue
+            left = [m for m in members if str(m).strip().lower() != user]
+            deleted["project_grants"] += len(members) - len(left)
+            if left:
+                kept[str(slug)] = left
+        if deleted["project_grants"]:
+            meta_set_json(conn, "project_group_grants", kept)
     for table, n in history.items():
         deleted[table] = deleted.get(table, 0) + n
     pseudonymised = pseudonymise_subject(conn, user, names, keep_actor=bool(was_admin))
@@ -9486,6 +9929,7 @@ SUBJECT_TABLES: tuple[SubjectTable, ...] = (
     SubjectTable("broll_standins", _BY_EDITOR, SUBJECT_CURRENT),
     SubjectTable("machine_setting_requests", f"{_BY_EDITOR} OR requested_by = {_U}",
                  SUBJECT_CURRENT),
+    SubjectTable("original_picks", f"{_BY_EDITOR} OR picked_by = {_U}", SUBJECT_CURRENT),
     # `devices` carries the editor name and the last IP address Syncthing saw.
     SubjectTable("devices", f"id IN {_MY_DEVICES}", SUBJECT_CURRENT),
     SubjectTable("invariant_results", _SUBJECT_IS_MINE, SUBJECT_CURRENT),
@@ -9751,6 +10195,7 @@ _PSEUDONYM_EXACT_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("editor_report_tokens", ("created_by", "revoked_by")),
     ("user_profiles", ("updated_by",)),
     ("machine_setting_requests", ("requested_by",)),
+    ("original_picks", ("picked_by",)),
 )
 
 
@@ -10032,38 +10477,73 @@ def match_project_label(resolve_project: str, labels: Iterable[str]) -> str | No
     return best[0] if len(best) == 1 else None
 
 
+def _identity_key(text: str) -> str:
+    """A project name as an identity: NFC, case-folded, '-' and '_' read as
+    spaces, whitespace collapsed. "Beyond-Nights" == "beyond  nights"."""
+    import unicodedata
+
+    s = unicodedata.normalize("NFC", str(text or "")).casefold()
+    return " ".join(re.sub(r"[-_]+", " ", s).split())
+
+
 def match_project_label_confident(
     resolve_project: str, labels: Iterable[str]
 ) -> str | None:
-    """match_project_label, but only when the evidence is strong enough to
-    write a PERMANENT, GLOBAL, sticky mapping nobody but an admin can change.
+    """The label a Resolve project name IS, or None. The only match strong
+    enough to write a PERMANENT, GLOBAL, sticky mapping nobody but an admin
+    can change.
 
-    match_project_label alone returns a winner on ONE shared non-trivial
-    token, which is how "Nuclear Family Reunion" auto-mapped to
-    "2025/FF4/Nuclear" on the token "nuclear" (verified 2026-07-25): every
-    frame that editor shot then had a permanent destination inside an
-    unrelated project. A single word is a coincidence, not a match, so the
-    auto-map now requires one of:
+    History. 2026-07-25: one shared word ("Nuclear Family Reunion" ->
+    "2025/FF4/Nuclear") was enough, so the rule became >= MIN_CONFIDENT_TOKENS
+    shared tokens or an exact name. 2026-10-31 (CR-379): two shared words
+    were not enough either -- "Beyond Nights LUSTY", a new episode, was
+    mapped for good into "2026/Beyond Nights" on 'beyond' + 'nights', its
+    footage destination became the old episode, and the NEW PROJECT prompt
+    never came. The owner's ruling: auto-mapping a project into one it does
+    not match "is not useful behaviour". A partial overlap is a guess; a
+    wrong guess here is permanent while a prompt costs one click.
 
-      (a) at least MIN_CONFIDENT_TOKENS shared non-trivial tokens, or
-      (b) the normalized Resolve name IS the project -- equal to the label's
-          final path segment, or to the whole label.
-
-    Below the threshold nothing is written: the report reply carries
-    resolve_project_unmapped and a human picks the folder in /project-setup.
+    So the name must BE the project: equal (by _identity_key) to the label's
+    final path segment or to the whole label, and to exactly ONE label --
+    two folders with the same name (2025/Shinto and 2026/Shinto) are a
+    question for a human. Everything else leaves the name unmapped and the
+    report reply carries resolve_project_unmapped.
     """
-    match = match_project_label(resolve_project, labels)
-    if match is None:
+    name_key = _identity_key(resolve_project)
+    if not name_key:
         return None
-    if len(_label_tokens(resolve_project) & _label_tokens(match)) >= MIN_CONFIDENT_TOKENS:
-        return match
-    # (b) exact-identity: "Season 2" for ".../CCT/Season 2", or the whole rel.
-    name_key = " ".join(str(resolve_project or "").split()).casefold()
-    segments = [s for s in str(match).replace("\\", "/").split("/") if s]
-    candidates = {str(match).casefold()}
-    if segments:
-        candidates.add(segments[-1].casefold())
-    return match if name_key in candidates else None
+    hits = []
+    for label in labels:
+        segments = [s for s in str(label).replace("\\", "/").split("/") if s]
+        keys = {_identity_key(label)}
+        if segments:
+            keys.add(_identity_key(segments[-1]))
+        if name_key in keys:
+            hits.append(label)
+    return hits[0] if len(hits) == 1 else None
+
+
+def unregistered_rivals(
+    resolve_project: str, match: str, folder_rels: Iterable[str]
+) -> list[str]:
+    """Unregistered tree folders with the SAME name as `match` (CR-379,
+    2026-10-31). match_project_label_confident only sees registered
+    projects, so "Shinto" would be mapped into the registered 2025/Shinto
+    while an unregistered 2026/Shinto, made for the new season, was never
+    consulted. Any such folder makes it a human's choice. Containers of the
+    match are never rivals."""
+    name_key = _identity_key(resolve_project)
+    match_norm = str(match).replace("\\", "/").strip("/")
+    rivals: list[str] = []
+    for rel in folder_rels:
+        rel_norm = str(rel).replace("\\", "/").strip("/")
+        if not rel_norm or rel_norm.casefold() == match_norm.casefold():
+            continue
+        if (match_norm.casefold() + "/").startswith(rel_norm.casefold() + "/"):
+            continue
+        if _identity_key(rel_norm.rsplit("/", 1)[-1]) == name_key:
+            rivals.append(rel_norm)
+    return rivals
 
 
 def sticky_project_root(
@@ -10355,6 +10835,218 @@ def nas_media_rows(
             for r in conn.execute(
                 "SELECT rel_path, kind, size, mtime_ns FROM nas_media WHERE project_id=?",
                 (project_id,))]
+
+
+# ---------------------------------------------------------------- originals on request (v60)
+#
+# docs/SELECTIVE_ORIGINALS.md §3 / §12.3 (2026-10-31). A pick names a file or
+# a folder of camera originals one computer wants brought down beside its
+# proxies. It is stored here and only expanded here: the companion is handed
+# a plain list of files (`originals` on the selection GET) and never sees a
+# folder rule, so "a folder pick also brings later uploads" (D3) is the
+# inventory walk refreshing nas_media, nothing more.
+
+ORIGINAL_PICK_VIAS = ("resolve", "dashboard")
+# The first companion that reads `originals` (§12, companion 0.9.87). Older
+# ones ignore the key, which is the safe direction (nothing comes down), but
+# a page that offers a pick such a computer silently never acts on is a page
+# that lies, so the add button is gated on it.
+ORIGINALS_MIN_COMPANION = (0, 9, 87)
+_ORIGINALS_AUDIT_NAMES = 100      # rels named in one audit row; the count is always exact
+
+
+def _pick_key(rel: str) -> str:
+    return media_rel_key(rel).strip("/")
+
+
+def add_original_pick(
+    conn: sqlite3.Connection, *, editor: str, machine: str, slug: str, rel: str,
+    is_dir: bool, picked_by: str, via: str, now: str,
+) -> bool:
+    """One pick. True when something changed: a new row, or a rel that was a
+    file pick becoming a folder pick (or back). The same pick again keeps who
+    made it first and when, the tick's own idempotent-add rule."""
+    if not machine or machine == ANY_MACHINE:
+        raise ValueError("a pick belongs to one computer, never the unassigned bucket")
+    if via not in ORIGINAL_PICK_VIAS:
+        raise ValueError(f"unknown pick source {via!r}")
+    key = _pick_key(rel)
+    if not key:
+        raise ValueError("a pick needs a path inside the project")
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO original_picks
+             (editor_username, machine, project_slug, rel_key, rel_path, is_dir,
+              picked_by, picked_via, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (editor, machine, slug, key, str(rel).strip("/"), int(bool(is_dir)),
+         picked_by, via, now),
+    )
+    if cur.rowcount > 0:
+        return True
+    cur = conn.execute(
+        """UPDATE original_picks SET is_dir=?, picked_by=?, picked_via=?, created_at=?
+            WHERE editor_username=? AND machine=? AND project_slug=? AND rel_key=?
+              AND is_dir<>?""",
+        (int(bool(is_dir)), picked_by, via, now, editor, machine, slug, key,
+         int(bool(is_dir))),
+    )
+    return cur.rowcount > 0
+
+
+def remove_original_pick(
+    conn: sqlite3.Connection, *, editor: str, machine: str, slug: str, rel: str,
+) -> bool:
+    """Un-pick, by NFC key, so a Mac's NFD spelling removes the row a Windows
+    page made. Removes the row only: files already down stay (D7)."""
+    cur = conn.execute(
+        """DELETE FROM original_picks
+            WHERE editor_username=? AND machine=? AND project_slug=? AND rel_key=?""",
+        (editor, machine, slug, _pick_key(rel)),
+    )
+    return cur.rowcount > 0
+
+
+def drop_original_picks(
+    conn: sqlite3.Connection, editor: str, slug: str, machine: str | None = None,
+) -> int:
+    """Every pick this person has for `slug` on `machine` (None: on every
+    computer of theirs, remove_selection's meaning of None)."""
+    if machine is None:
+        cur = conn.execute(
+            "DELETE FROM original_picks WHERE editor_username=? AND project_slug=?",
+            (editor, slug))
+    else:
+        cur = conn.execute(
+            """DELETE FROM original_picks
+                WHERE editor_username=? AND machine=? AND project_slug=?""",
+            (editor, machine, slug))
+    return int(cur.rowcount or 0)
+
+
+def original_picks(
+    conn: sqlite3.Connection, *, slug: str | None = None, editor: str | None = None,
+    machine: str | None = None,
+) -> list[dict[str, Any]]:
+    where, params = [], []
+    for column, value in (("project_slug", slug), ("editor_username", editor),
+                          ("machine", machine)):
+        if value is not None:
+            where.append(f"{column}=?")
+            params.append(value)
+    sql = "SELECT * FROM original_picks"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY editor_username, machine, project_slug, rel_key"
+    return [dict(r) for r in conn.execute(sql, params)]
+
+
+def _project_id_of(conn: sqlite3.Connection, slug: str) -> int | None:
+    row = conn.execute("SELECT id FROM projects WHERE slug=?", (slug,)).fetchone()
+    return int(row["id"]) if row is not None else None
+
+
+def expand_original_pick(
+    conn: sqlite3.Connection, project_id: int | None, pick: Mapping[str, Any],
+) -> list[tuple[str, int | None, bool]]:
+    """[(rel, size, on_nas)] for one pick, rels NFC.
+
+    A folder pick is whatever the LAST inventory walk found under it, kind
+    original: the live rule of D3. A file pick is its own rel even when the
+    walk has not seen it yet (on_nas False, size None): a clip picked in
+    Resolve minutes after it was uploaded is the likeliest pick there is, and
+    the companion re-lists the NAS before every run and drops a name that is
+    not really there, so handing it over costs nothing."""
+    key = str(pick["rel_key"])
+    if project_id is None:
+        return [] if pick["is_dir"] else [(key, None, False)]
+    if pick["is_dir"]:
+        return [(str(r["rel_path"]), r["size"], True) for r in conn.execute(
+            """SELECT rel_path, size FROM nas_media
+                WHERE project_id=? AND kind='original' AND rel_path LIKE ? ESCAPE '\\'
+                ORDER BY rel_path""",
+            (project_id, _like_prefix(key) + "/%"))]
+    row = conn.execute(
+        "SELECT rel_path, size FROM nas_media WHERE project_id=? AND rel_path=? AND kind='original'",
+        (project_id, key)).fetchone()
+    if row is None:
+        return [(key, None, False)]
+    return [(str(row["rel_path"]), row["size"], True)]
+
+
+def original_rels_for_machine(
+    conn: sqlite3.Connection, editor: str, machine: str, slugs: Iterable[str],
+) -> dict[str, list[str]]:
+    """slug -> the sorted, de-duplicated files this computer has asked for,
+    folder picks expanded. Only slugs with at least one file appear: the
+    selection GET leaves the key out for the rest, and an absent key is
+    "nothing to bring" (§12.3)."""
+    wanted = set(slugs)
+    by_slug: dict[str, set[str]] = {}
+    ids: dict[str, int | None] = {}
+    for pick in original_picks(conn, editor=editor, machine=machine):
+        slug = pick["project_slug"]
+        if slug not in wanted:
+            continue
+        if slug not in ids:
+            ids[slug] = _project_id_of(conn, slug)
+        for rel, _size, _on_nas in expand_original_pick(conn, ids[slug], pick):
+            by_slug.setdefault(slug, set()).add(rel)
+    return {slug: sorted(rels) for slug, rels in by_slug.items() if rels}
+
+
+def original_picks_total_bytes(
+    conn: sqlite3.Connection, editor: str, machine: str, slug: str,
+) -> int:
+    """What this computer's picks in `slug` add up to on the NAS, each file
+    once however many picks cover it. A file the walk has not seen counts 0:
+    the figure is shown BEFORE a download, and a guess there is worse than
+    an undercount the companion's own free-space check corrects."""
+    project_id = _project_id_of(conn, slug)
+    sizes: dict[str, int] = {}
+    for pick in original_picks(conn, editor=editor, machine=machine, slug=slug):
+        for rel, size, _on_nas in expand_original_pick(conn, project_id, pick):
+            sizes[rel] = int(size or 0)
+    return sum(sizes.values())
+
+
+def rewrite_original_picks_for_move(
+    conn: sqlite3.Connection, *, from_slug: str, from_rel: str, to_slug: str,
+    to_rel: str,
+) -> int:
+    """A file move made through the dashboard (or detected on the NAS) takes
+    the picks on the moved path with it (§4.3): the companion follows the
+    move with its own copy, and a pick left on the old path would expand to
+    nothing while the page still listed it as wanted. A pick on the moved
+    path itself or anywhere under it is re-keyed; a folder pick that merely
+    CONTAINED the moved file is a rule about that folder and is left alone.
+    Returns the number of picks moved."""
+    old = _pick_key(from_rel)
+    new = _pick_key(to_rel)
+    if not old:
+        return 0
+    moved = 0
+    for row in conn.execute(
+        """SELECT * FROM original_picks
+            WHERE project_slug=? AND (rel_key=? OR rel_key LIKE ? ESCAPE '\\')""",
+        (from_slug, old, _like_prefix(old) + "/%"),
+    ).fetchall():
+        rest = str(row["rel_key"])[len(old):]
+        key = (new + rest).strip("/")
+        if not key:
+            continue
+        conn.execute(
+            """DELETE FROM original_picks
+                WHERE editor_username=? AND machine=? AND project_slug=? AND rel_key=?""",
+            (row["editor_username"], row["machine"], from_slug, row["rel_key"]))
+        conn.execute(
+            """INSERT OR IGNORE INTO original_picks
+                 (editor_username, machine, project_slug, rel_key, rel_path, is_dir,
+                  picked_by, picked_via, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (row["editor_username"], row["machine"], to_slug, key, key, row["is_dir"],
+             row["picked_by"], row["picked_via"], row["created_at"]))
+        moved += 1
+    return moved
 
 
 def replace_nas_media(

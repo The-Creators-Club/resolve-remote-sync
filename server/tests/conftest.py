@@ -34,7 +34,27 @@ FIXTURE_SITE = Path(__file__).resolve().parent / "fixtures" / "site.toml"
 # shell's value first by design -- so an operator who exported one would
 # render it into the byte-for-byte goldens.
 for _shadowing in ("TRUENAS_HOST", "SYNO_HOST", "TRUENAS_USER", "SYNO_USER",
-                   "DASH_TRUSTED_PROXIES"):
+                   "DASH_TRUSTED_PROXIES",
+                   # CR-362 / GL-02 (2026-10-07): the Synology/image compose
+                   # files now render the deploying shell's release key and
+                   # vendor switch. load_secrets.ps1 exports the key on the
+                   # base rig and INSTALL.md Step 6 exports the switch, so
+                   # either would leak into the byte-for-byte goldens.
+                   "DASH_RELEASE_PUBKEYS", "DASH_VENDOR_DEFAULTS"):
+    os.environ.pop(_shadowing, None)
+
+# GL-18/GL-19 (CR-368, 2026-10-07): the operator toolchain now records NAS host
+# keys, NAS certificate pins and a generated Postgres password under ~/.ccsync.
+# A suite must neither read the base rig's real ones (a recorded key would
+# flow into the byte-for-byte goldens) nor write into them.
+import tempfile as _tempfile  # noqa: E402
+
+_STATE = Path(_tempfile.mkdtemp(prefix="ccsync-tests-state-"))
+os.environ["CCSYNC_KNOWN_HOSTS"] = str(_STATE / "known_hosts")
+os.environ["CCSYNC_KNOWN_CERTS"] = str(_STATE / "known_certs.json")
+os.environ["CCSYNC_PG_PASSWORD_FILE"] = str(_STATE / "pg_password")
+for _shadowing in ("CCSYNC_SSH_HOSTKEY", "PG_PASSWORD", "TRUENAS_VERIFY_SSL",
+                   "SYNO_VERIFY_SSL", "TRUENAS_API_KEY"):
     os.environ.pop(_shadowing, None)
 
 # setdefault, not a bare assignment: running the suite against another site's

@@ -20,6 +20,15 @@ says the same in one sentence: *Timeline Cards ships separately again
 (`install_dashboard_app.py` re-ships `[timeline_cards] src` -> `cards-web`
 even in image mode)*.
 
+> **Just want to ship it?** The recipe, as actually run (last: 2026-10-29,
+> Cards `7230be2` on image `sha256:1b0ca386…`), is
+> [The usual deploy](#the-usual-deploy-the-recipe) below: commit in
+> `E:\Projects\Editing`, read the LIVE image digest off the NAS, then one
+> PowerShell line on creator-1 --
+> `. .\tools\load_secrets.ps1; dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py --mode image --container-image ghcr.io/the-creators-club/ccsync@sha256:<live> --cards-commit <sha> --music-data none --yes`
+> -- `--dry-run` first. A "health check FAILED" at the end is usually
+> premature; check `docker ps` before rolling anything back.
+
 
 ## Why it works this way
 
@@ -142,20 +151,102 @@ should look like. (verify: no code reads `/cards-app/tests` at runtime; this
 is a read of the imports, not a measurement.)
 
 
-## The supported route: re-run the deploy from the base rig
+## The usual deploy (the recipe)
 
-One command, from the repo root on the base rig, with the usual secrets in the
-shell (`tools\load_secrets.ps1` -- `docs/SECRETS.md`):
+This is how it is actually done, from **creator-1** (the base rig), in
+`E:\Projects\Editing\ccsync`. Written down 2026-10-29 after a deploy that had
+to fish for it; it is the recipe Claude on creator-1 had been carrying in its
+memory (`cards-only-deploy-recipe`, owner-confirmed 2026-09-30) and it ran
+cleanly that day. Do not run a BARE `install_dashboard_app.py` (see step 2).
+
+**1. Commit the Cards change** in `E:\Projects\Editing` (subtree
+`Resolve/MulticamPipeline`). The deploy ships a `git archive` of ONE COMMIT
+from the local repo, so the commit is what matters; pushing to GitHub is
+good hygiene but the deploy does not need it. Before deploying, look at what
+else rides along -- everything between the live commit and yours ships:
 
 ```powershell
-.\tools\load_secrets.ps1
-dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py --dry-run
-dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py
+# the live commit is in DEPLOYED_COMMIT on the NAS (step 2 prints it)
+git -C E:\Projects\Editing log --oneline <live sha>..<new sha> -- Resolve/MulticamPipeline
 ```
 
-That ships the **`main` head** of the Timeline Cards repo. Nothing else is
-needed for the ordinary case: commit and push in the Cards repo first, then
-run this. To pin another commit (a rollback, or a branch under test), name it:
+**2. Read the LIVE image digest off the NAS.** `site.toml [stack] image` is
+STALE (it still pins the 0.7.69 digest from 2026-09-27 while the dashboard
+runs a newer image under its OTA code), and a bare run recreates the
+container on whatever `site.toml` says -- i.e. rolls the dashboard back. Put
+this in a `.sh` file and run it with Git Bash **from a PowerShell that has
+dot-sourced the secrets** -- never inline it through PowerShell or `bash -s`
+quoting, and never put the password on a command line or on stdin ahead of a
+script (2026-10-29: a `bash -s` attempt executed the password line as a
+command and printed it in the error):
+
+```bash
+#!/bin/bash
+# live.sh -- prints the live image and the live Cards commit
+printf '%s\n' "$TRUENAS_PW" | ssh -o BatchMode=yes truenas \
+  "sudo -S -p '' sh -c 'docker inspect ix-ccsync-dashboard-dashboard-1 --format {{.Config.Image}}; grep -E \"^(commit|subject)=\" /mnt/tank/apps/ccsync-dashboard/cards-web/DEPLOYED_COMMIT'"
+```
+
+```powershell
+. .\tools\load_secrets.ps1; & 'C:\Program Files\Git\bin\bash.exe' live.sh
+```
+
+**3. Dry run, then the real run -- secrets and deploy in ONE PowerShell
+command** (each new PowerShell -- and each Claude tool call -- is a fresh
+session, so env vars from an earlier one are gone; `load_secrets.ps1` must be
+DOT-sourced, the leading `.`):
+
+```powershell
+. .\tools\load_secrets.ps1; dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py --mode image --container-image ghcr.io/the-creators-club/ccsync@sha256:<live digest> --cards-commit <sha> --music-data none --yes --dry-run
+. .\tools\load_secrets.ps1; dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py --mode image --container-image ghcr.io/the-creators-club/ccsync@sha256:<live digest> --cards-commit <sha> --music-data none --yes
+```
+
+What each flag is for:
+
+| flag | why |
+|---|---|
+| `--mode image` | this site is image mode; the flag implies `--recreate` (the mode is baked in at create time) -- that is expected, nothing under `<host-root>` is deleted |
+| `--container-image <live digest>` | pins the image that is ALREADY live, so only Cards changes (step 2) |
+| `--cards-commit <sha>` | the commit to ship; default `main` (also `CARDS_COMMIT`) |
+| `--music-data none` | the default `auto` pushes any of the ~1.4 GB of music data the NAS lacks -- not part of a Cards deploy |
+| `--yes` | only matters for the recreate's confirmation |
+
+Not used: `--no-ffmpeg` (the ffmpeg step is idempotent and skips when it is
+provisioned), `--rollback-on-unhealthy` (image mode has no app tree to roll
+back to).
+
+**Secrets.** `tools\load_secrets.ps1` decrypts the DPAPI file
+`%LOCALAPPDATA%\ccsync\secrets\operator.xml` (alex on creator-1 only) into
+`TRUENAS_PW`, `SYNCTHING_API_KEY`, `DASH_REPORT_TOKEN`, `DASH_SESSION_SECRET`
+and `BROLL_INGEST_TOKEN`, and derives `DASH_RELEASE_PUBKEYS` (image mode
+refuses without it). `ANTHROPIC_API_KEY`, `TRUENAS_API_KEY` and
+`DASH_CARDS_TOKEN` show as **unset** in the dry run -- that is normal: the
+live container runs with all three empty (recorded 2026-09-08, "not a
+regression"); AI keys live in the dashboard's Settings -> AI providers. The
+deploy works from Claude's PowerShell on creator-1 and from a desktop-session
+task; over a key-based SSH logon the DPAPI file may not decrypt.
+
+**What the end of the run looks like** (2026-10-29), and what is NOT a
+failure:
+
+```
+installed Timeline Cards: commit 7230be21e0d2 (7230be2), marker DEPLOYED_COMMIT in .../cards-web
+pulled image: ghcr.io/the-creators-club/ccsync@sha256:1b0ca386...
+deleted app for re-create: ccsync-dashboard
+app create job ... accepted; waiting for it to finish ...
+code root: a code bundle applied OVER THE AIR (/data/code/0.7.76/src) ...
+FAILED: /api/v1/health did not answer from inside the container on port 8480.
+```
+
+The **FAILED** line (and exit code 1) came seconds before the container went
+healthy -- on 2026-10-04 and again on 2026-10-29. Exit 1 is also printed
+whenever the repo's dashboard VERSION is ahead of the pinned image. **Do not
+roll back on it**: check `sudo docker ps` (wanted:
+`ix-ccsync-dashboard-dashboard-1 ... (healthy)`) and the Verify section first.
+
+### Mechanics: what the deploy does with `--cards-commit`
+
+To pin another commit (a rollback, or a branch under test), name it:
 
 ```powershell
 dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py --cards-commit 8cac87f
@@ -317,7 +408,10 @@ look like nothing.
 1. **The mount is up.** `GET /api/v1/health` reports
    `"/cards": {"status": "mounted"}`. `absent` means the tree is not there or
    is incomplete (an operator problem, and it logs at WARNING); `disabled`
-   names which setting is off.
+   names which setting is off. Unauthenticated (e.g. `curl -k
+   https://truenas.tail26290e.ts.net:9443/api/v1/health`) it only says
+   `{"ok": true, "version": ...}`; without a session the quick proxy is
+   `GET /cards/` -> 303 to `/login` (mounted) versus 404 (absent).
 2. **The page is the NEW page.** `GET /cards/` with a session cookie and
    compare its size against the checkout's `tests/golden/page.html`, which the
    2026-09-03 wave regenerated from **691 497 -> 748 009 bytes**. The golden is
@@ -362,10 +456,12 @@ container is healthy: **re-deploy the previous commit**. The old tree's
 names it, and
 
 ```powershell
-dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py --cards-commit <old sha>
+. .\tools\load_secrets.ps1; dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py --mode image --container-image ghcr.io/the-creators-club/ccsync@sha256:<live digest> --cards-commit <old sha> --music-data none --yes
 ```
 
-puts exactly those bytes back, marker and all. Use the rename when the problem
+(the same recipe as [The usual deploy](#the-usual-deploy-the-recipe) -- the
+live digest pin matters just as much on the way back) puts exactly those
+bytes back, marker and all. Use the rename when the problem
 is that the deploy itself failed.
 
 By hand, the same with `cards-web.prev`. The prune step keeps the most recent

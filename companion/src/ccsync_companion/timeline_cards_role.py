@@ -196,6 +196,11 @@ def load_engine(checkout: str) -> Any:
         raise CardsRoleError(
             f"{root} is not a MulticamPipeline checkout "
             f"(no multicam_pipeline/cards in it)")
+    # GL-32 (CR-375, 2026-10-07): psycopg2 is LGPL and loads from a
+    # replaceable directory, so it must be on sys.path before the engine's
+    # lazy `import psycopg2` can run. lgpl_libs.py has the why.
+    from . import lgpl_libs
+    lgpl_libs.activate()
     path = str(root)
     if path not in sys.path:
         # Appended, never inserted at 0: this is somebody else's tree and it

@@ -186,14 +186,19 @@ def canonical_channel_bytes(channel: dict[str, Any]) -> bytes:
 
 
 def _sign_artifact(artifact: Path, *, kind: str, platform: str, version: str,
-                   min_version: str, signed_binary: bool, published_at: str, key: str,
+                   min_version: str | None, signed_binary: bool, published_at: str, key: str,
                    runtime_id: str = "", requires_dashboard: str = "",
-                   arch: str = "", git_sha: str = "", git_dirty: str = "") -> dict:
+                   arch: str = "", git_sha: str = "", git_dirty: str = "",
+                   allow_no_floor: bool = False) -> dict:
     """Run sign_release.main in-process and capture its JSON -- the SAME
     record shape and the SAME key file tools/sign_release.py uses everywhere
     else, imported rather than duplicated (see the module docstring)."""
     argv = ["--artifact", str(artifact), "--kind", kind, "--platform", platform,
-            "--version", version, "--min-version", min_version]
+            "--version", version]
+    if min_version:
+        argv += ["--min-version", min_version]
+    if allow_no_floor:
+        argv += ["--allow-no-floor"]
     if runtime_id:
         argv += ["--runtime-id", runtime_id]
     # REL-4 / REL-16 / REL-13 (2026-08-28). Passed through rather than
@@ -1032,6 +1037,88 @@ def _apply_manifest(args: argparse.Namespace, manifest: dict, manifest_dir: Path
         args.baked_pubkey_ids = ",".join(str(i).strip() for i in ids if str(i).strip())
 
 
+def _ci_gate_impl(args: argparse.Namespace) -> str:
+    """"" when this upload may make a build current for customers, else why not.
+
+    GL-25 (CR-371 overseer round 2, 2026-10-07): the full-green-CI gate lived
+    only in publish_latest.py and release_customers.py, so `ship.cmd
+    -PublishFeed` (a locally built, possibly dirty, possibly unpushed exe)
+    reached the vendor feed through here with no check at all. The check now
+    sits where every route converges. It applies only to what customers can
+    be OFFERED: a --github-upload with --make-current. Anything that cannot
+    be asked counts as not green (fail closed)."""
+    if not (args.github_upload and args.make_current and args.artifact):
+        return ""
+    if getattr(args, "allow_red_ci", False):
+        return ""
+    sha = str(args.git_sha or "").strip()
+    if not sha or str(args.git_dirty or "").strip() in ("1", "true", "True"):
+        return ("this build names no clean git commit (no git sha, or a +dirty tree), so no "
+                "CI run can vouch for it. Customers get only what the full suite passed: "
+                "build it from a pushed commit and publish through tools/release_customers.py "
+                "or tools/publish_latest.py, or pass --allow-red-ci for a deliberate hotfix.")
+    import publish_latest  # noqa: PLC0415  (in-repo, stdlib only)
+    # CR-371 round 2 (2026-10-07): every client manifest records a SHORT sha
+    # (`rev-parse --short`), and ci_green_for compares headSha exactly, so
+    # the gate refused every companion/onboard publish. Expand to the full
+    # commit first; a sha git cannot resolve is a refusal, never a pass.
+    if len(sha) < 40:
+        rc, out, _err = publish_latest.run(
+            ["git", "-C", str(publish_latest.REPO_ROOT), "rev-parse", "--verify",
+             f"{sha}^{{commit}}"])
+        full = (out or "").strip()
+        if rc != 0 or len(full) != 40 or not full.startswith(sha.lower()):
+            return (f"commit {sha[:7]} is not a commit this checkout can resolve, so no CI "
+                    "run can be matched to it. Pass --allow-red-ci for a deliberate hotfix.")
+        sha = full
+    if not publish_latest.ci_green_for(sha):
+        return (f"commit {sha[:7]} has no successful ci.yml run (or GitHub could not be asked). "
+                "Wait for CI, or pass --allow-red-ci for a deliberate hotfix.")
+    tip = publish_latest.remote_head_sha()
+    if not tip or not publish_latest.commit_is_on_main(sha, tip):
+        return (f"commit {sha[:7]} is not an ancestor of origin/{publish_latest.RELEASE_BRANCH} "
+                "(or the remote could not be asked): customers get builds from the release "
+                "branch only. Push it, or pass --allow-red-ci for a deliberate hotfix.")
+    return ""
+
+
+def ci_gate_refusal(args: argparse.Namespace) -> str:
+    return _ci_gate_impl(args)
+
+
+def stamp_generated_at(prior: str, now: str | None = None) -> tuple[str, str]:
+    """(generated_at to sign, warning or "").
+
+    CR-371 overseer round 2 (2026-10-07). Customer dashboards keep the newest
+    generated_at they ever accepted and refuse an older channel (replay
+    protection). A publish from a machine whose clock runs AHEAD would
+    therefore make every later, genuine publish look like a replay on every
+    customer dashboard, recalls included. So a channel is always stamped
+    strictly after the one it replaces: max(now, prior + 1 s). A prior that
+    is itself far in the future is warned about, because stamping past it
+    keeps the channel moving but does not heal the clock that caused it."""
+    now = now or sign_release.utcnow_iso()
+    if not prior:
+        return now, ""
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        import datetime as _dt
+        p = _dt.datetime.strptime(prior.replace("+00:00", "Z"), fmt)
+        n = _dt.datetime.strptime(now, fmt)
+    except ValueError:
+        return now, ""
+    if n > p:
+        return now, ""
+    stamped = (p + _dt.timedelta(seconds=1)).strftime(fmt)
+    warn = ""
+    if (p - n).total_seconds() > 60:
+        warn = (f"the channel already published is stamped {prior}, {int((p - n).total_seconds())} s "
+                f"AHEAD of this machine's clock ({now}). Stamping {stamped} so customer "
+                "dashboards do not read this publish as a replay. Fix the clock that published "
+                "the earlier one.")
+    return stamped, warn
+
+
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--artifact", default="")
@@ -1039,7 +1126,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--kind", default="companion", choices=sign_release.KINDS)
     ap.add_argument("--platform", default="", choices=("",) + sign_release.PLATFORMS)
     ap.add_argument("--version", default="")
-    ap.add_argument("--min-version", default="0.0.0")
+    # GL-25b (CR-371, 2026-10-07): None = tools/release_floor.json (sign_release
+    # resolves it); a companion/onboard record can no longer silently carry 0.0.0.
+    ap.add_argument("--min-version", default=None)
+    ap.add_argument("--allow-no-floor", action="store_true",
+                    help="sign a companion/onboard record with min_version 0.0.0 (GL-25b)")
+    ap.add_argument("--allow-floor-above-current", action="store_true",
+                    help="publish a min_version ABOVE the build currently CURRENT for that "
+                         "kind/platform. That floor disables the current build's own "
+                         "rollback everywhere (PL-RES-96); it is only meant when the "
+                         "current build itself is the hole"),
     ap.add_argument("--published-at", default="")
     ap.add_argument("--runtime-id", default="",
                     help="--kind dashboard only: the image runtime the bundle was built "
@@ -1127,6 +1223,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                          "this kind/platform. Needed only when the earlier floor was itself the "
                          "mistake.")
     ap.add_argument("--set-image", default="", help="tag@digest for dashboard_image")
+    ap.add_argument("--set-sftp-digest", default="",
+                    help="sha256:... of the matching ccsync-sftp image, recorded in "
+                         "dashboard_image so the admin page can print both replacement lines")
+    ap.add_argument("--allow-red-ci", action="store_true",
+                    help="make a build current although no green ci.yml run on the release "
+                         "branch vouches for its commit (a deliberate hotfix)")
     ap.add_argument("--verify", default="", help="offline-verify an existing feed dir and exit")
     ap.add_argument("--key", default="", help="release key file (default ~/.ccsync-release/release.key)")
     ap.add_argument("--allow-dirty", action="store_true")
@@ -1326,6 +1428,10 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
                 raise PublishFeedError(f"no artifact at {artifact}", EXIT_USAGE)
             if args.kind in sign_release.RUNTIME_ID_KINDS:
                 manifest_in_bundle = bundle_manifest(artifact)
+                if not args.git_sha:
+                    args.git_sha = str(manifest_in_bundle.get("git_commit") or "")
+                    if "git_dirty" in manifest_in_bundle and not args.git_dirty:
+                        args.git_dirty = "1" if manifest_in_bundle.get("git_dirty") else "0"
                 inside = str(manifest_in_bundle.get("runtime_id") or "")
                 if not args.runtime_id and inside:
                     args.runtime_id = inside
@@ -1337,9 +1443,14 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
                         "wrong one gives every customer a runtime mismatch nobody can fix "
                         "without the offline key. Drop the flag (it is read from the bundle).",
                         EXIT_USAGE)
+            gate = ci_gate_refusal(args)
+            if gate:
+                raise PublishFeedError(f"REFUSED (GL-25): {gate} Nothing was uploaded.",
+                                       EXIT_USAGE)
             signed = _sign_artifact(
                 artifact, kind=args.kind, platform=args.platform, version=args.version,
                 min_version=args.min_version, signed_binary=bool(args.signed_binary),
+                allow_no_floor=bool(args.allow_no_floor),
                 published_at=args.published_at, key=args.key,
                 runtime_id=args.runtime_id.strip(),
                 requires_dashboard=args.requires_dashboard.strip(),
@@ -1456,6 +1567,25 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
                     "the earlier floor was the mistake. Nothing was uploaded.",
                     EXIT_USAGE)
 
+            # PL-RES-96 / GL-25b (CR-371, 2026-10-07): a floor ABOVE the build that
+            # is current now makes that build's own rollback impossible (every
+            # companion refuses anything below the floor, including the build it
+            # just left). Floors trail by one release; the new record may sit
+            # at the build it replaces, never above it.
+            cur_now = current_version(channel, args.kind, args.platform)
+            if (args.kind in sign_release.FLOOR_KINDS and cur_now
+                    and sign_release.version_tuple(record["min_version"])
+                    > sign_release.version_tuple(cur_now)
+                    and not args.allow_floor_above_current):
+                raise PublishFeedError(
+                    f"min_version {record['min_version']} is ABOVE {cur_now}, the build "
+                    f"CURRENT for {args.kind}/{args.platform}. Every machine would refuse a "
+                    f"rollback to {cur_now} the moment it saw this record, so a bad new "
+                    "build could not be backed out. Lower the floor to the current build "
+                    "or below (tools/release_floor.json / --min-version), or pass "
+                    "--allow-floor-above-current when the current build is itself the hole. "
+                    "Nothing was uploaded.", EXIT_USAGE)
+
             upsert_record(channel, record)
             if args.make_current:
                 set_current(channel, args.kind, args.platform, args.version)
@@ -1508,6 +1638,8 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
                 raise PublishFeedError("--set-image must look like tag@sha256:...", EXIT_USAGE)
             tag, digest = args.set_image.split("@", 1)
             channel["dashboard_image"] = {"tag": tag, "digest": digest}
+            if args.set_sftp_digest.strip():
+                channel["dashboard_image"]["sftp_digest"] = args.set_sftp_digest.strip()
             print(f"[publish-feed] dashboard_image = {tag}@{digest}", file=out)
             published_something = True
 
@@ -1572,7 +1704,12 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
 
         channel["schema"] = SCHEMA
         channel["channel"] = args.channel
-        channel["generated_at"] = sign_release.utcnow_iso()
+        prior_stamps = [str(d.get("generated_at") or "") for d in (published, channel)
+                        if isinstance(d, dict)]
+        stamp, stamp_warn = stamp_generated_at(max(prior_stamps) if prior_stamps else "")
+        if stamp_warn:
+            print(f"[publish-feed] WARNING: {stamp_warn}", file=out)
+        channel["generated_at"] = stamp
         write_channel(feed_dir, channel, key_path=args.key)
         print(f"[publish-feed] wrote {feed_dir / CHANNEL_FILENAME} and .sig "
               f"({len(channel.get('packages', []))} package record(s))", file=out)

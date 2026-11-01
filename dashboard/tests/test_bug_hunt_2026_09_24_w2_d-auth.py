@@ -213,7 +213,9 @@ def test_oidc_claim_alone_does_not_satisfy_the_admin_step(site_conn):
     ctx = setup_engine.SetupContext(conn=site_conn, settings=settings, app=None)
     state = setup_engine.run_check(ctx, "admin")
     assert state.status == "todo"
-    assert "DASH_ADMIN_USERS" in state.detail
+    # CR-362/CR-363 (2026-10-07): the step now names the box on its own row
+    # (an appliance admin has no compose to edit), not the variable.
+    assert "account name" in state.detail and "only logged" in state.detail
     # ...and with the list set it is ok, claim or no claim.
     settings = Settings(auth_method="oidc", oidc_admin_claim="groups",
                         admin_users=frozenset({"owen"}))

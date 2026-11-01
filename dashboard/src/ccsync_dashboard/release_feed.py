@@ -432,6 +432,48 @@ def fetch_and_verify_channel(
     return channel, None
 
 
+def _parse_generated_at(value: str):
+    """A channel's generated_at as an aware datetime, or None if unreadable."""
+    from datetime import datetime, timezone
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def channel_replay_refusal(channel: dict[str, Any], highest_accepted: str) -> str:
+    """"" when `channel` is at least as new as the newest one this dashboard
+    has accepted, else the sentence for the admin page (GL-25b, CR-371).
+
+    Equal is fine (a re-check of the same channel). A first ever check has
+    nothing to compare against. A channel with no readable generated_at after
+    one WAS accepted is refused: dropping the field must not be a way round the
+    check. An unreadable STORED value is not held against the feed (it would
+    wedge the dashboard on a value it wrote itself)."""
+    previous = _parse_generated_at(highest_accepted)
+    if previous is None:
+        return ""
+    incoming_text = str(channel.get("generated_at") or "")
+    incoming = _parse_generated_at(incoming_text)
+    if incoming is None:
+        return ("the release channel carries no readable generated_at, and this "
+                f"dashboard has already accepted one from {highest_accepted}: refused as a "
+                "possible replay of an old channel. Nothing was changed.")
+    if incoming < previous:
+        return (f"the release channel is OLDER ({incoming_text}) than one this dashboard "
+                f"already accepted ({highest_accepted}): refused as a possible replay of "
+                "an old signed channel, which could bring back a build that was since "
+                "withdrawn or fixed. Nothing was changed. If the vendor really re-published "
+                "an older channel, they need to re-sign it with a new generated_at.")
+    return ""
+
+
 def _record_key(record: dict[str, Any]) -> tuple[str, str, str]:
     """(kind, platform, version), NORMALISED the way every consumer spells it.
 
@@ -843,6 +885,20 @@ def check_now(conn, settings, app_state) -> dict[str, Any]:
         db.set_feed_state(conn, last_checked_at=now, last_error=err)
         conn.commit()
         return {"ok": False, "error": err}
+    # GL-25b / bug-dash-release-4 (CR-371, 2026-10-07): a signature proves a
+    # channel was signed ONCE, not that it is the latest. Whoever serves the
+    # release assets could replay an older, validly signed channel after a
+    # security fix (or after a recall) and every policy=current dashboard would
+    # make the vulnerable build current again. So the newest generated_at ever
+    # accepted is remembered (feed_state, which already stored it) and an older
+    # one is refused like an outage: the cache and the offers stay as they were.
+    stale = channel_replay_refusal(
+        channel, str(db.get_feed_state(conn).get("last_channel_generated_at") or ""))
+    if stale:
+        log.warning("release feed check refused: %s", stale)
+        db.set_feed_state(conn, last_checked_at=now, last_error=stale)
+        conn.commit()
+        return {"ok": False, "error": stale}
     rejected: list[str] = []
     valid_records = _valid_records(channel, settings.release_pubkeys, rejected)
     cache = _cache(app_state)
@@ -1018,10 +1074,13 @@ def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]]
     if policy == "manual":
         return []
     applied: list[str] = []
-    # package_records, not valid_records: `stage`/`current` must never
-    # auto-apply a DASHBOARD code update. Replacing the code the container is
-    # running is a ten-second outage and an admin's decision, not a
-    # consequence of a policy about editor packages (ZERO_TOUCH_PLAN.md WP K).
+    # package_records, not valid_records: THIS loop never applies a DASHBOARD
+    # code update. (apply_dashboard_policy is a separate path and DOES apply the
+    # channel's current dashboard bundle on an image-mode site with
+    # policy = current, after soak_minutes; GL-24 / CR-371, 2026-10-07.)
+    # Within THIS loop, replacing the code the container is running (a
+    # ten-second outage) is not a consequence of a policy about editor packages
+    # (ZERO_TOUCH_PLAN.md WP K); only apply_dashboard_policy does that.
     channel = _cache(app_state).get("channel") or {}
     offered = select_offered_records(package_records(valid_records), channel)
     for (kind, platform), record in sorted(offered.items()):
@@ -1195,6 +1254,31 @@ def _dashboard_auto_apply_reason(conn, settings, app_state, now: str) -> tuple[s
         return "", (f"dashboard {version} was tried here and failed "
                     f"({read.get('error') or 'no reason recorded'}); it will not be "
                     f"retried automatically")
+    # CR-369 / GL-20 (2026-10-07, bug-dash-release-1): a bundle that passed
+    # stage-verify but crash-looped on boot ends its apply at step "done", and
+    # select_code_root's revert rewrites only current.json, so the "failed"
+    # guard above never saw it and every default-policy site re-applied it
+    # 10 s after each revert, for ever. Two durable signals, either is enough:
+    # the revert's own marker file, and current.json's reverted_from. A
+    # DIFFERENT (newer) offered version matches neither and goes through; an
+    # admin's [ APPLY ] clears the marker (dashboard_update.start_apply).
+    try:
+        marker = dashboard_update.read_no_auto_apply(settings)
+        current = dashboard_update._read_json(dashboard_update.current_json_path(settings))
+    except Exception:                                                 # noqa: BLE001
+        marker, current = {}, {}
+    entries = dashboard_update.no_auto_apply_entries(marker)
+    hit = entries.get(version)
+    if hit is not None and str(hit.get("reason") or "").startswith("rolled back"):
+        # An admin's own [ ROLLBACK ] away from this version.
+        return "", (f"dashboard {version} was rolled back by an admin ({hit.get('reason')}); "
+                    f"it will not be re-applied automatically. A newer version is taken "
+                    f"as usual, and \"Update now\" on the Packages page forces this one")
+    if hit is not None or str(current.get("reverted_from") or "") == version:
+        return "", (f"dashboard {version} was installed here, would not start, and was "
+                    f"reverted ({(hit or {}).get('reason') or current.get('reverted_reason') or 'no reason recorded'}); "
+                    f"it will not be retried automatically. A newer version is taken "
+                    f"as usual, and \"Update now\" on the Packages page forces this one")
     soak_minutes = package_store.soak_minutes_for(conn, settings)
     published_at = str(entry.get("published_at") or "")
     if soak_minutes > 0:
@@ -1430,6 +1514,65 @@ def publish_from_feed(
     return view
 
 
+VENDOR_IMAGE = "ghcr.io/the-creators-club/ccsync"
+VENDOR_SFTP_IMAGE = "ghcr.io/the-creators-club/ccsync-sftp"
+
+
+def image_refs(image: dict[str, Any] | None) -> list[str]:
+    """The exact `<image>:<tag>@<digest>` references the signed channel's
+    dashboard_image names, one per vendor image the channel carries a digest
+    for. [] when the channel names none (an older feed, or nothing published).
+
+    CR-371 overseer round 2 / GL-50 (2026-10-07). A customer compose pinned by
+    digest never follows a moving tag, so the only way a runtime update can
+    reach it is the admin putting the NEW digest into the project. Telling
+    them to press the NAS's own Update/Build re-pulls the SAME pinned digest
+    and the banner stays for ever."""
+    image = image if isinstance(image, dict) else {}
+    tag = str(image.get("tag") or "").strip()
+    digest = str(image.get("digest") or "").strip()
+    refs: list[str] = []
+    if tag and digest.startswith("sha256:"):
+        refs.append(f"{VENDOR_IMAGE}:{tag}@{digest}")
+        sftp = str(image.get("sftp_digest") or "").strip()
+        if sftp.startswith("sha256:"):
+            refs.append(f"{VENDOR_SFTP_IMAGE}:{tag}@{sftp}")
+    return refs
+
+
+def image_update_hint(nas_kind: str, image: dict[str, Any] | None) -> str:
+    """What an admin does to apply a RUNTIME update: one wording for the
+    Packages page, the Dashboard-update panel, the fleet banner and the alert
+    mail. With a digest on the channel it prints the replacement lines; without
+    one (an older feed) it keeps the NAS's own Update click, which is correct
+    for a site still on a floating tag."""
+    refs = image_refs(image)
+    kind = str(nas_kind or "").lower()
+    if refs:
+        where = {"synology": "Container Manager > Project ccsync > Edit",
+                 "truenas": "Apps > ccsync > Edit"}.get(
+                     kind, "your NAS's app or container manager")
+        # Every ref is separated from its neighbours by whitespace only and the
+        # text ENDS on the last ref: callers must not append punctuation, because
+        # a copied `sha256:<hex>.` is an invalid docker reference (GL-50, CR-371
+        # round 2, 2026-10-07). Services are named, since the compose file has
+        # three and the sftp ref in the dashboard service is a wrong-image deploy.
+        sftp_part = (" Image for the sftp service: " + refs[1]) if len(refs) > 1 else ""
+        return ("edit the project's compose file (" + where + "), put the "
+                "image refs named below on their services, then save and redeploy. "
+                "A site installed with install_dashboard_app.py has no sftp service: "
+                "set [stack] image in site.toml to the dashboard ref instead and "
+                "re-run the installer (--container-image or $CCSYNC_IMAGE, if "
+                "either is set, wins over [stack] image). Pressing Update or Build alone "
+                "re-pulls the old pinned image. Image for the dashboard and secrets-init "
+                "services: " + refs[0] + sftp_part)
+    if kind == "synology":
+        return "Container Manager > Project ccsync > Build"
+    if kind == "truenas":
+        return "Apps > ccsync > Update"
+    return "your NAS's own app or container manager's Update action"
+
+
 def build_feed_view(conn, settings, app_state) -> dict[str, Any]:
     """The shape GET /api/v1/admin/feed serves, and what the admin partial
     renders. `available` never fabricates a record: it is exactly the last
@@ -1482,6 +1625,9 @@ def build_feed_view(conn, settings, app_state) -> dict[str, Any]:
         "image": {
             "tag": str(image.get("tag") or ""),
             "digest": str(image.get("digest") or ""),
+            "sftp_digest": str(image.get("sftp_digest") or ""),
+            "refs": image_refs(image),
+            "update_hint": image_update_hint(getattr(settings, "nas_kind", ""), image),
             "current_running_version": VERSION,
         },
     }

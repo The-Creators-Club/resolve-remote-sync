@@ -341,7 +341,12 @@ class TestTheRealTree:
     def test_the_parser_sees_psycopg2_in_the_spec(self):
         """Guards the test above against passing because it read nothing."""
         names = scan_frozen.spec_hidden_imports(REPO / "companion" / "build.spec")
-        assert "psycopg2" in names and "pg8000.native" in names
+        # psycopg2 left the hidden imports on 2026-10-07 (GL-32, CR-375): it is
+        # shipped as plain files under ccsync_lib/ so the user can replace it.
+        # It must still be LOCKED, which is the check that mattered here.
+        assert "pg8000.native" in names and "psycopg2" not in names
+        lock = (REPO / "companion" / "requirements.lock").read_text(encoding="utf-8")
+        assert "psycopg2-binary==" in lock
 
     @pytest.mark.parametrize("spec", ["build_onboard.spec", "build_onboard_macos.spec"])
     def test_the_wizard_hidden_imports_are_all_first_party(self, spec):

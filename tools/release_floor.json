@@ -1,0 +1,5 @@
+{
+  "_comment": "GL-25b (CR-371, 2026-10-07): the downgrade floor every signer stamps into a companion/onboard record when no --min-version / CCSYNC_MIN_VERSION is given. A companion remembers the highest floor it has ever seen, for ever, so a value ABOVE any build the fleet runs is recoverable only by hand on each machine (CR-52): keep it at or below the build that is CURRENT, and trailing it by a release (PL-RES-96). Raise it at launch and at every release that fixes something a downgrade would reintroduce. Owner: pick the real launch values here before the beta opens.",
+  "companion": {"windows": "0.9.75", "macos": "0.9.75"},
+  "onboard": {"windows": "1.0.44", "macos": "1.0.44"}
+}

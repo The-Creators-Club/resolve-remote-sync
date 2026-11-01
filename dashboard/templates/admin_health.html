@@ -22,6 +22,7 @@
     <div>
       <h1><span><span class="prompt" aria-hidden="true">&gt;</span> HEALTH</span></h1>
       <div class="sub" id="health-head-sub">{% if health_total %}<b>{{ health_total }}</b> open across notices, alerts, invariants and protection{% else %}nothing open, every check answered{% endif %}</div>
+      <div class="sub" id="health-support">Support: <b>{{ support_contact }}</b></div>
     </div>
     <div class="acts bands" id="health-head-bands">
       {% if health_total %}
@@ -100,7 +101,7 @@
                 <span class="src" title="{{ src_tip.get(row.source, '') }}">{{ row.source }}</span>
                 {% if row.subject %}<div class="subj">{{ row.subject }}</div>{% endif %}
                 {% if row.diagnosis %}<div class="what">{{ row.diagnosis }}</div>{% endif %}
-                <div class="todo">{% if row.fix %}<span class="cmd">{{ row.fix }}</span>{% endif %}<span class="keys">
+                <div class="todo">{% if row.fix %}<span class="cmd">{{ row.fix | with_support }}</span>{% endif %}<span class="keys">
                   {% if row.href %}<a class="key sm" href="{{ row.href }}"><span class="t">{{ row.href_label | cc_unbracket }}</span><span class="vh">: {{ row.title }}</span></a>{% endif %}
                   {% if row.source == 'notice' %}<a class="key quiet sm" href="#server-notices" title="Open the problems the server found tab."><span class="t">notices</span><span class="vh">: {{ row.title }}</span></a>
                   {% else %}<a class="key quiet sm" href="{{ row.detail_page }}"><span class="t">{{ row.detail_label | cc_unbracket }}</span><span class="vh">: {{ row.title }}</span></a>{% endif %}

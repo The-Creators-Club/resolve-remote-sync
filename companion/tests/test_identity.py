@@ -216,6 +216,26 @@ def test_verify_credentials_success():
     assert result["token"] == token
 
 
+def test_verify_credentials_sends_this_computers_name(monkeypatch):
+    """CR-367 / GL-15 round 2 (2026-10-07): the dashboard replaces THIS
+    computer's earlier sign-in token only if the verify body names the
+    computer. The field is platform.node(), and a blank node name is sent as
+    is (the dashboard's validator turns it into None) rather than raising."""
+    monkeypatch.setattr(identity_mod.platform, "node", lambda: "EDIT-1")
+    bodies = []
+
+    def fake_post(url, data, headers, timeout):
+        bodies.append(dict(data))
+        return {"ok": True, "username": "owen", "token": _token()}
+
+    verify_credentials("http://dash.example.com", "owen", "hunter2", http_post=fake_post)
+    assert bodies[0]["machine"] == "EDIT-1"
+    monkeypatch.setattr(identity_mod.platform, "node", lambda: "")
+    result = verify_credentials("http://dash.example.com", "owen", "hunter2",
+                                http_post=fake_post)
+    assert result["ok"] is True and bodies[1]["machine"] == ""
+
+
 def test_verify_credentials_strips_trailing_slash_from_url():
     calls = []
 

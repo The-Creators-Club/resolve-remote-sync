@@ -194,6 +194,31 @@ def cli_gate(conn: sqlite3.Connection, settings: Any) -> tuple[str, str]:
     find; either missing makes the run a fallback email that says which."""
     from . import site_store
 
+    from . import build_flavor
+
+    if build_flavor.cli_build_locked():
+        # GL-31 / GL-48 / CR-374 (2026-10-07): the vendor build has no
+        # subscription CLI and no wizard, but triage SHIPS (owner table), so
+        # it keeps ONE compliant door: an unmodified Claude Code the admin
+        # put on the host (a typed path or PATH), run ONLY on the site's
+        # Anthropic API key (Console billing), never the sign-in relay or a
+        # stored setup-token. See `run_env`. The owner answered the
+        # "is that a CLI provider" question on 2026-10-07: allowed on the
+        # site's own Anthropic API key, only subscription sign-in is locked.
+        key, _src = ai_providers.read_key(settings, ai_providers.ANTHROPIC_API)
+        if not key:
+            return "", ("The server check needs an Anthropic API key "
+                        "(Settings, AI providers) on this build")
+        # Round 2 (2026-10-07): the owner ruled triage ships on the site's
+        # own API key, so the checksum-verified publisher install stays open
+        # for Claude Code on a locked build and its binary is found under
+        # <data>/tools (settings passed), not only by typed path or PATH.
+        path = ai_providers.cli_path(conn, ai_providers.CLAUDE_CODE, settings)
+        if not path:
+            return "", ("The server check needs Claude Code on this server: "
+                        "type the full path of a copy you installed under "
+                        "Settings, AI providers, or put it on this server's PATH")
+        return path, ""
     if not site_store.feature_enabled(conn, settings, "ai_cli_providers"):
         return "", ("Claude Code is switched off on this server (the site feature "
                     "ai_cli_providers)")
@@ -222,9 +247,42 @@ def _spawn(argv: list[str], prompt: str, cwd: str, env: dict,
         errors="replace", timeout=float(timeout), env=env, cwd=cwd)
 
 
+def run_env(settings: Any) -> dict:
+    """The CLI's environment. Studio flavour: as before. Locked (vendor)
+    build: no wizard home and no stored setup-token (the subscription
+    paths), just the allow-listed base plus the site's Anthropic API key
+    (GL-31 / CR-374, 2026-10-07)."""
+    from . import build_flavor
+
+    if not build_flavor.cli_build_locked():
+        return cli_tools.cli_env(settings, ai_providers.CLAUDE_CODE)
+    env = cli_tools.cli_env(None, ai_providers.CLAUDE_CODE)
+    env.pop(cli_tools.CLAUDE_TOKEN_VAR, None)
+    # CR-374 overseer (2026-10-07): the CLI writes ~/.claude and
+    # ~/.claude.json, and the image's user has no home (useradd
+    # --no-create-home, run.sh sets no HOME), so a bare run fails. Give the
+    # locked run its OWN writable HOME under <data>, beside (never inside)
+    # the wizard's `home`, which is never created on this build and so can
+    # never hold a sign-in. It holds no credentials: the key is in the env.
+    try:
+        home = cli_tools.tool_root(settings, ai_providers.CLAUDE_CODE) / "api-home"
+        home.mkdir(parents=True, exist_ok=True)
+        try:
+            home.chmod(0o700)
+        except OSError:
+            pass
+        env["HOME"] = str(home)
+    except (OSError, AttributeError, TypeError):
+        env.pop("HOME", None)
+    key, _src = ai_providers.read_key(settings, ai_providers.ANTHROPIC_API)
+    if key:
+        env["ANTHROPIC_API_KEY"] = key
+    return env
+
+
 def run_cli(argv: list[str], prompt: str, *, cwd: str, timeout: float,
             settings: Any) -> str:
-    env = cli_tools.cli_env(settings, ai_providers.CLAUDE_CODE)
+    env = run_env(settings)
     try:
         proc = _spawn(argv, prompt, cwd, env, timeout)
     except subprocess.TimeoutExpired:

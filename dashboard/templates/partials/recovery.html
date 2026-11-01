@@ -59,7 +59,7 @@
           <span class="ti">{{ fact.label }}{% if fact.value %}: <span class="rc-value">{{ fact.value }}</span>{% endif %}</span>
           {% if not fact.verified %}<div class="more">
             {% if fact.why_not %}<div class="cq">{{ fact.why_not }}</div>{% endif %}
-            {% if fact.fix %}<div class="fix">{{ fact.fix }}</div>{% endif %}
+            {% if fact.fix %}<div class="fix">{{ fact.fix | with_support }}</div>{% endif %}
           </div>{% endif %}
         </div>
       {% else %}

@@ -28,7 +28,25 @@
   var page = document.querySelector('.cl');
   if (!page) return;
   var savedAt = document.querySelector('meta[name="cards-offline"]');
-  var offline = !!savedAt;
+  // WORKING OFFLINE BY CHOICE (Alex, 2026-10-22: "enable offline mode even
+  // if I'm online, in all the apps, and in the browser"). The episode page
+  // keeps the switch in this same origin's localStorage (the Timeline Cards
+  // repo's 15-offline.js OFLFORCE), so the list honours it too: offline
+  // mode with the server up. In the Windows / Android app the app's own
+  // local server holds the same switch (docs/NATIVE-APPS.md there).
+  var FORCEKEY = 'cards_force_offline';
+  var forced = false;
+  try { forced = localStorage.getItem(FORCEKEY) === '1'; } catch (e) { /* no storage: never forced */ }
+  var inApp = location.hostname === '127.0.0.1' && location.port === '47823';
+  var offline = !!savedAt || forced;
+  function setForced(on) {
+    try { if (on) localStorage.setItem(FORCEKEY, '1'); else localStorage.removeItem(FORCEKEY); } catch (e) { /* */ }
+    var tell = inApp
+      ? fetch('/__app/api/offline', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                     body: JSON.stringify({on: !!on})}).catch(function () { return null; })
+      : Promise.resolve(null);
+    tell.then(function () { window.location.href = '/cards/'; });
+  }
 
   // ------------------------------------------------------------- the worker
   // Registers it, makes sure the phone is running THIS release's bytes, and
@@ -224,12 +242,14 @@
   }
 
   function offlineMode() {
-    var at = Number(savedAt.getAttribute('content') || 0);
+    var at = Number(savedAt ? savedAt.getAttribute('content') || 0 : 0);
     var note = el('div', 'note warn cl-offline-note');
     note.setAttribute('role', 'status');
     note.appendChild(el('span', 'tag solid warn', 'offline'));
-    note.appendChild(el('span', 'grow',
-      'The server cannot be reached. This is the episode list as of ' + (when(at) || 'your last visit')
+    note.appendChild(el('span', 'grow', forced
+      ? 'You are working offline by choice. Cut lists marked downloaded open from this device, and their'
+        + ' edits wait here until you go back online. Opening or closing anything else needs the server.'
+      : 'The server cannot be reached. This is the episode list as of ' + (when(at) || 'your last visit')
       + '. Cut lists marked downloaded open from this device and sync when the server is back.'
       + ' Opening or closing anything else needs the server.'));
     var head = page.querySelector('.head');
@@ -237,12 +257,33 @@
     else page.insertBefore(note, page.firstChild);
     page.querySelectorAll('form[action="/cards/open"] button, form[action="/cards/close"] button')
       .forEach(function (b) { b.disabled = true; b.title = 'Needs the server, which cannot be reached.'; });
-    var retry = el('a', 'key sm', 'try the server again');
-    retry.href = '/cards/';
-    note.appendChild(retry);
+    if (forced) {
+      var back = el('button', 'key sm primary', 'go back online');
+      back.type = 'button';
+      back.addEventListener('click', function () { setForced(false); });
+      note.appendChild(back);
+    } else {
+      var retry = el('a', 'key sm', 'try the server again');
+      retry.href = '/cards/';
+      note.appendChild(retry);
+    }
+  }
+
+  function onlineSwitch() {
+    var bar = el('div', 'enote cl-note cl-offline-switch');
+    var b = el('button', 'key sm', 'work offline');
+    b.type = 'button';
+    b.title = 'Use the cut lists downloaded on this device even with the server up, as on a plane.'
+      + ' Nothing goes to the server until you go back online.';
+    b.addEventListener('click', function () { setForced(true); });
+    bar.appendChild(b);
+    var head = page.querySelector('.head');
+    if (head && head.nextSibling) head.parentNode.insertBefore(bar, head.nextSibling);
+    else page.insertBefore(bar, page.firstChild);
   }
 
   if (offline) offlineMode();
+  else onlineSwitch();
 
   Promise.all([readIndex(), savedShells()]).then(function (got) {
     var index = got[0], shells = got[1];

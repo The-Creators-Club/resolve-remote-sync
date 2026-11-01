@@ -64,7 +64,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import auth, cli_tools, secrets_boot
+from . import auth, build_flavor, cli_tools, secrets_boot
 from .api import get_conn
 
 log = logging.getLogger("ccsync.dashboard.ai_providers")
@@ -425,7 +425,15 @@ def preference(conn: sqlite3.Connection) -> str:
     """The admin's pin, or "auto". An unrecognised stored value reads as
     "auto" rather than as a pin nothing can satisfy."""
     value = (get_setting(conn, PREFERENCE_KEY, AUTO) or AUTO).strip()
-    return value if value in PROVIDER_ORDER else AUTO
+    if value not in PROVIDER_ORDER:
+        return AUTO
+    # GL-31 / CR-374 round 2 (2026-10-07): a CLI pin stored by a studio that
+    # is now running the locked build is INERT, read as auto. Honouring it
+    # would refuse every AI call ("pinned but not available") even with a
+    # working API key. The stored row is left alone for when the lock lifts.
+    if PROVIDERS[value].kind == "cli" and build_flavor.cli_build_locked():
+        return AUTO
+    return value
 
 
 def set_preference(conn: sqlite3.Connection, value: str, updated_by: str) -> str:
@@ -433,6 +441,9 @@ def set_preference(conn: sqlite3.Connection, value: str, updated_by: str) -> str
     if value != AUTO and value not in PROVIDER_ORDER:
         raise ProviderError(
             f"{value!r} is not 'auto' or one of: {', '.join(PROVIDER_ORDER)}")
+    if (value != AUTO and PROVIDERS[value].kind == "cli"
+            and build_flavor.cli_build_locked()):
+        raise ProviderError(build_flavor.LOCKED_DETAIL)
     set_setting(conn, PREFERENCE_KEY, value, updated_by)
     return value
 
@@ -917,9 +928,11 @@ def provider_states(
                 # Names the control on THIS page, not the config key: the
                 # owner read "[features] ai_cli_providers" and went looking
                 # for a features page that does not exist (2026-08-18).
-                row["detail"] = ("CLI providers are off for this site. Tick "
-                                 "'Allow CLI providers (Claude Code, Codex)' "
-                                 "below to enable them")
+                row["detail"] = (
+                    build_flavor.LOCKED_DETAIL if build_flavor.cli_build_locked()
+                    else "CLI providers are off for this site. Tick "
+                         "'Allow CLI providers (Claude Code, Codex)' "
+                         "below to enable them")
             elif not probe:
                 # NOT "no" (CR-121). See unprobed_cli_state: the last probe,
                 # then the wizard's snapshot, then ST_UNKNOWN.
@@ -1082,6 +1095,9 @@ def _snapshot(conn: sqlite3.Connection, settings: Any, *, probe: bool = True,
         "order": list(PROVIDER_ORDER),
         "preference": preference(conn),
         "cli_enabled": cli_enabled(conn, settings),
+        # GL-31 / CR-374: the page hides every CLI row, the notice and the
+        # CLI switch when the BUILD (not the site) has them off.
+        "cli_build_locked": build_flavor.cli_build_locked(),
         "cli_tos_note": CLI_TOS_NOTE,
         # The picker's and wizard's words (terminal Settings page, phase 4).
         "help": PROVIDER_HELP,
@@ -1244,6 +1260,8 @@ def test_provider(conn: sqlite3.Connection, settings: Any, name: str) -> dict:
     provider = spec(name)
     if provider.kind == "cli":
         if not cli_enabled(conn, settings):
+            if build_flavor.cli_build_locked():
+                return {"ok": False, "detail": build_flavor.LOCKED_DETAIL}
             return {"ok": False, "detail": "CLI providers are off for this site "
                                            "([features] ai_cli_providers)"}
         # WITH settings: without them the probe cannot see the wizard's own

@@ -648,6 +648,16 @@ menu bar, exactly as on Windows.
 
 ## The release signing key (the upgrade channel's trust anchor)
 
+**VENDOR-ONLY (CR-362 / GL-03, 2026-10-07).** Generating, custody, backup and
+rotation of this key are the vendor's. A customer never runs
+`release_key.py new`: they pin the vendor's PUBLIC key in
+`DASH_RELEASE_PUBKEYS` (on the appliance it is baked into the image,
+`dashboard/src/ccsync_dashboard/vendor_defaults.py`, which must hold the same
+key as `release_pubkey.RELEASE_PUBKEYS`; a test pins the two). A customer who
+made their own key would reject every vendor build. The vendor feed address is
+the single constant `VENDOR_FEED_URL` in that file (GL-47: a placeholder
+pointing at today's feed until the vendor-owned domain exists).
+
 *Added 2026-08-17 — `docs/COMMERCIAL_READINESS.md` item 4 (STOP-SHIP, C2).*
 
 Until this existed, the upgrade channel had **no authentication at all**. The
@@ -701,9 +711,55 @@ python tools\release_key.py pubkey    # the value for DASH_RELEASE_PUBKEYS
 python tools\release_key.py bake      # writes the PUBLIC half into the companion
 ```
 
-**Back the key file up offline.** Losing it means you can never offer the
+**Back the key file up offline** (and encrypt it first, below). Losing it means you can never offer the
 fleet another build: every companion trusts only the keys baked into its own
 binary, and the only way out is a hand reinstall on every machine.
+
+### Encrypting the release key (once; GL-17 / GL-42 beta decision, CR-378)
+
+For the beta the key is a **passphrase-protected file**, not a hardware token.
+Do this once, at your own terminal, on the release rig:
+
+```powershell
+python tools\release_key.py status     # plaintext | encrypted
+python tools\release_key.py encrypt    # asks for a passphrase twice (12+ characters)
+python tools\release_key.py backup --to E:\    # USB stick 1
+python tools\release_key.py backup --to F:\    # USB stick 2
+```
+
+`encrypt` writes the encrypted file beside the key, checks that it decrypts to
+the same seed and the same public key, and only then overwrites the plaintext
+and swaps the encrypted file in. A failed check leaves the plaintext alone. The
+PUBLIC key is unchanged: nothing is rebaked, no companion notices, the dashboard's
+`DASH_RELEASE_PUBKEYS` stays as it is. `pubkey`, `trusted`, `bake` and the
+release rig's probes never ask for the passphrase (the encrypted file carries
+the public half in the clear).
+
+**The procedure that keeps it recoverable:**
+
+1. Two offline USB copies of the ENCRYPTED file (`backup --to`, which copies it
+   byte for byte), kept in two different places.
+2. The passphrase written down on paper and kept somewhere ELSE than the
+   sticks. A file with no passphrase and a passphrase with no file are both a
+   lost key, and a lost key means a hands-on reinstall on every machine.
+3. Destroy every older PLAINTEXT copy: earlier USB sticks, password-manager
+   entries, `backup --print` lines. They are the unencrypted key. Overwriting a
+   file is not guaranteed on an SSD, so physically destroy old sticks.
+4. Encrypt the rotation neighbours too (`release-next.key`,
+   `release.key.superseded`): `python tools\release_key.py --path <file> encrypt`.
+
+**At a release the passphrase is asked ONCE.** `tools\ship.cmd` and
+`tools\publish_latest.py` prompt at the start (never echoed), refuse before
+anything is built or uploaded if it is wrong, and pass it to the signing steps
+for that run only. Running `sign_release.py` or `publish_feed.py` by hand
+prompts per process. On the Mac, `release_macos.sh` shells out to
+`sign_release.py`, which prompts on the terminal. An unattended run on this rig
+can set `CCSYNC_RELEASE_KEY_PASSPHRASE` for that session (see `SECRETS.md`).
+
+A **plaintext** key still works, but every process that loads it prints an
+UNENCRYPTED warning on stderr, and `ship` repeats it. Format and construction
+are in the `tools/release_key.py` docstring (scrypt N=2^17, stdlib only, no new
+dependency).
 
 `tools/release.ps1` refuses to build when `RELEASE_PUBKEYS` is empty (a
 companion like that would refuse *every* update, permanently) and when the
@@ -1140,6 +1196,21 @@ step **amber**, not a green tick nobody read.
 
 ---
 
+## First delivery of the CLI lock to the studio (GL-31 / CR-374, 2026-10-07)
+
+The CR-374 dashboard boots with the Claude Code and Codex providers LOCKED
+unless the container environment carries `DASH_STUDIO_CLI_PROVIDERS=1`. An
+over-the-air bundle, the vendor feed, Settings > Packages "Update now" and
+`policy = current` all keep the container's OLD environment, so the first
+CR-374 build to arrive that way would strand the studio: Timeline Cards' AI
+(no API key here), the YouTube downloader's AI and the server check go dark.
+Do this first, once: put `[studio] allow_cli_providers = true` in the
+studio's site.toml and deploy through `server/install_dashboard_app.py`
+(`tools\ship.cmd`), and only then let any OTA path carry the build (hold it
+off `--make-current` until then). If it happens anyway, the dashboard says so:
+the notice `cli_lock_stranded` (PROBLEMS THE SERVER FOUND) names the fix.
+Details: `docs/STUDIO_BUILD.md`.
+
 ## The downgrade floor (`min_version`)
 
 The offer has always been *"different, not newer"* — the dashboard advertises
@@ -1156,8 +1227,19 @@ fixes. Hence the floor.
   still one click, still worded "Roll back to vX (older build)".
 
 Set it per release with `$env:CCSYNC_MIN_VERSION` (Windows ship) /
-`CCSYNC_MIN_VERSION` (macOS scripts); default `0.0.0`, i.e. no floor. **Raise
-it whenever a release fixes something a downgrade would reintroduce.**
+`CCSYNC_MIN_VERSION` (macOS scripts). **Unset no longer means no floor**
+(GL-25b, CR-371, 2026-10-07): every signer (`sign_release.py`, `publish_feed.py`,
+`publish_package.py`, both build scripts) stamps the per-platform value from
+the tracked `tools/release_floor.json` and REFUSES a companion/onboard record
+at `0.0.0` unless `--allow-no-floor` says it is meant. The floor must trail
+the build that is current: `publish_feed.py` refuses a floor above it
+(`--allow-floor-above-current`, PL-RES-96: a floor equal to the release
+disables that release's own rollback). **Raise the file whenever a release
+fixes something a downgrade would reintroduce**; the launch values in it are
+placeholders the owner confirms before the beta opens. The other half is the
+dashboard side: a channel whose `generated_at` is older than the newest one
+already accepted is refused (a replayed old signed channel cannot roll a
+`policy = current` site back).
 
 ### A floor above the build it describes is refused everywhere (CR-52)
 

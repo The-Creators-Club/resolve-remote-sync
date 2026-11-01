@@ -238,12 +238,15 @@ from common import (  # noqa: F401 - truenas_api/run_ssh/wait_for_job/ok are als
     ScriptCalls, add_host_key_arg, add_nas_kind_arg,
     add_site_arg, cli, confirm_destructive, editor_shell_is_sftp_only,
     editor_shell_mode, get_backend,
-    load_site, nas_admin_password, ok, print_nas_banner, require_env,
+    load_site, nas_admin_password, ok, print_nas_banner, print_truenas_version_note, require_env,
     require_site_value,
     run_ssh, set_host_key_pin, sftp_put_text, shell_quote, site_bool, site_int, site_list,
     site_value,
     snapshot_before, snapshot_verdict, ssh_client, truenas_api_key,
     synology_api, truenas_api, truenas_conn_params, wait_for_job,
+    # GL-18 / GL-19 secure defaults (CR-368, 2026-10-07)
+    _read_known_certs, default_cert_pin, nas_host_user, nas_ssh_hostkey_line,
+    project_acl_mode, project_server_password, security_legacy, synology_port,
 )
 from backends import truenas as truenas_backend
 
@@ -1509,6 +1512,41 @@ APP_GID = site_int("stack", "gid", 3001)
 APP_PRIVATE_GID = site_int("stack", "private_gid", APP_UID)
 
 
+def truenas_identity_mismatch(app_uid: int, app_gid: int, *, dry_run: bool = False) -> str:
+    """"" when the service account and the editors group on the box carry the
+    ids the container will run as; else the sentence naming the difference and
+    the site.toml keys to set. "" too when the box cannot answer (warned)."""
+    if dry_run:
+        return ""
+    probe = (f"id -u {shell_quote(DEFAULT_DATASET_OWNER)}; "
+             f"getent group {shell_quote(EDITORS_GROUP)} | cut -d: -f3")
+    try:
+        rc, out, _err = run_ssh(probe, dry_run=False, timeout=30)
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"WARNING: could not read the live uid/gid of {DEFAULT_DATASET_OWNER!r}: {exc}",
+              file=sys.stderr)
+        return ""
+    lines = [ln.strip() for ln in str(out or "").splitlines() if ln.strip()]
+    if rc != 0 or len(lines) < 2 or not (lines[0].isdigit() and lines[1].isdigit()):
+        print(f"WARNING: could not read the live uid/gid of {DEFAULT_DATASET_OWNER!r} / "
+              f"{EDITORS_GROUP!r}; deploying with [stack] uid/gid {app_uid}:{app_gid} "
+              f"unchecked", file=sys.stderr)
+        return ""
+    live_uid, live_gid = int(lines[0]), int(lines[1])
+    bad = []
+    if live_uid != app_uid:
+        bad.append(f"{DEFAULT_DATASET_OWNER!r} is uid {live_uid} on this box but the "
+                   f"container would run as {app_uid}")
+    if live_gid != app_gid:
+        bad.append(f"group {EDITORS_GROUP!r} is gid {live_gid} but the container would "
+                   f"use {app_gid}")
+    if not bad:
+        return ""
+    return ("; ".join(bad) + f". Set [stack] uid = {live_uid} and gid = {live_gid} in "
+            f"site.toml (the container then writes the tree as the account the "
+            f"editors' share is owned by).")
+
+
 def deploy_nas_kind() -> str:
     """Which platform this deploy targets: --nas-kind, else $CCSYNC_NAS_KIND,
     else [nas] kind. Imported locally because `nas_kind` is also a parameter
@@ -1595,6 +1633,69 @@ def expected_runtime_id() -> str:
         return ""
 
 
+def _vendor_defaults_module():
+    """dashboard/src/ccsync_dashboard/vendor_defaults.py, loaded by path for the
+    same reason expected_runtime_id() is (stdlib-only, no package import)."""
+    import importlib.util  # noqa: PLC0415
+
+    path = (Path(__file__).resolve().parents[1] / "dashboard" / "src"
+            / "ccsync_dashboard" / "vendor_defaults.py")
+    spec = importlib.util.spec_from_file_location("_ccsync_vendor_defaults", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _vendor_switch() -> bool:
+    """`DASH_VENDOR_DEFAULTS=1` in the DEPLOYING shell: a customer on the
+    bind/image path opts into the vendor's key and feed with one value. Off by
+    default so the studio's own deploy, whose blank feed or key is a decision,
+    is never changed through an upgrade (CR-362 / GL-02, 2026-10-07)."""
+    return os.environ.get("DASH_VENDOR_DEFAULTS", "").strip() == "1"
+
+
+def effective_release_pubkeys() -> str:
+    """DASH_RELEASE_PUBKEYS to hand the container: the shell's value, else the
+    vendor's public key when the switch is on, else ""."""
+    raw = os.environ.get("DASH_RELEASE_PUBKEYS", "")
+    if raw.strip() or not _vendor_switch():
+        return raw
+    return ",".join(_vendor_defaults_module().VENDOR_RELEASE_PUBKEYS)
+
+
+def effective_release_feed_url() -> str:
+    """site.toml [releases] feed_url, else the vendor feed when the switch is
+    on (GL-47: one constant, vendor_defaults.VENDOR_FEED_URL), else ""."""
+    configured = site_value("releases", "feed_url")
+    if configured or not _vendor_switch():
+        return configured
+    return _vendor_defaults_module().VENDOR_FEED_URL
+
+
+def invalid_release_pubkeys(raw: str) -> list:
+    """The entries of a DASH_RELEASE_PUBKEYS value that are not a base64 raw
+    Ed25519 public key (32 bytes). The dashboard silently drops such an entry
+    (Settings.release_pubkeys), which leaves 503 on every publish and every
+    feed record refused; a customer who ran `openssl rand -hex 24` on this
+    variable gets exactly that (CR-362 / GL-03 overseer, 2026-10-07)."""
+    import base64  # noqa: PLC0415
+    import binascii  # noqa: PLC0415
+
+    bad = []
+    for item in re.split(r"[,\s]+", raw.strip()):
+        if not item:
+            continue
+        try:
+            ok = len(base64.b64decode(item, validate=True)) == 32
+        except (binascii.Error, ValueError):
+            ok = False
+        if not ok:
+            bad.append(item)
+    return bad
+
+
 def image_mode_preflight(image: str, dry_run: bool) -> str:
     """Everything image mode must be told BEFORE anything moves. "" = go.
 
@@ -1626,7 +1727,7 @@ def image_mode_preflight(image: str, dry_run: bool) -> str:
               "tags. Until the first `v*` release use --container-image "
               "ghcr.io/the-creators-club/ccsync:edge, or its digest.",
               file=sys.stderr)
-    if not site_value("releases", "feed_url"):
+    if not effective_release_feed_url():
         print("WARNING: [releases] feed_url is blank, so the vendor release "
               "feed is off: no poller, no network call, and the Packages page "
               "offers no dashboard code update however well the image is "
@@ -1648,7 +1749,19 @@ def image_mode_preflight(image: str, dry_run: bool) -> str:
               "checkout (dashboard/deploy/requirements.lock + Dockerfile) -- "
               "the post-deploy check will report what the container has "
               "without comparing it.", file=sys.stderr)
-    if not os.environ.get("DASH_RELEASE_PUBKEYS", "").strip():
+    pubkeys = effective_release_pubkeys()
+    bad_keys = invalid_release_pubkeys(pubkeys)
+    if bad_keys:
+        return (
+            "DASH_RELEASE_PUBKEYS holds a value that is not an Ed25519 public "
+            f"key ({bad_keys[0][:12]}...).\n"
+            "  The dashboard silently drops such a value, so every publish "
+            "would answer 503 and every feed record would be refused.\n"
+            "  It is NOT a secret to generate: it is the VENDOR's public key "
+            "(base64, 44 characters), which the vendor gives you "
+            "(docs/INSTALL.md step 6). Do not run `openssl rand` on it."
+        )
+    if not pubkeys.strip():
         return (
             "DASH_RELEASE_PUBKEYS is empty, and image mode needs it.\n"
             "  The image's own select_code_root.py verifies every code tree in "
@@ -1657,9 +1770,13 @@ def image_mode_preflight(image: str, dry_run: bool) -> str:
             "the dashboard would report a version available and refuse it "
             "forever (ZERO_TOUCH_PLAN.md WP K).\n"
             "  The publish route also answers 503 without them, in both modes.\n"
-            "  Fix:  $env:DASH_RELEASE_PUBKEYS = python tools/release_key.py pubkey\n"
-            "  (docs/RELEASE.md, \"The upgrade channel is signed\"; "
-            "tools/load_secrets.ps1 exports it on the base rig.)"
+            "  Fix:  set DASH_RELEASE_PUBKEYS to the VENDOR's public release key "
+            "(docs/INSTALL.md step 6; or export DASH_VENDOR_DEFAULTS=1 to use "
+            "the key baked into this checkout). A customer does not mint a key of their "
+            "own: a self-signed key rejects every vendor build and cuts the site "
+            "off the vendor feed.\n"
+            "  (The vendor's own rig exports its key with tools/load_secrets.ps1; "
+            "docs/RELEASE.md, \"The upgrade channel is signed\".)"
         )
     if dry_run:
         print("[dry-run] DASH_RELEASE_PUBKEYS is set")
@@ -2184,6 +2301,23 @@ def broll_creators_shares_default() -> str:
     return "" if isinstance(table, dict) else LEGACY_BROLL_CREATORS_SHARES
 
 
+def _derived_sftp() -> tuple[str, int]:
+    """(chunk, concurrency) as published for this deploy's NAS kind."""
+    from common import derive_sftp_transport  # noqa: PLC0415
+
+    return derive_sftp_transport(deploy_nas_kind(), site_value("net", "sftp_chunk_size"),
+                                 site_value("net", "sftp_concurrency"))
+
+
+def sftp_transport_refusal() -> str:
+    """GL-10 / CR-364 (2026-10-07): "" or the reason this site.toml must not
+    be deployed. Checked before anything moves."""
+    from common import sftp_transport_problem  # noqa: PLC0415
+
+    return sftp_transport_problem(deploy_nas_kind(), site_value("net", "sftp_chunk_size"),
+                                  site_value("net", "sftp_concurrency"))
+
+
 def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
              dashboard_url: str = "") -> dict:
     """The SITE-DERIVED environment block: what GET /api/v1/site serves, plus
@@ -2215,6 +2349,9 @@ def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
         # dashboard topbar mark). Blank means "use org_name" -- the dashboard
         # decides that, not the deploy, so a blank must reach it as a blank.
         "DASH_SITE_ORG_SHORT": site_value("site", "org_short"),
+        # GL-34 / CR-374: blank reaches the dashboard as blank, which then
+        # shows the vendor's own address (site_store.DEFAULT_SUPPORT_CONTACT).
+        "DASH_SITE_SUPPORT_CONTACT": site_value("site", "support_contact"),
         # THE PRODUCT's name, not the customer's: the one identity string with
         # a non-blank default, because every deployment runs the same
         # software. Set only by a reseller.
@@ -2241,7 +2378,7 @@ def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
         # anything: every record is re-verified against DASH_RELEASE_PUBKEYS
         # before it reaches companion_packages (release_feed.py's threat
         # model).
-        "DASH_RELEASE_FEED_URL": site_value("releases", "feed_url"),
+        "DASH_RELEASE_FEED_URL": effective_release_feed_url(),
         # manual = show what is available and wait for an admin to click.
         # The other two (stage, current) auto-publish; a site opts into that
         # deliberately. An unrecognised value falls back to manual in
@@ -2292,8 +2429,26 @@ def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
         # dry run: the LAN IP would have gone into remote editors' rclone.conf.
         "DASH_SITE_SFTP_HOST": site_value("net", "sftp_host"),
         "DASH_SITE_SFTP_PORT": site_value("net", "sftp_port") or "22",
-        "DASH_SITE_SFTP_CHUNK_SIZE": site_value("net", "sftp_chunk_size"),
-        "DASH_SITE_SFTP_CONCURRENCY": site_value("net", "sftp_concurrency"),
+        # The NAS sshd's host key, published so both editor installers pin it in
+        # rclone's known_hosts file (GL-19 "editor lanes trust any NAS host key",
+        # CR-368, 2026-10-07). Blank when the site names no key, or when
+        # [security] skip_lane_host_key_pin = true (the studio's legacy: its
+        # editors' rclone remotes were written before pinning existed).
+        "DASH_SITE_SFTP_HOSTKEY": ("" if security_legacy("skip_lane_host_key_pin")
+                                   else nas_ssh_hostkey_line()),
+        # The site's project ACL mode and the NAS-side Projects path, so the
+        # dashboard can keep proj-<slug> membership in step with ticks and make
+        # a project it creates private (CR-368 follow-up, 2026-10-07). The
+        # studio's site.toml says "shared", which leaves project_groups.py inert.
+        "DASH_PROJECT_ACL": project_acl_mode(),
+        "DASH_NAS_PROJECTS_ROOT": f"{(tree_root or DEFAULT_CC_ROOT).rstrip('/')}/Projects",
+        # GL-10 / CR-364 (2026-10-07): a blank on a Synology site is the
+        # measured-safe 64Ki / 16, never the companion's 255Ki x 64 (which
+        # truncates lane-B downloads over 514 MiB on DSM's sshd). A value
+        # above the limit never gets here: main() refuses it first.
+        "DASH_SITE_SFTP_CHUNK_SIZE": _derived_sftp()[0],
+        "DASH_SITE_SFTP_CONCURRENCY": (str(_derived_sftp()[1])
+                                       if _derived_sftp()[1] else ""),
         # FORCED to "none" when [stack] editor_shell is "sftp-only": a nologin
         # editor cannot run md5sum over SSH whatever [net] shell_type says, and
         # the two disagreeing is what produces "failed to calculate hash" on
@@ -2309,10 +2464,129 @@ def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
     }
 
 
+# --------------------------------------------------------------------------
+# Secure defaults a NEW site inherits (GL-18 / GL-19, CR-368, 2026-10-07)
+# --------------------------------------------------------------------------
+#
+# Owner decision 2026-10-07: new sites get every COM-H15 default, and the
+# studio's own long-running site keeps its legacy values by naming them in its
+# own site.toml ([nas] verify_ssl = "0", [stack] project_acl = "shared",
+# [security] allow_* / skip_*). Nothing below changes what a manifest that
+# already says the legacy value deploys.
+
+
+def configured_verify_ssl() -> str:
+    """The raw TLS-verification setting the manifest or environment names, ""
+    when neither does (which means: pin the certificate, see
+    common.default_cert_pin). Used where no NAS may be contacted (rendering the
+    compose FILE an operator pastes)."""
+    return (os.environ.get("TRUENAS_VERIFY_SSL", "").strip()
+            or site_value("nas", "verify_ssl"))
+
+
+def container_verify_ssl(dry_run: bool = False, kind: str = "truenas") -> str:
+    """What the container's TRUENAS_VERIFY_SSL is deployed as.
+
+    A configured value passes through untouched (so the studio's "0" is still
+    "0"). Unset becomes a `sha256:` pin of the NAS certificate: the one this
+    toolchain already recorded, or -- with --trust-host-key-on-first-use -- the
+    one it records now, or a refusal. A dry run never opens a connection: it
+    shows the recorded pin or says one will be taken."""
+    raw = configured_verify_ssl()
+    if raw:
+        return raw
+    port = synology_port() if kind == "synology" else 443
+    if dry_run:
+        try:
+            host = nas_host_user(dry_run=True)[0]
+            recorded = str(_read_known_certs().get(f"{host}:{port}") or "").strip()
+        except EnvError:
+            recorded = ""
+        return f"sha256:{recorded}" if recorded else "sha256:<recorded-at-deploy>"
+    return default_cert_pin(port=port)
+
+
+def resolve_dashboard_admins(explicit: str, nas_user: str) -> str:
+    """The DASH_ADMIN_USERS value, with the dashboard admin kept SEPARATE from
+    the NAS admin (COM-H5).
+
+    Dashboard admin is by default a NAS-privileged role: the container can
+    create accounts and SSH keys. Before, an unset list silently meant "the NAS
+    admin account", who then signed in to the dashboard with the NAS admin
+    password. A new site must NAME its dashboard admins, and none of them may be
+    the NAS admin account. `[security] allow_nas_admin_as_dashboard_admin = true`
+    is the studio's explicit legacy."""
+    legacy = security_legacy("allow_nas_admin_as_dashboard_admin")
+    names = [n.strip() for n in str(explicit or "").split(",") if n.strip()]
+    if not names:
+        if legacy:
+            return nas_user
+        raise EnvError(
+            "DASH_ADMIN_USERS is not set. Name the dashboard admin account(s) -- an "
+            "editor account, NOT the NAS admin "
+            f"({nas_user!r}) -- e.g. DASH_ADMIN_USERS=alex. The NAS admin password "
+            "must not be what signs people in to the dashboard (COM-H5). A site that "
+            "deliberately keeps the old behaviour sets [security] "
+            "allow_nas_admin_as_dashboard_admin = true in its site.toml.")
+    if not legacy and nas_user.strip().lower() in {n.lower() for n in names}:
+        raise EnvError(
+            f"DASH_ADMIN_USERS names the NAS admin account {nas_user!r}. Use a separate "
+            "account for the dashboard (COM-H5), or set [security] "
+            "allow_nas_admin_as_dashboard_admin = true in site.toml to keep it on purpose.")
+    return ",".join(names)
+
+
+def require_nas_api_key(kind: str, api_key: str) -> None:
+    """TrueNAS: the container holds a scoped API key, never the admin password.
+
+    `compose_nas_pw = "" if nas_api_key else truenas_pw` made the key an option
+    and a stderr NOTE the only guard, so a default install put a root-equivalent
+    NAS login in `docker inspect` (COM-H5 / COMMERCIAL_READINESS item 6). It is
+    mandatory now. DSM has no API-key concept and keeps the password (the
+    non-admin service account there is documented in docs/SERVER-SYNOLOGY.md).
+    The studio's explicit legacy is [security] allow_nas_password_in_container."""
+    if kind != "truenas" or api_key:
+        return
+    if security_legacy("allow_nas_password_in_container"):
+        return
+    raise EnvError(
+        "TRUENAS_API_KEY is not set. The dashboard container no longer holds the NAS "
+        "admin password: mint a key and export it, then redeploy\n"
+        "        python server/create_api_key.py --name ccsync-dashboard --username <service-account>\n"
+        "  (docs/SERVER.md, \"Scoped API key\"). A site that deliberately keeps the "
+        "password in the container sets [security] allow_nas_password_in_container = "
+        "true in its own site.toml.")
+
+
+def compose_pg_bind_lines(binds, indent: str = "      ") -> str:
+    """The postgres `ports:` list: the SAME interfaces the dashboard binds (LAN
+    and tailnet), never 0.0.0.0. DASH_PG_PORT stays the host-port knob."""
+    lines = []
+    for env_name, address in binds:
+        host = f"${{{env_name}:-{address}}}" if env_name else address
+        lines.append(f'{indent}- "{host}:${{DASH_PG_PORT:-5432}}:5432"')
+    return "\n".join(lines)
+
+
+def shared_report_token_flag() -> str:
+    """"1" or "0" for DASH_SHARED_REPORT_TOKEN_ENABLED, ONE rule for both the
+    TrueNAS dict and the rendered compose FILE (CR-367 / GL-15, round 2,
+    2026-10-07): the environment, then site.toml [security]
+    shared_report_token, then "0". The two compose templates used to hard-code
+    "0", so a Synology deploy or a hand-pasted YAML of a site that still lives
+    on the shared token turned it off and every companion holding only that
+    token got 401."""
+    return (os.environ.get("DASH_SHARED_REPORT_TOKEN_ENABLED", "")
+            or ("1" if site_bool("security", "shared_report_token", False) else "0"))
+
+
 def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token: str,
                    session_secret: str = "", admin_users: str = "",
                    truenas_host: str = "", truenas_user: str = "", truenas_pw: str = "",
-                   truenas_verify_ssl: str = "0", truenas_api_key: str = "",
+                   # None = "what site.toml / the environment says" (the same
+                   # answer compose_variables renders into the FILE). main()
+                   # passes container_verify_ssl() explicitly.
+                   truenas_verify_ssl: str | None = None, truenas_api_key: str = "",
                    bind_lan: str = LAN_BIND_IP, bind_tailnet: str = TAILNET_BIND_IP,
                    image: str = DEFAULT_IMAGE,
                    broll_enabled: str = "1", broll_ingest_token: str = "",
@@ -2341,6 +2615,12 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                    # which was the whole point of item 1 -- so this projects
                    # one site.toml key and provisions nothing.
                    ai_cli_providers: str = "0",
+                   # GL-31 / CR-374 (2026-10-07): the BUILD-level lock on the
+                   # CLI providers (dashboard build_flavor.py). "0" is the
+                   # vendor build: ai_cli_providers above is then inert. Only
+                   # the studio's own site.toml `[studio] allow_cli_providers`
+                   # makes it "1". Provisions nothing.
+                   studio_cli_providers: str = "0",
                    # Unattended updates (2026-08-18). "0" here is the vendor
                    # build and the safe default: with it off, a companion
                    # still offers the build in its tray and an admin can push
@@ -2462,8 +2742,14 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # key and this dict did not, and the TrueNAS deploy posts
                     # THIS dict, so the flag would never have reached the
                     # container it was written for.
-                    "DASH_SHARED_REPORT_TOKEN_ENABLED":
-                        os.environ.get("DASH_SHARED_REPORT_TOKEN_ENABLED", "") or "1",
+                    #
+                    # CR-367 / GL-15 (2026-10-07): the answer for a NEW site is
+                    # "0" -- /verify mints each computer its own revocable
+                    # report token. A site that lives on the shared token says
+                    # so in ITS OWN site.toml ([security] shared_report_token
+                    # = true; the studio's does), and the environment still
+                    # wins over both for a one-off.
+                    "DASH_SHARED_REPORT_TOKEN_ENABLED": shared_report_token_flag(),
                     "DASH_SESSION_SECRET": session_secret,
                     # Blank would be an admin list naming nobody: every /admin
                     # route 403s, for everyone. Falls back to the account this
@@ -2578,6 +2864,8 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # GET /api/v1/site: no companion, installer or indexer
                     # has any use for it.
                     "DASH_SITE_AI_CLI_PROVIDERS": ai_cli_providers,
+                    # Deploy-only, never a site setting (build_flavor.py).
+                    "DASH_STUDIO_CLI_PROVIDERS": studio_cli_providers,
                     # Published in GET /api/v1/site, unlike the key above:
                     # the COMPANION is the client that acts on this one.
                     "DASH_SITE_AUTO_UPDATE": auto_update,
@@ -2620,7 +2908,13 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # all (503) rather than accepting a build nothing can
                     # verify -- everything else keeps working. Passed through
                     # from the deploying shell's environment, like the secrets.
-                    "DASH_RELEASE_PUBKEYS": os.environ.get("DASH_RELEASE_PUBKEYS", ""),
+                    "DASH_RELEASE_PUBKEYS": effective_release_pubkeys(),
+                    # CR-362 / GL-02 round 2 (2026-10-07): a customer declares
+                    # itself with DASH_VENDOR_DEFAULTS=1 in the deploying
+                    # shell; the container then knows the pinned vendor key's
+                    # private half is the vendor's (Protection page shows no
+                    # backup form). Blank for the studio, which holds it.
+                    "DASH_VENDOR_CUSTOMER": "1" if _vendor_switch() else "",
                     # DASH_PACKAGES_DIR intentionally unset: defaults to a
                     # "packages" dir next to DASH_DB_PATH (/data/packages),
                     # which is already the persistent volume.
@@ -2647,6 +2941,18 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     "TRUENAS_PW": truenas_pw,
                     "TRUENAS_API_KEY": truenas_api_key,
                     "DASH_NAS_API_KEY": truenas_api_key,
+                    # CR-365 / GL-11 (2026-10-07), overseer 1 and 6. The JSON-RPC
+                    # login names the account the key was MINTED FOR
+                    # (create_api_key.py --username), which is not the admin in
+                    # DASH_NAS_USER below; blank = the key is the admin's own.
+                    # And the rollback switch: DASH_NAS_API_TRANSPORT =
+                    # auto|jsonrpc|rest (blank = auto), so a site that meets a
+                    # JSON-RPC problem on a live 25.x NAS pins REST by editing one
+                    # value and redeploying, not by hand-editing a compose file.
+                    "TRUENAS_API_KEY_USER": os.environ.get("TRUENAS_API_KEY_USER", "").strip(),
+                    "DASH_NAS_API_KEY_USER": os.environ.get("TRUENAS_API_KEY_USER", "").strip(),
+                    "DASH_NAS_API_TRANSPORT": (os.environ.get("TRUENAS_API_TRANSPORT", "").strip()
+                                               or os.environ.get("DASH_NAS_API_TRANSPORT", "").strip()),
                     # Which NAS the dashboard's runtime backend talks to
                     # (ccsync_dashboard.nas.factory). "truenas" is what it
                     # defaults to anyway -- set explicitly so a deployment
@@ -2681,7 +2987,9 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # TRUENAS_PW). "0" = trust the NAS's self-signed cert, as
                     # before; "1" or a CA bundle path inside the container
                     # once the NAS has a trusted cert.
-                    "TRUENAS_VERIFY_SSL": truenas_verify_ssl,
+                    "TRUENAS_VERIFY_SSL": (configured_verify_ssl()
+                                           if truenas_verify_ssl is None
+                                           else truenas_verify_ssl),
                     # --- Timeline Cards at /cards (see cards_env) ------------
                     **cards_env(cards_enabled, cards_token),
                     # --- the roots a PINNED fleet job is placed against ------
@@ -2903,6 +3211,8 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
                       nas_user: str = "", admin_users: str = "",
                       homes_parent: str = "", nas_kind: str = "",
                       dashboard_url: str = "", broll_enabled: str = "1",
+                      # None = site.toml / environment; main() passes the pin.
+                      nas_verify_ssl: str | None = None,
                       broll_creators_shares: str = "",
                       # The protection panel's two dataset names (2026-09-03,
                       # see datasets_env). Parameters for the same reason
@@ -2935,7 +3245,14 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
         "NAS_KIND": nas_kind or deploy_nas_kind(),
         # The SSH half of the Synology runtime backend (authorized_keys).
         "NAS_SSH_PORT": site_value("net", "sftp_port") or "22",
-        "NAS_SSH_HOSTKEY": site_value("nas", "ssh_hostkey"),
+        # The configured pin, else the key this toolchain recorded for the NAS
+        # (bug-dash-ops-5, CR-368, 2026-10-07): the container used to get ONLY a
+        # site.toml pin and so trusted whatever answered on every connection
+        # when the operator had accepted the key at the terminal instead.
+        "NAS_SSH_HOSTKEY": nas_ssh_hostkey_line() or site_value("nas", "ssh_hostkey"),
+        "NAS_VERIFY_SSL": (configured_verify_ssl() if nas_verify_ssl is None
+                           else nas_verify_ssl),
+        "PG_PORT_BINDS": compose_pg_bind_lines(binds),
         "NAS_SSH_KEY_PROBE": site_value("nas", "ssh_key_probe") or "1",
         "SMB_HOST": site_value("net", "smb_host") or nas_host,
         "DASH_COOKIE_SECURE": cookie_secure_for(
@@ -2946,6 +3263,7 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
         # it (the same rule NAS_ADMIN_USERS follows below). main() passes the
         # real one when it renders for a deploy.
         "DASH_BROLL_ENABLED": broll_enabled or "1",
+        "DASH_SHARED_REPORT_TOKEN_ENABLED": shared_report_token_flag(),
         # Own-footage shares, from site.toml (product-surface-3, 2026-08-21).
         # Both compose templates carried the literal "mofa-disaster" until
         # then, so every operator who pasted the manual-YAML fallback got one
@@ -2975,6 +3293,10 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
         # compose.yaml simply never asks for it, and an unused variable costs
         # nothing while a missing one is a hard error by design.
         "CCSYNC_IMAGE": ccsync_image or SITE_CONTAINER_IMAGE,
+        # The file the Synology deploy uploads must carry the same key and
+        # vendor flag compose_config() hands TrueNAS (CR-362 / GL-02, 2026-10-07).
+        "RELEASE_PUBKEYS": effective_release_pubkeys(),
+        "VENDOR_CUSTOMER": "1" if _vendor_switch() else "",
         # Timeline Cards' block, minus the token: that one is a
         # `DASH_CARDS_TOKEN: "REPLACE_ME"` line in the template, which
         # secrets_as_env_refs turns into a ${DASH_CARDS_TOKEN} reference into
@@ -5065,6 +5387,13 @@ def main():
     # DSM -- spike 1), where code stages (DSM's SFTP cannot see /tmp), and
     # whether the ~1.4 GB of optional artefacts are pushed by default.
     synology = backend().kind == "synology"
+    refusal = sftp_transport_refusal()
+    if refusal:
+        print(f"REFUSING to deploy: [net] in site.toml: {refusal}. Set "
+              f"sftp_chunk_size = \"64Ki\" and sftp_concurrency = 16 (or remove both "
+              f"lines: a Synology site gets those by default). docs/SERVER-SYNOLOGY.md.",
+              file=sys.stderr)
+        return 1
     # ...and the 1.4 GB of music data + host binaries are opt-in there.
     if synology and not args.with_host_binaries:
         args.no_ffmpeg = True
@@ -5079,6 +5408,8 @@ def main():
     if not LOCAL_DASHBOARD_DIR.is_dir():
         print(f"FAILED: {LOCAL_DASHBOARD_DIR} not found -- run from the repo", file=sys.stderr)
         return 1
+    # After every argument check, and never on --dry-run or another platform.
+    print_truenas_version_note(truenas_api, args=args)
 
     # Image-mode pre-flight, BEFORE anything is created or uploaded -- the
     # same place, and for the same reason, as the b-roll pre-flight below:
@@ -5267,6 +5598,13 @@ def main():
     # The decision lives here rather than inside compose_config so that a
     # dry-run's masked key cannot be mistaken for a configured one.
     compose_nas_pw = "" if nas_api_key else truenas_pw
+    # COM-H5 (CR-368, 2026-10-07): a key is mandatory on TrueNAS unless the
+    # site's own manifest names the legacy. Refuses BEFORE anything is changed.
+    try:
+        require_nas_api_key(backend().kind, nas_api_key)
+    except EnvError as exc:
+        print(f"FAILED: {exc}", file=sys.stderr)
+        return 1
     # The customer's Anthropic key for /ytdl's two AI calls (2026-08-17,
     # COMMERCIAL_READINESS.md item 1). Blank is a supported state -- the
     # downloader then reports claude_auth: and nothing else is affected -- so
@@ -5292,6 +5630,10 @@ def main():
     # (docs/legal/YOUTUBE_FEATURE_NOTICE.md), which belongs in their manifest
     # where it is written down, not in one operator's shell history.
     ai_cli_providers = "1" if site_bool("features", "ai_cli_providers") else "0"
+    # GL-31 / CR-374: the vendor build hard-disables the CLI providers; the
+    # studio's own site.toml opts its flavour back in. No CLI flag and no
+    # Settings page can set it (docs/STUDIO_BUILD.md).
+    studio_cli_providers = "1" if site_bool("studio", "allow_cli_providers") else "0"
     # Same reasoning as the line above: whether editors' machines take builds
     # unattended belongs in the site manifest, where it is written down.
     auto_update = "1" if site_bool("features", "auto_update") else "0"
@@ -5310,21 +5652,41 @@ def main():
                   "(TRUENAS_API_KEY); the admin password is NOT written into the "
                   "container environment.")
         else:
-            print("NOTE: the dashboard container will hold the NAS ADMIN PASSWORD "
-                  "(TRUENAS_PW), which `docker inspect` and any code execution in "
-                  "that container can read. Mint a scoped key instead:\n"
-                  "        python server/create_api_key.py --name ccsync-dashboard\n"
+            # Only reachable with [security] allow_nas_password_in_container.
+            print("NOTE: [security] allow_nas_password_in_container is set: the dashboard "
+                  "container will hold the NAS ADMIN PASSWORD (TRUENAS_PW), which "
+                  "`docker inspect` and any code execution in that container can read. "
+                  "Mint a scoped key instead:\n"
+                  "        python server/create_api_key.py --name ccsync-dashboard "
+                  "--username <service-account>\n"
                   "      then export TRUENAS_API_KEY=... and redeploy "
                   "(docs/SERVER.md, \"Scoped API key\").", file=sys.stderr)
+    elif backend().kind == "synology":
+        print("NOTE: DSM has no API-key concept, so the dashboard container holds the "
+              "password of the account in [nas] admin_user. Make that a dedicated "
+              "non-admin service account where DSM allows it, and read the residual "
+              "risk in docs/SERVER-SYNOLOGY.md (\"Service account\").", file=sys.stderr)
     # "0" keeps today's behaviour (self-signed NAS cert trusted); the dashboard
     # reads the same var (truenas_client._verify_setting). A CA bundle path
     # inside the container is the answer once the NAS has a real cert --
     # docs/SERVER.md, "Verifying the NAS certificate".
-    truenas_verify_ssl = os.environ.get("TRUENAS_VERIFY_SSL", "0").strip() or "0"
+    #
+    # GL-18/GL-19 (CR-368, 2026-10-07): unset is now a `sha256:` PIN of the NAS
+    # certificate (recorded here on first use), not "0". "0" is still honoured
+    # when site.toml [nas] verify_ssl or the environment says so -- which is
+    # how the studio's own manifest keeps its legacy.
+    try:
+        truenas_verify_ssl = container_verify_ssl(args.dry_run, kind=backend().kind)
+    except EnvError as exc:
+        print(f"FAILED: {exc}", file=sys.stderr)
+        return 1
     if truenas_verify_ssl in ("0", "false", "no"):
-        print("NOTE: TRUENAS_VERIFY_SSL=0 -- the container will not verify the NAS's "
-              "TLS certificate on its API calls. Export the NAS CA and set "
-              "TRUENAS_VERIFY_SSL=/certs/nas-ca.pem once it has one.", file=sys.stderr)
+        print("NOTE: TLS verification is OFF for the container's NAS API calls "
+              "([nas] verify_ssl / TRUENAS_VERIFY_SSL is 0). Pin the certificate with "
+              "verify_ssl = \"sha256:<fingerprint>\" (docs/SERVER.md, "
+              "\"Verifying the NAS certificate\").", file=sys.stderr)
+    elif truenas_verify_ssl.startswith("sha256:"):
+        print(f"NAS certificate pinned for the container: {truenas_verify_ssl}")
     # Host and user only -- neither is a secret, and both appear in the printed
     # ssh lines anyway. The password for the compose body comes from `secrets`;
     # run_ssh and truenas_api re-read TRUENAS_PW themselves for their own calls.
@@ -5335,7 +5697,27 @@ def main():
     # naming NOBODY: every /admin route then answers 403 to everyone, including
     # the person who just installed it (found on the 2026-08-17 Synology
     # bring-up, where the account is `Studio`).
-    admin_users = os.environ.get("DASH_ADMIN_USERS", "").strip() or truenas_user
+    #
+    # CR-368 (COM-H5): the dashboard admin must be a DIFFERENT account from the
+    # NAS admin on a new site; the old fallback to the NAS admin is the studio's
+    # explicit legacy (see resolve_dashboard_admins).
+    try:
+        admin_users = resolve_dashboard_admins(
+            os.environ.get("DASH_ADMIN_USERS", ""), truenas_user)
+    except EnvError as exc:
+        print(f"FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    # GL-19 (CR-368, 2026-10-07): per-project is the default for a NEW site, and
+    # the dashboard's tick does not add group membership yet, so say what the
+    # operator has to do rather than let a first editor find an empty project.
+    if project_acl_mode() == "per-project":
+        print("NOTE: [stack] project_acl is per-project (the default for a new site): each "
+              "project belongs to its own proj-<slug> group. Add an editor to the projects "
+              "they work on with `python server/setup_editor_account.py --name <editor> "
+              "--project <slug>` -- the dashboard tick does not add group membership yet "
+              "(docs/TENANCY.md). `project_acl = \"shared\"` keeps one group for everyone.",
+              file=sys.stderr)
 
     root = require_site_value(args.host_root, "[apps] root", "--host-root").rstrip("/")
     if not backend().host_root_re.match(root):
@@ -5425,6 +5807,19 @@ def main():
         else:
             print(f"stack identity: the container will run as {app_uid}:{app_gid} "
                   f"({DEFAULT_DATASET_OWNER}:{EDITORS_GROUP}), read from the NAS")
+
+    # GL-06 / COM-M45 / CR-364 (2026-10-07): on TrueNAS the container's uid:gid
+    # are [stack] uid/gid (default 3000:3001) and nothing ever asked the box.
+    # TrueNAS gives uid 3000 to the FIRST local user it makes, so on a pool
+    # built in a different order the container writes as the wrong account.
+    # Synology reads the live ids above; this is the same question for the
+    # other backend, refused on a MISMATCH and only warned about when the box
+    # cannot answer (a wrong refusal strands a working deploy).
+    if not synology:
+        mismatch = truenas_identity_mismatch(app_uid, app_gid, dry_run=args.dry_run)
+        if mismatch:
+            print(f"REFUSING to deploy: {mismatch}", file=sys.stderr)
+            return 1
 
     # Step 0: a point-in-time to come back to. Everything from here down is
     # privileged and destructive by design -- `mv app app.old.<ts>`, a
@@ -6044,12 +6439,16 @@ def main():
         broll_creators_shares=os.environ.get("BROLL_CREATORS_SHARES", "").strip(),
         binds=binds,
         nas_kind=backend().kind,
-        ssh_hostkey=site_value("nas", "ssh_hostkey"),
+        # bug-dash-ops-5: the configured pin, else the key this toolchain
+        # recorded (the base rig's known_hosts), so the container never has to
+        # trust on every connection what the operator already verified once.
+        ssh_hostkey=nas_ssh_hostkey_line() or site_value("nas", "ssh_hostkey"),
         ssh_port=site_value("net", "sftp_port") or "22",
         ssh_key_probe=site_value("nas", "ssh_key_probe") or "1",
         youtube_download=youtube_download,
         youtube_unblock=youtube_unblock,
         ai_cli_providers=ai_cli_providers,
+        studio_cli_providers=studio_cli_providers,
         auto_update=auto_update,
         anthropic_api_key=anthropic_api_key,
         cards_enabled=cards_enabled, cards_token=cards_token,
@@ -6072,6 +6471,7 @@ def main():
                 syncthing_url=args.syncthing_gui_url, nas_host=truenas_host,
                 nas_user=truenas_user, admin_users=admin_users,
                 homes_parent=DEFAULT_HOMES_PARENT, nas_kind=backend().kind,
+                nas_verify_ssl=truenas_verify_ssl,
                 broll_enabled=broll_enabled, ccsync_image=ccsync_image,
                 # The same value compose_config was given above: the FILE this
                 # renders and the DICT the TrueNAS path POSTs describe one
@@ -6101,7 +6501,23 @@ def main():
             # 0600 .env rather than the world-readable compose.yaml beside it
             # like every other credential here.
             "DASH_CARDS_TOKEN": cards_token,
+            # The Resolve Project Server's random password (bug-server-8 /
+            # PL-RES-27, CR-368, 2026-10-07). Generated once and kept in the
+            # operator's ~/.ccsync/pg_password so a redeploy re-renders the SAME
+            # secret; a dry run touches no file. The compose file's postgres
+            # service refuses to start without it, and refuses 'DaVinci'.
+            "PG_PASSWORD": ("<PG_PASSWORD-not-shown-in-dry-run>" if args.dry_run
+                            else project_server_password()),
         }
+        if not args.dry_run:
+            print("Project-server (Postgres) password generated for the compose profile "
+                  "and written to the 0600 .env as PG_PASSWORD; it is also kept in "
+                  "~/.ccsync/pg_password. A database a previous deploy already initialised is "
+                  "re-keyed to it when the container starts (initdb alone reads the "
+                  "variable on an empty volume); a failure there stops the container "
+                  "and says so. Enter it once in each editor's Resolve database "
+                  "entry. Port 5432 is published on the LAN and tailnet addresses only "
+                  "(docs/TAILNET_POLICY.md).")
         if args.dry_run:
             print(f"[dry-run] the .env would carry: "
                   f"{', '.join(sorted(env_file))} (values not shown)")

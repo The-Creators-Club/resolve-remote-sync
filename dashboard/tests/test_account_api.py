@@ -33,7 +33,10 @@ def _key(seed: str, comment: str = "") -> str:
 
 def _settings(tmp_path, **kwargs) -> Settings:
     base = dict(db_path=str(tmp_path / "acct.db"), session_secret=STRONG,
-                admin_users=frozenset({"owen"}))
+                admin_users=frozenset({"owen"}),
+                # CR-362 (2026-10-07): login in SMB mode with no NAS address
+                # now refuses to boot; the verifier is stubbed, the host is not used.
+                smb_host="nas.test")
     base.update(kwargs)
     return Settings(**base)
 

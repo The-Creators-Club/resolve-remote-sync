@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccsync-companion"
-version = "0.9.84"
+version = "0.9.87"
 description = "Editor-side companion app for the CC Sync Resolve remote-sync system: timeline watcher, move-and-relink popup, and rclone/Syncthing sync lanes."
 requires-python = ">=3.12"
 dependencies = [
@@ -114,6 +114,9 @@ where = ["src"]
 # covers the other.
 [tool.setuptools.package-data]
 "ccsync_companion.broll_vlm" = ["prompts/*.md"]
+# The Resolve menu scripts (docs/SELECTIVE_ORIGINALS.md 12.1), read by
+# resolve_menu_install.py; build.spec lists them again for the frozen build.
+"ccsync_companion" = ["resolve_menu/*.lua"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

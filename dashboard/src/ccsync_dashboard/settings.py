@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
+from . import vendor_defaults
+
 log = logging.getLogger("ccsync.dashboard.settings")
 
 # Identity values that used to be this fleet's own addresses, hardcoded as
@@ -113,6 +115,16 @@ _SITE_IDENTITY_ENV = {
 }
 
 
+def _shared_token_from_env(raw: str) -> bool:
+    """DASH_SHARED_REPORT_TOKEN_ENABLED -> bool (CR-367 / GL-15, 2026-10-07)."""
+    value = str(raw or "").strip().lower()
+    if not value:
+        return False
+    if value in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class Settings:
     syncthing_url: str = ""
@@ -132,6 +144,13 @@ class Settings:
     # machines on the shared credential -- that is the whole point of the
     # per-editor tokens: revocable per person, and not one leak away from the
     # entire fleet.
+    #
+    # CR-367 / GL-15 (2026-10-07): THE DATACLASS DEFAULT STAYS True and is not
+    # the product default. from_env() is: an UNSET DASH_SHARED_REPORT_TOKEN_ENABLED
+    # is OFF for a new site (every COM-H15 secure default), and an explicit
+    # "1" keeps it on for a site that lives on it. A Settings() built by hand
+    # (the test suite, a tool) keeps the legacy shape so that nothing which
+    # never read the environment changes meaning.
     shared_report_token_enabled: bool = True
 
     # Login (per-editor project selection). Phase-0 verified: SMB session
@@ -264,6 +283,11 @@ class Settings:
     # Mint one with `python server/create_api_key.py`. TrueNAS only: DSM has no
     # API-key concept, so a Synology site keeps using the password.
     nas_api_key: str = ""
+    # The account that key was minted FOR (create_api_key.py --username), which
+    # is not nas_user (the admin): the JSON-RPC login names it (CR-365, GL-11,
+    # 2026-10-07). DASH_NAS_API_KEY_USER / TRUENAS_API_KEY_USER; blank = the
+    # key is the admin's own.
+    nas_api_key_user: str = ""
     # TLS verification for those calls (they carry the NAS password). Default
     # False preserves the existing behaviour -- the NAS presents a self-signed
     # cert -- but it is a knob: "1" to verify, or a path to a CA bundle.
@@ -309,6 +333,8 @@ class Settings:
     # "use the product name", which is what an unbranded install shows
     # (2026-08-17, COMMERCIAL_READINESS.md item 10).
     site_org_short: str = ""
+    # GL-34 / CR-374: blank = the vendor default (site_store.DEFAULT_SUPPORT_CONTACT).
+    site_support_contact: str = ""
     # THE VENDOR'S product name, not the customer's -- it is the one brand
     # string in this file that has a non-blank default, because every
     # deployment is running the same product and a blank window title helps
@@ -333,6 +359,20 @@ class Settings:
     # DSM often runs sshd off 22, and the port is implicit in today's rclone
     # stanzas (WP5).
     site_sftp_port: int = 22
+    # The NAS sshd's host key, `<type> <base64>`, published in GET /api/v1/site so
+    # both editor installers pin it in rclone's known_hosts file (GL-19 "editor
+    # lanes trust any NAS host key", CR-368, 2026-10-07). A deploy-time FACT
+    # (DASH_SITE_SFTP_HOSTKEY), deliberately not an editable Settings field: a
+    # pin an admin can retype from a browser is not much of a pin. "" = the
+    # site publishes none, and an installer then leaves rclone unpinned and
+    # says so.
+    site_sftp_hostkey: str = ""
+    # "per-project" (a new site) or "shared" (the studio, and the default for a
+    # container that was never told): CR-368 follow-up, 2026-10-07. Only
+    # "per-project" turns on project_groups.py. nas_projects_root is the NAS-side
+    # absolute path of the Projects folder, which setperm needs.
+    project_acl: str = "shared"
+    nas_projects_root: str = ""
     # rclone SFTP tuning the SERVER dictates, because it depends on the NAS's
     # sshd: DSM 7.2 ships OpenSSH 8.2p1, which lacks limits@openssh.com, and
     # rclone's 255Ki chunks (right for TrueNAS) truncate every download at
@@ -480,6 +520,20 @@ class Settings:
     # is deliberately a NUMBER an admin sets rather than a flag every click
     # has to carry.
     release_soak_minutes: int = 30
+    # CR-362 / GL-02 (2026-10-07): True on a vendor-build dashboard (the
+    # appliance sets DASH_VENDOR_DEFAULTS=1). It is what makes the feed URL and
+    # public key come from vendor_defaults when the environment is silent, and
+    # what lets the protection panel say "the vendor holds this key" instead of
+    # asking a customer to back up a private key they never had.
+    vendor_defaults: bool = False
+    # CR-362 / GL-02 round 2 (2026-10-07): a CUSTOMER deployed through
+    # install_dashboard_app.py (bind or image mode) pins the vendor's key like
+    # the appliance does, but must NOT get `vendor_defaults` (that also lifts
+    # the Synology SFTP window limit, which is right only for the appliance's
+    # own sidecar sshd). This narrow switch (DASH_VENDOR_CUSTOMER=1, rendered
+    # by the deploy when the deploying shell sets DASH_VENDOR_DEFAULTS=1) only
+    # says "the private half of the pinned vendor key is the vendor's".
+    vendor_customer: bool = False
 
     # Serve the b-roll search UI at /broll from inside this process, so editors
     # get one URL and one login instead of a second service to reach and sign
@@ -587,6 +641,13 @@ class Settings:
     # CurAddr (DERP-relayed), so enabling this today would STOP lane C, not
     # accelerate it. Confirm a direct path first.
     syncthing_tailnet_only: bool = False
+    # CR-363 / GL-08 (2026-10-07): whether this dashboard puts a login on the
+    # sync engine's admin page when it finds none (syncthing_gui_guard). ON by
+    # default (a new site gets the secure value) and only an explicit "0"
+    # turns it off, so a typo cannot leave the page open. The studio's own
+    # deployment keeps whatever it already has by setting it in its own
+    # environment; the API key is unaffected either way.
+    syncthing_gui_secure: bool = True
 
     # Collector cadences (seconds). Overridable for tests.
     interval_provision: float = 300.0
@@ -789,11 +850,18 @@ class Settings:
                 raw = env.get(name, "").strip()
                 if raw:
                     break
-            if not raw or raw.lower() in ("0", "false", "no"):
+            # UNSET is VERIFY (PR-GL19 / GL-18, CR-368, 2026-10-07). The deploy
+            # writes an explicit value for every site; the studio's manifest
+            # says "0" and keeps it. A `sha256:<hex>` value is a certificate
+            # pin (nas/tls_pin.py) and passes through as the string it is.
+            if not raw:
+                # first-use pin, resolved by the NAS client (nas/tls_pin.py)
+                return "tofu"
+            if raw.lower() in ("0", "false", "no"):
                 return False
             if raw.lower() in ("1", "true", "yes"):
                 return True
-            return raw   # a CA bundle path inside the container
+            return raw   # a CA bundle path inside the container, or a sha256: pin
 
         def first(*names: str) -> str:
             """The first of `names` that is set, so DASH_NAS_* wins over the
@@ -811,10 +879,16 @@ class Settings:
             port=int(num("DASH_PORT", 8480)),
             report_token=env.get("DASH_REPORT_TOKEN", ""),
             report_token_optional=env.get("DASH_REPORT_TOKEN_OPTIONAL", "") == "1",
-            # Default TRUE, and only an explicit "0" turns it off: a typo in
-            # this variable must not silently disconnect the fleet.
-            shared_report_token_enabled=(
-                env.get("DASH_SHARED_REPORT_TOKEN_ENABLED", "").strip() != "0"),
+            # CR-367 / GL-15 (2026-10-07): UNSET is OFF (a new site), an
+            # explicit off spelling is off, and ANYTHING ELSE is on: a typo
+            # in a variable somebody deliberately set must not silently
+            # disconnect a fleet, which is the reason this used to be
+            # "default true, only 0 turns it off". The studio's deployed
+            # compose carries an explicit "1", and the installer keeps writing
+            # it for a site whose site.toml says [security] shared_report_token
+            # = true, so an existing fleet never reads "unset".
+            shared_report_token_enabled=_shared_token_from_env(
+                env.get("DASH_SHARED_REPORT_TOKEN_ENABLED", "")),
             auth_method=env.get("DASH_AUTH_METHOD", "smb"),
             smb_host=env.get("DASH_SMB_HOST", ""),
             session_secret=env.get("DASH_SESSION_SECRET", ""),
@@ -853,11 +927,13 @@ class Settings:
             nas_user=first("DASH_NAS_USER", "TRUENAS_USER"),
             nas_pw=first("DASH_NAS_PW", "TRUENAS_PW"),
             nas_api_key=first("DASH_NAS_API_KEY", "TRUENAS_API_KEY"),
+            nas_api_key_user=first("DASH_NAS_API_KEY_USER", "TRUENAS_API_KEY_USER"),
             nas_verify_ssl=verify_ssl("DASH_NAS_VERIFY_SSL", "TRUENAS_VERIFY_SSL"),
             nas_homes_parent=env.get("DASH_NAS_HOMES_PARENT", "").strip().rstrip("/"),
             nas_service_user=env.get("DASH_NAS_SERVICE_USER", "").strip(),
             site_org_name=env.get("DASH_SITE_ORG_NAME", "").strip(),
             site_org_short=env.get("DASH_SITE_ORG_SHORT", "").strip(),
+            site_support_contact=env.get("DASH_SITE_SUPPORT_CONTACT", "").strip(),
             site_product_name=env.get("DASH_SITE_PRODUCT_NAME", "").strip() or "CC Sync",
             site_brand_logo=env.get("DASH_SITE_BRAND_LOGO", "").strip(),
             site_tree_name=env.get("DASH_SITE_TREE_NAME", "").strip(),
@@ -866,6 +942,9 @@ class Settings:
             site_smb_unc=env.get("DASH_SITE_SMB_UNC", "").strip(),
             site_sftp_host=env.get("DASH_SITE_SFTP_HOST", "").strip(),
             site_sftp_port=int(num("DASH_SITE_SFTP_PORT", 22)),
+            site_sftp_hostkey=" ".join(env.get("DASH_SITE_SFTP_HOSTKEY", "").split()),
+            project_acl=(env.get("DASH_PROJECT_ACL", "").strip().lower() or "shared"),
+            nas_projects_root=env.get("DASH_NAS_PROJECTS_ROOT", "").strip(),
             site_sftp_chunk_size=env.get("DASH_SITE_SFTP_CHUNK_SIZE", "").strip(),
             site_sftp_concurrency=int(num("DASH_SITE_SFTP_CONCURRENCY", 0)),
             site_sftp_shell_type=env.get("DASH_SITE_SFTP_SHELL_TYPE", "").strip(),
@@ -921,10 +1000,12 @@ class Settings:
             release_pubkeys=tuple(
                 k for k in (
                     part.strip()
-                    for part in env.get("DASH_RELEASE_PUBKEYS", "").replace(",", " ").split()
+                    for part in vendor_defaults.pubkeys_raw(env).replace(",", " ").split()
                 ) if _looks_like_ed25519_pubkey(k)
             ),
-            release_feed_url=env.get("DASH_RELEASE_FEED_URL", "").strip(),
+            vendor_defaults=vendor_defaults.enabled(env),
+            vendor_customer=str(env.get("DASH_VENDOR_CUSTOMER", "")).strip() == "1",
+            release_feed_url=vendor_defaults.feed_url(env),
             release_feed_sig_url=env.get("DASH_RELEASE_FEED_SIG_URL", "").strip(),
             release_feed_policy=(env.get("DASH_RELEASE_FEED_POLICY", "").strip().lower() or "manual"),
             release_feed_interval=num("DASH_RELEASE_FEED_INTERVAL", 86400.0),
@@ -934,6 +1015,7 @@ class Settings:
             syncthing_assets_prefix=env.get("DASH_SYNCTHING_ASSETS_PREFIX", "/data/Assets"),
             syncthing_tailnet_ip=env.get("DASH_SYNCTHING_TAILNET_IP", "").strip(),
             syncthing_tailnet_only=env.get("DASH_SYNCTHING_TAILNET_ONLY", "") == "1",
+            syncthing_gui_secure=env.get("DASH_SYNCTHING_GUI_SECURE", "").strip() != "0",
             interval_provision=num("DASH_INTERVAL_PROVISION", 300.0),
             interval_config=num("DASH_INTERVAL_CONFIG", 120.0),
             interval_enforce=num("DASH_INTERVAL_ENFORCE", 60.0),

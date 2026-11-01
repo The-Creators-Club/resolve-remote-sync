@@ -251,7 +251,10 @@ def test_the_nas_client_refuses_a_redirect(monkeypatch):
             return _Redirect()
 
     client = TrueNASClient("nas.example", "truenas_admin", "pw",
-                           session=FakeSession(), api_key="")
+                           session=FakeSession(), api_key="",
+                           # CR-365 (2026-10-07): "auto" now tries JSON-RPC first;
+                           # this pins the REST seam, and no cert lookup.
+                           transport="rest", verify_ssl=False)
     with pytest.raises(NasError) as excinfo:
         client.post("/user", json_body={"password": "hunter2"})
     assert seen["allow_redirects"] is False

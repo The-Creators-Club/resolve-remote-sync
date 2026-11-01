@@ -56,6 +56,7 @@ def make_nas_client(settings) -> NasBackend:
             verify_ssl=settings.nas_verify_ssl,
             homes_parent=getattr(settings, "nas_homes_parent", "") or "",
             api_key=getattr(settings, "nas_api_key", "") or "",
+            api_key_user=getattr(settings, "nas_api_key_user", "") or "",
         )
     if kind == "synology":
         client = SynologyClient(

@@ -8,6 +8,12 @@ and the answer carries `BackendState`, `AuthURL`, `TailscaleIPs` and
 `Self.DNSName` -- which is everything the wizard's "Connect to your tailnet"
 step needs to say something true. No new dependency: stdlib only.
 
+Spike S1 proved READS from another container; its client ran as root, so it
+does NOT prove a write as the dashboard's uid. tailscaled grants write to the
+peer's uid only if it is root, the daemon's own uid, the operator or a local
+admin, so the appliance compose runs tailscaled as the dashboard's uid
+(CR-363 round 2, GL-04, 2026-10-07; live check on the GL-60 list).
+
 READ ONLY on purpose. The login drive (`PATCH /prefs` ->
 `POST /login-interactive`) and the Serve config (`POST /serve-config`) are WP
 B's own work and land here when that package does; a setup CHECK must not

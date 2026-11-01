@@ -641,19 +641,6 @@ def test_none_of_the_three_appear_when_nothing_is_wrong():
 # -- APP-2 / RES-12 / UX-15 (resilience sweep 2026-08-28) ------------------
 
 
-class _FakeTracker:
-    def __init__(self, folders=()):
-        self._folders = [dict(f) for f in folders]
-        self.forgotten = []
-
-    def folders(self):
-        return [dict(f) for f in self._folders]
-
-    def forget_folder(self, folder):
-        self.forgotten.append(folder)
-        return True
-
-
 def _resolve_app(**health):
     app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app.sync_guard = lambda: {"resolve_health": health}
@@ -661,36 +648,21 @@ def _resolve_app(**health):
 
 
 def test_the_skipped_clip_line_appears_in_sync_lanes():
-    app = _resolve_app(ignored_this_session=14, ignored_folders=0)
+    app = _resolve_app(ignored_this_session=14)
     lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     # comp-ui-4 (2026-09-11): "clip(s)" -> ui_copy.count.
     assert any("14 clips skipped this session" in l for l in lines)
 
 
-def test_each_leave_alone_folder_gets_a_forget_button(monkeypatch):
-    """RES-12: a decision that says "always" has to be undoable from the
-    product, or it is a trap."""
-    app = _resolve_app()
-    app.ignore_tracker = _FakeTracker([
-        {"folder": r"C:\Stock", "reason": "my own library", "when": ""}])
-    advanced = _section(build_settings_model(_tray_snapshot(app), app), "ADVANCED")
-    labels = _labels(advanced)
-    assert any(l.startswith("Leaving clips in C:\\Stock alone") for l in labels)
-    assert r"FORGET: C:\Stock" in labels
-
-    button = next(i for i in advanced.items
-                  if isinstance(i, Button) and i.label.startswith("FORGET:"))
-    spawned = []
-    monkeypatch.setattr(sw.tray_mod, "_spawn",
-                        lambda app, label, fn: spawned.append(label) or fn())
-    button.on_click()
-    assert app.ignore_tracker.forgotten == [r"C:\Stock"]
-
-
-def test_no_forget_buttons_when_nothing_is_left_alone():
+def test_no_leave_alone_lines_or_forget_buttons_any_more():
+    """CR-356 (2026-09-30): the folder layer is retired, so Settings has
+    nothing to list and nothing to FORGET."""
     app = _resolve_app()
     labels = _flat_labels(build_settings_model(_tray_snapshot(app), app))
     assert not any(l.startswith("FORGET:") for l in labels)
+    assert not any(l.startswith("Leaving clips in") for l in labels)
+    assert not hasattr(sw, "action_forget_ignored_folder")
+    assert not hasattr(sw, "_ignored_folders")
 
 
 def test_the_repair_button_appears_only_when_the_mapping_is_broken():

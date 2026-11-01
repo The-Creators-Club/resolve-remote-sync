@@ -88,6 +88,8 @@ LANE_C_DOWN = LANE_C + ":down"
 _LANE_NOUNS = {
     "lane_a_video_up": ("upload", "uploads"),
     "lane_b_proxy_down": ("proxy download", "proxy downloads"),
+    # Originals on request (SELECTIVE_ORIGINALS.md 4.2, 2026-10-31).
+    "lane_b_originals_down": ("original download", "original downloads"),
     LANE_C_UP: ("other file upload", "other file uploads"),
     LANE_C_DOWN: ("other file download", "other file downloads"),
     LANE_C: ("other file", "other files"),
@@ -106,7 +108,9 @@ _LANE_NOUNS = {
 # this module cannot place, and lane C with no direction (no peer, or both
 # ways at once), recur: the safe direction for a reminder about footage.
 UPLOAD_LANE = "lane_a_video_up"
-DOWNLOAD_LANES = frozenset({"lane_b_proxy_down", LANE_C_DOWN})
+# An interrupted originals download owes nothing either: every byte of it is a
+# copy of a file the NAS holds (SELECTIVE_ORIGINALS.md 4.2).
+DOWNLOAD_LANES = frozenset({"lane_b_proxy_down", "lane_b_originals_down", LANE_C_DOWN})
 
 # The download nouns, longest first so "other file downloads" is never read
 # as "other file" + a stray word. Used only to recover the decision for an

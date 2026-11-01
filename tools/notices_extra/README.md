@@ -17,6 +17,7 @@ and exactly where its text was copied from. The texts themselves are verbatim.
 | `tcl-tk.txt` | Tcl/Tk 8.6, for tkinter | Tcl/Tk moves to 9 |
 | `openssl.txt` | OpenSSL 3 (CPython's, and psycopg2-binary's in the companion) | never for a 3.x bump; OpenSSL 3 is Apache-2.0 throughout |
 | `libpq.txt` | libpq inside psycopg2-binary (companion only) | psycopg2-binary's bundled libpq changes major version |
+| `lgpl-3.0.txt` | the LGPL-3.0 text psycopg2 is distributed under (GL-32, 2026-10-07; the wheel's own LICENSE only points at it) | never |
 | `dists/<name>.txt` | a locked distribution whose wheel ships no licence file (`flatbuffers`, `pyobjc-core` as of 2026-09-25) | the distribution starts shipping its own, then delete the fallback |
 | `lock_only.json` | the metadata licence of a LOCKED distribution no development machine here can install (`uvloop`, Linux only), for `THIRD_PARTY_NOTICES.md` (CR-353) | the pin moves: `gen_notices.py` then names it as unresolved |
 | `music_text_encoder/{NOTICE,LICENSE}` | the Apache-2.0 notice and modification statement for the exported CLAP text tower; copies live in `music/web/data/text_encoder/`, which is gitignored | the text tower is re-exported (`music/indexer/export_text_encoder.py` does not copy them yet) |

@@ -83,6 +83,10 @@
         <form class="form sp-gap" id="setup-alerts-form">
           <div class="form-row"><label class="lbl" for="setup-alert-email">email address</label><input class="inp" id="setup-alert-email" type="text" name="email" placeholder="you@yourstudio.com"></div>
           <div class="form-row"><label class="lbl" for="setup-alert-hook" title="A webhook is a web address another app gives you (a chat app, for example); the server posts each alert to it.">or a webhook URL</label><input class="inp" id="setup-alert-hook" type="text" name="webhook" placeholder="https://..."></div>
+          {# CR-363 / GL-09 (PL-RES-52): the dead-man heartbeat, offered here because
+             an alarm that only speaks when something is wrong sounds exactly like
+             one that is switched off. Ticked by default; unticking is a choice. #}
+          <div class="form-row"><span></span><label class="check"><input type="checkbox" id="setup-alert-heartbeat" name="heartbeat" checked><span class="g" aria-hidden="true"></span><span class="l">Also send one short "still here" message a day. If they stop arriving, this server is down.</span></label></div>
           <div class="form-row"><span></span><div class="inline">
             <button class="key primary" type="submit"><span class="t">save</span></button>
             <button class="key" type="button" id="setup-alerts-test" title="Sends one test message to the address or webhook above, so you can see it arrive."><span class="t">send a test</span></button>
@@ -103,6 +107,8 @@
           <tr><td colspan="4" class="muted" data-label="">loading...</td></tr>
         </tbody>
       </table></div></div>
+      {# GL-34 / CR-374 (2026-10-07): the self-installing admin's last screen says where to send a problem. #}
+      <div class="lede-in" id="setup-support">Stuck, or something here looks wrong? Send it to <b>{{ support_contact }}</b>.</div>
     </section>
   </div>
 </div>

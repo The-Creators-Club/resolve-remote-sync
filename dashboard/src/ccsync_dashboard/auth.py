@@ -44,6 +44,7 @@ import hashlib
 import hmac
 import ipaddress
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -375,7 +376,8 @@ def make_session_cookie(secret: str, username: str, now: float | None = None,
     return _make_token(secret, PURPOSE_SESSION, username, now=now, ttl=ttl, nonce=nonce)
 
 
-def make_identity_token(secret: str, username: str, now: float | None = None) -> str:
+def make_identity_token(secret: str, username: str, now: float | None = None,
+                        floor: int = 0) -> str:
     """Non-expiring signed token the companion stores to prove which editor's
     machine it is. Same HMAC scheme as the session cookie but signed with
     purpose="identity" -- read_session_cookie only accepts purpose="session"
@@ -385,13 +387,32 @@ def make_identity_token(secret: str, username: str, now: float | None = None) ->
     It does not expire -- see IDENTITY_TTL_SECONDS for why. Tokens minted
     before CR-86 still carry their old 30-day expiry and read_identity_token
     still rejects them once past it, so those editors sign in one last time.
-    Revocation is unchanged, and a 30-day TTL was never much of one anyway.
-    An identity token has no server-side row to revoke -- it proves WHICH
-    machine, and a report also needs a report token, which is the credential
-    disable/delete actually revoke (`_purge_user_credentials`, dash-core-3).
-    Take an editor's access away by disabling or deleting the account, not by
-    waiting a month."""
-    return _make_token(secret, PURPOSE_IDENTITY, username, now=now, ttl=IDENTITY_TTL_SECONDS)
+
+    REVOCATION (CR-367 / GL-15, 2026-10-07): the token still has no row of its
+    own, but it carries its ISSUED-AT implicitly (expiry minus
+    IDENTITY_TTL_SECONDS), and db.revoke_identity keeps a per-person
+    `valid_after`. `floor` is that value: a token minted after a revocation is
+    stamped no earlier than it, so the person who signs in again gets a token
+    that passes while every older copy does not. The five-field wire shape is
+    unchanged, so a companion in the field parses it as before."""
+    stamp = time.time() if now is None else now
+    return _make_token(secret, PURPOSE_IDENTITY, username,
+                       now=max(stamp, float(floor or 0)), ttl=IDENTITY_TTL_SECONDS)
+
+
+def identity_issued_at(token: str | None) -> int | None:
+    """The issued-at second a (signature-verified) identity token carries, or
+    None when it cannot be read. Derived, never stored: expiry - the fixed
+    IDENTITY_TTL_SECONDS every token since CR-86 is minted with. A token from
+    before CR-86 yields a date a century ago, which is "older than any
+    revocation" -- the conservative answer."""
+    parts = str(token or "").split(".")
+    if len(parts) != 5:
+        return None
+    try:
+        return int(parts[3]) - IDENTITY_TTL_SECONDS
+    except ValueError:
+        return None
 
 
 def _read_token(secret: str, token: str | None, purpose: str, now: float | None = None) -> str | None:
@@ -483,18 +504,67 @@ def read_identity_token(secret: str, token: str | None, now: float | None = None
     return _read_token_any(secret, previous, token, PURPOSE_IDENTITY, now=now)[0]
 
 
+def identity_status(
+    settings: Settings | None, token: str | None, now: float | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> tuple[str | None, bool, bool]:
+    """(username, signed with a RETIRED key, REVOKED).
+
+    `username` is the signature's answer and is set even when the token has
+    been revoked, so a caller can tell "forged or expired" (None) from "ours,
+    and withdrawn" (revoked=True) and word the refusal for the editor at the
+    tray accordingly (CR-367 / GL-15, 2026-10-07)."""
+    secret = getattr(settings, "session_secret", "") or ""
+    username, used = _read_token_any(
+        secret, previous_session_secrets(settings), token, PURPOSE_IDENTITY, now=now)
+    if username is None:
+        return None, False, False
+    return username, used != secret, _identity_revoked(settings, username, token, conn)
+
+
+def _identity_revoked(settings: Settings | None, username: str, token: str | None,
+                      conn: sqlite3.Connection | None) -> bool:
+    """Is this person's token older than their `valid_after`? FAILS OPEN when
+    the database cannot be read: the fleet's only fix channel is the report
+    reply, and a lock must never turn every computer away."""
+    issued = identity_issued_at(token)
+    if issued is None:
+        return False
+    owned = False
+    try:
+        if conn is None:
+            path = str(getattr(settings, "db_path", "") or "")
+            # A dashboard with no database file has nothing to have revoked;
+            # opening one here would CREATE an empty file.
+            if not path or not os.path.exists(path):
+                return False
+            conn = db.connect(path)
+            owned = True
+        return issued < db.identity_floor(conn, username)
+    except Exception:  # noqa: BLE001 - fail open, see above
+        log.warning("could not read the identity revocation state for %r", username,
+                    exc_info=True)
+        return False
+    finally:
+        if owned and conn is not None:
+            conn.close()
+
+
 def read_identity_token_ex(
     settings: Settings | None, token: str | None, now: float | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> tuple[str | None, bool]:
     """read_identity_token plus "and it was signed with a RETIRED key".
 
     The pair, because api_report has to do two different things with the two
     halves: accept the report, and count the machine as still owing its editor
-    one "Sign in..." click (DASH-2)."""
-    secret = getattr(settings, "session_secret", "") or ""
-    username, used = _read_token_any(
-        secret, previous_session_secrets(settings), token, PURPOSE_IDENTITY, now=now)
-    return username, bool(username is not None and used != secret)
+    one "Sign in..." click (DASH-2). A REVOKED token answers (None, False)
+    exactly like a forged one -- every caller already refuses that -- and
+    `identity_status` is the door for the one that wants to say why."""
+    username, retired, revoked = identity_status(settings, token, now=now, conn=conn)
+    if revoked:
+        return None, False
+    return username, retired
 
 
 def previous_session_secrets(settings: Settings | None) -> tuple[str, ...]:
@@ -608,6 +678,66 @@ def refuse_plaintext_login(settings: Settings, request: Request) -> bool:
         return False
     forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
     return forwarded != "https"
+
+
+def oidc_password_refused(settings: Settings, username: str) -> bool:
+    """True when the PASSWORD form must refuse `username` because this site's
+    method is SSO and the person is not an operator.
+
+    GL-16 / bug-dash-auth-1 (2026-10-07). On DASH_AUTH_METHOD=oidc the password
+    form is BREAK-GLASS for DASH_ADMIN_USERS only: verify_credentials checks
+    SMB for "oidc" because the NAS is the only thing that can check a NAS
+    password, so without this rule any NAS SMB account (a leaver the IdP had
+    already disabled, a bookkeeper, a share-only user) signed in and skipped
+    the IdP, its MFA and DASH_OIDC_ALLOWED_GROUPS. The rule lives HERE and both
+    sign-in routes (ui.page_login_submit, api.api_login) call it, because the
+    JSON twin shipped without it and nothing made the two agree."""
+    if str(getattr(settings, "auth_method", "") or "").strip().lower() != "oidc":
+        return False
+    return not is_admin(settings, username)
+
+
+def password_login_refusal(settings: Settings, request: Request,
+                           username: str) -> tuple[int, str, bool] | None:
+    """The JSON login's refusal, or None: (status, detail, counts_as_failure).
+
+    Plaintext first (a password must never cross a connection the cookie
+    policy forbids), then the SSO rule; both messages are generic about WHO is
+    an admin."""
+    if refuse_plaintext_login(settings, request):
+        return (403, "this dashboard is configured for https only "
+                     "(DASH_COOKIE_SECURE=1): use the https URL", False)
+    if oidc_password_refused(settings, username):
+        log.warning("local password login refused for non-admin %r while "
+                    "DASH_AUTH_METHOD=oidc", username)
+        return (401, "bad username or password", True)
+    return None
+
+
+def removed_signin_refused(settings: Settings, username: str) -> bool:
+    """True when an admin DELETED this person (the durable tombstone,
+    db.identity_removed) and so no browser session may be started for them
+    (GL-15 / bug-dash-auth-2, CR-367 round 2, 2026-10-07).
+
+    The tombstone used to be read only on the companion doors, so on smb/oidc,
+    where the account lives off this dashboard, a deleted person whose NAS or
+    IdP account still worked signed straight back into b-roll, music, Timeline
+    Cards and client folders. SUSPENSION stays out of browser sign-in
+    (DCORE-4). A name in DASH_ADMIN_USERS is exempt: that list is operator
+    configuration, and refusing it would lock the operator out of their own
+    dashboard. FAILS OPEN on a database error, like every account check."""
+    name = str(username or "").strip().lower()
+    if not name or is_admin(settings, name):
+        return False
+    try:
+        conn = db.connect(settings.db_path)
+        try:
+            return db.identity_removed(conn, name)
+        finally:
+            conn.close()
+    except Exception:                                              # noqa: BLE001
+        log.warning("could not read the removal tombstone for %r at sign-in", name)
+        return False
 
 
 # ---------------------------------------------------- server-side sessions
@@ -860,6 +990,20 @@ def check_boot_secrets(settings: Settings) -> list[str]:
         problems.extend(check_oidc_settings(settings))
     elif method == "local":
         problems.extend(check_local_settings(settings))
+    elif (method == "smb" and settings.session_secret
+          and not str(settings.smb_host or "").strip()):
+        # CR-362 / GL-00 (2026-10-07): the appliance compose never said
+        # "local", so a brand-new customer booted in SMB mode against an empty
+        # NAS address: the setup page sent them to a login no password could
+        # pass and the create-the-first-admin window stayed shut. Boot clean
+        # and unusable was the bug; refuse in words. Only when login is on
+        # (a session secret): without one login is off, a documented lab shape.
+        problems.append(
+            "DASH_AUTH_METHOD=smb but DASH_SMB_HOST (and DASH_NAS_HOST) is empty, so "
+            "no password can ever be checked and nobody could sign in. Set "
+            "DASH_AUTH_METHOD=local to use accounts this dashboard keeps itself, "
+            "or give the NAS address"
+        )
     return problems
 
 

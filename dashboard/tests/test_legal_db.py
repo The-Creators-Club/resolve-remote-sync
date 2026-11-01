@@ -77,13 +77,13 @@ V59 = {"report_optouts", "report_optouts_local", "report_via", "eula_json"}
 def test_v59_is_the_head_and_the_list_stays_gapless():
     numbers = [n for n, _ in dbmod._MIGRATION_STEPS]
     assert numbers == list(range(1, dbmod.SCHEMA_VERSION + 1))
-    assert dbmod.SCHEMA_VERSION == 59
+    assert dbmod.SCHEMA_VERSION >= 59
     assert dict(dbmod._MIGRATION_STEPS)[59] is dbmod.SCHEMA_V59
 
 
 def test_v59_on_a_fresh_database(conn):
     assert V59 <= _columns(conn, "machine_state")
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 59
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
 
 
 def test_v59_on_a_v58_database_reaches_the_same_shape_and_backfills_nothing(tmp_path):
@@ -93,7 +93,7 @@ def test_v59_on_a_v58_database_reaches_the_same_shape_and_backfills_nothing(tmp_
                 " VALUES ('a', 'M', ?)", (NOW,))
     old.commit()
     dbmod.migrate(old)
-    assert old.execute("PRAGMA user_version").fetchone()[0] == 59
+    assert old.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
     row = old.execute("SELECT report_optouts, report_optouts_local, report_via, eula_json"
                       " FROM machine_state").fetchone()
     assert tuple(row) == (None, None, None, None)
@@ -101,7 +101,7 @@ def test_v59_on_a_v58_database_reaches_the_same_shape_and_backfills_nothing(tmp_
     dbmod.migrate(fresh)
     assert _columns(old, "machine_state") == _columns(fresh, "machine_state")
     dbmod.migrate(old)                       # twice is a no-op
-    assert old.execute("PRAGMA user_version").fetchone()[0] == 59
+    assert old.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
     old.close()
 
 

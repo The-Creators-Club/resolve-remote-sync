@@ -12,7 +12,7 @@
 {% if crash_reports %}
 <div class="body split"><div class="inline">
   <span>This server has <b>{{ crash_reports }}</b> saved crash report(s) of its own.</span>
-  <a class="key sm" href="/admin/diagnostics/crash-reports.zip" title="Downloads this server's own crash reports as one zip, to send to support."><span class="t">download crash reports</span></a>
+  <a class="key sm" href="/admin/diagnostics/crash-reports.zip" title="Downloads this server's own crash reports as one zip, to send to support."><span class="t">download crash reports</span></a> <span class="dim">then send them to {{ support_contact }}</span>
 </div></div>
 {% endif %}
 {% if diagnostics.bundles %}

@@ -21,11 +21,15 @@ EXPECTED_KEYS = {
     "schema", "org_name", "tree_name", "canonical_prefix", "remote_root", "smb_unc",
     "sftp_host", "sftp_port", "sftp_chunk_size", "sftp_concurrency", "sftp_shell_type",
     "rclone_remote",
+    # GL-19 (CR-368, 2026-10-07): the NAS sshd host key editors pin in rclone.
+    "sftp_hostkey",
     "nas_syncthing_id", "dashboard_url", "template_folders", "shared_asset_folders",
     "nas_kind",
     # Brand + the read-only extension list (2026-08-17,
     # COMMERCIAL_READINESS.md items 10/11).
     "org_short", "product_name", "video_extensions",
+    # GL-34 / CR-374 (2026-10-07): the vendor-defaulted support address.
+    "support_contact",
     # The fleet's own tray/window mark (2026-08-18) -- the half of item 10's
     # de-branding that a site needs to be able to undo without reinstalling
     # every editor machine.

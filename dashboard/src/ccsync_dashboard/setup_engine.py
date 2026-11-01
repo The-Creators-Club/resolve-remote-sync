@@ -596,13 +596,13 @@ def _check_admin(ctx: SetupContext) -> TaskState:
                 "anyone an admin)") if claim else ""
         return TaskState(
             status="todo",
-            detail="no admin is configured for oidc login: set DASH_ADMIN_USERS to the "
-                   f"account(s) that may administer this dashboard, then redeploy{note}",
+            detail="no admin is configured for oidc login: type the account name(s) that may "
+                   f"administer this dashboard in the box on this row and save{note}",
         )
     return TaskState(
         status="todo",
-        detail=f"no admin is configured for {method} login: set DASH_ADMIN_USERS "
-               "to the NAS account(s) that may administer this dashboard, then redeploy",
+        detail=f"no admin is configured for {method} login: type the NAS account name(s) "
+               "that may administer this dashboard in the box on this row and save",
     )
 
 
@@ -745,6 +745,39 @@ def _check_storage(ctx: SetupContext) -> TaskState:
     return TaskState(status="ok", detail=f"writable{free_str}")
 
 
+def storage_identity_hint(root: Path, exc: BaseException) -> str:
+    """Name the usual cause of a refused write: the container's account does
+    not own the folder (GL-06, CR-364, 2026-10-07).
+
+    The appliance runs as `${APP_UID:-3000}:${APP_GID:-3001}`. On a Synology
+    DSM has no such user (local accounts start at 1026), so every write into
+    the DSM-owned tree is refused and, until this, the only symptom was
+    "could not write ... probe file" with nothing naming APP_UID. Only a
+    permission refusal is explained this way; a full disk or a missing mount
+    is not an ownership problem and gets no advice that would mislead.
+    """
+    import errno
+
+    code = getattr(exc, "errno", None)
+    if not isinstance(exc, PermissionError) and code not in (errno.EACCES, errno.EPERM):
+        return ""
+    uid = getattr(os, "getuid", lambda: None)()
+    gid = getattr(os, "getgid", lambda: None)()
+    me = f"uid {uid}, gid {gid}" if uid is not None else "its own account"
+    try:
+        st = os.stat(root)
+        owner = f"uid {st.st_uid}, gid {st.st_gid}"
+    except OSError:
+        owner = "an account it cannot read"
+    return (
+        f"The container runs as {me} but the folder belongs to {owner}. Create a "
+        f"dedicated account for CC Sync on the NAS (Synology: Control Panel > User "
+        f"& Group), give it read/write on the shared folder, read its numbers with "
+        f"`id <account>` over SSH, set APP_UID and APP_GID to them in the "
+        f"Environment tab, and redeploy (docs/APPLIANCE_INSTALL.md, step 2)."
+    )
+
+
 def _run_storage(ctx: SetupContext) -> TaskState:
     projects_dir = str(getattr(ctx.settings, "projects_dir", "") or "")
     if not projects_dir or not Path(projects_dir).is_dir():
@@ -761,7 +794,11 @@ def _run_storage(ctx: SetupContext) -> TaskState:
         if "ccsync setup probe" not in readback:
             return TaskState(status="fail", detail="probe file read back different content")
     except OSError as exc:
-        return TaskState(status="fail", detail=f"could not write/read/delete a probe file: {exc}")
+        detail = f"could not write/read/delete a probe file: {exc}"
+        cause = storage_identity_hint(root, exc)
+        if cause:
+            detail = f"{detail}. {cause}"
+        return TaskState(status="fail", detail=detail)
     try:
         free = shutil.disk_usage(root).free
     except OSError:
@@ -864,7 +901,7 @@ def _run_secrets(ctx: SetupContext) -> TaskState:
         state = TaskState(
             status=state.status,
             detail=state.detail + f"; generated {len(generated)} just now. "
-                                   "Restart the container to load them",
+                                   "Press RESTART SERVER on this row to load them",
         )
     return state
 
@@ -880,7 +917,7 @@ register(Task(
 
 def _check_syncthing(ctx: SetupContext) -> TaskState:
     if not str(getattr(ctx.settings, "syncthing_url", "") or ""):
-        return TaskState(status="todo", detail="SYNCTHING_GUI_URL not configured")
+        return TaskState(status="todo", detail=_SYNCTHING_NO_ADDRESS)
     from .syncthing_client import SyncthingClient, SyncthingError
 
     try:
@@ -891,13 +928,38 @@ def _check_syncthing(ctx: SetupContext) -> TaskState:
         return TaskState(status="fail", detail=f"unreachable: {exc}")
     if not my_id:
         return TaskState(status="warn", detail="reachable but reported no device id")
-    return TaskState(status="ok", detail=f"device id {my_id[:7]}...")
+    return _syncthing_gui_note(client, TaskState(status="ok", detail=f"device id {my_id[:7]}..."))
+
+
+# CR-363 / GL-07: the address is a form on the row now, not an environment
+# variable and a redeploy.
+_SYNCTHING_NO_ADDRESS = ("no sync engine address is set: type it in the box on this row "
+                         "and save (the bundled one is http://tailscale:8384)")
+
+
+def _syncthing_gui_note(client, state: TaskState) -> TaskState:
+    """CR-363 / GL-08: say so when the sync engine's own admin page is still
+    open. The dashboard closes it itself (syncthing_gui_guard), so this is the
+    line an admin sees only if that could not be done."""
+    from . import syncthing_gui_guard
+
+    try:
+        protected = syncthing_gui_guard.is_protected(client)
+    except Exception:                                                  # noqa: BLE001
+        protected = None
+    if protected is False:
+        return TaskState(
+            status="warn",
+            detail=state.detail + "; its admin page has no password, so anyone on your "
+                   "network can reach it. This server sets one itself on its next cycle, or "
+                   "now with the button on this row")
+    return state
 
 
 def _run_syncthing(ctx: SetupContext) -> TaskState:
     if not str(getattr(ctx.settings, "syncthing_url", "") or ""):
-        return TaskState(status="todo", detail="SYNCTHING_GUI_URL not configured")
-    from . import site_store
+        return TaskState(status="todo", detail=_SYNCTHING_NO_ADDRESS)
+    from . import site_store, syncthing_gui_guard
     from .syncthing_client import SyncthingClient, SyncthingError
 
     try:
@@ -908,6 +970,11 @@ def _run_syncthing(ctx: SetupContext) -> TaskState:
         return TaskState(status="fail", detail=f"unreachable: {exc}")
     if not my_id:
         return TaskState(status="warn", detail="reachable but reported no device id")
+    # CR-363 / GL-08: the button also closes the sync engine's admin page.
+    try:
+        syncthing_gui_guard.ensure(ctx.settings, client)
+    except Exception:                                                  # noqa: BLE001
+        log.warning("setup: could not secure the sync engine's admin page", exc_info=True)
     existing = site_store.get_all(ctx.conn).get("nas_syncthing_id", "")
     if not existing:
         # Only fills a BLANK row -- never overwrites a value an admin (or a
@@ -1104,12 +1171,103 @@ def _run_tailnet(ctx: SetupContext) -> TaskState:
     if url:
         return TaskState(status="todo",
                          detail=f"open {url} and sign in, then press CHECK on this task")
-    if "signed in" in why or "no bundled Tailscale node" in why:
-        # Already on the tailnet, or published some other way entirely: the
-        # check's own answer is the right answer, and it is the one an admin
-        # would otherwise have to press a second button to see.
+    if "signed in" in why:
+        # CR-363 / GL-04 (2026-10-07): a node that is signed in is not a
+        # dashboard editors can reach. The same button now PUBLISHES it
+        # through Serve (and records the https address) before it answers.
+        from . import tailnet_serve
+
+        published, detail = tailnet_serve.publish(ctx.conn, ctx.settings)
+        if not published:
+            return TaskState(
+                status="todo",
+                detail=f"the node is signed in, but the dashboard could not be published "
+                       f"on the tailnet: {_one_line(detail)}. {_TAILNET_MANUAL_SERVE}")
+        return _check_tailnet(ctx)
+    if "no bundled Tailscale node" in why:
+        # Published some other way entirely: the check's own answer is the
+        # right answer, and it is the one an admin would otherwise have to
+        # press a second button to see.
         return _check_tailnet(ctx)
     return TaskState(status="todo", detail=_one_line(why))
+
+
+# GL-04: the by-hand fallback, named in every refusal so a customer whose
+# tailnet has not enabled Serve (or whose node refused) is never left with
+# only a button that failed.
+_TAILNET_MANUAL_SERVE = (
+    "From a terminal on the NAS you can do it by hand: docker compose exec "
+    f"tailscale tailscale serve --bg http://dashboard:8480 ({_TAILNET_APPLIANCE_DOC})")
+
+
+def _tailnet_running_state(ctx: SetupContext, node: dict[str, Any], raw: Any) -> TaskState:
+    """A node that is `Running` (CR-363 / GL-04, 2026-10-07).
+
+    This used to be the whole answer: signed in meant green. But the appliance
+    dashboard listens on the NAS loopback only, and what makes it reachable from
+    any other machine is the node's Serve config, which nothing ever wrote. So
+    the tick is earned by one of two facts, both read from the world: Serve
+    publishes something for this node, or the site's published `dashboard_url`
+    is already a tailnet address (a studio that publishes some other way).
+    A Serve config that cannot be READ is not "missing" and not "fine": it
+    falls back to the URL fact alone.
+
+    GL-09: the same read carries the node's key expiry. A default Tailscale key
+    lasts 180 days, and on that day every editor goes silent at once.
+    """
+    from . import tailnet_serve
+
+    name = node["dns_name"] or (node["ips"][0] if node["ips"] else "")
+    who = f"the bundled Tailscale node is signed in as {name}" if name \
+        else "the bundled Tailscale node is signed in"
+    try:
+        cfg = tailnet_serve.read_serve()
+    except Exception:                                                  # noqa: BLE001
+        cfg = None
+    https_ok = tailnet_serve.https_capable(raw)
+    served = cfg is not None and (
+        tailnet_serve.serve_covers(cfg, node["dns_name"]) or tailnet_serve.serve_covers(cfg))
+    url = _published_dashboard_url(ctx)
+    url_on_tailnet = bool(url) and _is_tailnet_address(urlsplit(url).hostname or url)
+
+    note = ""
+    expiry = tailnet_serve.key_expiry(raw)
+    days = tailnet_serve.days_until(expiry)
+    if days is not None:
+        if days <= tailnet_serve.KEY_EXPIRY_WARN_DAYS:
+            return TaskState(
+                status="warn",
+                detail=f"{who}, but its key expires in {max(0, int(days))} day(s). When it does "
+                       "every editor loses the server at once. In the Tailscale admin console "
+                       "open Machines, this node, and choose Disable key expiry")
+        note = (f". Its key expires on {expiry.date().isoformat()}: in the Tailscale admin "
+                "console open Machines, this node, and choose Disable key expiry, or the whole "
+                "fleet goes quiet that day")
+    if served and https_ok:
+        where = f", published at {url}" if url else f", published at https://{node['dns_name']}" \
+            if node["dns_name"] else ", published through Serve"
+        return TaskState(status="ok", detail=f"{who}{where}{note}")
+    if url_on_tailnet:
+        return TaskState(status="ok",
+                         detail=f"{who}; editors reach this dashboard at {url}, a tailnet "
+                                f"address{note}")
+    if not https_ok:
+        # GL-04 overseer fix (2026-10-07): a Serve config the tailnet cannot
+        # certify is not a published dashboard, whether or not one is written.
+        return TaskState(
+            status="todo",
+            detail=f"{who}, but {tailnet_serve.HTTPS_OFF_MESSAGE}. {_TAILNET_MANUAL_SERVE}")
+    if cfg is None:
+        return TaskState(
+            status="todo",
+            detail=f"{who}, but its Serve settings could not be read, so nobody can say "
+                   "whether editors can reach this dashboard. Press this task's button to "
+                   f"publish it. {_TAILNET_MANUAL_SERVE}")
+    return TaskState(
+        status="todo",
+        detail=f"{who}, but nothing publishes this dashboard on the tailnet, so no editor can "
+               "reach it (it listens on the NAS itself only). Press SIGN IN OR PUBLISH on this "
+               f"task. {_TAILNET_MANUAL_SERVE}")
 
 
 def _check_tailnet(ctx: SetupContext) -> TaskState:
@@ -1122,20 +1280,17 @@ def _check_tailnet(ctx: SetupContext) -> TaskState:
     the page on exactly the deployments that are not on a tailnet yet."""
     from . import tailscale_local
 
+    raw = None
     try:
-        node = tailscale_local.summarise(tailscale_local.status())
+        raw = tailscale_local.status()
+        node = tailscale_local.summarise(raw)
     except Exception as exc:                                          # noqa: BLE001
         log.warning("tailnet check: LocalAPI read failed: %s", exc)
         node = None
     if node:
         state = node["backend_state"] or "unknown"
         if state == "Running":
-            name = node["dns_name"] or (node["ips"][0] if node["ips"] else "")
-            return TaskState(
-                status="ok",
-                detail=(f"the bundled Tailscale node is signed in as {name}" if name
-                        else "the bundled Tailscale node is signed in"),
-            )
+            return _tailnet_running_state(ctx, node, raw)
         if node["auth_url"]:
             return TaskState(
                 status="todo",
@@ -1147,7 +1302,7 @@ def _check_tailnet(ctx: SetupContext) -> TaskState:
         return TaskState(
             status="todo",
             detail=f"the bundled Tailscale node is {state}, with no sign-in link yet: "
-                   f"press GET A SIGN-IN LINK on this task ({_TAILNET_APPLIANCE_DOC} "
+                   f"press SIGN IN OR PUBLISH on this task ({_TAILNET_APPLIANCE_DOC} "
                    f"is the command-line way in)",
         )
 
@@ -1176,7 +1331,7 @@ register(Task(
     # job. It puts the sign-in link on the page; the signing in happens in
     # the admin's browser, at Tailscale.
     check=_check_tailnet, run=_run_tailnet, optional=True,
-    run_label="GET A SIGN-IN LINK",
+    run_label="SIGN IN OR PUBLISH",
 ))
 
 
@@ -1208,8 +1363,9 @@ def _nas_client(ctx: SetupContext):
     if not factory.nas_configured(ctx.settings):
         return None, TaskState(
             status="todo",
-            detail="no NAS credential in this container: set DASH_NAS_HOST and "
-                   f"{_nas_credential_key(kind)}, then redeploy",
+            detail="no NAS credential is stored yet: fill in the NAS address and "
+                   f"{'API key' if kind == 'truenas' else 'admin password'} in the boxes "
+                   "on this row and save",
         )
     try:
         client = factory.make_nas_client(ctx.settings)
@@ -1269,8 +1425,12 @@ def _check_nas_connect(ctx: SetupContext) -> TaskState:
                 version = str(info.get("version") or "")
                 hostname = str(info.get("hostname") or "") or where
                 if version:
+                    # CR-365 / GL-11: a TrueNAS release outside the supported
+                    # range is named here, never refused (doubt is not a failure).
+                    note = str(info.get("support_note") or "")
                     return TaskState(status="ok",
-                                     detail=f"{kind} {version} at {hostname} answered")
+                                     detail=f"{kind} {version} at {hostname} answered"
+                                            + (f". {note}" if note else ""))
             except Exception as exc:                                  # noqa: BLE001
                 # Reachable is the answer to THIS task. A scoped key that
                 # cannot read /system/info is not a failure of it.
@@ -1482,8 +1642,8 @@ def _run_software(ctx: SetupContext) -> TaskState:
     if not str(getattr(ctx.settings, "release_feed_url", "") or ""):
         return TaskState(
             status=state.status,
-            detail=state.detail + "; no vendor feed is configured (DASH_RELEASE_FEED_URL), so "
-                                  "there is nothing to check for",
+            detail=state.detail + "; no vendor update feed address is set (type it in the "
+                                  "box on this row and save), so there is nothing to check for",
         )
     from . import release_feed
 
@@ -1530,15 +1690,24 @@ def _check_release_key(ctx: SetupContext) -> TaskState:
     so a skip here cannot make that line green."""
     keys = tuple(getattr(ctx.settings, "release_pubkeys", ()) or ())
     if keys:
+        # CR-362 / GL-02 (2026-10-07): on a vendor build the key is the
+        # vendor's, not "your release key"; say whose it is.
+        from . import vendor_defaults
+        if ((getattr(ctx.settings, "vendor_defaults", False)
+                or getattr(ctx.settings, "vendor_customer", False))
+                and vendor_defaults.holds_only_vendor_keys(keys)):
+            return TaskState(status="ok", detail="the vendor's signing key is pinned: this "
+                                                 "server only accepts builds the vendor signed")
         return TaskState(status="ok", detail=f"{len(keys)} release signing key configured"
                                              if len(keys) == 1 else
                                              f"{len(keys)} release signing keys configured")
     return TaskState(
         status="todo",
         detail="no release signing key: this server refuses every build until "
-               "DASH_RELEASE_PUBKEYS holds the public half of your release key, so your "
-               "editors' computers can never be updated from here. Set it and redeploy "
-               "(docs/RELEASE.md). Skipping means updates wait until you do",
+               "this server holds the vendor's public signing key, so your "
+               "editors' computers can never be updated from here. Do not make a key of "
+               "your own: paste the vendor's in the box on this row and save "
+               "(docs/INSTALL.md step 6). Skipping means updates wait until you do",
     )
 
 
@@ -1592,7 +1761,8 @@ def _check_alerts(ctx: SetupContext) -> TaskState:
             return TaskState(status="warn",
                              detail=f"the webhook channel is chosen but no URL is set: "
                                     f"{_alerts_next_step()}")
-        return TaskState(status="ok", detail=f"alerts go to {alerts.mask_url(url)}")
+        return TaskState(status="ok", detail=f"alerts go to {alerts.mask_url(url)}"
+                                             + _heartbeat_note(values))
     to = str(values.get("alerts_smtp_to") or "")
     if not to:
         return TaskState(status="warn",
@@ -1615,7 +1785,18 @@ def _check_alerts(ctx: SetupContext) -> TaskState:
                 detail=f"we have an address ({to}) and a mail server, but no password for "
                        f"{values.get('alerts_smtp_user')}: {_alerts_next_step()}",
             )
-    return TaskState(status="ok", detail=f"alerts go to {to} through {host}")
+    return TaskState(status="ok", detail=f"alerts go to {to} through {host}"
+                                         + _heartbeat_note(values))
+
+
+def _heartbeat_note(values: dict) -> str:
+    """CR-363 / GL-09 (PL-RES-52): an alert channel that only speaks when
+    something is wrong sounds exactly like one that is switched off, so the
+    checklist says when the daily proof of life is not on."""
+    if str(values.get("alerts_heartbeat") or "0") == "1":
+        return "; a daily still-here message is on"
+    return ("; the daily still-here message is off, so nothing tells you if this server "
+            "itself goes down")
 
 
 def _run_alerts(ctx: SetupContext) -> TaskState:
@@ -1658,6 +1839,13 @@ def _run_alerts(ctx: SetupContext) -> TaskState:
             values["alerts_smtp_from"] = email
     else:
         values = {"alerts_sink": alerts.SINK_WEBHOOK, "alerts_webhook_url": webhook}
+    # CR-363 / GL-09 (PL-RES-52, 2026-10-07): the dead-man heartbeat is the one
+    # message whose ABSENCE is the news ("the server itself is down"), and it
+    # was off with nothing in setup ever offering it. The form carries the
+    # choice; an absent key leaves the stored value alone.
+    beat = ctx.payload.get("heartbeat")
+    if beat is not None and str(beat).strip() != "":
+        values["alerts_heartbeat"] = "1" if str(beat).strip().lower() in ("1", "true", "yes", "on") else "0"
     try:
         alerts.set_settings(ctx.conn, values, "setup:alerts")
     except alerts.AlertError as exc:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 import secrets
 import sqlite3
 from pathlib import Path
@@ -217,6 +218,32 @@ def shown_as_filter(ctx, value) -> str:
 
 
 templates.env.filters["shown_as"] = shown_as_filter
+
+
+# GL-34 / CR-374 (2026-10-07): every fix line that tells a person to "send us"
+# something or "send it to support" now names WHERE, from the site manifest's
+# `support_contact` (vendor default, reseller override). One filter on the
+# render side rather than 40 edited registry strings: the strings are data in
+# alerts/notices/invariants and are also mailed, so a template cannot be the
+# only place that learns the address. Never raises, never doubles the address.
+_SEND_TO_SUPPORT_RE = re.compile(r"\bsend us\b|\bto (?:us|support)\b", re.IGNORECASE)
+
+
+def with_support_text(text, contact: str) -> str:
+    from . import site_store
+
+    return site_store.with_support_text(text, contact)
+
+
+@pass_context
+def with_support_filter(ctx, value) -> str:
+    try:
+        return with_support_text(value, ctx.get("support_contact") or "")
+    except Exception:  # noqa: BLE001
+        return "" if value is None else str(value)
+
+
+templates.env.filters["with_support"] = with_support_filter
 
 
 def _display_names_safe(request: Request) -> dict[str, str]:
@@ -707,6 +734,9 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
                                      or "CC Sync"))
     context.setdefault("brand_product", manifest.get("product_name")
                        or settings.site_product_name)
+    # GL-34 / CR-374: the support address every "send to support" line shows.
+    context.setdefault("support_contact", manifest.get("support_contact")
+                       or site_store.DEFAULT_SUPPORT_CONTACT)
     # Which nav entry to mark (2026-08-18). The drawer in partials/topbar.html
     # and the Settings strip in partials/settings_nav.html read the same one
     # variable, so a page names where it is ONCE. Defaulted here because both
@@ -1026,7 +1056,6 @@ async def page_login_submit(request: Request):
     next_path = _safe_next(form.get("next", ""))
     renew = form.get("renew", "") == "1"
     local = request.query_params.get("local", "") == "1" or form.get("local", "") == "1"
-    sso = str(settings.auth_method or "").strip().lower() == "oidc"
     error = None
     if not settings.session_secret:
         error = "login not configured on the server (DASH_SESSION_SECRET unset)"
@@ -1042,9 +1071,11 @@ async def page_login_submit(request: Request):
         # message still protects is the OUTCOME of a sign-in that was
         # actually tried -- this page never says which half was wrong.
         error = auth.throttle_message(throttled_for)
-    elif sso and not auth.is_admin(settings, username):
+    elif auth.oidc_password_refused(settings, username):
         # Break-glass is for the operator, not a password back door for the
         # fleet. Same generic message, so it does not disclose who is an admin.
+        # The rule is auth.oidc_password_refused, shared with /api/v1/login
+        # (GL-16, CR-367, 2026-10-07).
         log.warning("local password login refused for non-admin %r while "
                     "DASH_AUTH_METHOD=oidc", username)
         auth.record_login_failure(request, username)
@@ -1063,6 +1094,10 @@ async def page_login_submit(request: Request):
             # throttle either.
             error = "the server is busy checking sign-ins. Try again in a moment."
         else:
+            if verified and auth.removed_signin_refused(settings, username):
+                # A DELETED person's NAS password still works; the tombstone
+                # is what says no (GL-15, CR-367 round 2, 2026-10-07).
+                verified = False
             if verified:
                 auth.clear_login_failures(request, username)
                 landing = next_path
@@ -2076,6 +2111,8 @@ def _alerts_context(request: Request, conn, error: str = "",
         "alerts_kinds": [{"kind": k.kind, "severity": k.severity,
                           "title": k.title, "what": k.what}
                          for k in alerts.ALERT_KINDS],
+        # 2026-09-29: the per-kind "send this as an alert" switches.
+        "alerts_groups": alerts.kind_groups_view(conn),
         # CR-190 (2026-09-04): grouped by the message the rows went out in,
         # so the page shows what the mailbox received rather than eleven
         # entries for one email.
@@ -2299,11 +2336,12 @@ def page_admin_invariants(request: Request, conn: sqlite3.Connection = Depends(g
 # DATE, never a boolean, so the lines above them can age.
 
 
-def _protection_context(conn, error: str = "", notice: str = "") -> dict:
+def _protection_context(conn, error: str = "", notice: str = "",
+                        settings=None) -> dict:
     from . import protection
 
     return {
-        "protection": protection.page_view(conn),
+        "protection": protection.page_view(conn, settings),
         "protection_error": error,
         "protection_notice": notice,
     }
@@ -2314,7 +2352,7 @@ def page_admin_protection(request: Request, conn: sqlite3.Connection = Depends(g
     _require_admin_page(request)
     return _render(request, "admin_protection.html", {
         **_sidebar_context(request, conn, None),
-        **_protection_context(conn),
+        **_protection_context(conn, settings=request.app.state.settings),
         "nav_current": "protection",
     })
 
@@ -2355,7 +2393,8 @@ async def partial_admin_protection_ack(
         conn.rollback()
         error = str(exc)
     return _render(request, "partials/protection.html",
-                   _protection_context(conn, error, notice))
+                   _protection_context(conn, error, notice,
+                                       settings=request.app.state.settings))
 
 
 # ------------------------------------------------------------------ recovery
@@ -2605,6 +2644,53 @@ async def partial_admin_alerts_save(request: Request,
                      and (saved.get("alerts_sink") or before) != alerts.SINK_NONE)
         notice = ("Saved. The next check will send everything that is "
                   "currently open." if turned_on else "saved.")
+    except alerts.AlertError as exc:
+        conn.rollback()
+        error = str(exc)
+    return _render(request, "partials/admin_alerts.html",
+                   _alerts_context(request, conn, error, notice))
+
+
+@router.post("/partials/admin/alerts/kinds")
+async def partial_admin_alerts_kinds(request: Request,
+                                     conn: sqlite3.Connection = Depends(get_conn)):
+    """Which kinds of alert are sent (2026-09-29). The form posts one `send`
+    field per ticked kind; everything in the registry NOT ticked is stored as
+    switched off, so a kind a later build adds starts switched on. `preset`
+    (all / errors / none) is a named submit and wins over the ticks."""
+    user = _require_admin_page(request)
+    from . import alerts
+
+    try:
+        parsed = parse_qs((await request.body()).decode(),
+                          max_num_fields=len(alerts.ALERT_KINDS) + 6)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="malformed form body")
+    everything = [k.kind for k in alerts.ALERT_KINDS]
+    preset = (parsed.get("preset") or [""])[0]
+    if preset == "all":
+        send = set(everything)
+    elif preset == "errors":
+        send = {k.kind for k in alerts.ALERT_KINDS if k.severity == alerts.SEV_ERROR}
+    elif preset == "none":
+        send = set()
+    else:
+        send = set(parsed.get("send") or [])
+    error = ""
+    notice = ""
+    try:
+        unknown = send - set(everything)
+        if unknown:
+            raise alerts.AlertError(f"not an alert kind: {', '.join(sorted(unknown)[:5])}")
+        muted = alerts.set_muted_kinds(
+            conn, [k for k in everything if k not in send], user)
+        db.audit(conn, user, "alerts.kinds", "alerts",
+                 {"switched_off": sorted(muted)})
+        conn.commit()
+        on = len(everything) - len(muted)
+        notice = (f"saved. {on} of {len(everything)} kinds are sent as alerts."
+                  + (" The rest are still checked and still shown on this page "
+                     "and in the weekly report." if muted else ""))
     except alerts.AlertError as exc:
         conn.rollback()
         error = str(exc)
@@ -2870,6 +2956,272 @@ def _rendered_project_detail(request, conn, slug: str, *, error=None, done=None)
         "move_error": error,
         "move_done": done,
     })
+
+
+def _project_access_answer(request, conn, slug: str, *, error=None, done=None):
+    """The project page's access window (2026-10-07, CR-368 follow-up): who
+    can open this project on the server besides the people who tick it. The
+    grant was API-only, so a wired editor on a per-project site (who works on
+    the NAS directly and whose tick the API refuses, CR-28) had no way in
+    that an admin could reach from a page. Its own window, loaded once and
+    re-drawn only by its own buttons, NOT inside #project-detail: that polls
+    every 10 s and would wipe a half-chosen name."""
+    from . import project_groups
+    from .api import _access_project_or_404, _require_admin
+
+    _require_admin(request)
+    _access_project_or_404(conn, slug)
+    granted = project_groups.grants(conn).get(slug, [])
+    ticked = db.fetch_all_selections(conn).get(slug, [])
+    candidates = sorted(db.known_editor_usernames(conn) - set(granted))
+    return _render(request, "partials/project_access.html", {
+        "slug": slug,
+        "per_project": project_groups.enabled(request.app.state.settings),
+        "granted": granted,
+        "ticked": ticked,
+        "candidates": candidates,
+        "access_error": error,
+        "access_done": done,
+    })
+
+
+@router.get("/partials/project/{slug}/access")
+def partial_project_access(slug: str, request: Request,
+                           conn: sqlite3.Connection = Depends(get_conn)):
+    return _project_access_answer(request, conn, slug)
+
+
+@router.post("/partials/project/{slug}/access")
+async def partial_project_access_edit(slug: str, request: Request,
+                                      conn: sqlite3.Connection = Depends(get_conn)):
+    """[ GIVE ACCESS ] / [ REMOVE ]: the same set_project_access the JSON
+    routes call. A refusal comes back as a banner in the window."""
+    from .api import set_project_access
+
+    form = await _form(request)
+    editor = form.get("editor", "").strip().lower()
+    give = form.get("action", "grant") != "revoke"
+    error = None
+    done = None
+    try:
+        if not editor:
+            error = "choose a person first"
+        else:
+            result = set_project_access(request, conn, slug, editor, give=give)
+            done = {"editor": editor, "give": give, "changed": result["changed"]}
+    except HTTPException as exc:
+        if exc.status_code in (401, 403):
+            raise
+        error = str(exc.detail)
+    return _project_access_answer(request, conn, slug, error=error, done=done)
+
+
+# ---------------------------------------------- originals on request (v60)
+# docs/SELECTIVE_ORIGINALS.md §12.3, D2 (2026-10-31): every pick for the
+# project is LISTED for everyone who can see the page, with the person and
+# the computer it belongs to; only the people who may pick for that computer
+# (D4) get its buttons. Its own window, loaded once and redrawn by its own
+# buttons like the access window, because #project-detail's 10 s poll would
+# close a folder someone is half way through browsing.
+ORIGINALS_BROWSE_FILES_MAX = 400
+
+
+def _originals_target(raw: str) -> tuple[str, str] | None:
+    editor, sep, machine = str(raw or "").partition("::")
+    editor, machine = editor.strip().lower(), machine.strip()
+    return (editor, machine) if sep and editor and machine else None
+
+
+def _originals_progress(conn, slug: str, picks: list[dict], withheld: dict) -> dict:
+    """(editor, machine) -> {"held": set of NFC rels | None, "truncated"}.
+    None is "cannot tell": the computer withholds its file list (LG-1), or
+    has never reported this project, and neither may ever read as 0 or as
+    done (§6)."""
+    out: dict[tuple[str, str], dict] = {}
+    for pair in {(p["editor_username"], p["machine"]) for p in picks}:
+        if "local_manifest" in withheld.get(pair, set()):
+            out[pair] = {"held": None, "why": "withheld", "truncated": False}
+            continue
+        summary = conn.execute(
+            """SELECT truncated FROM editor_media_project
+                WHERE editor_username=? AND machine=? AND project_slug=?""",
+            (pair[0], pair[1], slug)).fetchone()
+        if summary is None:
+            out[pair] = {"held": None, "why": "unreported", "truncated": False}
+            continue
+        held = {str(r["rel_path"]) for r in conn.execute(
+            """SELECT rel_path FROM editor_media
+                WHERE editor_username=? AND machine=? AND project_slug=? AND kind='original'""",
+            (pair[0], pair[1], slug))}
+        out[pair] = {"held": held, "why": "", "truncated": bool(summary["truncated"])}
+    return out
+
+
+def _originals_browse(conn, project_id: int | None, rel_dir: str,
+                      picked: set[str]) -> dict:
+    """One folder of the project's originals as the last NAS walk saw them:
+    its subfolders (file count and size under each) and its own files."""
+    prefix = f"{rel_dir}/" if rel_dir else ""
+    folders: dict[str, dict] = {}
+    files: list[dict] = []
+    if project_id is not None:
+        for r in conn.execute(
+                "SELECT rel_path, size FROM nas_media WHERE project_id=? AND kind='original'"
+                " ORDER BY rel_path", (project_id,)):
+            rel = str(r["rel_path"])
+            if not rel.startswith(prefix):
+                continue
+            rest = rel[len(prefix):]
+            head, sep, _tail = rest.partition("/")
+            if sep:
+                entry = folders.setdefault(head, {"name": head, "rel": prefix + head,
+                                                  "count": 0, "bytes": 0})
+                entry["count"] += 1
+                entry["bytes"] += int(r["size"] or 0)
+            else:
+                files.append({"name": rest, "rel": rel, "bytes": int(r["size"] or 0)})
+    for entry in folders.values():
+        entry["picked"] = entry["rel"] in picked
+    for entry in files:
+        entry["picked"] = entry["rel"] in picked
+    parent = rel_dir.rpartition("/")[0] if rel_dir else None
+    return {"dir": rel_dir, "parent": parent,
+            "folders": sorted(folders.values(), key=lambda e: e["name"].lower()),
+            "files": files[:ORIGINALS_BROWSE_FILES_MAX],
+            "more_files": max(0, len(files) - ORIGINALS_BROWSE_FILES_MAX)}
+
+
+def _project_originals_answer(request, conn, slug: str, *, target: str = "",
+                              browse_dir: str | None = None, error=None, done=None):
+    from .api import _version_tuple
+
+    settings = request.app.state.settings
+    user = auth.get_session_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="sign in first")
+    project = conn.execute(
+        "SELECT id, label FROM projects WHERE slug=? AND active=1", (slug,)).fetchone()
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
+    project_id = int(project["id"])
+    picks = db.original_picks(conn, slug=slug)
+    withheld = db.withheld_map(conn)
+    progress = _originals_progress(conn, slug, picks, withheld)
+    rows = []
+    for p in picks:
+        pair = (p["editor_username"], p["machine"])
+        files = db.expand_original_pick(conn, project_id, p)
+        on_nas = [f for f in files if f[2]]
+        state = progress.get(pair) or {"held": None, "why": "unreported", "truncated": False}
+        held = state["held"]
+        n_in = None if held is None else sum(1 for rel, _s, _o in on_nas if rel in held)
+        rows.append({
+            "editor": p["editor_username"], "machine": p["machine"],
+            "rel": p["rel_path"], "key": p["rel_key"], "is_dir": bool(p["is_dir"]),
+            "via": p["picked_via"], "picked_by": p["picked_by"], "at": p["created_at"],
+            "bytes": sum(int(s or 0) for _r, s, _o in on_nas),
+            "total": len(on_nas), "n_in": n_in, "why": state["why"],
+            "at_least": bool(state["truncated"] and n_in is not None and n_in < len(on_nas)),
+            "can_edit": auth.can_manage(settings, user, p["editor_username"]),
+        })
+    versions = db.fetch_companion_version_map(conn)
+    candidates = []
+    for editor, machine in sorted(db.fetch_machine_selections(
+            conn, sync_modes=(db.SYNC_MODE_FULL,), for_enforce=True).get(slug, [])):
+        if not machine or not auth.can_manage(settings, user, editor):
+            continue
+        version = (versions.get((editor, machine)) or {}).get("companion_version") or ""
+        candidates.append({
+            "editor": editor, "machine": machine, "value": f"{editor}::{machine}",
+            "version": version,
+            "ready": _version_tuple(version) >= db.ORIGINALS_MIN_COMPANION,
+        })
+    min_version = ".".join(str(n) for n in db.ORIGINALS_MIN_COMPANION)
+    browse = None
+    chosen = None
+    pair = _originals_target(target)
+    if pair is not None:
+        chosen = next((c for c in candidates
+                       if (c["editor"], c["machine"]) == pair), None)
+        if chosen is None:
+            error = error or ("You cannot choose originals for that computer here: it "
+                              "does not have this project ticked for full sync, or it is "
+                              "not one of yours.")
+        elif not chosen["ready"]:
+            running = (f"runs companion {chosen['version']}" if chosen["version"]
+                       else "has not said which companion it runs")
+            error = error or (f"{chosen['machine']} {running}, and only {min_version} or "
+                              f"later brings originals down: an older one ignores the "
+                              f"picks. Update it first.")
+            chosen = None
+        else:
+            picked = {p["rel_key"] for p in picks
+                      if (p["editor_username"], p["machine"]) == pair}
+            browse = _originals_browse(conn, project_id,
+                                       db.media_rel_key(browse_dir or "").strip("/"), picked)
+    return _render(request, "partials/project_originals.html", {
+        "slug": slug, "label": project["label"], "picks": rows,
+        "candidates": candidates, "chosen": chosen, "browse": browse,
+        "min_version": min_version,
+        "originals_error": error, "originals_done": done,
+    })
+
+
+@router.get("/partials/project/{slug}/originals")
+def partial_project_originals(slug: str, request: Request, target: str = "",
+                              dir: str = "",  # noqa: A002 - the query name the page sends
+                              conn: sqlite3.Connection = Depends(get_conn)):
+    return _project_originals_answer(request, conn, slug, target=target,
+                                     browse_dir=dir if target else None)
+
+
+@router.post("/partials/project/{slug}/originals")
+async def partial_project_originals_edit(slug: str, request: Request,
+                                         conn: sqlite3.Connection = Depends(get_conn)):
+    """[ BRING THIS FOLDER ] / [ BRING THIS FILE ] / [ STOP ]: the same
+    apply_original_picks the PUT calls, behind the session rule (an editor
+    for their own computers, an admin for anyone's). A refusal, the upload
+    only one included, comes back as a banner in the window (D9)."""
+    from pydantic import ValidationError
+
+    from .api import OriginalPickIn, OriginalPicksIn, apply_original_picks
+
+    form = await _form(request)
+    editor = form.get("editor", "").strip().lower()
+    machine = form.get("machine", "").strip()
+    rel = form.get("rel", "")
+    action = form.get("action", "add")
+    browse_dir = form.get("dir", "")
+    target = f"{editor}::{machine}" if action == "add" else ""
+    error = None
+    done = None
+    try:
+        if not editor or not machine or not rel.strip():
+            error = "choose a computer and a file or folder first"
+        else:
+            user = auth.get_session_user(request)
+            if not auth.can_manage(request.app.state.settings, user, editor):
+                raise HTTPException(
+                    status_code=403 if user else 401,
+                    detail="you can only choose originals for your own computers (admins excepted)")
+            if action == "remove":
+                body = OriginalPicksIn(remove=[rel], via="dashboard")
+            else:
+                body = OriginalPicksIn(add=[OriginalPickIn(
+                    rel=rel, is_dir=form.get("is_dir", "") in ("1", "true", "on"))],
+                    via="dashboard")
+            result = apply_original_picks(conn, editor, slug, machine, body, user)
+            done = {"action": action, "machine": machine, "rel": rel.strip().strip("/"),
+                    **result}
+    except ValidationError:
+        error = "that path is too long to be a file in this project"
+    except HTTPException as exc:
+        if exc.status_code in (401, 403):
+            raise
+        error = str(exc.detail)
+    return _project_originals_answer(request, conn, slug, target=target,
+                                     browse_dir=browse_dir if target else None,
+                                     error=error, done=done)
 
 
 @router.post("/partials/project/{slug}/moves/{move_id}/undo")
@@ -4505,6 +4857,32 @@ async def partial_admin_resume_lane_b(
     })
 
 
+@router.post("/partials/admin/enforce/approve-removals")
+async def partial_admin_approve_removals(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """[ APPLY THESE N REMOVALS ] on the refusal line (GL-33 / CR-376,
+    2026-10-07): the same write as POST /api/v1/enforce/approve-removals. The
+    count rides in the form from the banner the admin read."""
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    error = None
+    try:
+        db.approve_enforce_removals(conn, db.utcnow_iso(), admin,
+                                    int(form.get("count", "-1") or -1))
+        conn.commit()
+        from .api import _nudge_collector
+        _nudge_collector(request)
+    except ValueError as exc:
+        error = str(exc)
+    scope = auth.scope_for(request)
+    return _render(request, "partials/fleet_grid.html", {
+        "view": api_scope_projects_view(build_projects_view(conn), scope),
+        "fleet": _fleet_view(conn, scope),
+        "error": error,
+    })
+
+
 @router.post("/partials/admin/machines/ask-why")
 async def partial_admin_ask_why(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
@@ -4760,11 +5138,19 @@ def _auto_derived_env_hints(settings, manifest: dict) -> dict[str, str]:
 @router.get("/admin/settings")
 def page_admin_settings(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     _require_admin_page(request)
-    from . import site_store
+    from . import build_flavor, site_store
 
     settings = request.app.state.settings
     manifest = site_store.resolved_manifest(conn, settings)
-    live_derived = _live_auto_derived_values(settings)
+    live_derived = dict(_live_auto_derived_values(settings))
+    # GL-19 / data-model-8 (CR-368, 2026-10-07): the three tree keys are
+    # read-only once any computer exists (site_store.check_tree_lock refuses the
+    # write); the box says so instead of letting an admin find out from a 422.
+    tree_locked = site_store.tree_keys_locked(conn)
+    for _tree_key in (site_store.TREE_KEYS if tree_locked else ()):
+        live_derived.setdefault(
+            _tree_key, "read-only now that computers have registered; every installer and "
+                       "companion builds its paths from it")
     return _render(request, "admin_settings.html", {
         **_sidebar_context(request, conn, None),
         "manifest": manifest,
@@ -4773,6 +5159,7 @@ def page_admin_settings(request: Request, conn: sqlite3.Connection = Depends(get
         # which is "could be derived once a sidecar exists", not "is".
         "auto_derived": sorted(live_derived.keys()),
         "auto_derived_reason": live_derived,
+        "tree_locked": tree_locked,
         "env_hint": _auto_derived_env_hints(settings, manifest),
         "from_db": set(manifest.get("_from_db", ())),
         # A CHOICE, not free text (dash-admin-7, 2026-08-21): the field used
@@ -4783,7 +5170,38 @@ def page_admin_settings(request: Request, conn: sqlite3.Connection = Depends(get
         # refusal.
         "nas_kinds": list(nas_factory.NAS_KINDS),
         "nav_current": "site",
+        # GL-34 / CR-374: the box shows the RAW value (blank when unset), the
+        # vendor default is only its placeholder; GL-31: the template hides
+        # the CLI feature rows server-side on a locked build.
+        "support_contact_raw": site_store.raw_support_contact(conn, settings),
+        "support_contact_default": site_store.DEFAULT_SUPPORT_CONTACT,
+        "cli_build_locked": build_flavor.cli_build_locked(),
+        # GL-33 / CR-376 (2026-10-07): a dashboard-only row, not a site_store key.
+        "enforce_per_computer": db.enforce_removals_per_computer(conn),
     })
+
+
+@router.post("/partials/admin/enforce/allowance")
+async def partial_admin_enforce_allowance(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """Settings, Sharing safety: the per-computer removal allowance (GL-33 /
+    CR-376, 2026-10-07). The same db call and audit row as
+    POST /api/v1/enforce/allowance; answers a sentence for the result line."""
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    try:
+        value = db.set_enforce_removals_per_computer(
+            conn, int(str(form.get("per_computer", "")).strip()), admin)
+    except ValueError:
+        return HTMLResponse("Enter a whole number from 0 to 100.", status_code=422)
+    conn.commit()
+    from .api import _nudge_collector
+    _nudge_collector(request)
+    return HTMLResponse(
+        "Saved. The flat limit applies." if value == 0 else
+        f"Saved. Up to {value} share removal{'s' if value != 1 else ''} per computer "
+        "in one pass before the safety stop.")
 
 
 # ------------------------------------------------- admin packages: release feed

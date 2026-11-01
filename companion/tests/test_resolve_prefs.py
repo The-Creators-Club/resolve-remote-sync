@@ -253,3 +253,124 @@ def test_an_unsupported_platform_is_inconclusive_too(monkeypatch):
     monkeypatch.setattr(rp.platform, "system", lambda: "Linux")
     assert rp.resolve_process_state() is None
     assert rp.resolve_is_running() is True
+
+
+# -- External scripting (CR-373 / GL-29, 2026-10-07) --------------------------
+
+def test_scripting_mode_is_read_from_both_files(tmp_path):
+    d = _prefs_dir(tmp_path, WINDOWS_CONFIG_DAT + "System.Scripting.Mode = 1\n",
+                   WINDOWS_CONFIG_DATA)
+    assert rp.ResolvePrefs(d).scripting_mode() == rp.SCRIPTING_LOCAL
+    (tmp_path / "b").mkdir()
+    d2 = _prefs_dir(tmp_path / "b", WINDOWS_CONFIG_DAT, WINDOWS_CONFIG_DATA)
+    assert rp.ResolvePrefs(d2).scripting_mode() is None
+
+
+def test_ensure_scripting_local_writes_both_files_and_a_backup(tmp_path, resolve_quit):
+    d = _prefs_dir(tmp_path, WINDOWS_CONFIG_DAT, WINDOWS_CONFIG_DATA)
+    assert rp.ResolvePrefs(d).ensure_scripting_local() == rp.OK
+    again = rp.ResolvePrefs(d)
+    assert again.dat.get(rp.SCRIPTING_MODE_KEY) == "1"
+    assert again.data.get(rp.SCRIPTING_MODE_KEY) == "1"
+    assert again.ensure_scripting_local() == rp.ALREADY
+    # Lossless: nothing else in the file moved.
+    assert "Custom.LUT.Path.Count = 0" in (d / "config.dat").read_text()
+    assert any(p.name.startswith("config.dat.ccsync-bak") for p in d.iterdir())
+
+
+def test_ensure_scripting_local_replaces_an_existing_none(tmp_path, resolve_quit):
+    d = _prefs_dir(tmp_path, WINDOWS_CONFIG_DAT + "System.Scripting.Mode = 0\n",
+                   WINDOWS_CONFIG_DATA + "System.Scripting.Mode = 0\n")
+    assert rp.ResolvePrefs(d).ensure_scripting_local() == rp.OK
+    assert rp.ResolvePrefs(d).scripting_mode() == rp.SCRIPTING_LOCAL
+
+
+def test_network_mode_is_left_alone(tmp_path, resolve_quit):
+    d = _prefs_dir(tmp_path, WINDOWS_CONFIG_DAT + "System.Scripting.Mode = 2\n",
+                   WINDOWS_CONFIG_DATA + "System.Scripting.Mode = 2\n")
+    assert rp.ResolvePrefs(d).ensure_scripting_local() == rp.ALREADY
+    assert rp.ResolvePrefs(d).scripting_mode() == rp.SCRIPTING_NETWORK
+
+
+def test_ensure_scripting_local_refuses_while_resolve_runs(tmp_path, monkeypatch):
+    d = _prefs_dir(tmp_path, WINDOWS_CONFIG_DAT, WINDOWS_CONFIG_DATA)
+    monkeypatch.setattr(rp, "resolve_is_running", lambda: True)
+    before = (d / "config.dat").read_text()
+    assert rp.ResolvePrefs(d).ensure_scripting_local() == rp.RESOLVE_RUNNING
+    assert (d / "config.dat").read_text() == before
+
+
+def test_enable_scripting_never_creates_the_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("BMD_RESOLVE_CONFIG_DIR", str(tmp_path / "none"))
+    assert rp.enable_scripting() == rp.CONFIG_MISSING
+    assert not (tmp_path / "none").exists()
+    assert rp.scripting_status()["prefs"] == rp.CONFIG_MISSING
+
+
+def test_scripting_status_names_the_mode(tmp_path, monkeypatch):
+    d = _prefs_dir(tmp_path, WINDOWS_CONFIG_DAT + "System.Scripting.Mode = 0\n",
+                   WINDOWS_CONFIG_DATA)
+    monkeypatch.setenv("BMD_RESOLVE_CONFIG_DIR", str(d))
+    st = rp.scripting_status()
+    assert st["mode"] == 0 and st["mode_name"] == "None" and st["prefs"] == "ok"
+
+
+def _no_registry(monkeypatch):
+    import sys
+
+    class _Reg:
+        HKEY_LOCAL_MACHINE = 0
+
+        @staticmethod
+        def OpenKey(*a, **k):
+            raise OSError("no key")
+    monkeypatch.setitem(sys.modules, "winreg", _Reg)
+
+
+def test_ensure_scripting_local_needs_both_files(tmp_path, resolve_quit):
+    # CR-373 round 2: config.dat alone is NOT CHECKED, never OK.
+    d = _prefs_dir(tmp_path, WINDOWS_CONFIG_DAT, "")
+    (d / rp.CONFIG_DATA_NAME).unlink()
+    assert rp.ResolvePrefs(d).ensure_scripting_local() == rp.FORMAT_UNRECOGNISED
+    assert "System.Scripting.Mode" not in (d / "config.dat").read_text()
+
+
+def test_ensure_scripting_local_rewrites_disagreeing_files(tmp_path, resolve_quit):
+    d = _prefs_dir(tmp_path, WINDOWS_CONFIG_DAT + "System.Scripting.Mode = 1\n",
+                   WINDOWS_CONFIG_DATA + "System.Scripting.Mode = 0\n")
+    assert rp.ResolvePrefs(d).ensure_scripting_local() == rp.OK
+    assert rp.ResolvePrefs(d).data.get(rp.SCRIPTING_MODE_KEY) == "1"
+
+
+def test_detect_resolve_never_claims_an_edition(tmp_path, monkeypatch):
+    exe = tmp_path / "Resolve.exe"
+    exe.write_bytes(b"x")
+    d = tmp_path / "prefs"
+    d.mkdir()
+    (d / ".version").write_text("Resolve.Version=21.0.0\nOnboarding.Version=16\n")
+    monkeypatch.setattr(rp.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("CCSYNC_RESOLVE_EXE", str(exe))
+    monkeypatch.setenv("BMD_RESOLVE_CONFIG_DIR", str(d))
+    monkeypatch.setenv("ProgramData", str(tmp_path / "pd"))
+    _no_registry(monkeypatch)
+    got = rp.detect_resolve()
+    assert got["installed"] is True and got["version"] == "21.0.0"
+    assert got["edition"] is None
+    monkeypatch.setenv("CCSYNC_RESOLVE_EXE", str(tmp_path / "missing.exe"))
+    assert rp.detect_resolve()["installed"] is False
+
+
+def test_detect_resolve_windows_default_path_present_and_absent(monkeypatch, tmp_path):
+    # CR-373 / GL-29 (2026-10-07): a missing constant was swallowed and every
+    # Windows seat answered installed=None. No env override here on purpose.
+    from ccsync_companion import resolve_prefs as rp
+    monkeypatch.setattr(rp.platform, "system", lambda: "Windows")
+    monkeypatch.delenv("CCSYNC_RESOLVE_EXE", raising=False)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    _no_registry(monkeypatch)
+    assert rp.detect_resolve()["installed"] is False
+    exe = tmp_path / "Blackmagic Design" / "DaVinci Resolve" / "Resolve.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    got = rp.detect_resolve()
+    assert got["installed"] is True and got["path"] == str(exe)

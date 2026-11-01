@@ -57,7 +57,9 @@ def no_real_ytdl_store(monkeypatch):
 @pytest.fixture
 def app(tmp_path, strict, no_other_stores):
     settings = Settings(db_path=str(tmp_path / "subj.db"), session_secret=STRONG,
-                        admin_users=frozenset({"owen"}))
+                        admin_users=frozenset({"owen"}),
+                        # CR-362 (2026-10-07): SMB login needs a NAS address to boot.
+                        smb_host="nas.test")
     conn = db.connect(settings.db_path)
     try:
         db.migrate(conn)

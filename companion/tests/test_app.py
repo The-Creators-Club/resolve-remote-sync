@@ -167,29 +167,36 @@ def test_scan_whole_project_clears_the_session_skips(tmp_path, monkeypatch):
     assert app.ignore_tracker.session_count() == 0
 
 
-def test_scan_whole_project_still_honours_a_persisted_folder_ignore(
+def test_a_folder_rule_from_an_older_build_hides_nothing_from_the_scan(
         tmp_path, monkeypatch):
-    """RES-12: the scan clears DISMISSALS, not standing decisions. The
-    editor who said "always leave my stock folder alone" is not asking to be
-    shown it again every time they run a scan -- that is what the Settings
-    window's [ FORGET ] is for."""
-    stock = tmp_path / "stock"
-    stock.mkdir()
-    stock_clip = stock / "stock.mov"
-    stock_clip.touch()
-    other = tmp_path / "other"
-    other.mkdir()
-    fresh_path = other / "fresh.mov"
-    fresh_path.touch()
+    """CR-356 (2026-09-30): RES-12's "always leave this folder alone" is
+    retired. A machine upgraded with Ruskin's Desktop rule still on disk
+    must offer the music under Desktop/Music Docs, and must not count it."""
+    import json
 
-    app = _make_app(tmp_path)
-    assert app.ignore_tracker.ignore_folder(str(stock), reason="personal library")
+    from ccsync_companion import fixer
+
+    desktop = tmp_path / "Desktop"
+    music = desktop / "Music Docs"
+    music.mkdir(parents=True)
+    track = music / "track01.aac"
+    track.touch()
+
+    first = _make_app(tmp_path)
+    state = first.log_path.parent / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / fixer.FIXER_IGNORES_FILENAME).write_text(json.dumps({"folders": [
+        {"folder": str(desktop), "reason": "the editor chose it in the fixer",
+         "when": "2026-09-28T10:00:00+00:00"}]}), encoding="utf-8")
+
+    app = _make_app(tmp_path)  # the upgraded companion starting up
+    assert not (state / fixer.FIXER_IGNORES_FILENAME).exists()
+    assert "ignored_folders" not in app.resolve_health()
 
     monkeypatch.setattr(
         resolve_bridge, "get_media_pool_items",
-        lambda: _mp_result(_item(str(stock_clip)), _item(str(fresh_path))),
+        lambda: _mp_result(_item(str(track))),
     )
-
     captured = {}
     monkeypatch.setattr(
         popup, "show_popup",
@@ -197,8 +204,7 @@ def test_scan_whole_project_still_honours_a_persisted_folder_ignore(
     )
 
     app.scan_whole_project()
-    paths = [item["file_path"] for item in captured["items"]]
-    assert paths == [str(fresh_path)]
+    assert [item["file_path"] for item in captured["items"]] == [str(track)]
 
 
 def test_scan_whole_project_does_not_apply_popup_snooze(tmp_path, monkeypatch):
@@ -1109,6 +1115,71 @@ def test_refresh_media_tree_once_keeps_non_ignored_project(tmp_path, monkeypatch
     )
     app._refresh_media_tree_once()
     assert "Real Project" in app.get_media_tree()
+
+
+# -- CR-358: a pool walk taken in one project is not acted on in another -----
+
+
+def _spy_pool_passes(app) -> list[str]:
+    ran: list[str] = []
+    app._relink_proxies_once = lambda items: ran.append("relink")
+    app._classify_pool_once = lambda items: ran.append("classify")
+    return ran
+
+
+def test_refresh_media_tree_once_skips_both_passes_after_a_project_switch(
+    tmp_path, monkeypatch
+):
+    """Ruskin 2026-09-30: walked in Framing Formosa, Reproductive Rights Fight
+    open by the time the passes ran -> a popup of the old project's clips."""
+    app = _make_app(tmp_path)
+    ran = _spy_pool_passes(app)
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item("clip.mov"), project_name="Framing Formosa"),
+    )
+    monkeypatch.setattr(resolve_bridge, "current_project_name",
+                        lambda max_age=0: "Reproductive Rights Fight")
+    app._refresh_media_tree_once()
+    assert ran == []
+
+
+def test_refresh_media_tree_once_stops_before_classify_when_the_switch_lands_mid_relink(
+    tmp_path, monkeypatch
+):
+    app = _make_app(tmp_path)
+    ran = _spy_pool_passes(app)
+    open_now = ["Framing Formosa"]
+
+    def relink(items):
+        ran.append("relink")
+        open_now[0] = "Reproductive Rights Fight"
+
+    app._relink_proxies_once = relink
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item("clip.mov"), project_name="Framing Formosa"),
+    )
+    monkeypatch.setattr(resolve_bridge, "current_project_name",
+                        lambda max_age=0: open_now[0])
+    app._refresh_media_tree_once()
+    assert ran == ["relink"]
+
+
+@pytest.mark.parametrize("open_now", ["Framing Formosa", ""])
+def test_refresh_media_tree_once_runs_both_passes_when_the_project_is_unchanged_or_unknown(
+    tmp_path, monkeypatch, open_now
+):
+    app = _make_app(tmp_path)
+    ran = _spy_pool_passes(app)
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item("clip.mov"), project_name="Framing Formosa"),
+    )
+    monkeypatch.setattr(resolve_bridge, "current_project_name",
+                        lambda max_age=0: open_now)
+    app._refresh_media_tree_once()
+    assert ran == ["relink", "classify"]
 
 
 # -- ops-efficiency-8 (CR-66 / CR-67 item 9): the media-tree stat cache -----
@@ -7190,14 +7261,14 @@ def test_resolve_health_rides_the_report(tmp_path):
     app.watcher.last_scan_at = "2026-08-28T09:00:00+00:00"
     app.watcher.last_resolve_project = "FF4 Nuclear"
     app.ignore_tracker.ignore(r"C:\Users\owen\Desktop\clip.mov")
-    app.ignore_tracker.ignore_folder(r"C:\Stock")
 
     health = app.sync_guard()["resolve_health"]
     assert health["out_of_tree"] == 3
     assert health["bad_prefix"] == 1
     assert health["missing"] == 2
     assert health["ignored_this_session"] == 1
-    assert health["ignored_folders"] == 1
+    # CR-356: the retired folder layer is no longer counted on the wire.
+    assert "ignored_folders" not in health
     assert health["last_scan_at"] == "2026-08-28T09:00:00+00:00"
     assert health["open_project"] == "FF4 Nuclear"
 

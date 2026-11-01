@@ -219,3 +219,30 @@ def test_the_serve_switch_is_off_by_default(code: str):
 
 def test_the_serve_config_directory_is_mounted_read_only(code: str):
     assert "- ./tailscale:/config:ro" in code
+
+
+# ------------------------------------------- CR-362 (GL-00 / GL-01 / GL-02)
+# The three lines whose absence made the appliance unusable for a new
+# customer: nobody could sign in, the wizard's sync-engine step could never
+# pass, and the dashboard had no vendor key or feed. dashboard/tests/
+# test_cr362_appliance_defaults.py builds Settings from this same block.
+
+def test_the_dashboard_selects_local_accounts(code: str):
+    assert 'DASH_AUTH_METHOD: "local"' in code
+
+
+def test_the_dashboard_is_told_where_its_syncthing_is(code: str):
+    # Syncthing shares the tailscale service's netns, so its GUI is at the
+    # service name `tailscale`, never on a published port.
+    assert 'SYNCTHING_GUI_URL: "http://tailscale:8384"' in code
+
+
+def test_the_vendor_defaults_switch_is_on_and_no_key_is_typed(code: str, text: str):
+    assert 'DASH_VENDOR_DEFAULTS: "1"' in code
+    # The key and feed are baked into the image, not into the compose a
+    # customer pastes: a key here could not rotate with an image update.
+    assert "DASH_RELEASE_PUBKEYS" not in code
+    assert "DASH_RELEASE_FEED_URL" not in code
+    # The comment that said the key was generated on first boot was false.
+    assert "is NOT generated" in text
+    assert "`DASH_RELEASE_PUBKEYS`, `SYNCTHING_API_KEY`" not in text

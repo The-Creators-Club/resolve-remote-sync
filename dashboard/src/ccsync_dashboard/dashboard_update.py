@@ -195,6 +195,10 @@ def boot_attempts_path(settings) -> Path:
     return code_dir(settings) / "boot_attempts.json"
 
 
+def no_auto_apply_path(settings) -> Path:
+    return code_dir(settings) / "no_auto_apply.json"
+
+
 def update_state_path(settings) -> Path:
     return code_dir(settings) / "update_state.json"
 
@@ -485,6 +489,188 @@ def wait_until_serving(settings, *, deadline_seconds: float = BOOT_HEALTH_PROBE_
     return False, why
 
 
+def _exit_process(code: int) -> None:
+    """The one place this module ends the process from a worker thread. A
+    seam so a test can observe the exit; os._exit and not sys.exit because the
+    caller is a daemon thread and the process is, by definition, wedged (its
+    shutdown hooks may be the thing that hangs)."""
+    try:
+        logging.shutdown()
+    except Exception:                                                 # noqa: BLE001
+        pass
+    os._exit(code)
+
+
+def _image_schema_version() -> int | None:
+    """Highest migration the IMAGE's own db.py knows, parsed the way
+    select_code_root.image_schema_version does (same rule, same answer)."""
+    import re
+    try:
+        text = (IMAGE_APP_ROOT / "src" / "ccsync_dashboard" / "db.py").read_text(
+            encoding="utf-8")
+        body = text.split("_MIGRATION_STEPS", 1)[1].split("SCHEMA_VERSION =", 1)[0]
+    except (OSError, UnicodeDecodeError, IndexError):
+        return None
+    steps = [int(m) for m in re.findall(r"^\s*\(\s*(\d+)\s*,", body, re.M)]
+    return max(steps) if steps else None
+
+
+def revert_would_be_refused(settings) -> str:
+    """"" when a revert at the next start could go ahead (or cannot be judged,
+    select_code_root's own three-way rule), else the sentence why not. Mirrors
+    select_code_root.main: a standing revert_refused_from for this version, or
+    the live schema above what the previous tree (or the image) knows."""
+    current = _read_json(current_json_path(settings))
+    if str(current.get("revert_refused_from") or "") == VERSION:
+        return str(current.get("revert_refused_reason") or
+                   f"a revert from {VERSION} was already refused")
+    live = live_schema_versions(settings).get("dashboard")
+    if live is None:
+        return ""
+    previous = str(current.get("previous") or "")
+    known = _image_schema_version() if not previous else tree_schema_version(settings, previous)
+    if known is None or known >= int(live):
+        return ""
+    return (f"{previous or 'the image'} knows database schema v{known} and this "
+            f"database is on v{live}")
+
+
+def exit_for_revert(settings, why: str) -> bool:
+    """CR-369 / GL-20+GL-21 (2026-10-07, PL-RES-04): a volume tree that boots
+    but cannot serve ends the process with 75, so run.sh re-runs
+    select_code_root, the failed-boot counter advances and the second failure
+    reverts. Before this the watchdog only logged: the wedged process stayed
+    up, there was never a "next start", and the container sat Up (unhealthy)
+    with every page, rollback included, dead.
+
+    ONLY for a tree being judged: running from a volume bundle AND a
+    boot_attempts record standing (select_code_root writes it for every volume
+    tree it hands out). Image code and a dev checkout stay log-only, because
+    restarting the same image cannot change anything and would only loop.
+    Returns False when it did not exit (the real thing never returns)."""
+    try:
+        judged = (running_source(settings) == "volume"
+                  and boot_attempts_path(settings).is_file())
+    except Exception:                                                 # noqa: BLE001
+        judged = False
+    if not judged:
+        return False
+    # CR-369 overseer defect 1 (2026-10-07): an exit that cannot lead to a
+    # revert is only a restart loop (select_code_root refuses a revert INTO a
+    # tree that knows an older schema, and boots the same tree again, counter
+    # climbing for ever). The wedged process may still serve the admin pages
+    # the refusal sentence points at, so stay up and log.
+    try:
+        refused = revert_would_be_refused(settings)
+    except Exception:                                                 # noqa: BLE001
+        refused = ""
+    if refused:
+        log.error("NOT exiting for a revert: %s (the process stays up so the "
+                  "admin pages still answer; the trigger was: %s)", refused, why)
+        return False
+    log.error("exiting 75 so the next start can count this failed boot and, at "
+              "%d, revert to the previous tree (%s)", MAX_BOOT_ATTEMPTS, why)
+    _exit_process(RESTART_EXIT_CODE)
+    return True
+
+
+# GL-21: a lifespan that hangs BEFORE the watchdog is armed (a deadlocked
+# migrate, a collector that never starts) is never probed at all. The deadline
+# is a daemon timer started at the top of the lifespan and cancelled where the
+# watchdog is armed. Generous: db.migrate on a large database is legitimately
+# slow, and a false trip costs a counted boot.
+LIFESPAN_DEADLINE_SECONDS = 600.0
+
+
+def arm_lifespan_deadline(settings, seconds: float | None = None) -> threading.Timer | None:
+    """Start the lifespan deadline; the caller `.cancel()`s it once startup
+    got as far as arming the boot watchdog. None for anything exit_for_revert
+    would not act on, so image code never carries a timer."""
+    try:
+        if not (running_source(settings) == "volume"
+                and boot_attempts_path(settings).is_file()):
+            return None
+    except Exception:                                                 # noqa: BLE001
+        return None
+    limit = LIFESPAN_DEADLINE_SECONDS if seconds is None else seconds
+    timer = threading.Timer(
+        limit, exit_for_revert,
+        args=(settings, f"startup did not finish within {int(limit)} s"))
+    timer.daemon = True
+    timer.name = "lifespan-deadline"
+    timer.start()
+    return timer
+
+
+def read_no_auto_apply(settings) -> dict[str, Any]:
+    """The durable "do not auto-apply this version" note select_code_root.revert
+    writes (GL-20). {} when absent."""
+    return _read_json(no_auto_apply_path(settings))
+
+
+def no_auto_apply_entries(marker: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The marker as a per-version map (CR-369 round 2, GL-20, 2026-10-07).
+
+    The file used to hold ONE {version, reason, at}, so a second revert or a
+    rollback overwrote the first and an admin APPLY of any version deleted it,
+    letting the poller re-apply the bundle that crash-looped. It now carries
+    {"versions": {v: {reason, at}}}; the old single-key shape is read as one
+    entry, and writers keep the newest entry's single keys alongside for an
+    older reader."""
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(marker, dict):
+        return out
+    legacy = str(marker.get("version") or "")
+    if legacy:
+        out[legacy] = {"reason": str(marker.get("reason") or ""),
+                       "at": str(marker.get("at") or "")}
+    versions = marker.get("versions")
+    if isinstance(versions, dict):
+        for v, e in versions.items():
+            if str(v):
+                e = e if isinstance(e, dict) else {}
+                out[str(v)] = {"reason": str(e.get("reason") or ""),
+                               "at": str(e.get("at") or "")}
+    return out
+
+
+def _marker_payload(entries: dict[str, dict[str, Any]], newest: str | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"versions": entries}
+    if newest and newest in entries:
+        payload.update({"version": newest, **entries[newest]})
+    return payload
+
+
+def add_no_auto_apply(settings, version: str, reason: str) -> None:
+    """ADD one version to the marker; never overwrites another's entry."""
+    version = str(version or "")
+    if not version:
+        return
+    entries = no_auto_apply_entries(read_no_auto_apply(settings))
+    entries[version] = {"reason": reason, "at": db.utcnow_iso()}
+    _write_json(no_auto_apply_path(settings), _marker_payload(entries, version))
+
+
+def clear_no_auto_apply(settings, version: str | None = None) -> None:
+    """Drop the marker, or (with `version`) only that version's entry: an
+    admin applying 0.8.1 says nothing about the crash-looping 0.9.0."""
+    try:
+        if version is None:
+            no_auto_apply_path(settings).unlink(missing_ok=True)
+            return
+        entries = no_auto_apply_entries(read_no_auto_apply(settings))
+        if str(version) not in entries:
+            return
+        del entries[str(version)]
+        if not entries:
+            no_auto_apply_path(settings).unlink(missing_ok=True)
+        else:
+            _write_json(no_auto_apply_path(settings),
+                        _marker_payload(entries, next(reversed(entries))))
+    except OSError as exc:                                          # noqa: BLE001
+        log.warning("could not clear %s: %s", no_auto_apply_path(settings), exc)
+
+
 def start_boot_watchdog(settings) -> threading.Thread | None:
     """Arm the "this boot is healthy" timer. Best-effort and daemon: a
     dashboard that cannot write its own state files still has to serve the
@@ -502,6 +688,7 @@ def start_boot_watchdog(settings) -> threading.Thread | None:
                 "this boot is NOT healthy: %s. Leaving boot_attempts standing -- "
                 "%d failed boots revert /data/code/current.json to the previous tree "
                 "at the next start (REL-6).", why, MAX_BOOT_ATTEMPTS)
+            exit_for_revert(settings, f"the boot probe failed: {why}")
             return
         clear_boot_attempts(settings)
         log.info("dashboard code boot marked healthy (%s, source=%s): /api/v1/health "
@@ -1643,6 +1830,15 @@ def rollback(settings, *, to_version: str = "", restore_db: str = "",
         "rolled_back_from": str(current.get("version") or ""),
     })
     boot_attempts_path(settings).unlink(missing_ok=True)
+    # CR-369 overseer defect 2 (GL-20, 2026-10-07): an admin's rollback must not
+    # be undone by the release-feed poller 10 s after the restart. Same durable
+    # marker select_code_root.revert writes; cleared only by an admin APPLY.
+    left = str(current.get("version") or "")
+    if left:
+        try:
+            add_no_auto_apply(settings, left, f"rolled back by {started_by or 'an admin'}")
+        except OSError as exc:                                      # noqa: BLE001
+            log.warning("could not write %s: %s", no_auto_apply_path(settings), exc)
     result = {"version": target or "image", "restored": restored,
               "rolled_back_from": current.get("version"), "schema": schema}
     # dash-release-jobs-1 (2026-09-18b mediums): best effort, for the same
@@ -1672,6 +1868,10 @@ def start_apply(settings, app_state, *, version: str, force: bool, started_by: s
     expensive prize (two processes extracting into the same directory)."""
     with _APPLY_LOCK:
         record = preflight(settings, app_state, version=version, force=force)
+        # GL-20: an admin's own APPLY is the one thing that overrides the
+        # reverted-version marker; the poller's call never does.
+        if not str(started_by or "").startswith("release-feed"):
+            clear_no_auto_apply(settings, version)
         _set_state(settings, step="starting", in_progress=True, version=version,
                    error="", message="queued", started_at=db.utcnow_iso(),
                    started_by=started_by, finished_at="")
@@ -1772,7 +1972,7 @@ def status(settings, app_state) -> dict[str, Any]:
         "code_updates": code_updates,
         "rollback_candidates": rollback_candidates,
         "runtime_updates": runtime_updates,
-        "nas_hint": nas_update_hint(settings),
+        "nas_hint": nas_update_hint(settings, app_state),
         "in_progress": bool(state.get("in_progress")),
         "step": str(state.get("step") or "idle"),
         "message": str(state.get("message") or ""),
@@ -1858,16 +2058,19 @@ def record_feed_runtime_mismatch(conn, settings, app_state) -> dict[str, Any] | 
     return payload
 
 
-def nas_update_hint(settings) -> str:
-    """The exact click that applies a RUNTIME update, per platform. Same three
-    answers the feed's image line already gives (docs/RELEASE_FEED.md section
-    4) -- one wording, two callers."""
-    kind = str(getattr(settings, "nas_kind", "") or "").lower()
-    if kind == "synology":
-        return "Container Manager > Project ccsync > Build"
-    if kind == "truenas":
-        return "Apps > ccsync > Update"
-    return "your NAS's own app or container manager's Update action"
+def nas_update_hint(settings, app_state=None) -> str:
+    """How to apply a RUNTIME update, per platform. One wording with the
+    feed's image line (release_feed.image_update_hint): with a digest on the
+    signed channel it names the exact image lines to paste into the project
+    (GL-50, CR-371 round 2, 2026-10-07), because the NAS's Update/Build button
+    on a digest-pinned project re-pulls the same digest for ever."""
+    image = None
+    if app_state is not None:
+        try:
+            image = (release_feed._cache(app_state).get("channel") or {}).get("dashboard_image")
+        except Exception:                                             # noqa: BLE001
+            image = None
+    return release_feed.image_update_hint(getattr(settings, "nas_kind", ""), image)
 
 
 # --------------------------------------------------------------------- JSON API

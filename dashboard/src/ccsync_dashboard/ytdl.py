@@ -165,6 +165,13 @@ class YtdlGate:
         mounted app is not the only thing that ever reads it."""
         headers = [(k, v) for k, v in scope.get("headers", ())
                    if k.lower() not in (IDENTITY_HEADER, FLEET_AUTH_HEADER)]
+        # CR-367 / GL-15 (2026-10-07): a REVOKED identity, or one whose person
+        # is suspended, disabled or removed, is withheld from the sub-app,
+        # which verifies the signature but cannot see this database. That is
+        # what closes the SHARED-token path: the stamp says "somebody in this
+        # fleet" and the identity header was the only thing naming who.
+        from . import api as _api  # deferred: auth imports this module
+        headers = _api.strip_barred_identity(self._settings, headers, "ytdl")
         stamp = self._fleet_stamp(headers)
         if stamp is not None:
             headers.append((FLEET_AUTH_HEADER, stamp))

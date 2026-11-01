@@ -736,6 +736,13 @@ popup_snooze_seconds = 300
 resolve_scripting_warning = true
 resolve_scripting_warning_interval = 300
 
+# Warn when the open Resolve timeline uses VP9 source media (typically a
+# YouTube download). Resolve Studio cannot render a VP9 original at full
+# resolution, and the H.264 proxies hide the problem until render time. The
+# popup lists the clips and offers to stop warning for that timeline. Set
+# false to switch the check off.
+vp9_guard = true
+
 # Restart the companion when the Resolve it was connected to exits, so its
 # scripting link starts clean against the next one. Leave this on unless you
 # are debugging the companion itself: fusionscript keeps process-global IPC

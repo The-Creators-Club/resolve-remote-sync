@@ -278,7 +278,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--kind", default="companion", choices=KINDS)
     ap.add_argument("--platform", default="", choices=("",) + tuple(PLATFORMS))
     ap.add_argument("--version", default="")
-    ap.add_argument("--min-version", default="0.0.0")
+    # GL-25b (CR-371, 2026-10-07): None = tools/release_floor.json, resolved by
+    # sign_release (which refuses a floorless companion/onboard record).
+    ap.add_argument("--min-version", default=None)
+    ap.add_argument("--allow-no-floor", action="store_true",
+                    help="sign a companion/onboard record with min_version 0.0.0 (GL-25b)")
     ap.add_argument("--signed-binary", dest="signed_binary", action="store_true", default=None,
                     help="the artefact carries a real Authenticode/Developer ID signature")
     ap.add_argument("--make-current", action="store_true")
@@ -326,7 +330,11 @@ def main(argv: list[str] | None = None, http=None, environ: dict | None = None,
 
         # 1. sign -- before any network, before any prompt.
         sign_argv = ["--artifact", str(artifact), "--kind", args.kind, "--platform", args.platform,
-                     "--version", args.version, "--min-version", args.min_version]
+                     "--version", args.version]
+        if args.min_version:
+            sign_argv += ["--min-version", args.min_version]
+        if args.allow_no_floor:
+            sign_argv.append("--allow-no-floor")
         if args.signed_binary:
             sign_argv.append("--signed-binary")
         if args.key:

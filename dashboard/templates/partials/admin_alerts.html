@@ -8,6 +8,7 @@
    form's windows for the eye but belong to #alerts-pw-form and
    #alerts-run-form through the form= attribute; those two forms are empty
    siblings AFTER the save form. The fourth, the test, is in the page head.
+   A fifth, #alerts-kinds-form, wraps the checks list at the bottom.
 
    ONE FIELD PER SETTING KEY, AND NO MORE (settings-1, 2026-09-25): the save
    route's field cap is ui.alerts_form_max_fields(), sized from
@@ -40,7 +41,7 @@
         <span class="when"></span>
         <div class="what">{{ f.diagnosis }}</div>
         {% if f.detail %}<div class="subj">{{ f.detail }}</div>{% endif %}
-        {% if f.fix %}<div class="todo"><span class="cmd">{{ f.fix }}</span></div>{% endif %}
+        {% if f.fix %}<div class="todo"><span class="cmd">{{ f.fix | with_support }}</span></div>{% endif %}
       </div>
       {% endfor %}
     </div>
@@ -213,17 +214,34 @@
     </div></div>
   </section>
 
+  {# The fifth form (2026-09-29): which kinds are sent as alerts. One `send`
+     checkbox per registry kind, so its field cap is its own
+     (ui.partial_admin_alerts_kinds), never the save form's. An unticked kind
+     is still checked and still listed under currently open; only the message
+     is withheld. #}
+  {% set sent_count = alerts_kinds | length - alerts_settings.muted_kinds | length %}
   <h2 class="sec">what this server checks</h2>
+  <form id="alerts-kinds-form" hx-post="/partials/admin/alerts/kinds" hx-target="#admin-alerts" hx-swap="outerHTML">
   <section class="win" data-win="checks">
-    <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold what this server checks"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">checks</h2><span class="bar-rule"></span><span class="meta"><b>{{ alerts_kinds | length }}</b> checks, <b>{{ open_kinds | unique | list | length }}</b> found</span></div>
-    <div class="body lede">So that silence is provably checked, not unchecked.</div>
+    <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold what this server checks"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">checks</h2><span class="bar-rule"></span><span class="meta"><b>{{ alerts_kinds | length }}</b> checks, <b>{{ open_kinds | unique | list | length }}</b> found, <b>{{ sent_count }}</b> sent as alerts</span></div>
+    <div class="body lede">So that silence is provably checked, not unchecked. Tick the kinds you want to be told about. An unticked kind is still checked every {{ alerts_interval_minutes }} minutes and still shows on this page and in the weekly report; it just sends no message. A check added in a later update starts ticked.</div>
     <div class="scroll-y hl-checks">
+      {% for g in alerts_groups %}
+      <div class="sec-h">{{ g.group }}</div>
       <ul class="checks alerts-checks">
-      {% for k in alerts_kinds %}
+      {% for k in g.kinds %}
         <li>{% if k.kind in open_kinds %}<span class="tag solid {{ 'err' if k.severity == 'error' else 'warn' }}" title="This check found something. It is under currently open.">found</span>
-          {% else %}<span class="tag mute" title="How serious it is when this check finds something.">{{ 'problem' if k.severity == 'error' else 'to look at' }}</span>{% endif %}<span>{{ k.what }}</span></li>
+          {% else %}<span class="tag mute" title="How serious it is when this check finds something.">{{ 'problem' if k.severity == 'error' else 'to look at' }}</span>{% endif %}<label class="check" title="{{ k.title }}"><input type="checkbox" name="send" value="{{ k.kind }}"{% if k.send %} checked{% endif %}><span class="g"></span><span class="l">{{ k.what }}</span></label></li>
       {% endfor %}
       </ul>
+      {% endfor %}
     </div>
   </section>
+  <div class="foot-keys">
+    <button class="key primary w-10" type="submit" data-busy title="Sends alerts for the ticked kinds only."><span class="t">Save</span><span class="busy-t"><span class="spin"></span> saving</span></button>
+    <button class="key quiet sm" type="submit" name="preset" value="all" title="Tick every kind and save."><span class="t">All</span></button>
+    <button class="key quiet sm" type="submit" name="preset" value="errors" title="Only the kinds marked problem: something is wrong and needs a person."><span class="t">Problems only</span></button>
+    <button class="key quiet sm" type="submit" name="preset" value="none" title="Send no problem alerts at all. The weekly report and the daily message are set under channel."><span class="t">None</span></button>
+  </div>
+  </form>
 </div>

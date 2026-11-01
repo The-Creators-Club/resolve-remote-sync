@@ -364,23 +364,47 @@ def test_the_shoot_tree_mirrors_the_real_folders_all_the_way_down(client, conn, 
 
 
 def test_folders_below_the_depth_cap_fold_into_their_parent(client, conn, creators):
-    """Past three levels a shoot's folders are camera-roll bookkeeping
-    (CARD1/CLIP0001), which would shatter one interview across a dozen branches.
+    """Past five levels a shoot's folders are camera-roll bookkeeping
+    (CARD1/CLIP0001), which would shatter one event across a dozen branches.
     Those clips are not dropped, they count towards the folder an editor clicks."""
-    insert_video(conn, share="mofa-disaster",
-                 rel_path="Whisky/Interviews/黃培峻 Huang Pei-jun/Proxy/a.mov",
+    base = "FF2 E7/Footage/B-roll/Pride March/Drone"
+    insert_video(conn, share="mofa-disaster", rel_path=f"{base}/Proxy/a.mov",
                  category=None, status="organised")
-    insert_video(conn, share="mofa-disaster",
-                 rel_path="Whisky/Interviews/黃培峻 Huang Pei-jun/CARD1/Proxy/b.mov",
+    insert_video(conn, share="mofa-disaster", rel_path=f"{base}/CARD1/Proxy/b.mov",
                  category=None, status="organised")
 
     tree = client.get("/api/tree").json()
     cc = next(r for r in tree if r["collection"] == config.COLLECTION_CREATORS)
-    person = cc["groups"][0]["children"][0]["children"][0]["children"][0]
+    node = cc["groups"][0]
+    for _ in range(5):
+        node = node["children"][0]
 
-    assert person["label"] == "黃培峻 Huang Pei-jun"
-    assert person["count"] == 2, "the deeper clip still lives here"
-    assert person["children"] == []
+    assert node["label"] == "Drone"
+    assert node["slug"] == "mofa-disaster::FF2 E7 / Footage / B-roll / Pride March / Drone"
+    assert node["count"] == 2, "the deeper clip still lives here"
+    assert node["children"] == []
+
+
+def test_a_fourth_level_event_folder_is_its_own_branch(client, conn, creators):
+    """The case that set the depth to five: an event folder four levels down
+    (episode / Footage / B-roll / Pride March) must be a node an editor can
+    click, not folded into `B-roll` beside every other event."""
+    insert_video(conn, share="mofa-disaster",
+                 rel_path="FF2 E7/Footage/B-roll/Pride March/Proxy/a.mov",
+                 category=None, status="organised")
+    insert_video(conn, share="mofa-disaster",
+                 rel_path="FF2 E7/Footage/B-roll/True Light Church/Proxy/b.mov",
+                 category=None, status="organised")
+
+    tree = client.get("/api/tree").json()
+    cc = next(r for r in tree if r["collection"] == config.COLLECTION_CREATORS)
+    broll = cc["groups"][0]["children"][0]["children"][0]["children"][0]
+    assert broll["label"] == "B-roll"
+    assert [c["label"] for c in broll["children"]] == ["Pride March", "True Light Church"]
+
+    body = client.get("/api/search", params={
+        "shoot": "mofa-disaster::FF2 E7 / Footage / B-roll / Pride March"}).json()
+    assert body["total"] == 1
 
 
 def test_clicking_a_nested_folder_returns_only_what_is_under_it(client, conn, creators):

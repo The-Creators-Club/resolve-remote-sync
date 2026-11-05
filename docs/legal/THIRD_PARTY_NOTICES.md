@@ -82,7 +82,7 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Lock:
 
 ### dashboard
 
-FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Lock: `dashboard/requirements.lock`, 57 package(s).
+FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Lock: `dashboard/requirements.lock`, 58 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -141,6 +141,7 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 | `typing-inspection` | 0.4.4 | MIT | https://github.com/pydantic/typing-inspection |
 | `urllib3` | 2.7.0 | MIT | https://github.com/urllib3/urllib3/blob/main/CHANGES.rst |
 | `uvicorn` | 0.52.3 | BSD-3-Clause | https://uvicorn.dev/ |
+| `websockets` | 17.4 | BSD-3-Clause | https://github.com/python-websockets/websockets |
 | `yt-dlp` | 2026.8.19 | Unlicense | https://github.com/yt-dlp/yt-dlp |
 | `zstandard` | 0.25.0 | BSD-3-Clause | https://github.com/indygreg/python-zstandard |
 
@@ -225,7 +226,7 @@ b-roll search UI mounted at /broll. Lock: `broll/web/requirements.lock`, 32 pack
 
 ### dashboard-container
 
-what the deployed dashboard image installs -- the artefact a customer receives, not a developer venv. Lock: `dashboard/deploy/requirements.lock`, 52 package(s). A lock carries no licence metadata, so each licence below is the one the same package's metadata declares in a developer venv on this machine; the version column is the CONTAINER's.
+what the deployed dashboard image installs -- the artefact a customer receives, not a developer venv. Lock: `dashboard/deploy/requirements.lock`, 53 package(s). A lock carries no licence metadata, so each licence below is the one the same package's metadata declares in a developer venv on this machine; the version column is the CONTAINER's.
 
 | Package | Version (container) | Licence | Licence read from |
 |---|---|---|---|
@@ -279,12 +280,13 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `typing-inspection` | 0.4.4 | MIT | a venv's 0.4.4 |
 | `urllib3` | 2.7.0 | MIT | a venv's 2.7.0 |
 | `uvicorn` | 0.52.3 | BSD-3-Clause | a venv's 0.52.3 |
+| `websockets` | 17.4 | BSD-3-Clause | a venv's 17.4 |
 | `yt-dlp` | 2026.8.19 | Unlicense | a venv's 2026.8.19 |
 | `zstandard` | 0.25.0 | BSD-3-Clause | a venv's 0.25.0 |
 
 ## All pip dependencies (merged)
 
-75 distinct (package, version) pair(s) across every scanned venv.
+76 distinct (package, version) pair(s) across every scanned venv.
 
 | Package | Version | Licence | Components | Licence text on disk |
 |---|---|---|---|---|
@@ -359,6 +361,7 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `uvloop` | 0.22.1 | Apache Software License; MIT License | music/web, broll/web | yes |
 | `watchdog` | 6.0.0 | Apache Software License | companion | yes |
 | `watchfiles` | 1.2.0 | MIT License | music/web, broll/web | yes |
+| `websockets` | 17.4 | BSD-3-Clause | dashboard, dashboard-container | yes |
 | `websockets` | 17.0.1 | BSD-3-Clause | music/web, broll/web | yes |
 | `xxhash` | 4.0.1 | BSD-2-Clause | companion | yes |
 | `yt-dlp` | 2026.8.19 | Unlicense | dashboard, dashboard-container | yes |

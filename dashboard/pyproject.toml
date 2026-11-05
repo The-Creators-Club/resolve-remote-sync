@@ -129,6 +129,16 @@ cards = [
     # container's case with neither installed. The base rig keeps zhconv in
     # the Cards repo's own requirements.
     "pypinyin>=0.53",
+    # The NEW editor at /cards/edit (cards_edit.py, 2026-11-05): a child Node
+    # process behind a streaming reverse proxy. `httpx` is the proxy's HTTP
+    # client (it was already in the container, as a dependency of `anthropic`;
+    # named here because the proxy no longer works without it) and
+    # `websockets` does BOTH ends of the editor's /sync socket -- uvicorn
+    # serves no WebSocket at all without a library, and this dashboard served
+    # none until now. BSD-3-Clause, pure Python with an optional C speedup,
+    # no dependencies of its own.
+    "httpx>=0.27",
+    "websockets>=13",
 ]
 
 # The YouTube "unblock" plugin -- SEPARATE from `ytdl` above, and deliberately

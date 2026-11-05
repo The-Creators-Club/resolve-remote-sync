@@ -538,6 +538,13 @@ project_acl = "per-project"
 # both origins can run side by side during the transition. Its secret is
 # $DASH_CARDS_TOKEN in the deploying shell, never in this file.
 # server_url = "http://truenas:8800"
+# THE NEW EDITOR at /cards/edit, beside the page above (docs/CARDS_EDITOR.md).
+# On = the deploy provisions a pinned, checksum-verified Node into
+# <host-root>/node (mounted read-only at /opt/node), sets DASH_CARDS_EDITOR=1
+# and DASH_NODE, and the dashboard runs and proxies the editor from the Cards
+# checkout (editor/dist-server/host.mjs). Needs `enabled` above. Off in the
+# vendor build.
+# editor = true
 
 [security]
 # Whether the ONE shared fleet report token (DASH_REPORT_TOKEN) is still

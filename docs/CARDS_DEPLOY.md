@@ -477,6 +477,11 @@ place to stand while the checkout is sorted out.
 
 ## See also
 
+* `docs/CARDS_EDITOR.md` -- the NEW editor beside this page at `/cards/edit`
+  (a Node child process the dashboard supervises and proxies; Node provisioned
+  into `<host-root>/node`; `[timeline_cards] editor = true`). Its Cards
+  commit rides this same recipe, but turning it on is also a DASHBOARD
+  release first (a new dependency, so a rebuilt image).
 * `dashboard/src/ccsync_dashboard/cards.py` -- the mount, its docstring, and
   the tri-state.
 * `docs/DOCKER.md`, "The Timeline Cards mounts" -- the three mounts, the vault

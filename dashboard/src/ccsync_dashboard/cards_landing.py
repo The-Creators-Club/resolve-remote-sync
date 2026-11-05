@@ -151,6 +151,7 @@ def _state(request: Request) -> dict:
     admin = auth.is_admin(request.app.state.settings, me)
     names = _display_names(request)
     _catalogue(request, rows, me, names)
+    _editor_links(request, rows)
     for row in rows:
         # account page 2026-09-25: "in it now" by display name; the sign-in
         # names stay in `occupants` (and in the row's title) as the keys.
@@ -189,6 +190,32 @@ def _state(request: Request) -> dict:
         "ready": [r["slug"] for r in rows if r.get("state") == cards_pool.READY],
         "me": auth.get_session_user(request) or "",
     }
+
+
+def _editor_links(request: Request, rows: list[dict]) -> None:
+    """`editor_href` on each row: the quiet "Open in the new editor" link.
+
+    Only while the new editor is really answering (cards_edit.Editor.ready):
+    a link to a page that says "not running" is a worse landing page than no
+    link. Always set (blank when off) so the template never meets a missing
+    key. Never raises; the picker must draw regardless.
+    """
+    from . import cards, cards_edit
+
+    for row in rows:
+        row["editor_href"] = ""
+    try:
+        editor = getattr(request.app.state, "cards_edit", None)
+        if editor is None or not editor.ready():
+            return
+        vault = cards.vault_root(request.app.state.settings)
+        for row in rows:
+            if row.get("root"):
+                row["editor_href"] = cards_edit.editor_href(vault, row["root"])
+    except Exception:  # noqa: BLE001
+        log.exception("Timeline Cards picker: could not build the editor links")
+        for row in rows:
+            row["editor_href"] = ""
 
 
 def _catalogue(request: Request, rows: list[dict], me: str,

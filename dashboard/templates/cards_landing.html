@@ -62,6 +62,12 @@
               title="{{ 'Opening this episode failed last time. Try opening it again.' if ep.state == 'failed' else 'Opens this episode on the server. Up to ' ~ cap ~ ' can be open at once.' }}"><span class="t">{{ 'Try again' if ep.state == 'failed' else 'Open' }}</span></button>
     </form>
   {% endif %}
+  {% if ep.editor_href %}
+    {# The NEW editor beside the old page (cards_edit.py, 2026-11-05). Quiet on
+       purpose, and NOT a cl-btn: cards_landing.js picks its "go" target by
+       that class. Drawn only while the editor is answering. #}
+    <a class="key quiet sm cl-editor-link" href="{{ ep.editor_href }}" title="Open this episode in the new Timeline Cards editor. The original page stays as it is."><span class="t">Open in the new editor</span></a>
+  {% endif %}
   {% if ep.may_close %}
     {# The prompt is built server-side and emitted with `tojson`: an episode
        name with an apostrophe in it would otherwise end the JS string. #}

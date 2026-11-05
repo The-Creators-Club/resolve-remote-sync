@@ -78,6 +78,21 @@ run alongside the tray app — it would hold port 8899.
   check FAILED" at the end is usually premature -- `docker ps` before any
   rollback. Never pipe `TRUENAS_PW` into `bash -s` or put it on a command
   line.
+- **The NEW editor at `/cards/edit`, beside the old page** (2026-11-05,
+  `dashboard/src/ccsync_dashboard/cards_edit.py`, `docs/CARDS_EDITOR.md`,
+  built and tested, NOT yet released or deployed): the rebuilt Timeline Cards
+  is a Node server (`editor/dist-server/host.mjs` in the Cards checkout), so
+  the dashboard starts it as a supervised child (restart with backoff, log
+  prefix `editor:`, stopped gracefully by the lifespan because its SIGTERM
+  flushes the cut lists) and reverse-proxies `/cards/edit/*`, HTTP streamed
+  and the `/sync` WebSocket relayed, behind the login with `X-TC-Proxy-Secret`
+  and `X-TC-User` added and every client `X-TC-*` stripped. **`login_gate`
+  never sees a websocket**, so the socket authenticates itself. Node is
+  provisioned like deno but PINNED and checksum-gated (no checksum, no
+  install). Off in the vendor build (`DASH_CARDS_EDITOR`, `[timeline_cards]
+  editor`); tri-state and never fatal; adds `websockets` and `httpx` to the
+  `cards` extra, so shipping it is a dashboard release (rebuilt image) first.
+  The old `/cards` mount is untouched, and the later flip is in that doc.
 - **One engine per EPISODE, and the URL is the key** (2026-09-14,
   `docs/CARDS_TWO_PROJECTS.md` phase 1): `/cards` is a LANDING page that needs
   no engine to draw (which is why it answers when every engine is busy), and

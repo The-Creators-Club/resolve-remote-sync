@@ -554,6 +554,10 @@ SITE_CARDS_DB_NAME = site_value("timeline_cards", "db_name")
 SITE_CARDS_DB_WRITE_ALLOW = site_value("timeline_cards", "db_write_allow")
 SITE_CARDS_DB_BACKUPS = site_value("timeline_cards", "db_backups")
 SITE_CARDS_SERVER_URL = site_value("timeline_cards", "server_url")
+# The NEW editor at /cards/edit (2026-11-05, dashboard cards_edit.py,
+# docs/CARDS_EDITOR.md). Off by default: it needs a Node runtime provisioned
+# onto the host (NODE_*, below) and the bundle inside the Cards checkout.
+SITE_CARDS_EDITOR = site_bool("timeline_cards", "editor", False)
 # The GROUP the vault's files belong to, which this container must be a member
 # of to write them. On this NAS tank/web is Alex's own share -- uid 3003, gid
 # 3000 (broll) -- and the dashboard runs 3000:3001, so without a supplementary
@@ -1326,6 +1330,50 @@ def cards_group_add() -> list:
     SITE_CARDS_VAULT_GID -- and docs/DOCKER.md for the host half, without
     which this alone changes nothing."""
     return [SITE_CARDS_VAULT_GID] if SITE_CARDS_VAULT_HOST else []
+
+def cards_editor_for_site(cards_enabled: str) -> str:
+    """"1" when the new editor should be wired in: site.toml asks for it AND
+    /cards itself is on. The editor reads the Cards checkout (`/cards-app`)
+    and the vault, both of which only exist under an enabled /cards, so
+    `editor = true` on a site with cards off is a note, not a half-built
+    mount."""
+    return "1" if (SITE_CARDS_EDITOR and cards_enabled == "1") else "0"
+
+
+def cards_editor_env() -> dict:
+    """Only emitted when the editor is on, so the default key set (which
+    server/tests/test_safety.py diffs against compose.yaml) is unchanged."""
+    return {"DASH_CARDS_EDITOR": "1", "DASH_NODE": NODE_MOUNT + "/bin/node"}
+
+
+# --------------------------------------------------------------------------
+# NODE, for the new Timeline Cards editor (2026-11-05)
+# --------------------------------------------------------------------------
+#
+# The editor's server is Node 24. NOTHING BUILDS THE DASHBOARD IMAGE'S
+# RUNTIMES and the container is unprivileged, so Node is provisioned onto the
+# host like ffmpeg and deno: `<host-root>/node`, root-owned, mounted :ro at
+# /opt/node (the dashboard starts `/opt/node/bin/node`; DASH_NODE overrides).
+# It is never in the image. Only `bin/node` is installed: the editor ships as
+# one bundled file and needs no npm, no headers and no node_modules.
+#
+# PINNED, unlike deno: the official linux-x64 tarball from nodejs.org, and its
+# sha256 is a constant here AND must agree with the SHASUMS256.txt nodejs.org
+# publishes beside it (fetched at provisioning time). NO CHECKSUM, NO INSTALL
+# -- the same rule as cli_tools.py's wizard (trust-model-7): a SHASUMS file
+# that cannot be fetched, has no line for the tarball, or disagrees with the
+# pin is a refusal, never an install behind a note nobody reads. A bump is a
+# new NODE_VERSION and NODE_SHA256 together, from the published list.
+# (Measured 2026-11-05: v24.22.2 was the newest 24.x; the hash below was
+# computed from a downloaded copy AND read from the published list.)
+NODE_VERSION = "24.22.2"
+NODE_TARBALL = f"node-v{NODE_VERSION}-linux-x64.tar.xz"
+NODE_DIST_URL = f"https://nodejs.org/dist/v{NODE_VERSION}"
+NODE_URL = f"{NODE_DIST_URL}/{NODE_TARBALL}"
+NODE_SHASUMS_URL = f"{NODE_DIST_URL}/SHASUMS256.txt"
+NODE_SHA256 = "48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75"
+NODE_HOST_DIR = "node"
+NODE_MOUNT = "/opt/node"
 
 # The binaries the ytdl app needs on the host, provisioned the same way ffmpeg
 # is and for the same reason: NOTHING BUILDS THIS IMAGE (compose runs a stock
@@ -2634,6 +2682,11 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                    # dashboard that was not asked for it must behave exactly
                    # as it did before. Projects site.toml's [timeline_cards].
                    cards_enabled: str = "0", cards_token: str = "",
+                   # The NEW editor at /cards/edit (2026-11-05): "1" adds
+                   # DASH_CARDS_EDITOR/DASH_NODE and the Node mount, and
+                   # nothing else changes -- the default key set and volume
+                   # list are byte-for-byte what they were.
+                   cards_editor: str = "0",
                    # Which datasets the protection panel checks the snapshot
                    # schedule against (2026-09-03, see datasets_env). Blank
                    # here means "ask site.toml and no further": only main()
@@ -2992,6 +3045,7 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                                            else truenas_verify_ssl),
                     # --- Timeline Cards at /cards (see cards_env) ------------
                     **cards_env(cards_enabled, cards_token),
+                    **(cards_editor_env() if cards_editor == "1" else {}),
                     # --- the roots a PINNED fleet job is placed against ------
                     **jobs_env(),
                     # --- which datasets have to be in a snapshot task -------
@@ -3099,6 +3153,13 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # onto the host like ffmpeg and read-only for the same
                     # reason: no image build, unprivileged container.
                     *([f"{host_root}/deno:/opt/deno:ro"] if unblock_on else []),
+                    # Node for the new Timeline Cards editor, on deno's terms:
+                    # provisioned onto the host by this script, mounted
+                    # read-only, and ONLY on a site that turned the editor on
+                    # (site.toml [timeline_cards] editor). An unprovisioned
+                    # dir is a supported state: /cards/edit says so.
+                    *([f"{host_root}/{NODE_HOST_DIR}:{NODE_MOUNT}:ro"]
+                      if cards_editor == "1" else []),
                 ] if not (image_mode and mount_target(v) in IMAGE_MODE_CODE_MOUNTS)],
                 "restart": "unless-stopped",
                 "healthcheck": healthcheck_config(port),
@@ -4326,7 +4387,7 @@ def binary_present(root: str, host_dir: str, binary: str, dry_run: bool) -> bool
 
 def install_binary_over_lan(root: str, host_dir: str, binary: str,
                             local_file: Path | None, url: str, sha256: str,
-                            dry_run: bool) -> tuple[bool, str]:
+                            dry_run: bool, build_script=None) -> tuple[bool, str]:
     """Push one fetched binary/archive to the NAS and install it. (ok, error).
 
     The same staged-then-verified-then-swapped route as everything else this
@@ -4370,7 +4431,10 @@ def install_binary_over_lan(root: str, host_dir: str, binary: str,
                            f"{err.strip()[:200]}")
         print(f"pushed {human_bytes(staged_bytes)} to staging {staging}")
 
-    script = build_binary_install_script(target_dir, binary, staged, staging, sha256)
+    # `build_script` is how Node (a tarball whose binary lands in bin/, with a
+    # version to check) reuses this transfer without bending the deno script.
+    script = (build_script or build_binary_install_script)(
+        target_dir, binary, staged, staging, sha256)
     rc, out, err = run_ssh_guarded('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(script),
                                    dry_run, 300)
     if rc != 0:
@@ -4439,6 +4503,152 @@ def provision_ytdl_binaries(root: str, dry_run: bool) -> None:
             print(f"NOTE: {name} was NOT provisioned ({err}). Everything else "
                   f"deploys; until it exists in {target_dir}, {consequence}.",
                   file=sys.stderr)
+
+
+def parse_shasums(text: str, name: str) -> str:
+    """The sha256 for `name` out of a `sha256sum`-format list, or "".
+
+    nodejs.org's SHASUMS256.txt is `<hex>  <file>` per line. Exact name match
+    on the second field, so `node-v24...tar.xz` never matches `...tar.xz.sig`
+    or another platform's file.
+    """
+    for line in str(text or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*") == name:
+            digest = parts[0].lower()
+            if len(digest) == 64 and all(c in "0123456789abcdef" for c in digest):
+                return digest
+    return ""
+
+
+def node_published_digest(fetch_text=None) -> tuple[str, str]:
+    """(digest, error): what nodejs.org publishes for the pinned tarball.
+
+    `fetch_text(url) -> str` is a seam for tests; the default is urllib with a
+    timeout. Any failure is an error string, never a fallback to the pin
+    alone: a pin we cannot corroborate is not a checksum we may install on.
+    """
+    try:
+        if fetch_text is None:
+            with urllib.request.urlopen(NODE_SHASUMS_URL, timeout=60) as resp:
+                text = resp.read(2 << 20).decode("utf-8", "replace")
+        else:
+            text = fetch_text(NODE_SHASUMS_URL)
+    except Exception as exc:  # noqa: BLE001 - urllib raises URLError, OSError, ...
+        return "", f"{NODE_SHASUMS_URL} could not be fetched ({type(exc).__name__}: {exc})"
+    digest = parse_shasums(text, NODE_TARBALL)
+    if not digest:
+        return "", f"{NODE_SHASUMS_URL} lists no checksum for {NODE_TARBALL}"
+    return digest, ""
+
+
+# One statement per line, joined with spaces by build_node_install_script: the
+# remote runs it as a single `sudo -S sh -c '...'` like every other script here.
+_NODE_INSTALL_TEMPLATE = r"""
+set -e;
+D=@D@; TB=@TB@; WANT=@WANT@;
+if [ -x "$D/bin/node" ] && [ "$("$D/bin/node" --version 2>/dev/null)" = "$WANT" ]; then echo "node $WANT already provisioned at $D"; exit 0; fi;
+if ! printf '%s  %s\n' @SHA@ "$TB" | sha256sum -c - >/dev/null 2>&1; then echo "the staged node download does not match the pinned digest -- the transfer was corrupted; nothing installed" >&2; exit 7; fi;
+mkdir -p "$D/bin";
+t=$(mktemp -d /tmp/ccsync-node.XXXXXX);
+trap 'rm -rf "$t"' EXIT;
+tar -xJf "$TB" -C "$t" --wildcards '*/bin/node';
+f=$(find "$t" -type f -path '*/bin/node' | head -n 1);
+if [ -z "$f" ]; then echo "the node download holds no bin/node" >&2; exit 1; fi;
+install -o root -g root -m 755 "$f" "$D/bin/node.new";
+if [ "$("$D/bin/node.new" --version 2>/dev/null)" != "$WANT" ]; then echo "the downloaded node does not run on this host (or is not $WANT)" >&2; rm -f "$D/bin/node.new"; exit 1; fi;
+if [ -e "$D/bin/node" ]; then mv -f "$D/bin/node" "$D/bin/node.prev"; fi;
+mv "$D/bin/node.new" "$D/bin/node";
+chmod 755 "$D" "$D/bin";
+rm -rf @STAGING@;
+echo "node $WANT provisioned: $D"
+"""
+
+
+def build_node_install_script(target_dir: str, binary: str, staged: str,
+                              staging: str, sha256: str) -> str:
+    """Install Node's `bin/node` on the NAS from a tarball ALREADY STAGED there.
+
+    build_binary_install_script's guarantees, for the one file Node needs:
+      - idempotent: the pinned version already in place is left alone, a
+        different one is REPLACED by `mv` (the old binary is kept as
+        bin/node.prev, nothing is deleted);
+      - the digest is MANDATORY and checked before anything is unpacked: with
+        no digest this refuses to build the script at all (no checksum, no
+        install);
+      - the candidate is EXECUTED (`--version`) and must print exactly the
+        pinned version before it is moved into place, so a build for the wrong
+        architecture or libc never becomes the node the container finds.
+    The container runs the HOST's file, so "runs on this host" is the check
+    that matters; the container is a Debian image like the host, and the
+    first start reports it if it ever is not (health: editor).
+    """
+    if not sha256:
+        raise ValueError("no checksum, no install: Node is never provisioned unverified")
+    body = (_NODE_INSTALL_TEMPLATE
+            .replace("@D@", shell_quote(target_dir))
+            .replace("@TB@", shell_quote(staged))
+            .replace("@WANT@", shell_quote(f"v{NODE_VERSION}"))
+            .replace("@SHA@", shell_quote(sha256))
+            .replace("@STAGING@", shell_quote(staging)))
+    return " ".join(line.strip() for line in body.strip().splitlines())
+
+
+def provision_node(root: str, dry_run: bool, fetch_text=None) -> bool:
+    """Step 2h: Node for the new Timeline Cards editor. NON-FATAL throughout,
+    like provision_ffmpeg: without it /cards/edit answers a page that says
+    Node is missing, and the dashboard is otherwise untouched. -> True when
+    Node is (or would be, in a dry run) provisioned.
+    """
+    target_dir = f"{root}/{NODE_HOST_DIR}"
+    consequence = ("the new Timeline Cards editor at /cards/edit will say it has "
+                   "no Node runtime")
+    if dry_run:
+        print(f"[dry-run] would provision Node v{NODE_VERSION} for the new "
+              f"Timeline Cards editor: fetch {NODE_URL}, require sha256 "
+              f"{NODE_SHA256[:12]}... AND the same line in {NODE_SHASUMS_URL}, "
+              f"push it over the LAN and install bin/node into {target_dir} "
+              f"(mounted read-only at {NODE_MOUNT})")
+        binary_present(root, NODE_HOST_DIR, "bin/node", True)
+        return True
+    # The published list FIRST, before 25 MB moves anywhere: no checksum, no
+    # install, and a list that disagrees with the pin is louder than a miss.
+    published, err = node_published_digest(fetch_text)
+    if not published:
+        print(f"NOTE: Node was NOT provisioned -- {err}. A download with no "
+              f"published checksum is never installed. Everything else deploys; "
+              f"{consequence}.", file=sys.stderr)
+        return False
+    if published != NODE_SHA256:
+        print(f"NOTE: Node was NOT provisioned -- nodejs.org now publishes "
+              f"{published} for {NODE_TARBALL}, not the pinned {NODE_SHA256}. "
+              f"Either the pin is stale or the download host is not what it "
+              f"was; nothing was fetched. Everything else deploys; {consequence}.",
+              file=sys.stderr)
+        return False
+    # The version the host's node prints is the sentinel: the mount is
+    # /opt/node and the dashboard runs /opt/node/bin/node.
+    rc, out, _err = run_ssh_guarded(
+        f"{shell_quote(target_dir + '/bin/node')} --version 2>/dev/null || true",
+        False, 120)
+    if rc == 0 and out.strip().splitlines()[-1:] == [f"v{NODE_VERSION}"]:
+        print(f"node v{NODE_VERSION} already provisioned at {target_dir}")
+        return True
+    local_file, err = fetch_pinned_file(
+        NODE_URL, NODE_SHA256, os.environ.get("CARDS_NODE_FILE", "").strip(), "node")
+    if local_file is None:
+        print(f"NOTE: Node was NOT provisioned -- the download could not be "
+              f"fetched here ({err}). Everything else deploys; {consequence}.\n"
+              f"  Retry, or point CARDS_NODE_FILE at {NODE_TARBALL} already on "
+              f"this machine (its checksum is still enforced).", file=sys.stderr)
+        return False
+    ok_, err = install_binary_over_lan(
+        root, NODE_HOST_DIR, "node", local_file, NODE_URL, NODE_SHA256, False,
+        build_script=build_node_install_script)
+    if not ok_:
+        print(f"NOTE: Node was NOT provisioned ({err}). Everything else "
+              f"deploys; {consequence}.", file=sys.stderr)
+    return ok_
 
 
 def weak_ingest_token(token: str) -> str | None:
@@ -5274,6 +5484,11 @@ def main():
                     help="skip provisioning static ffmpeg/ffprobe onto the host. "
                          "Only /music's queued ingest uses them, and it answers 503 "
                          "with a readable message when they are missing.")
+    ap.add_argument("--no-node", action="store_true",
+                    help="skip provisioning Node onto the host for the new "
+                         "Timeline Cards editor (/cards/edit). Only matters on a "
+                         "site whose site.toml sets [timeline_cards] editor = "
+                         "true; without Node the editor's page says so.")
     ap.add_argument("--no-ytdl-bins", action="store_true",
                     help="skip provisioning deno onto the host for /ytdl. It is "
                          "skipped anyway unless this site enabled youtube_unblock "
@@ -5554,6 +5769,12 @@ def main():
                  if cards_info else ""),
               file=sys.stderr)
     cards_enabled = cards_enabled_for_site(ship_cards)
+    cards_editor = cards_editor_for_site(cards_enabled)
+    if SITE_CARDS_EDITOR and cards_editor != "1":
+        print("NOTE: [timeline_cards] editor is set but /cards itself is not "
+              "going out (not enabled, or no Timeline Cards checkout to ship) "
+              "-- the new editor needs its bundle from that checkout and the "
+              "vault, so it is left OFF.", file=sys.stderr)
     if SITE_CARDS_ENABLED and not SITE_CARDS_VAULT_HOST:
         print("NOTE: [timeline_cards] enabled is set but vault_host is not -- "
               "/cards will report 'no vault is mounted here' and serve "
@@ -5941,6 +6162,13 @@ def main():
             f"chmod 755 {shell_quote(root + '/ytdl-web')} "
             f"{shell_quote(root + '/cards-web')} "
             f"{shell_quote(root + '/deno')} && "
+            # ...and Node's, for the new Timeline Cards editor (2026-11-05):
+            # the same posture, created on every site for the reason cards-web
+            # is (a bind whose host path is missing stops the container), and
+            # only ever MOUNTED when the editor is on.
+            f"mkdir -p {shell_quote(root + '/' + NODE_HOST_DIR)} && "
+            f"chown root:root {shell_quote(root + '/' + NODE_HOST_DIR)} && "
+            f"chmod 755 {shell_quote(root + '/' + NODE_HOST_DIR)} && "
             # ytdl DATA root: ytdl.db and the worker's scratch, so data/'s
             # posture -- 3000:3000 mode 770, group 3000 and NOT 3001/editors,
             # for the same C-2 reason. Create-only; an existing one (with a
@@ -6159,6 +6387,12 @@ def main():
     # repeated here -- the step above covers both mounts.
     if ship_ytdl and youtube_unblock == "1" and not args.no_ytdl_bins:
         provision_ytdl_binaries(root, args.dry_run)
+
+    # Node for the new Timeline Cards editor (2026-11-05, step 2h): pinned,
+    # checksum-verified, only when site.toml turned the editor on, and
+    # non-fatal like the two steps above. Never run for a site without it.
+    if cards_editor == "1" and not args.no_node:
+        provision_node(root, args.dry_run)
 
     # A pre-C-2 deployment has an editor-writable venv sitting inside data/.
     # Move it aside (never delete: no-deletion rule) so run.sh rebuilds a
@@ -6452,6 +6686,7 @@ def main():
         auto_update=auto_update,
         anthropic_api_key=anthropic_api_key,
         cards_enabled=cards_enabled, cards_token=cards_token,
+        cards_editor=cards_editor,
         tree_dataset=datasets["DASH_TREE_DATASET"],
         apps_dataset=datasets["DASH_UPDATE_SNAPSHOT_DATASET"],
         snapshot=snapshot,

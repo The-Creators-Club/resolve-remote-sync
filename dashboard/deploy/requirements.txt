@@ -161,3 +161,8 @@ zstandard>=0.21
 # and reported it UNSCANNED instead (docs/RELEASE.md, "Refreshing the
 # lockfiles"). Do not put it back.
 pypinyin>=0.53
+# The new editor at /cards/edit (cards_edit.py, 2026-11-05): httpx is the
+# streaming reverse proxy, websockets relays the editor's /sync socket (and is
+# what lets uvicorn serve a WebSocket at all). See pyproject.toml, `cards`.
+httpx>=0.27
+websockets>=13

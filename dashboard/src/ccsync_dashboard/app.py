@@ -31,8 +31,8 @@ from starlette.requests import ClientDisconnect
 
 from . import (
     VERSION,
-    ai_providers, api, appliance_config, assignments, auth, broll, cards, cards_exec,
-    cards_tunnel,
+    ai_providers, api, appliance_config, assignments, auth, broll, cards, cards_edit,
+    cards_exec, cards_tunnel,
     cli_tools, crash_report,
     dashboard_update, db, gear_ai, internal_sftp, jobs, local_users, mount_status, music,
     notices,
@@ -873,6 +873,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             executor.start()
         else:
             log.info("fleet jobs are never pinned here: %s", executor.why_not())
+        # The new editor's child process (cards_edit.py). A thread that
+        # supervises it; nothing here waits for it or can fail the boot.
+        cards_edit.start(app)
         collector = Collector(
             settings, pin_fn=lambda: jobs.can_pin(app),
             # dash-core-5: the periodic sweep of `auth_sessions`, which had
@@ -935,6 +938,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # worker.
             executor.stop()
             cards.stop_engine(app)
+            # The new editor's child process: stopped GRACEFULLY, because its
+            # SIGTERM handler is what flushes every open cut list (cards_edit).
+            await cards_edit.shutdown(app)
             if feed_poller is not None:
                 feed_poller.stop()
             # ...and the other half: an update that has finished staging asks
@@ -1467,7 +1473,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if (path.startswith(("/broll/api/", "/broll/media/",
                                  "/music/api/", "/ytdl/api/", "/cards/agent/",
                                  "/cards/api/", "/cards/audio", "/cards/video",
-                                 "/cards/peaks"))
+                                 "/cards/peaks",
+                                 # the new editor's fetches and <audio>/<video>
+                                 # srcs (cards_edit.py): same reason, same answer
+                                 "/cards/edit/api/", "/cards/edit/media/"))
                     # ...and all four of the cards prefixes again under ONE
                     # EPISODE (2026-09-14). Same sentence, same reason: under
                     # `/cards/p/<slug>/` an expired session would hand an
@@ -1758,6 +1767,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # and no nav link unless it fully took. It is the only one that carries
     # an ENGINE with background threads, which is why the lifespan stops it
     # (Starlette runs no lifespan for a mounted app).
+    # The NEW editor at /cards/edit (2026-11-05, cards_edit.py), registered
+    # BEFORE the /cards mount below because that mount is a catch-all under
+    # the same prefix and Starlette matches in the order routes were added.
+    # Off in the vendor build (DASH_CARDS_EDITOR); a missing Node or bundle is
+    # an ABSENT editor with a page that says so, never a failed boot. The
+    # child process itself is started by the lifespan, not here.
+    app.state.cards_edit_status, app.state.cards_edit_detail = cards_edit.mount_editor(
+        app, settings)
+    if app.state.cards_edit_status != cards_edit.DISABLED:
+        log.info("the new Timeline Cards editor is %s: %s",
+                 app.state.cards_edit_status, app.state.cards_edit_detail)
     app.state.cards_status, app.state.cards_detail = cards.mount_cards(app, settings)
     app.state.cards_mounted = app.state.cards_status == cards.MOUNTED
     _record_mount(app, "cards", app.state.cards_status, app.state.cards_detail,

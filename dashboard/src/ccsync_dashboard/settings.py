@@ -612,6 +612,20 @@ class Settings:
     cards_db_write_allow: str = ""
     cards_db_backups: str = ""
     cards_media_map: str = ""
+    # --- the NEW Timeline Cards editor, beside the old page (2026-11-05) ----
+    # `cards_edit.py`: a Node child process the dashboard starts and proxies
+    # at /cards/edit (docs/CARDS_EDITOR.md). OFF in the vendor build: it needs
+    # a Node runtime provisioned onto the host (`<host-root>/node`, mounted
+    # at /opt/node) and the bundle inside the Cards checkout, and a customer
+    # without either must not even see a route. A studio turns it on with
+    # `[timeline_cards] editor = true` in site.toml (the installer then emits
+    # DASH_CARDS_EDITOR=1 and DASH_NODE) or by hand.
+    # `cards_editor_port` 0 means "ask the kernel for a free loopback port at
+    # each start"; a fixed one is for a host that wants to firewall it.
+    # `cards_node` blank means /opt/node/bin/node, else `node` on PATH (dev).
+    cards_editor: bool = False
+    cards_editor_port: int = 0
+    cards_node: str = ""
 
     # Auto-provisioning: when projects_dir is a mounted copy of the server's
     # Projects tree, the collector creates a Syncthing folder (and shares it
@@ -990,6 +1004,10 @@ class Settings:
             cards_db_write_allow=env.get("DASH_CARDS_DB_WRITE_ALLOW", "").strip(),
             cards_db_backups=env.get("DASH_CARDS_DB_BACKUPS", "").strip(),
             cards_media_map=env.get("DASH_CARDS_MEDIA_MAP", "").strip(),
+            # "1" and nothing else, like DASH_CARDS_ENABLED.
+            cards_editor=env.get("DASH_CARDS_EDITOR", "") == "1",
+            cards_editor_port=max(0, int(num("DASH_CARDS_EDITOR_PORT", 0))),
+            cards_node=env.get("DASH_NODE", "").strip(),
             packages_dir=env.get("DASH_PACKAGES_DIR", ""),
             # Only entries that actually decode to a 32-byte Ed25519 key are
             # kept: the shipped compose sets "REPLACE_ME", and a placeholder

@@ -897,6 +897,14 @@ def health_block(app: FastAPI) -> dict[str, Any]:
         "status": status,
         "detail": getattr(app.state, "cards_detail", ""),
     }
+    # The new editor beside the old page (cards_edit.py): its own sub-block,
+    # because it can be up while /cards is absent and the reverse.
+    try:
+        from . import cards_edit
+
+        out["editor"] = cards_edit.health_block(app)
+    except Exception:  # noqa: BLE001 - a health line never raises
+        pass
     pool = getattr(app.state, "cards_pool", None)
     if pool is not None:
         # ONE LINE PER EPISODE (2026-09-14). The old block named "the" root

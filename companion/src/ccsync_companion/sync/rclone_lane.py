@@ -30,6 +30,7 @@ import time
 import unicodedata
 import uuid
 from collections import deque
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -441,6 +442,14 @@ DEFAULT_SFTP_CONCURRENCY = 64
 # TrueNAS sshd's MaxStartups 10:30:100.
 DEFAULT_SFTP_CONNECTIONS = 16
 DEFAULT_CHECKERS = 16
+# The same two for a lane A run that is only RE-CHECKING a project with no
+# local change since its last clean run (2026-11-05). Every rclone process
+# opens its own pool and closes it on exit, so 16 here was ~10 SSH logins
+# per project per pass purely to confirm nothing was new: ruskin's 14
+# projects cost the NAS ~1,900 logins an hour, in bursts of ~150 every
+# 6 minutes, on passes that uploaded nothing. 0 = use the normal value.
+DEFAULT_SFTP_CONNECTIONS_VERIFY = 4
+DEFAULT_CHECKERS_VERIFY = 4
 # P2: rclone verifies size AND hash after every transfer when a common hash
 # exists, and the SFTP backend gets MD5 by shelling `md5sum <path>` over SSH
 # (rclone.conf sets shell_type = unix) -- so the NAS re-reads the whole file
@@ -591,6 +600,8 @@ class RcloneTuning:
     ignore_checksum: bool = DEFAULT_IGNORE_CHECKSUM
     order_by_up: str = DEFAULT_ORDER_BY_UP
     order_by_down: str = DEFAULT_ORDER_BY_DOWN
+    sftp_connections_verify: int = DEFAULT_SFTP_CONNECTIONS_VERIFY
+    checkers_verify: int = DEFAULT_CHECKERS_VERIFY
 
     @classmethod
     def from_cfg(cls, cfg: Optional[dict]) -> "RcloneTuning":
@@ -604,6 +615,26 @@ class RcloneTuning:
             ignore_checksum=bool(cfg.get("rclone_ignore_checksum", DEFAULT_IGNORE_CHECKSUM)),
             order_by_up=_cfg_str(cfg, "order_by_up", DEFAULT_ORDER_BY_UP),
             order_by_down=_cfg_str(cfg, "order_by_down", DEFAULT_ORDER_BY_DOWN),
+            sftp_connections_verify=_cfg_int(
+                cfg, "sftp_connections_verify", DEFAULT_SFTP_CONNECTIONS_VERIFY),
+            checkers_verify=_cfg_int(cfg, "checkers_verify", DEFAULT_CHECKERS_VERIFY),
+        )
+
+    def for_verify(self) -> "RcloneTuning":
+        """The tuning for a lane A run that only RE-CHECKS a project nobody
+        has written to since its last clean run (2026-11-05). Narrower pool,
+        same everything else: a re-check that does find a file still uploads
+        it, on fewer streams. Each knob only ever LOWERS its partner (0 in
+        sftp_connections means unlimited, so any verify value is lower), and
+        a verify knob of 0 leaves the normal value alone."""
+        def _narrow(normal: int, verify: int) -> int:
+            if verify <= 0:
+                return normal
+            return verify if normal <= 0 else min(normal, verify)
+        return dataclasses.replace(
+            self,
+            sftp_connections=_narrow(self.sftp_connections, self.sftp_connections_verify),
+            checkers=_narrow(self.checkers, self.checkers_verify),
         )
 
     def flags(self, direction: str) -> list[str]:
@@ -3569,6 +3600,17 @@ class RcloneLane(LaneAdapter):
         # same object: a reader that finds another subpath here learns
         # nothing, which is the safe answer.
         self._last_run_outcome: Optional[tuple[str, str]] = None
+        # Did the last lane A command leave paths OUT because an express run
+        # or a handed-off child had them in flight (2026-11-05)? Such a run
+        # can answer "found nothing" without having looked at those files,
+        # and if the express upload then fails, only a later full run picks
+        # them up -- so the sequencer must not count it as a clean check.
+        self._last_build_deferred = False
+        # Bumped every time the file watcher's observer (re)starts
+        # (2026-11-05). The sequencer only trusts "no watcher event since the
+        # last clean run" while the SAME observer has been watching the whole
+        # time: an observer that died and came back may have missed writes.
+        self._watch_epoch = 0
         # Has `remote_root` itself been confirmed to hold the marker dirs
         # this process? In managed mode every pass names a project subpath,
         # so the breaker's root probe never ran at all (sync-safety-5,
@@ -3716,7 +3758,9 @@ class RcloneLane(LaneAdapter):
         subpath: Optional[str] = None,
         stats_interval: Optional[str] = None,
         max_duration_seconds: Optional[float] = None,
+        verify_only: bool = False,
     ) -> list[str]:
+        self._last_build_deferred = False
         if self.direction == DIRECTION_UP:
             # Don't re-upload what express already has in flight. Both runs
             # use --ignore-existing, but neither has finished, so the
@@ -3754,6 +3798,10 @@ class RcloneLane(LaneAdapter):
                     "background", self.name, len(carried),
                 )
                 excludes += carried
+            # Recorded BEFORE the server-moved paths join the list: leaving
+            # those out is deliberate and permanent for the day, not a file
+            # someone else is still uploading.
+            self._last_build_deferred = bool(excludes)
             if self.extra_excludes_fn is not None:
                 try:
                     moved_away = [
@@ -3785,7 +3833,8 @@ class RcloneLane(LaneAdapter):
             return build_up_command(
                 self.rclone_path, self.local_root, self.remote, self.remote_root,
                 filter_file, transfers, subpath=subpath, stats_interval=stats_interval,
-                max_duration_seconds=max_duration_seconds, tuning=self.tuning,
+                max_duration_seconds=max_duration_seconds,
+                tuning=self.tuning.for_verify() if verify_only else self.tuning,
                 partial_suffix=partial_suffix,
             )
         filter_file = self._ensure_filter_file()
@@ -4658,6 +4707,7 @@ class RcloneLane(LaneAdapter):
     def run_once(
         self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None,
         rotation_pass: bool = False, may_hand_off: bool = False,
+        verify_only: bool = False,
     ) -> LaneStatus:
         """One synchronous pass. `max_duration_seconds` is a per-project time
         budget (the sequencer passes project_rotation_seconds) -- without it
@@ -4673,14 +4723,21 @@ class RcloneLane(LaneAdapter):
         background (HANDOFF_GRACE_SECONDS). Only the sequencer's rotation
         asks for it: consolidate and FIX ALL call this same method to WAIT
         for their upload, and a return before the file has landed would tell
-        them it had."""
+        them it had.
+
+        `verify_only` (lane A, 2026-11-05) narrows the SSH pool for a run
+        that only re-checks a project nobody has written to since its last
+        clean run (RcloneTuning.for_verify). The run is otherwise the same
+        run: it still uploads anything it finds."""
         with self._run_lock:
             return self._run_once_locked(
-                subpath, max_duration_seconds, rotation_pass, may_hand_off)
+                subpath, max_duration_seconds, rotation_pass, may_hand_off,
+                verify_only)
 
     def _run_once_locked(
         self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None,
         rotation_pass: bool = False, may_hand_off: bool = False,
+        verify_only: bool = False,
     ) -> LaneStatus:
         # Cleared here rather than only set at the end, so an early return
         # (breaker, stopped lane, missing root) reads as "this pass moved
@@ -4688,6 +4745,7 @@ class RcloneLane(LaneAdapter):
         self._last_run_moved = 0
         # CR-319: and as "don't know" rather than as the last pass's outcome.
         self._note_run_outcome(subpath, None)
+        self._last_build_deferred = False
         # Same reasoning for the stall sentence: a pass that ended down one
         # of the early-return paths must not hand its predecessor's stall to
         # the NEXT pass as that pass's error.
@@ -4853,6 +4911,7 @@ class RcloneLane(LaneAdapter):
                 subpath=subpath,
                 stats_interval=stats_interval,
                 max_duration_seconds=max_duration_seconds,
+                verify_only=verify_only and self.direction == DIRECTION_UP,
             )
         except FilterFileError as exc:
             # Fail the run, loudly, rather than let rclone run unfiltered:
@@ -5833,6 +5892,29 @@ class RcloneLane(LaneAdapter):
                 return None
             want = str(subpath or "").replace("\\", "/").strip("/")
             return record[1] if record[0] == want else None
+        except Exception:
+            return None
+
+    def last_run_deferred(self) -> bool:
+        """Did the last run's command leave files to an express run or a
+        handed-off child (2026-11-05)? Then its "found nothing" did not look
+        at everything, and the sequencer's clean-check record must not be
+        written from it."""
+        return bool(self._last_build_deferred)
+
+    def watch_epoch(self) -> Optional[int]:
+        """Which observer generation is watching local_root right now, or
+        None when none is (never started, failed to start, stopped, or its
+        thread has died). Never raises; None is the answer that costs a
+        full run, never one that skips it (2026-11-05)."""
+        try:
+            observer = self._observer
+            if observer is None or self._stop_event.is_set():
+                return None
+            alive = getattr(observer, "is_alive", None)
+            if alive is not None and not alive():
+                return None
+            return int(self._watch_epoch)
         except Exception:
             return None
 
@@ -6861,6 +6943,7 @@ class RcloneLane(LaneAdapter):
         except Exception as exc:
             log.warning("%s: failed to start watchdog observer: %s", self.name, exc)
             return
+        self._watch_epoch += 1
         self._note_watchdog_started()
 
     # -- the watchdog's own watchdog (MAC-12) ------------------------------

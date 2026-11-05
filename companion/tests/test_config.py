@@ -165,6 +165,9 @@ def test_default_toml_text_documents_every_default_key():
         # The CR-319 skip-ahead window: same class, a field knob whose
         # shipped value must stay re-tunable.
         "lane_b_idle_recheck_seconds",
+        # Lane A's clean-project skip and its narrow re-check pool
+        # (2026-11-05): same class.
+        "lane_a_verify_seconds", "sftp_connections_verify", "checkers_verify",
         # The proxy generator's tuning, same class again -- plus
         # proxy_gen_enabled, which CANNOT be written live at all: its default
         # is None ("derive it from lane_b_enabled"), TOML has no null, and an

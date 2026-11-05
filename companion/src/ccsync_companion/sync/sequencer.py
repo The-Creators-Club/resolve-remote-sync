@@ -37,6 +37,7 @@ from ..selection import SelectionClient
 # the sequencer itself) -- hence the alias.
 from .base import STATE_ERROR as STATE_ERROR_LANE
 from .rclone_lane import (
+    LANE_A_MIN_AGE_SECONDS,
     RUN_OUTCOME_NOTHING,
     RUN_OUTCOME_WORK_REMAINED,
     clone_directory_tree,
@@ -137,6 +138,30 @@ IDLE_BACKOFF_STEPS = (1, 2, 5)
 # 22), and a raised window buys more repeats at a longer re-check. 0
 # disables it and restores the plain rotation exactly.
 DEFAULT_LANE_B_IDLE_RECHECK_SECONDS = 600
+
+# Lane A's clean-project skip (2026-11-05). A rotation turn used to run
+# `rclone copy --ignore-existing` up for EVERY ticked project on every pass,
+# and each of those is its own pool of SSH logins plus a recursive SFTP
+# listing of the project on the NAS. ruskin's 14 projects cost the NAS
+# ~1,900 logins an hour, in bursts of ~150 every 6 minutes, on passes that
+# uploaded nothing at all. The watcher already sees every local write (it
+# drives notify_change and express), so a project whose last lane A run
+# checked everything and found nothing, and that nobody has written to
+# since, has nothing for lane A to find. It is skipped -- but re-checked at
+# least this often anyway (with the narrow verify pool), because a watcher
+# can miss events (a full ReadDirectoryChangesW buffer, a drive that came
+# back). 0 = never skip: lane A runs every turn, as before.
+DEFAULT_LANE_A_VERIFY_SECONDS = 7200
+# A change counts as covered only by a clean run that STARTED at least this
+# long after it: lane A's --min-age leaves a file with a fresh mtime for the
+# next run, so a run that began 30 s after the write found "nothing" without
+# being allowed to look at it. The extra 30 s absorbs watcher latency.
+LANE_A_CHANGE_SETTLE_SECONDS = LANE_A_MIN_AGE_SECONDS + 30
+
+# What a turn does with lane A (_lane_a_plan).
+LANE_A_FULL = "full"      # a normal run, full SSH pool
+LANE_A_VERIFY = "verify"  # a re-check of a project with no change: narrow pool
+LANE_A_SKIP = "skip"      # no run at all
 
 # What a per-turn read of a folder's .stignore found (SYNC-6, 2026-08-14).
 # "missing" deliberately covers a read that failed as well as one that came
@@ -438,6 +463,10 @@ class Sequencer:
         self.lane_b_idle_recheck_seconds = config_mod.coerce_count(
             cfg, "lane_b_idle_recheck_seconds", DEFAULT_LANE_B_IDLE_RECHECK_SECONDS
         )
+        # See DEFAULT_LANE_A_VERIFY_SECONDS. coerce_count: 0 is legal ("off").
+        self.lane_a_verify_seconds = config_mod.coerce_count(
+            cfg, "lane_a_verify_seconds", DEFAULT_LANE_A_VERIFY_SECONDS
+        )
         self.folder_status_poll_seconds = folder_status_poll_seconds
         self._now = now
         self._clone_tree_fn = clone_tree_fn
@@ -608,6 +637,18 @@ class Sequencer:
         # rotation skip MORE, on evidence from before the restart.
         self._turn_records: dict[str, dict] = {}
         self._lane_a_dirty: set[str] = set()
+        # Lane A's clean-project skip (DEFAULT_LANE_A_VERIFY_SECONDS). When
+        # the watcher last saw a write in each project (slug -> _now()), and
+        # each subpath's last lane A run that looked at EVERYTHING and found
+        # nothing (subpath -> (started, watch epoch)). In memory only, for
+        # the same reason as _turn_records: a restart forgets every clean
+        # check, so the first round after it runs lane A everywhere.
+        self._lane_a_changed_at: dict[str, float] = {}
+        self._lane_a_clean: dict[str, tuple[float, int]] = {}
+        # Set when a lane B run fails during this pass. While it is, lane A
+        # is never skipped: the offline test (_note_transport) needs BOTH
+        # lanes to fail on one project, and a skipped lane A cannot fail.
+        self._pass_b_failed = False
 
     @staticmethod
     def _state_dir_for(cfg: dict[str, Any]) -> Optional[Path]:
@@ -783,6 +824,9 @@ class Sequencer:
         self._unpause_all(self._last_selection)
 
     def resume(self) -> None:
+        # A drive that went away and came back, or a pause long enough for
+        # anything to happen: the watcher's silence since then proves nothing.
+        self._forget_clean_checks()
         self._resume_event.set()
         self._wake_event.set()
         self._interrupt.set()
@@ -802,6 +846,8 @@ class Sequencer:
         self._lane_c_idle.wait(timeout)
 
     def trigger_pass_now(self) -> None:
+        # "Sync now" means LOOK, not "skip what you looked at an hour ago".
+        self._forget_clean_checks()
         self._wake_event.set()
         self._interrupt.set()
         # An explicit "sync now" is the clearest possible evidence that the
@@ -1309,6 +1355,9 @@ class Sequencer:
                 # project with one is never skipped over (_skip_ahead_reason).
                 # Cleared when that project's next turn starts.
                 self._lane_a_dirty.add(slug)
+                # NOT cleared at turn start: the clean-project skip compares
+                # it with the start of the last clean run (2026-11-05).
+                self._lane_a_changed_at[slug] = self._now()
             if not slug or slug == self._current_slug:
                 return
             if slug in self._processed_slugs:
@@ -2144,6 +2193,7 @@ class Sequencer:
             self._processed_slugs = set()
         self._pass_moved = 0
         self._offline_pass = False
+        self._pass_b_failed = False
         processed_entries: dict[str, dict] = {}
         try:
             while True:
@@ -2350,7 +2400,8 @@ class Sequencer:
         self._release_paused_folders()
 
         budget = self.project_rotation_seconds if self.project_rotation_seconds > 0 else None
-        lane_runs.append(self._run_lanes_a_and_b(subpath, budget, upload_only=upload_only))
+        lane_runs.append(self._run_lanes_a_and_b(
+            subpath, budget, upload_only=upload_only, slug=slug))
         if self._stop_event.is_set() or not self._resume_event.is_set():
             return
 
@@ -2376,7 +2427,7 @@ class Sequencer:
             self._maybe_clone_structure(sub, key, forced=False)
             if self._stop_event.is_set() or not self._resume_event.is_set():
                 return
-            lane_runs.append(self._run_lanes_a_and_b(sub, budget))
+            lane_runs.append(self._run_lanes_a_and_b(sub, budget, slug=slug))
             if self._stop_event.is_set() or not self._resume_event.is_set():
                 return
             self._maybe_scan_orphans(sub, key)
@@ -2567,6 +2618,7 @@ class Sequencer:
 
     def _run_lanes_a_and_b(
         self, subpath: str, budget: Optional[float], upload_only: bool = False,
+        slug: Optional[str] = None,
     ) -> dict[str, Optional[str]]:
         """Lane A (up) and lane B (down) for one project.
 
@@ -2622,15 +2674,29 @@ class Sequencer:
             self._lane_b_gen += 1
             generation = self._lane_b_gen
         outcomes: dict[str, Any] = {}
+        plan = self._lane_a_plan(slug, subpath)
 
         def _a() -> None:
+            if plan == LANE_A_SKIP:
+                # Nothing has been written here since a run that looked at
+                # everything and found nothing. "Found nothing" is then the
+                # honest outcome for the skip-ahead too: it is exactly what a
+                # run would have reported, minus the SSH logins.
+                log.debug("sequencer: lane A skipped for %s -- no local change since "
+                          "its last clean check", subpath)
+                outcomes["a_outcome"] = RUN_OUTCOME_NOTHING
+                return
             try:
+                started = self._now()
+                epoch = self._lane_a_watch_epoch()
                 # may_hand_off (2026-09-26): past its budget with files still
                 # in flight, lane A returns and lets them finish in the
                 # background, so this turn -- and the rest of the rotation --
                 # is not held by one big original on a thin uplink.
-                outcomes["a"] = self._run_lane(self.lane_a, subpath, budget, may_hand_off=True)
+                verify_only = plan == LANE_A_VERIFY
+                outcomes["a"] = self._run_lane(self.lane_a, subpath, budget, may_hand_off=True, verify_only=verify_only)
                 outcomes["a_outcome"] = self._lane_outcome(self.lane_a, subpath)
+                self._note_lane_a_check(subpath, started, epoch, outcomes["a_outcome"])
             except Exception:
                 log.exception("sequencer: lane A run_once failed for %s", subpath)
             finally:
@@ -2725,6 +2791,82 @@ class Sequencer:
                             "being marked abandoned -- not latching it", subpath)
         self._note_transport(outcomes, run_b)
         return self._turn_outcomes(outcomes)
+
+    # -- lane A's clean-project skip (2026-11-05) ----------------------------
+    def _lane_a_watch_epoch(self) -> Optional[int]:
+        """The lane's watcher generation, or None ("not watching", or a lane
+        that cannot say). Never raises."""
+        probe = getattr(self.lane_a, "watch_epoch", None)
+        if probe is None:
+            return None
+        try:
+            epoch = probe()
+        except Exception:
+            return None
+        return epoch if isinstance(epoch, int) and not isinstance(epoch, bool) else None
+
+    def _lane_a_plan(self, slug: Optional[str], subpath: str) -> str:
+        """LANE_A_FULL, LANE_A_VERIFY or LANE_A_SKIP for this turn's lane A
+        run of `subpath`. Never raises; every doubt is LANE_A_FULL.
+
+        VERIFY needs ALL of: the skip is on; a clean check of this subpath
+        exists (a run that completed, found nothing, and left nothing to an
+        express run or a background upload); the watcher has been the SAME
+        observer since that run started and still is; and the project's last
+        watcher event, if any, came LANE_A_CHANGE_SETTLE_SECONDS or more
+        before that run started (so --min-age could not have hidden it).
+        SKIP is VERIFY while the clean check is younger than
+        lane_a_verify_seconds and no lane B run has failed this pass."""
+        try:
+            if self.lane_a_verify_seconds <= 0 or not slug:
+                return LANE_A_FULL
+            with self._lock:
+                clean = self._lane_a_clean.get(subpath)
+                changed_at = self._lane_a_changed_at.get(slug)
+            if clean is None:
+                return LANE_A_FULL
+            started, epoch = clean
+            current = self._lane_a_watch_epoch()
+            if current is None or current != epoch:
+                return LANE_A_FULL
+            if changed_at is not None and changed_at > started - LANE_A_CHANGE_SETTLE_SECONDS:
+                return LANE_A_FULL
+            if self._pass_b_failed:
+                return LANE_A_VERIFY
+            if self._now() - started < self.lane_a_verify_seconds:
+                return LANE_A_SKIP
+            return LANE_A_VERIFY
+        except Exception:
+            log.debug("sequencer: lane A plan failed for %s -- running it in full",
+                      subpath, exc_info=True)
+            return LANE_A_FULL
+
+    def _note_lane_a_check(self, subpath: str, started: float,
+                           epoch_before: Optional[int], outcome: Optional[str]) -> None:
+        """Record (or drop) the clean check a lane A run just made. Never
+        raises. Only a run that found nothing, deferred nothing, and was
+        watched by one observer from start to end counts."""
+        try:
+            deferred_fn = getattr(self.lane_a, "last_run_deferred", None)
+            deferred = True if deferred_fn is None else bool(deferred_fn())
+            epoch_after = self._lane_a_watch_epoch()
+            clean = (outcome == RUN_OUTCOME_NOTHING and not deferred
+                     and epoch_before is not None and epoch_before == epoch_after)
+            with self._lock:
+                if clean:
+                    self._lane_a_clean[subpath] = (started, int(epoch_before))
+                else:
+                    self._lane_a_clean.pop(subpath, None)
+        except Exception:
+            log.debug("sequencer: could not record lane A's check of %s", subpath,
+                      exc_info=True)
+            with self._lock:
+                self._lane_a_clean.pop(subpath, None)
+
+    def _forget_clean_checks(self) -> None:
+        """Every project's lane A runs again on its next turn."""
+        with self._lock:
+            self._lane_a_clean.clear()
 
     @staticmethod
     def _turn_outcomes(outcomes: dict[str, Any]) -> dict[str, Optional[str]]:
@@ -2851,6 +2993,8 @@ class Sequencer:
         """
         if not run_b:
             return
+        if getattr(outcomes.get("b"), "state", None) == STATE_ERROR_LANE:
+            self._pass_b_failed = True
         states = [getattr(outcomes.get(key), "state", None) for key in ("a", "b")]
         if all(state == STATE_ERROR_LANE for state in states):
             self._offline_pass = True
@@ -2881,7 +3025,8 @@ class Sequencer:
 
     @staticmethod
     def _run_lane(lane: Any, subpath: str, budget: Optional[float],
-                  rotation_pass: bool = False, may_hand_off: bool = False) -> Any:
+                  rotation_pass: bool = False, may_hand_off: bool = False,
+                  verify_only: bool = False) -> Any:
         """run_once with a per-project time budget where the lane supports
         one. Adapters that predate the budget (and test doubles) take
         (subpath) only -- checked by signature rather than by catching
@@ -2901,6 +3046,8 @@ class Sequencer:
             kwargs["rotation_pass"] = True
         if may_hand_off and _accepts_kw(lane.run_once, "may_hand_off"):
             kwargs["may_hand_off"] = True
+        if verify_only and _accepts_kw(lane.run_once, "verify_only"):
+            kwargs["verify_only"] = True
         return lane.run_once(subpath, **kwargs)
 
     def _guarded_move(self, src: str, dst: str) -> None:

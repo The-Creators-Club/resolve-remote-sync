@@ -284,6 +284,10 @@ DEFAULTS: dict[str, Any] = {
     "sftp_concurrency": 64,
     "sftp_connections": 16,
     "checkers": 16,
+    # The same two for a lane A run that only RE-CHECKS a project nobody has
+    # written to since its last clean run (2026-11-05). 0 = the normal value.
+    "sftp_connections_verify": 4,
+    "checkers_verify": 4,
     # rclone verifies size AND hash after every transfer when a common hash
     # exists; with shell_type=unix it gets MD5 by running `md5sum <path>` on
     # the NAS, so the NAS RE-READS every file it just received or sent
@@ -428,6 +432,11 @@ DEFAULTS: dict[str, Any] = {
     # long plus two of the busy project's turns after its last one (at the
     # defaults: the busy project goes twice per round). 0 = off.
     "lane_b_idle_recheck_seconds": 600,
+    # Lane A's clean-project skip (2026-11-05): a project with no local
+    # change since a lane A run that checked everything and found nothing is
+    # not re-listed on the NAS every pass, only re-checked at least this
+    # often (seconds). 0 = run lane A on every turn, as before.
+    "lane_a_verify_seconds": 7200,
     # How long selection.SelectionClient may serve the last dashboard
     # response from memory before going back to the network, and the longer
     # TTL for the sticky project_roots destination mapping. Both were read
@@ -1057,6 +1066,10 @@ transfers = 4
 # sftp_connections = 16
 # Parallel same-or-different checks while comparing the two sides.
 # checkers = 16
+# The same two for an upload run that only re-checks a project nothing has
+# been written to since its last clean check. 0 = use the values above.
+# sftp_connections_verify = 4
+# checkers_verify = 4
 # true skips rclone's post-transfer hash check, which otherwise makes the
 # NAS re-read (md5sum) every file it just received or sent.
 # rclone_ignore_checksum = true
@@ -1189,6 +1202,10 @@ sequencer_idle_seconds = 60
 # another turn straight away while every other ticked project found nothing
 # in its last turn (within this many seconds). 0 = plain rotation.
 # lane_b_idle_recheck_seconds = 600
+# A project with no local file change since an upload check that found
+# nothing is not re-checked on the server every pass, only this often
+# (seconds). "Sync now" always checks. 0 = check every pass.
+# lane_a_verify_seconds = 7200
 # How long (seconds) the last selection response is served from memory
 # before the companion asks the dashboard again, and the longer TTL for the
 # sticky per-project destination mapping (project_roots) inside it:
@@ -2340,6 +2357,21 @@ def validate_config(cfg: dict[str, Any], for_save: bool = False) -> tuple[list[s
     # scopes nothing that syncs -- it only decides whether a busy project may
     # go again before a quiet one is re-checked -- so it must not become a
     # config_problems entry, which stops every lane (DEL-3).
+    # 2026-11-05, the same class as lane_b_idle_recheck_seconds below: a bad
+    # value falls back to the default and scopes nothing that syncs, so a
+    # warning, never an error.
+    for key, off in (("lane_a_verify_seconds", "re-checks every pass"),
+                     ("sftp_connections_verify", "uses sftp_connections"),
+                     ("checkers_verify", "uses checkers")):
+        try:
+            value = float(cfg.get(key, DEFAULTS[key]))
+            if value < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            warnings.append(
+                f"{key} must be a number >= 0 (0 {off}), got {cfg.get(key)!r} -- "
+                f"using the default ({DEFAULTS[key]})"
+            )
     try:
         value = float(cfg.get("lane_b_idle_recheck_seconds",
                               DEFAULTS["lane_b_idle_recheck_seconds"]))

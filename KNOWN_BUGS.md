@@ -34198,3 +34198,55 @@ Config `vp9_guard` (default true) turns the whole guard off. It never calls
 Resolve (CR-68): it reads the walk the watcher already did. Known limit: the
 position is the track and the clip's number on it, not a timecode, because the
 walk carries no clip start. Tests: `tests/test_cr380_vp9_guard.py`.
+
+## CR-381 - an idle editor's upload lane logged in to the NAS ~1,900 times an hour to find nothing new - FIXED in repo (companion, unbuilt, unshipped)
+
+2026-11-05, found while the NAS was slow in Explorer (that slowness was a
+separate server-side copy from creator-1). The NAS's sshd log held a
+`ruskin` login from 100.125.57.46 (DESKTOP-LQQ41TC) roughly 30 times a
+minute since the journal began: 1,600-1,950 an hour, in bursts of 100-180
+logins every ~6 minutes, each an `internal-sftp` session. Watching his
+machine during a burst caught 27 `rclone copy ... --ignore-existing
+--sftp-connections 16 --checkers 16` children of `ccsync-companion.exe`,
+one per ticked project: lane A's rotation turn. His lane B was parked by the
+disk floor, so every login was lane A, on passes that uploaded nothing.
+The ~6 minute cadence is the idle backoff's ceiling (5 x 60 s) plus the
+pass itself. Every rclone opens its own pool and closes it on exit, so
+`sftp_connections = 16` is up to 16 logins per project per pass, plus a
+recursive SFTP listing of that project on the NAS.
+
+**Fixed: a project with no local change since a clean check is skipped,
+and re-checked with a narrow pool.** `Sequencer._lane_a_plan` decides each
+turn's lane A run: FULL (as before), VERIFY (`run_once(verify_only=True)`
+-> `RcloneTuning.for_verify()`, `sftp_connections_verify` /
+`checkers_verify`, default 4 / 4, never wider than the normal values), or
+SKIP (no run; the turn records `RUN_OUTCOME_NOTHING`, which is what the run
+would have said, so CR-319's skip-ahead reads it unchanged). SKIP/VERIFY
+need ALL of: `lane_a_verify_seconds` > 0 (default 7200; 0 = old behaviour);
+a clean check of that subpath on record, i.e. a run that completed, moved
+nothing, and left nothing to an express run or a handed-off child
+(`RcloneLane.last_run_deferred()`; server-moved excludes do not count); the
+SAME watcher observer from that run's start to its end and still now
+(`RcloneLane.watch_epoch()`, bumped on every observer start, None when not
+watching); and no watcher event in the project later than
+`LANE_A_CHANGE_SETTLE_SECONDS` (min-age 120 s + 30) before that run started,
+because --min-age hides a fresh-mtime file from the run that "found
+nothing". SKIP is VERIFY while the clean check is younger than
+`lane_a_verify_seconds` and no lane B run has failed this pass (a failed
+lane B makes it VERIFY, so `_note_transport`'s both-lanes-failed offline
+test still has a lane A to fail). In memory only: a restart, `resume()`
+and `trigger_pass_now()` ("Sync now", the drive coming back) forget every
+clean check. Lanes without the new accessors (older doubles) always run in
+full.
+
+**Not changed, deliberately:** the idle backoff ceiling stays 5 x
+`sequencer_idle_seconds`. Raising it was considered and dropped: a tick is
+only read at the start of a pass, and lane B has no NAS-side change signal,
+so a longer ceiling is a longer worst case for both a new tick and a new
+proxy arriving. Lane B's own per-pass listings are untouched.
+
+New config keys (template commented out, `config.example.toml` filled in,
+warnings not errors on a bad value): `lane_a_verify_seconds`,
+`sftp_connections_verify`, `checkers_verify`. Tests:
+`tests/test_lane_a_clean_skip.py` (20); `test_broll_standins.py`'s pinned
+lane A call line gains `verify_only=verify_only` (scope unchanged).

@@ -149,6 +149,12 @@ sftp_concurrency = 64
 sftp_connections = 16
 # Parallel same-or-different checks while comparing the two sides.
 checkers = 16
+# The same two for an upload run that only RE-CHECKS a project nothing has
+# been written to since its last clean check (every rclone opens its own
+# pool, so these are SSH logins on the NAS per project per check). 0 = use
+# the values above.
+sftp_connections_verify = 4
+checkers_verify = 4
 # true skips rclone's post-transfer hash check, which otherwise makes the NAS
 # re-read (md5sum) every file it just received or sent -- the single largest
 # source of NAS I/O contention between editors.
@@ -334,6 +340,14 @@ lane_c_settle_seconds = 30
 # under lane_c_pause_scheme = "rotate", on a halt, with the drive absent, or
 # for an upload-only tick. 0 restores the plain rotation exactly:
 lane_b_idle_recheck_seconds = 600
+# Lane A's clean-project skip (2026-11-05). The file watcher sees every local
+# write, so a project whose last upload check looked at everything and found
+# nothing, and that nothing has been written to since, is not re-listed on
+# the server every pass. It is still re-checked at least this often
+# (seconds), with the narrow pool above, in case the watcher missed an event.
+# A restart, a resume, a drive coming back or "Sync now" forgets every clean
+# check. 0 = check every project on every pass, as before:
+lane_a_verify_seconds = 7200
 # How long (seconds) the sequencer idles between full passes once every
 # selected project is caught up (small edits still trickle during this
 # window -- every selected folder is unpaused while idle):

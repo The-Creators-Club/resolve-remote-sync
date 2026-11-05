@@ -236,8 +236,11 @@ def test_lane_a_can_never_see_the_archive_at_all():
                     if "_run_lane(self.lane_a" in line]
     # may_hand_off (CR-347, 2026-09-26) changes when lane A returns, never
     # what it is scoped to: a handed-off child keeps this same subpath.
+    # verify_only (2026-11-05) narrows the SSH pool of a re-check, never the
+    # scope either.
     assert lane_a_calls == [
-        'outcomes["a"] = self._run_lane(self.lane_a, subpath, budget, may_hand_off=True)']
+        'outcomes["a"] = self._run_lane(self.lane_a, subpath, budget, may_hand_off=True, '
+        'verify_only=verify_only)']
     assert 'subpath = f"{PROJECTS_PREFIX}{rel_path}"' in source
 
     # ...and that rel cannot climb back out into Assets/.

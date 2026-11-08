@@ -227,10 +227,16 @@ def test_the_settings_script_hides_cli_rows_when_locked():
     assert "cli_build_locked" in js
 
 
-def test_the_deploy_script_projects_only_the_studio_toml_key():
+def test_the_deploy_script_projects_only_the_studio_toml_key(monkeypatch):
     import sys
     from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "server"))
+    server_dir = Path(__file__).resolve().parents[2] / "server"
+    # The server suite's committed fixture manifest (2026-11-08): compose_config
+    # reads the site file, and the repo's own site.toml is gitignored, so on
+    # every CI runner this failed with "[tree] pool_root/tree_name is not
+    # configured" and passed only on the base rig.
+    monkeypatch.setenv("CCSYNC_SITE", str(server_dir / "tests" / "fixtures" / "site.toml"))
+    sys.path.insert(0, str(server_dir))
     import install_dashboard_app as ida
 
     body = ida.compose_config(8480, "/mnt/tank/apps/ccsync-dashboard",

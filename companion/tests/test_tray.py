@@ -3083,7 +3083,7 @@ def test_ignored_line_names_the_way_back():
     from ccsync_companion.tray import _ignored_line
 
     line = _ignored_line({"resolve_health": {"ignored_this_session": 14}})
-    assert line.startswith("\u26a0 14 clips skipped this session")
+    assert line.startswith("\u26a0 14 clips skipped for now")
     assert "SCAN WHOLE PROJECT" in line
     assert "\u2014" not in line
 

@@ -2408,6 +2408,71 @@ def _check_out_of_tree(ctx: Ctx) -> list[Finding]:
     return out
 
 
+def _check_unopened_out_of_tree(ctx: Ctx) -> list[Finding]:
+    """Tree projects NOT open on a computer whose clips exist only on it.
+
+    CR-383 (2026-11-08). "Animals - Pangolins and Bears" (library FF5) held 45
+    music clips on ruskin's Desktop for at least nine days, and `out_of_tree`
+    never fired: it reads the OPEN project's scan, and nobody had that
+    project open there. Companion 0.9.88's unopened-projects sweep reads
+    every project in that computer's Resolve libraries and reports the
+    flagged ones by name; this is the server half.
+
+    The SUBJECT is `editor/machine` for `_check_out_of_tree`'s reason: the
+    ledger is keyed (kind, subject), and a project name in there would open a
+    new row and a new mail every time the list changed. The names go in the
+    title and the sentence.
+
+    CR-232's "only tree projects" is ALREADY applied, and more strictly than
+    a name match could: the companion flags a project only when one of its
+    own clips sits in the tree under a project root. `_synced_project` is NOT
+    used as a filter here on purpose. It matches by name, and a project
+    nobody opens is exactly the one whose name nobody mapped at
+    /project-setup, so filtering on it would silence the incident this kind
+    exists for. It names the slug in the detail when it can.
+
+    A computer that withholds `resolve_project` (LG-1) has nothing to read
+    here: the names were stripped on arrival.
+    """
+    out = []
+    for e in ctx.editors:
+        withheld = _withheld_quiet(ctx, "unopened_out_of_tree", e, "resolve_project")
+        if withheld is not None:
+            if withheld:
+                out.append(withheld)
+            continue
+        g = ctx.guard(e)
+        entries = [x for x in (g.get("resolve_unopened_out_of_tree") or [])
+                   if isinstance(x, Mapping) and str(x.get("project") or "").strip()
+                   and int(x.get("count") or 0) > 0]
+        if not entries:
+            continue
+        who = ctx.name(_who(e))
+        first = str(entries[0]["project"])
+        total = sum(int(x.get("count") or 0) for x in entries)
+        rest = len(entries) - 1
+        title = f"footage on one computer only in '{first}'" + (
+            f" and {rest} other project{'s' if rest != 1 else ''}" if rest else "")
+        listed = "; ".join(f"'{x['project']}' ({int(x['count'])})" for x in entries[:5])
+        if len(entries) > 5:
+            listed += f"; and {len(entries) - 5} more"
+        slugs = ",".join(_synced_project(ctx, str(x["project"])) or "-"
+                         for x in entries[:5])
+        out.append(_f(
+            who,
+            f"{who} holds {total} clip(s) that exist only on that computer, outside "
+            f"the sync tree, in project(s) it does not have open: {listed}. Those "
+            f"clips have never uploaded, so every other computer opens those "
+            f"projects with red media.",
+            "Ask that editor to open each project in Resolve on that computer and "
+            "press FIX ALL. The companion reminds them every 30 minutes until it "
+            "is done.",
+            f"projects={len(entries)} slugs={slugs} "
+            f"scanned {_age_words(g.get('resolve_unopened_scan_at'), ctx.now)}",
+            title=title))
+    return out
+
+
 def _withheld_quiet(ctx: Ctx, kind: str, e: Mapping[str, Any],
                     category: str) -> Finding | None:
     """LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.1, 2026-09-25). For a
@@ -4221,6 +4286,10 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
               "open problems the server recorded", _check_notices),
     AlertKind("out_of_tree", SEV_WARN, "footage is outside the tree",
               "clips referenced from outside the tree", _check_out_of_tree),
+    # CR-383 (2026-11-08): the same loss in projects nobody has open there.
+    AlertKind("unopened_out_of_tree", SEV_WARN, "footage on one computer only",
+              "clips only on one computer in projects not open there",
+              _check_unopened_out_of_tree),
     AlertKind("stray_projects", SEV_WARN, "project folders outside the tree",
               "stray project folders", _check_stray_projects),
     AlertKind("moved_project_dir", SEV_WARN, "a project folder has moved",
@@ -4403,8 +4472,8 @@ KIND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "soak_failed", "feed_stale", "feed_runtime_mismatch",
         "platform_channel_stale")),
     ("projects and footage", (
-        "out_of_tree", "stray_projects", "moved_project_dir",
-        "ingest_staging")),
+        "out_of_tree", "unopened_out_of_tree", "stray_projects",
+        "moved_project_dir", "ingest_staging")),
     ("fleet jobs", (
         "jobs_starved", "jobs_abandoned", "jobs_pinned_no_executor")),
     ("youtube downloads", (

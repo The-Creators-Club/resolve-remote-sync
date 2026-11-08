@@ -435,6 +435,12 @@ CHIP_HELP: dict[str, str] = {
         "outside the sync tree{bad_prefix}. They will never upload, so the "
         "timeline opens with red media on every other computer. Scanned "
         "{at}."),
+    # CR-383 (2026-11-08).
+    "unopened_out_of_tree": (
+        "{n} clip(s) exist only on this computer, outside the sync tree, in "
+        "Resolve projects it does not have open: '{names}'{more}. They will "
+        "never upload until the editor opens each project and presses FIX "
+        "ALL. Checked {at}."),
     "stray_dirs": (
         "{n} project folder(s) on this computer's disk are not in the sync "
         "tree, holding {bytes}. Nothing in them is on the server or visible "

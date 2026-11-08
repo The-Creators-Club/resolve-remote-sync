@@ -1278,6 +1278,24 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
             else:
                 entry["why"]["sentence"] = f"{entry['why']['sentence']}. Also: {note}"
             entry["why"]["out_of_tree"] = out_of_tree
+        # CR-383 (2026-11-08): the same loss in projects NOT open there, on
+        # the same informational terms. Names come from the companion's
+        # unopened-projects sweep (stripped on arrival under LG-1).
+        unopened = entry["guard"].get("resolve_unopened_out_of_tree") or []
+        if unopened:
+            first = unopened[0]
+            clips = sum(int(x.get("count") or 0) for x in unopened)
+            rest = len(unopened) - 1
+            note = (f"{clips} clip(s) only on this computer in '{first['project']}'"
+                    + (f" and {rest} other project(s)" if rest else "")
+                    + ", which it does not have open; they will never upload")
+            if entry["why"] is None:
+                entry["why"] = {"reason": "unopened_out_of_tree",
+                                "sentence": note[0].upper() + note[1:],
+                                "informational": True}
+            else:
+                entry["why"]["sentence"] = f"{entry['why']['sentence']}. Also: {note}"
+            entry["why"]["unopened_out_of_tree"] = len(unopened)
         entry["ingest"] = ingest.get(key) or {}
         entry["music_ingest"] = music_ingest.get(key) or {}
         entry["job"] = running_jobs.get(key) or {}
@@ -9026,6 +9044,22 @@ class ResolveHealthIn(_BoundedSectionIn):
     skipped_ever: int | None = Field(default=None, ge=0)
     # comp-broll-tiers-5 (2026-09-18, owed here by companion-core).
     standins_owed: "StandinsOwedIn | None" = None
+    # CR-383 (2026-11-08): the Resolve projects NOT open on that computer
+    # whose clips exist only there, outside the tree (companion 0.9.88,
+    # unopened_scan.py), as {project, count}, never a path. Declared BEFORE
+    # the companion ships, SYS-3's rule. None is "has not looked" (an older
+    # companion, a sweep not yet finished, the switch off) and [] is "looked,
+    # nothing": the two never render alike. The list is LG-1 resolve_project
+    # data (telemetry_fields.FIELDS strips it on arrival); the time is not.
+    unopened_out_of_tree: list["UnopenedProjectIn"] | None = Field(
+        default=None, max_length=20)
+    unopened_scan_at: str | None = Field(default=None, max_length=64)
+
+
+class UnopenedProjectIn(_BoundedSectionIn):
+    """One project in `resolve_health.unopened_out_of_tree` (CR-383)."""
+    project: str | None = Field(default=None, max_length=400)
+    count: int | None = Field(default=None, ge=0)
 
 
 class StandinsOwedIn(_BoundedSectionIn):
@@ -9476,6 +9510,17 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
             or (rh.ignored_this_session is None and rh.ignored_folders is None)
             else int(rh.ignored_this_session or 0) + int(rh.ignored_folders or 0)),
         "resolve_last_scan_at": rh.last_scan_at if rh is not None else None,
+        # CR-383 (2026-11-08): the unopened-projects sweep, as JSON for the
+        # v61 column. NULL when the section or the list is absent (the LATCH
+        # rule above: an older companion, a sweep not yet run and the LG-1
+        # strip all clear what was held), "[]" for a sweep that found nothing.
+        "resolve_unopened_out_of_tree": (
+            None if rh is None or rh.unopened_out_of_tree is None
+            else json.dumps([
+                {"project": p.project or "", "count": int(p.count or 0)}
+                for p in rh.unopened_out_of_tree if (p.project or "").strip()],
+                ensure_ascii=False)),
+        "resolve_unopened_scan_at": rh.unopened_scan_at if rh is not None else None,
         # comp-app-2 (bug hunt 2026-09-11): the wave-3 nine, whole, for
         # db.store_resolve_health_detail to put in `meta`. Not flattened into
         # columns here - two of them are LISTS of clips and three are little

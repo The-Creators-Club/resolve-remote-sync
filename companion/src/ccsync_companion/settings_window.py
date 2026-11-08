@@ -990,6 +990,27 @@ def _resolve_section(app: "CompanionApp", guard: dict) -> list:
                                 lambda: tray_mod.action_scan_whole_project(app)))
             offered_scan = True
 
+    # CR-383 (2026-11-08): projects NOT open here whose clips exist only on
+    # this computer. The open one is already counted above, by the watcher.
+    unopened_reader = getattr(app, "unopened_out_of_tree", None)
+    try:
+        unopened = list(unopened_reader() or []) if callable(unopened_reader) else []
+    except Exception:
+        log.exception("settings: could not read the unopened-projects sweep")
+        unopened = []
+    for finding in unopened[:3]:
+        count = int(getattr(finding, "count", 0) or 0)
+        name = str(getattr(finding, "project", "") or "")
+        if not count or not name:
+            continue
+        items.append(Line(
+            f"{ui_copy.count(count, 'clip')} in '{name}' {'is' if count == 1 else 'are'} "
+            "only on this computer. Open that project in Resolve and press FIX ALL",
+            style="warning"))
+    if len(unopened) > 3:
+        items.append(Line(f"...and {ui_copy.count(len(unopened) - 3, 'more project')}",
+                          style="warning"))
+
     attach = health.get("proxy_attach") or {}
     if isinstance(attach, dict) and (attach.get("attached") or attach.get("failed")
                                      or attach.get("refreshed")):

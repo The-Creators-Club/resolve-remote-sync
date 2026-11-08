@@ -74,6 +74,7 @@ and POSTed as one JSON body. Field names below are the **exact wire keys**.
 | `proxy_coverage` | Counters for originals with no proxy beside them, plus a per-project map (capped at 64 projects). | `reporter.py:_build_payload` ← `app.CompanionApp.proxy_coverage` |
 | `youtube_import` | Counters for whether downloaded YouTube clips reached the editor's Resolve bins. | `reporter.py:_build_payload` ← `app.CompanionApp.youtube_import_status` |
 | `sync_guard` | Local safety-latch state and sync-health findings: circuit breaker, trash guard, halt, files skipped because they already exist, moved or stray project folders, shared-folder problems, clip relink events, b-roll stand-ins placed, YouTube import status, and the reporter's own health. Mostly counters and flags; some entries **name projects and files**. | `reporter.py:_build_payload` ← `app.CompanionApp.sync_guard` |
+| **`sync_guard.resolve_health.unopened_out_of_tree`** | **The names of DaVinci Resolve projects that are NOT open on this computer** but hold clips that exist only on it, outside the sync folder, each with a clip count (at most 20 projects; never a file path). Read every `unopened_scan_minutes` (default 30) straight out of the project libraries this computer can reach; `unopened_scan_at` beside it is when, and names nothing. Absent until the first check has finished. Withheld with `resolve_project`. | `app.py:resolve_health` ← `unopened_scan.UnopenedScan.report` (CR-383, companion 0.9.88+) |
 | `broll_ingest`, `music_ingest` | Progress of a b-roll or music ingest batch running on this machine, when there is one. | `reporter.py:_build_payload` ← `app.CompanionApp.broll_ingest_status`, `music_ingest_status` |
 | `file_moves_applied`, `resolve_undo_applied` | This machine's answers to admin commands: a file moved on the server, a Resolve clip-path change put back. | `reporter.py:_build_payload` |
 
@@ -265,7 +266,8 @@ its DPO should know it.
 Settings, THIS COMPUTER, PRIVACY (or the setup wizard's privacy step). For
 the whole site: the dashboard's Settings, Site, TELEMETRY. They are:
 `resolve_project` (the open project's name, wherever the companion reports
-it, including Resolve health, fix journals and the answers to an undo),
+it, including Resolve health, fix journals and the answers to an undo, and
+the names of projects not open there that hold clips only on that computer),
 `local_manifest` (the disk file list, plus the file names in the Resolve
 health and sync-conflict checks, which are then sent only as counts, the
 names of stray or moved project folders, and the sample file names from

@@ -61,6 +61,7 @@ from . import resolve_prefs as resolve_prefs_mod
 from . import resolve_undo as resolve_undo_mod
 from . import root_guard as root_guard_mod
 from . import drive_reminder as drive_reminder_mod
+from . import unopened_scan as unopened_scan_mod
 from . import shutdown_guard as shutdown_guard_mod
 from . import stills as stills_mod
 from . import theme
@@ -1824,6 +1825,26 @@ class CompanionApp:
             interval=drive_reminder_mod.interval_seconds(cfg),
             state_path=(config_mod.resolved_log_path(cfg).parent / "state"
                         / drive_reminder_mod.STATE_FILENAME),
+        )
+        # CR-383 (2026-11-08, unopened_scan.py): every project in this
+        # machine's Resolve libraries, not just the open one, read for clips
+        # that exist only here. Every input is a lambda because the watcher,
+        # the sequencer and the tray are built after this line; the thread is
+        # started by _start_unopened_scan with the rest of start()'s extras.
+        self._unopened_scan = unopened_scan_mod.UnopenedScan(
+            interval_fn=lambda: unopened_scan_mod.interval_seconds(self.config),
+            local_root_fn=lambda: str(self.config.get("local_root", "") or ""),
+            canonical_prefix_fn=lambda: str(self.config.get("canonical_prefix", "") or ""),
+            open_project_fn=lambda: getattr(getattr(self, "watcher", None),
+                                            "last_resolve_project", None),
+            ignored_projects_fn=lambda: self.config.get("ignored_resolve_projects"),
+            libraries_fn=self._unopened_scan_libraries,
+            known_rels_fn=self._unopened_scan_known_rels,
+            notify_fn=self._notify_tray,
+            ready_fn=self._unopened_scan_ready,
+            # The balloon says "press FIX ALL", and with popups off (a base
+            # rig) there is no FIX ALL to press. The report still carries it.
+            nag_allowed_fn=lambda: bool(self.config.get("popup_enabled", True)),
         )
         # The licence dialog is offered ONCE per run, on the same reasoning:
         # an unaccepted licence is a state the tray already shows, and a modal
@@ -5505,6 +5526,7 @@ class CompanionApp:
         """
         counts = getattr(self.watcher, "last_counts", None) or {}
         wedge = self._bridge_wedge()
+        unopened, unopened_at = self._unopened_report()
         return {
             "out_of_tree": int(counts.get("out_of_tree") or 0),
             "bad_prefix": int(counts.get("bad_prefix") or 0),
@@ -5545,7 +5567,22 @@ class CompanionApp:
             "skipped_ever": self.ignore_tracker.skipped_count(),
             "last_scan_at": getattr(self.watcher, "last_scan_at", None),
             "open_project": getattr(self.watcher, "last_resolve_project", None),
+            # CR-383 (2026-11-08): the projects NOT open here whose clips
+            # exist only on this computer, [{"project", "count"}] capped at
+            # 20, never a path. None until the first sweep has completed, so
+            # "not looked" never reads as "clean". The names are LG-1's
+            # resolve_project kind (telemetry_policy.FIELDS); the time is not.
+            "unopened_out_of_tree": unopened,
+            "unopened_scan_at": unopened_at,
         }
+
+    def _unopened_report(self) -> tuple:
+        try:
+            scan = getattr(self, "_unopened_scan", None)
+            return scan.report() if scan is not None else (None, None)
+        except Exception:
+            log.exception("resolve_health: unopened scan report failed")
+            return None, None
 
     # -- what this machine knows, for whoever asks (wave 3, 2026-09-04) ---
     #
@@ -9786,7 +9823,7 @@ class CompanionApp:
             f"{health['out_of_tree']} clip(s) outside the tree",
             f"{health['bad_prefix']} on a broken {self.canonical_prefix_label()} mapping",
             f"{health['missing']} missing on disk",
-            f"{health['ignored_this_session']} skipped this session",
+            f"{health['ignored_this_session']} skipped for now (30 min)",
             f"{health['skipped_ever']} skipped ever",
         ]
         return ", ".join(parts) + f" (last scan {health['last_scan_at']})"
@@ -10583,6 +10620,7 @@ class CompanionApp:
             ("yt-dlp manager", self._start_ytdlp_manager),
             ("Resolve menu scripts", self._start_resolve_menu_install),
             ("originals requests", self._start_originals_inbox),
+            ("unopened-projects sweep", self._start_unopened_scan),
             # LAST: it supervises the threads everything above it started
             # (SYS-2). See _start_lane_watchdog.
             ("thread watchdog", self._start_lane_watchdog),
@@ -10745,6 +10783,75 @@ class CompanionApp:
         originals lane honours the pause on its own."""
         if self.originals_inbox is not None:
             self.originals_inbox.start()
+
+    # -- the unopened-projects sweep (CR-383, 2026-11-08) -----------------
+
+    def _start_unopened_scan(self) -> None:
+        """Its own daemon thread, on _stop_event like every other loop here.
+        NEVER the watcher thread: a sweep reads whole libraries over the
+        network, and the watcher's 3 s poll is what the popup rides on."""
+        scan = getattr(self, "_unopened_scan", None)
+        if scan is None:
+            return
+        threading.Thread(target=scan.run, args=(self._stop_event,),
+                         name="ccsync-unopened-scan", daemon=True).start()
+
+    def _unopened_scan_ready(self) -> bool:
+        """The same three refusals _classify_pool_once makes: with local_root
+        broken or the drive out every clip classifies OUT_OF_TREE, and during
+        a grade swap P: points at the server."""
+        try:
+            if self._local_root_is_broken():
+                return False
+            if getattr(self, "_p_swap_busy", False):
+                return False
+            return self.p_mapping_mode() != "server"
+        except Exception:
+            return False
+
+    def _unopened_scan_known_rels(self) -> Optional[list[str]]:
+        """The project rels this machine knows: its plan (borrowed subtrees
+        included) plus every marker folder on disk, the union the popup
+        suggests destinations from. None when neither answers."""
+        try:
+            from . import fixer as fixer_mod
+
+            planned = _synced_project_rels(self) or []
+            rels = fixer_mod.list_project_dirs(
+                str(self.config.get("local_root", "") or ""), planned)
+            return rels or (planned or None)
+        except Exception:
+            log.debug("unopened scan: could not list project folders", exc_info=True)
+            return None
+
+    def _unopened_scan_libraries(self) -> list:
+        """Which libraries to read. GetDatabaseList() is asked ONLY when the
+        watcher's last poll found the bridge connected: connect() is still
+        the only scriptapp() caller (CR-68), but nothing in a background
+        sweep may be the first thing to knock on Resolve's door during its
+        launch window. The API lock is held for that one call and released
+        before any SQL runs."""
+        from . import library as library_mod
+
+        api_infos: list = []
+        try:
+            if self._bridge_connected_now() is True:
+                with resolve_bridge.api_call("unopened_scan.databases"):
+                    resolve = resolve_bridge.connect()
+                    api_infos = library_mod.database_list(resolve)
+        except Exception:
+            log.debug("unopened scan: GetDatabaseList failed", exc_info=True)
+        return unopened_scan_mod.discover_libraries(api_infos, self.config)
+
+    def unopened_out_of_tree(self) -> list:
+        """The flagged projects minus the one open now, for the tray and the
+        Settings window: [Finding]. Never raises, never walks anything."""
+        try:
+            scan = getattr(self, "_unopened_scan", None)
+            return scan.visible() if scan is not None else []
+        except Exception:
+            log.exception("unopened scan: reading the findings failed")
+            return []
 
     def _start_ytdlp_manager(self) -> None:
         """Keep this machine's yt-dlp binary present and current.

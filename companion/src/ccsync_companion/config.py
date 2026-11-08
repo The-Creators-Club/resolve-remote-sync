@@ -159,7 +159,12 @@ log = logging.getLogger("ccsync.config")
 # section 12): the `lane_b_originals_down` lane, the Resolve menu scripts and
 # their request inbox. Needs dashboard 0.7.77 for the `originals` key and the
 # PUT route; against an older one it brings nothing down.
-VERSION = "0.9.87"
+# 0.9.88 (2026-11-08): CR-383, the unopened-projects sweep (unopened_scan.py):
+# every project in this machine's Resolve libraries is read for clips that
+# exist only here, outside the tree, with a tray reminder every 30 minutes and
+# `sync_guard.resolve_health.unopened_out_of_tree` on the report. Needs
+# dashboard 0.7.78 to store and alert on it; deploy the dashboard first.
+VERSION = "0.9.88"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
@@ -742,6 +747,13 @@ DEFAULTS: dict[str, Any] = {
     # the "still disconnected, plug it back in to finish syncing" balloons
     # after it, for as long as the drive stays out. 0 = first warning only.
     "drive_reminder_minutes": 30.0,
+    # How often to read EVERY project in this machine's Resolve project
+    # libraries for clips that are only on this computer (CR-383,
+    # unopened_scan.py). The out-of-tree popup sees only the project open in
+    # Resolve here, so a project nobody opens kept 45 Desktop music clips
+    # offline on every other machine for over a week with nobody told. While
+    # one is found the tray reminds every 30 minutes. 0 = off.
+    "unopened_scan_minutes": 30.0,
     # Warn when the open Resolve timeline uses VP9 source media, which Resolve
     # Studio cannot render at full resolution (CR-380, 2026-11-01,
     # vp9_guard.py). ON by default; false stops the checks and the popup.
@@ -1482,6 +1494,13 @@ keep_awake_while_syncing = true
 # reminds you this often (minutes) until it is plugged back in. 0 keeps the
 # first warning and drops the reminders. The default is the shipped value.
 # drive_reminder_minutes = 30
+
+# How often (minutes) CCSync reads every project in your Resolve project
+# libraries for clips that exist only on this computer, outside the synced
+# folder, in projects you do not have open. While it finds any it reminds you
+# every 30 minutes; opening that project and pressing FIX ALL clears it.
+# 0 turns the check off. The default is the shipped value.
+# unopened_scan_minutes = 30
 
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and
@@ -2351,6 +2370,17 @@ def validate_config(cfg: dict[str, Any], for_save: bool = False) -> tuple[list[s
             f"drive_reminder_minutes must be a number >= 0 (0 disables the "
             f"reminders), got {cfg.get('drive_reminder_minutes')!r} -- using the "
             f"default ({DEFAULTS['drive_reminder_minutes']})"
+        )
+    # CR-383: the same class again (0 = the check is off).
+    try:
+        value = float(cfg.get("unopened_scan_minutes", DEFAULTS["unopened_scan_minutes"]))
+        if value < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        warnings.append(
+            f"unopened_scan_minutes must be a number >= 0 (0 turns the check "
+            f"off), got {cfg.get('unopened_scan_minutes')!r} -- using the "
+            f"default ({DEFAULTS['unopened_scan_minutes']})"
         )
     # CR-319: a WARNING, like the two above, and never an error. A bad value
     # here crashes nothing (coerce_count falls back to the default) and

@@ -162,6 +162,8 @@ def test_default_toml_text_documents_every_default_key():
         # The sync-drive reminder cadence (CR-92): same class, a field knob
         # whose shipped value must stay re-tunable.
         "drive_reminder_minutes",
+        # CR-383's unopened-projects sweep cadence: same class.
+        "unopened_scan_minutes",
         # The CR-319 skip-ahead window: same class, a field knob whose
         # shipped value must stay re-tunable.
         "lane_b_idle_recheck_seconds",
@@ -289,7 +291,7 @@ def test_default_toml_text_documents_every_default_key():
 EXAMPLE_COMMENTED_OUT = {
     "sync_enabled", "lane_b_enabled", "server_p_unc",
     "keep_awake_stale_seconds", "keep_awake_max_hold_seconds",
-    "drive_reminder_minutes",
+    "drive_reminder_minutes", "unopened_scan_minutes",
     "proxy_gen_enabled", "proxy_gen_max_height", "proxy_gen_bitrate",
     "proxy_gen_max_failures", "proxy_notify_cooldown_seconds",
     "proxy_gen_skip_while_resolve_running",

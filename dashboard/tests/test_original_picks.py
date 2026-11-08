@@ -117,7 +117,8 @@ def ruskin(env):
 def test_v60_is_the_head_and_the_list_stays_gapless():
     numbers = [n for n, _ in dbmod._MIGRATION_STEPS]
     assert numbers == list(range(1, dbmod.SCHEMA_VERSION + 1))
-    assert dbmod.SCHEMA_VERSION == 60
+    # >= since v61 (CR-383, 2026-11-08): 60 stays in the list, not the head.
+    assert dbmod.SCHEMA_VERSION >= 60
     assert dict(dbmod._MIGRATION_STEPS)[60] is dbmod.SCHEMA_V60
 
 
@@ -125,7 +126,7 @@ def test_v60_on_a_v59_database_reaches_the_fresh_shape_and_replays(tmp_path):
     old = dbmod.connect(tmp_path / "v59.db")
     dbmod.migrate(old, [s for s in dbmod._MIGRATION_STEPS if s[0] <= 59])
     dbmod.migrate(old)
-    assert old.execute("PRAGMA user_version").fetchone()[0] == 60
+    assert old.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
     fresh = sqlite3.connect(":memory:")
     dbmod.migrate(fresh)
     cols = lambda c: [tuple(r)[1:] for r in c.execute("PRAGMA table_info(original_picks)")]

@@ -350,6 +350,113 @@ def database_info(resolve: Any) -> Optional[LibraryInfo]:
     return _info_from_api(resolve) if resolve is not None else None
 
 
+# --------------------------------------------------------------------------
+# every library, not just the open project's (CR-383, 2026-11-08)
+# --------------------------------------------------------------------------
+#
+# The out-of-tree popup only ever saw the project OPEN on the editor's own
+# machine, so 45 Desktop music clips sat in "Animals - Pangolins and Bears"
+# for at least nine days with nobody warned (ruskin's PC, library FF5). The
+# unopened-projects sweep (unopened_scan.py) reads every project of every
+# library this machine knows; these three answer "which libraries".
+
+# A disk library holds one Project.db per project, under folders the editor
+# made in the Project Manager. The bound is on what a damaged or enormous
+# library can cost a background pass, not a correctness limit.
+MAX_DISK_PROJECTS = 500
+_DISK_WALK_MAX_DIRS = 5000
+
+
+def database_list(resolve: Any) -> list[LibraryInfo]:
+    """GetDatabaseList(), for the Resolve versions where it answers. Never
+    raises; [] when it does not (Resolve 21.0.1 returns None, see
+    _info_from_log). Only the PostgreSQL entries are kept: a disk entry
+    carries no path, and disk_project_dbs() finds those on disk."""
+    try:
+        manager = resolve.GetProjectManager() if resolve is not None else None
+        entries = manager.GetDatabaseList() if manager else None
+    except Exception:
+        return []
+    out: list[LibraryInfo] = []
+    for entry in entries if isinstance(entries, (list, tuple)) else ():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("DbType") or "") != "PostgreSQL":
+            continue
+        name = str(entry.get("DbName") or "")
+        if name:
+            out.append(LibraryInfo(kind="PostgreSQL", name=name,
+                                   host=str(entry.get("IpAddress") or "127.0.0.1")))
+    return out
+
+
+def postgres_libraries_from_log() -> list[LibraryInfo]:
+    """Every PostgreSQL library Resolve's log says it connected to.
+
+    Resolve writes one `postgres project library <name> at <ip>` line per
+    library it attaches at launch, whichever project is opened afterwards,
+    so this is the whole list on the version where GetDatabaseList() says
+    nothing. The last host seen for a name wins (a library can move). Never
+    raises."""
+    hosts: dict[str, str] = {}
+    try:
+        for line in _log_lines():
+            match = _LOG_PGLIB.search(line)
+            if match:
+                hosts[match.group("lib")] = match.group("ip")
+    except Exception:
+        log.debug("library: reading Resolve's log for its libraries failed", exc_info=True)
+    return [LibraryInfo(kind="PostgreSQL", name=name, host=host)
+            for name, host in sorted(hosts.items())]
+
+
+def disk_project_dbs() -> list[tuple[str, str]]:
+    """(library name, Project.db path) for every project in every DISK
+    library under Resolve's Support directory. Never raises; bounded.
+
+    Same layout _find_disk_db reads one project out of: the built-in "Local
+    Database" at `Resolve Project Library/Resolve Projects/Users/<user>/
+    Projects/...` and every other disk library at `Resolve Project Library/
+    <name>/Resolve Projects/...`. Projects inside Project Manager folders
+    nest deeper, so the walk descends and prunes at each Project.db. A disk
+    library the editor created somewhere else on disk is not found here;
+    that is a known gap, not a silent pass (the caller logs what it read).
+    """
+    support = _resolve_support_dir()
+    if support is None:
+        return []
+    base = support / "Resolve Project Library"
+    roots: list[tuple[str, Path]] = [("Local Database", base / "Resolve Projects")]
+    try:
+        for entry in sorted(base.iterdir()):
+            if entry.is_dir() and entry.name != "Resolve Projects":
+                roots.append((entry.name, entry / "Resolve Projects"))
+    except OSError:
+        pass
+    found: list[tuple[str, str]] = []
+    visited = 0
+    for library_name, root in roots:
+        users = root / "Users"
+        try:
+            user_dirs = sorted(p for p in users.iterdir() if p.is_dir())
+        except OSError:
+            continue
+        for user_dir in user_dirs:
+            try:
+                for dirpath, dirnames, filenames in os.walk(str(user_dir / "Projects")):
+                    visited += 1
+                    if visited > _DISK_WALK_MAX_DIRS or len(found) >= MAX_DISK_PROJECTS:
+                        log.info("library: disk library walk stopped at %d folders / %d "
+                                 "projects; the rest are not swept", visited, len(found))
+                        return found
+                    if "Project.db" in filenames:
+                        found.append((library_name, os.path.join(dirpath, "Project.db")))
+                        dirnames[:] = []
+            except OSError:
+                continue
+    return found
+
+
 _UNASKED = object()
 
 
@@ -522,6 +629,17 @@ class _SqliteBackend(_Backend):
             pass
 
 
+def _open_backend(info: LibraryInfo) -> _Backend:
+    """One connection to `info`, or LibraryUnavailable. Shared by the
+    open-project reader and the whole-library one (CR-383), so there is one
+    place that knows which kinds of library exist."""
+    if info.kind == "PostgreSQL":
+        return _PostgresBackend(info)
+    if info.kind == "Disk":
+        return _SqliteBackend(info)
+    raise LibraryUnavailable("unsupported project library type %r" % info.kind)
+
+
 def _uid_str(value: Any) -> str:
     """Normalise a uuid column: pg8000 hands back UUID, sqlite hands back str."""
     if value is None:
@@ -577,12 +695,7 @@ class ProjectLibrary:
         with max_connections=100, so that is the whole fleet locked out of
         the library inside five minutes.
         """
-        if self.info.kind == "PostgreSQL":
-            backend: _Backend = _PostgresBackend(self.info)
-        elif self.info.kind == "Disk":
-            backend = _SqliteBackend(self.info)
-        else:
-            raise LibraryUnavailable("unsupported project library type %r" % self.info.kind)
+        backend = _open_backend(self.info)
         self._backend = backend
         try:
             self._project_id = self._find_project_id()
@@ -717,23 +830,7 @@ class ProjectLibrary:
         clip with both has the same path in both, and the video row is the
         one that exists for 98% of them.
         """
-        paths: dict[str, str] = {}
-        for uid, blob in self._query(
-                'SELECT "Sm2MpMedia_id", "Clip" FROM "BtVideoInfo" '
-                'WHERE "Sm2MpMedia_id" IS NOT NULL'):
-            path = clip_path(decompress_blob(blob))
-            if path:
-                paths[_uid_str(uid)] = path
-        for uid, blob in self._query(
-                'SELECT "Sm2MpMedia_id", "Clip" FROM "BtAudioInfo" '
-                'WHERE "Sm2MpMedia_id" IS NOT NULL'):
-            key = _uid_str(uid)
-            if key in paths:
-                continue
-            path = clip_path(decompress_blob(blob))
-            if path:
-                paths[key] = path
-        return paths
+        return _read_paths(self._query)
 
     def pool_paths(self) -> dict[str, str]:
         """uid -> live path, cached until changed() says the library moved."""
@@ -1068,31 +1165,10 @@ class ProjectLibrary:
         pool_uid = _uid_str(rows[0][0]) if rows else ""
         if not pool_uid:
             raise LibraryUnavailable("project %r has no media pool" % self.project_name)
-        rows = self._query(
-            'SELECT "Sm2MpFolder_id", "Name", "Sm2MpFolder_Owner_id", "Sm2MediaPool_id" '
-            'FROM "Sm2MpFolder"')
-        names: dict[str, str] = {}
-        children: dict[str, list[str]] = {}
-        root = ""
-        for folder_id, name, owner, media_pool in rows:
-            key = _uid_str(folder_id)
-            names[key] = str(name or "")
-            children.setdefault(_uid_str(owner), []).append(key)
-            if _uid_str(media_pool) == pool_uid and not _uid_str(owner):
-                root = key
-        if not root:
+        tree = _FolderIndex(self._query(_FOLDERS_SQL)).tree(pool_uid)
+        if tree is None:
             raise LibraryUnavailable(
                 "no root bin for project %r (media pool %s)" % (self.project_name, pool_uid))
-        tree: dict[str, str] = {}
-        stack = [(root, "")]
-        while stack:
-            folder_id, bin_path = stack.pop()
-            if folder_id in tree:
-                continue
-            tree[folder_id] = bin_path
-            for child in children.get(folder_id, []):
-                child_path = (bin_path + "/" + names[child]) if bin_path else names[child]
-                stack.append((child, child_path))
         return tree
 
     def pool_items(self) -> list[dict]:
@@ -1115,24 +1191,162 @@ class ProjectLibrary:
         def work():
             tree = self._folder_tree()
             paths = self.pool_paths()
-            rows = self._query(
-                'SELECT "Sm2MpMedia_id", "Name", "Sm2MpFolder_id" FROM "Sm2MpMedia"')
-            items = []
-            for media_id, name, folder_id in rows:
-                bin_path = tree.get(_uid_str(folder_id))
-                if bin_path is None:
-                    continue                      # another project's bin
-                uid = _uid_str(media_id)
-                items.append({
-                    "file_path": paths.get(uid, ""),
-                    "media_pool_item": None,
-                    "media_pool_uid": uid,
-                    "clip_name": str(name or ""),
-                    "source": "library",
-                    "resolve_project_name": self.project_name,
-                    "bin_path": bin_path,
-                    "proxy_path": "",
-                    "proxy_state": "",
-                })
-            return items
+            return _pool_items(self._query(_MEDIA_SQL), tree, paths, self.project_name)
         return self._retrying(work)
+
+
+# --------------------------------------------------------------------------
+# shared by both readers
+# --------------------------------------------------------------------------
+
+_FOLDERS_SQL = ('SELECT "Sm2MpFolder_id", "Name", "Sm2MpFolder_Owner_id", '
+                '"Sm2MediaPool_id" FROM "Sm2MpFolder"')
+_MEDIA_SQL = 'SELECT "Sm2MpMedia_id", "Name", "Sm2MpFolder_id" FROM "Sm2MpMedia"'
+
+
+def _read_paths(query) -> dict[str, str]:
+    """uid -> live media path for every clip in the library (see
+    ProjectLibrary._load_paths for why it is whole-library)."""
+    paths: dict[str, str] = {}
+    for uid, blob in query(
+            'SELECT "Sm2MpMedia_id", "Clip" FROM "BtVideoInfo" '
+            'WHERE "Sm2MpMedia_id" IS NOT NULL'):
+        path = clip_path(decompress_blob(blob))
+        if path:
+            paths[_uid_str(uid)] = path
+    for uid, blob in query(
+            'SELECT "Sm2MpMedia_id", "Clip" FROM "BtAudioInfo" '
+            'WHERE "Sm2MpMedia_id" IS NOT NULL'):
+        key = _uid_str(uid)
+        if key in paths:
+            continue
+        path = clip_path(decompress_blob(blob))
+        if path:
+            paths[key] = path
+    return paths
+
+
+class _FolderIndex:
+    """Every Sm2MpFolder row of a library, indexed once, so each project's
+    bin tree is a descent in memory rather than another scan of the table
+    (CR-383: the unopened-projects sweep walks every project of a library on
+    one connection, and FF5 holds five of them)."""
+
+    def __init__(self, rows: Iterable[tuple]):
+        self.names: dict[str, str] = {}
+        self.children: dict[str, list[str]] = {}
+        self.roots: dict[str, str] = {}
+        for folder_id, name, owner, media_pool in rows:
+            key = _uid_str(folder_id)
+            self.names[key] = str(name or "")
+            self.children.setdefault(_uid_str(owner), []).append(key)
+            if _uid_str(media_pool) and not _uid_str(owner):
+                self.roots[_uid_str(media_pool)] = key
+
+    def tree(self, pool_uid: str) -> Optional[dict[str, str]]:
+        """folder id -> bin_path below the project's root, or None when no
+        root folder carries this media pool."""
+        root = self.roots.get(pool_uid)
+        if not root:
+            return None
+        tree: dict[str, str] = {}
+        stack = [(root, "")]
+        while stack:
+            folder_id, bin_path = stack.pop()
+            if folder_id in tree:
+                continue
+            tree[folder_id] = bin_path
+            for child in self.children.get(folder_id, []):
+                name = self.names.get(child, "")
+                stack.append((child, (bin_path + "/" + name) if bin_path else name))
+        return tree
+
+
+def _pool_items(rows: Iterable[tuple], tree: dict[str, str], paths: dict[str, str],
+                project_name: str) -> list[dict]:
+    """The pool-item dicts for the media rows that sit in `tree`'s bins."""
+    items = []
+    for media_id, name, folder_id in rows:
+        bin_path = tree.get(_uid_str(folder_id))
+        if bin_path is None:
+            continue                      # another project's bin
+        uid = _uid_str(media_id)
+        items.append({
+            "file_path": paths.get(uid, ""),
+            "media_pool_item": None,
+            "media_pool_uid": uid,
+            "clip_name": str(name or ""),
+            "source": "library",
+            "resolve_project_name": project_name,
+            "bin_path": bin_path,
+            "proxy_path": "",
+            "proxy_state": "",
+        })
+    return items
+
+
+@dataclass
+class LibraryPools:
+    """Every project's media pool in one library, read on one connection.
+
+    `pools` is project name -> pool items (ProjectLibrary.pool_items' shape).
+    `duplicates` are names the library holds more than once: nothing here can
+    tell which row is which project (bug-comp-resolve-8), so they are left
+    out rather than merged. `no_pool` are projects with no root bin, which a
+    half-created project can be.
+    """
+    pools: dict[str, list[dict]]
+    duplicates: list[str]
+    no_pool: list[str]
+
+
+def read_all_pools(info: LibraryInfo) -> LibraryPools:
+    """Every project's media pool in one library. CR-383 (2026-11-08).
+
+    The open-project reader (ProjectLibrary) is scoped to one project and
+    reloads the whole-library path map per instance, so reading a library's
+    five projects through it would be five connections and five scans of
+    BtVideoInfo. This opens ONE connection, reads the path map, the folder
+    table and the media table once each, and builds every project's pool in
+    memory. Same SELECTs, same decoding, same scoping rule (a project's pool
+    is its own folder tree) -- the helpers above are shared with
+    ProjectLibrary so the two can never disagree about a bin.
+
+    Raises LibraryUnavailable and nothing else; always closes what it opened.
+    """
+    backend = _open_backend(info)
+    try:
+        try:
+            projects = backend.query(
+                'SELECT "SM_Project_id", "ProjectName", "MediaPool" FROM "SM_Project"')
+            paths = _read_paths(backend.query)
+            folders = _FolderIndex(backend.query(_FOLDERS_SQL))
+            media = backend.query(_MEDIA_SQL)
+        except LibraryUnavailable:
+            raise
+        except Exception as exc:
+            raise LibraryUnavailable("library read failed: %s" % exc) from exc
+    finally:
+        backend.close()
+
+    ids_by_name: dict[str, set[str]] = {}
+    pool_of: dict[str, str] = {}
+    for project_id, name, pool in projects:
+        text = str(name or "")
+        if not text:
+            continue
+        ids_by_name.setdefault(text, set()).add(_uid_str(project_id))
+        pool_of[text] = _uid_str(pool)
+    pools: dict[str, list[dict]] = {}
+    duplicates: list[str] = []
+    no_pool: list[str] = []
+    for name in sorted(ids_by_name):
+        if len(ids_by_name[name]) > 1:
+            duplicates.append(name)
+            continue
+        tree = folders.tree(pool_of.get(name, ""))
+        if tree is None:
+            no_pool.append(name)
+            continue
+        pools[name] = _pool_items(media, tree, paths, name)
+    return LibraryPools(pools=pools, duplicates=duplicates, no_pool=no_pool)

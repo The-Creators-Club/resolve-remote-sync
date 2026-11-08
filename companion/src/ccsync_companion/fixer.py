@@ -8,7 +8,8 @@ Contract, per SPEC.md:
   - "Fix all": copy file to local_root/<dest>/<filename>, collision -> append
     " (2)", " (3)", ... then relink via mediaPoolItem.ReplaceClip(new_path).
   - Never delete/move the original — copy only, even on ReplaceClip failure.
-  - "Ignore": per-session suppression, keyed by normalized path.
+  - "Ignore" (SKIP FOR NOW): 30-minute suppression, keyed by normalized
+    path (per-session until CR-382, 2026-11-08).
 """
 
 from __future__ import annotations
@@ -61,6 +62,11 @@ FIXER_IGNORES_RETIRED_SUFFIX = ".retired-cr356"
 # be able to grow a JSON file in ~/.ccsync without bound.
 _MAX_SKIPPED_RECORDED = 5000
 
+# CR-382 (2026-11-08): how long SKIP FOR NOW holds a clip back before the
+# popup offers it again. It used to be "until the tray restarts", which on
+# a machine that is never rebooted meant days.
+SKIP_FOR_SECONDS = 30 * 60
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -99,10 +105,11 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> bool:
 
 
 class IgnoreTracker:
-    """Suppression for out-of-tree clips: ONE layer, per session.
+    """Suppression for out-of-tree clips: ONE layer, 30 minutes per skip.
 
-    The per-SESSION set SPEC.md describes: SKIP FOR NOW, keyed by normalized
-    path, gone when the process is. There used to be a second, persisted
+    SKIP FOR NOW, keyed by normalized path. SPEC.md's per-SESSION set until
+    CR-382 (2026-11-08) made each skip run out after SKIP_FOR_SECONDS; it is
+    also gone when the process is. There used to be a second, persisted
     FOLDER layer (RES-12, resilience sweep 2026-08-28, [ ALWAYS LEAVE THIS
     FOLDER ALONE ON THIS COMPUTER ]). CR-356 (2026-09-30) retired it: it
     matched recursively and for ever, so one click for a subtitle file on a
@@ -112,7 +119,7 @@ class IgnoreTracker:
 
     Alongside it, a persisted LEDGER of what has been skipped
     (`skipped_clips.json`, UX-4). That ledger suppresses nothing -- the button
-    still says "this session" and still means it. It exists so a tray restart
+    says "30 minutes" and means it. It exists so a tray restart
     does not erase the fact that 40 clips on this machine are not syncing, and
     so `sync_guard.resolve_health` and the tray line can say so.
 
@@ -120,8 +127,14 @@ class IgnoreTracker:
     popup thread writes through `ignore`.
     """
 
-    def __init__(self, state_dir: Optional[Any] = None) -> None:
-        self._ignored: set[str] = set()
+    def __init__(self, state_dir: Optional[Any] = None,
+                 skip_seconds: float = SKIP_FOR_SECONDS,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        # key -> monotonic time the skip runs out (CR-382). Monotonic so a
+        # clock change or a sleep/resume can never stretch a skip.
+        self._ignored: dict[str, float] = {}
+        self.skip_seconds = float(skip_seconds)
+        self._clock = clock
         self._lock = threading.RLock()
         self._state_dir = Path(state_dir) if state_dir else None
         self._skipped: dict[str, dict[str, Any]] = {}
@@ -184,22 +197,35 @@ class IgnoreTracker:
         return _write_json_atomic(path, {"clips": self._skipped})
 
     # -- session layer -------------------------------------------------
+    def _prune(self, now: float) -> None:
+        """Drop skips whose time is up. Caller holds the lock."""
+        expired = [key for key, until in self._ignored.items() if until <= now]
+        for key in expired:
+            del self._ignored[key]
+
     def is_ignored(self, path: str) -> bool:
         with self._lock:
+            self._prune(self._clock())
             return resolve_bridge._norm_path(path) in self._ignored
 
     def ignore(self, path: str, how: str = "skip") -> None:
-        """SKIP FOR NOW: suppress for THIS session, and record it for ever.
+        """SKIP FOR NOW: suppress for SKIP_FOR_SECONDS, and record it for ever.
 
-        The record is not the suppression (UX-4): an editor who restarts the
-        tray is offered the clip again, exactly as the button's label
-        promises. What survives is the COUNT, which is the only way anyone --
-        the editor at the tray line, the owner on the fleet grid -- learns
-        that this machine holds media that will never reach the server.
+        CR-382 (2026-11-08, owner's order: "it should constantly bother
+        people until they do it"): the skip used to last the SESSION, i.e.
+        until the tray restarted, and Ruskin's tray had just run six days
+        straight. It now runs out after 30 minutes and the watcher's next
+        poll offers the clip again. Pressing it again restarts the 30
+        minutes; it never extends past that.
+
+        The record is not the suppression (UX-4): what survives the skip is
+        the COUNT, which is the only way anyone -- the editor at the tray
+        line, the owner on the fleet grid -- learns that this machine holds
+        media that will never reach the server.
         """
         key = resolve_bridge._norm_path(path)
         with self._lock:
-            self._ignored.add(key)
+            self._ignored[key] = self._clock() + self.skip_seconds
             if self._state_dir is None or not str(path or "").strip():
                 return
             record = self._skipped.get(key)
@@ -229,7 +255,9 @@ class IgnoreTracker:
             self._ignored.clear()
 
     def session_count(self) -> int:
+        """Clips skipped right now (their 30 minutes not yet up)."""
         with self._lock:
+            self._prune(self._clock())
             return len(self._ignored)
 
     def skipped_count(self) -> int:

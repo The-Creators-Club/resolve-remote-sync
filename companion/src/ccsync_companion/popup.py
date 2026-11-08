@@ -1126,7 +1126,7 @@ class PopupDialog:
         # fixer.IgnoreTracker) -- editors read it as "never show me this
         # again", or worse, as doing something to the file (AUDIT_2 UX-13).
         self._ignore_btn = theme.neon_button(
-            tk, btn_bar, "SKIP FOR NOW (this session)", self._on_ignore, primary=False)
+            tk, btn_bar, "SKIP FOR 30 MINUTES", self._on_ignore, primary=False)
         self._ignore_btn.pack(side="left", padx=(0, 18))
         # CR-356 (2026-09-30, owner's order): RES-12's third button, [ ALWAYS
         # LEAVE THIS FOLDER ALONE ON THIS COMPUTER ], is gone. Its rule matched
@@ -1134,7 +1134,9 @@ class PopupDialog:
         # Desktop silently covered a Desktop\Music Docs folder created a day
         # later: 30 licensed tracks cut into an episode, never offered here,
         # never uploaded, offline on every other machine. SKIP FOR NOW is the
-        # only dismissal, and it lasts one session on purpose.
+        # only dismissal. It lasted one session until CR-382 (2026-11-08):
+        # a tray that ran six days held a skip for six days, so it now runs
+        # out after 30 minutes and the label says so.
         self._fix_btn = theme.neon_button(tk, btn_bar, "FIX ALL", self._on_fix_all, primary=True)
         self._fix_btn.pack(side="left")
         # Present only after a run that left failures behind -- a failed file
@@ -2781,7 +2783,7 @@ def show_popup(
                 row["clip_name"], row["file_path"], row["suggested_dest"],
             )
         log.warning(
-            "%d clip(s) auto-skipped for this session -- fix them in Resolve, or use "
+            "%d clip(s) auto-skipped for 30 minutes -- fix them in Resolve, or use "
             "%s once a display is available", len(rows), ui_copy.SCAN_WHOLE_PROJECT,
         )
         try:

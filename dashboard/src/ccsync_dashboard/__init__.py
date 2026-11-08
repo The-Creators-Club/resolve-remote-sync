@@ -33,4 +33,7 @@
 # redeploy with [studio] allow_cli_providers set (CR-374), never by OTA first.
 # 0.7.77 (2026-10-31): originals on request (schema v60, `original_picks`,
 # docs/SELECTIVE_ORIGINALS.md) and CR-379. Deploy it BEFORE companion 0.9.87.
-VERSION = "0.7.77"
+# 0.7.78 (2026-11-08): CR-383, the unopened-projects sweep's report field
+# (`resolve_health.unopened_out_of_tree`, schema v61) and its alert,
+# `unopened_out_of_tree`. Deploy it BEFORE companion 0.9.88.
+VERSION = "0.7.78"

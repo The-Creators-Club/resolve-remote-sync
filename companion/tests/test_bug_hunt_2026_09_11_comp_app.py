@@ -219,6 +219,10 @@ def test_resolve_health_sends_the_documented_keys_and_nothing_else(tmp_path):
         # editing-proxy upgrade gave up. Declared on the dashboard's
         # ResolveHealthIn in the same pass (CR-285N), dashboard first.
         "standins_owed",
+        # CR-383 (2026-11-08): projects nobody has open that hold clips only
+        # this computer has. Declared on ResolveHealthIn in the same pass
+        # (dashboard 0.7.78), dashboard first.
+        "unopened_out_of_tree", "unopened_scan_at",
     }
 
 

@@ -51,6 +51,10 @@ FIELDS: dict[str, tuple[str, ...]] = {
         "capabilities.resolve.project",
         "sync_guard.resolve_health.open_project",
         "sync_guard.resolve_health.project_open",
+        # CR-383 (2026-11-08): the projects NOT open on that computer whose
+        # clips exist only there, by NAME (with a count). The scan time
+        # beside it names nothing and stays.
+        "sync_guard.resolve_health.unopened_out_of_tree",
         "resolve_journals[].project",
         "resolve_journals[].id",
         # G1a review round 1 (2026-09-25): the undo's answer names the

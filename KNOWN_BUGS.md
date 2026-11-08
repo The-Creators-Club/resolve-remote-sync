@@ -34250,3 +34250,127 @@ warnings not errors on a bad value): `lane_a_verify_seconds`,
 `sftp_connections_verify`, `checkers_verify`. Tests:
 `tests/test_lane_a_clean_skip.py` (20); `test_broll_standins.py`'s pinned
 lane A call line gains `verify_only=verify_only` (scope unchanged).
+
+## CR-382 - SKIP FOR NOW held a clip back for as long as the tray ran (six days on Ruskin's machine) - FIXED in repo (companion 0.9.88, unshipped)
+
+Found 2026-11-08 while chasing the CR-383 incident. CR-356 (2026-09-30) had
+already removed the permanent "always leave this folder alone" button, so the
+only dismissal left was SKIP FOR NOW (this session). But "session" meant the
+life of the tray process, and Ruskin's tray had just run from 2026-11-02 to
+2026-11-08 without a restart: a skip pressed on the Monday hid those clips
+until the Sunday. Owner's order: "it should constantly bother people until
+they do it", 30 minutes.
+
+Fix: `fixer.IgnoreTracker` keeps each skip with a monotonic expiry,
+`SKIP_FOR_SECONDS = 30 * 60`; `is_ignored` and `session_count` prune expired
+entries, and the watcher's next poll offers the clip again (the popup snooze
+still spaces repeats at `popup_snooze_seconds`). Pressing it again restarts
+the 30 minutes and never extends past them. The persisted ledger
+(`skipped_clips.json`, UX-4) is untouched: expiry does not erase the record.
+Button relabelled `SKIP FOR 30 MINUTES`; the tray line, Settings and
+diagnostics say "skipped for now". The headless fallback's auto-skip expires
+the same way. `popup_enabled = false` in config.toml still silences the
+popup entirely; it is a hand-edited dev/base-rig key, in no UI and not in
+MACHINE_SETTING_KEYS.
+
+Tests: `tests/test_fixer.py` (expiry, restart-not-extend, ledger survives
+expiry) plus the wording pins in test_popup/test_tray/test_settings_window/
+test_app.
+
+## CR-383 - 45 clips sat on one editor's Desktop for over a week in a project nobody opened, and nothing warned anyone - FIXED in repo (companion 0.9.88 + dashboard 0.7.78, schema v61, unshipped; DEPLOY THE DASHBOARD FIRST)
+
+**Seen 2026-11-08.** The Resolve project "Animals - Pangolins and Bears" in
+the shared postgres project library FF5 had 45 music clips in its
+Master/Music bin linked to `C:\Users\user\Desktop\Music Docs\...` on
+ruskin's PC (DESKTOP-LQQ41TC): outside the sync tree, so never uploaded and
+offline on every other machine. The out-of-tree popup, `resolve_health` and
+the dashboard's `out_of_tree` alert all look ONLY at the project open in
+Resolve on the editor's own machine, and ruskin had not opened that project
+since at least 2026-10-30. The same 45 files had been fixed in three other
+projects on 2026-10-31, the day he opened those. Nobody was told about the
+fourth. The owner's ask: check the projects nobody is looking at, and keep
+bothering the editor until it is fixed.
+
+**Fix, companion (`unopened_scan.py`).** Every `unopened_scan_minutes`
+(new key, default 30, 0 = off; template and `config.example.toml`
+commented out, a warning not an error on a bad value), on its own thread
+`ccsync-unopened-scan` on `_stop_event` (never the watcher's), first pass
+two minutes after start:
+
+- Libraries: GetDatabaseList() through `resolve_bridge.api_call` + the
+  existing `connect()`, and ONLY when the watcher's last poll found the
+  bridge connected (CR-68: a background sweep must never be what knocks on
+  Resolve during its launch window; the lock is released before any SQL);
+  every `postgres project library <name> at <ip>` line in Resolve's log
+  (`library.postgres_libraries_from_log`, the fallback Resolve 21 needs);
+  the `library_db_*` overrides; and every Project.db under the disk
+  library folders (`library.disk_project_dbs`, bounded at 500 projects).
+  A disk library created outside Resolve's Support folder is not found
+  (known gap).
+- Reading: `library.read_all_pools(info)` opens ONE connection per library
+  and reads the path map, the folder table and the media table once each,
+  then builds every project's pool in memory. `ProjectLibrary` and it share
+  the extracted helpers (`_open_backend`, `_read_paths`, `_FolderIndex`,
+  `_pool_items`), so the two readers cannot disagree about a bin. All
+  SELECTs. A name the library holds twice is left out and logged once
+  (bug-comp-resolve-8's rule); an unreachable library is logged once (and
+  once more when it answers again) and skipped; nothing readable at all
+  keeps the previous verdict rather than reporting "clean".
+- Verdict: a project is flagged when at least one clip is `OUT_OF_TREE` by
+  `paths.classify_path` (which already means "the file exists on THIS
+  computer", so editor A is never told about editor B's Desktop) AND at
+  least one other clip lives in the tree under a project root
+  (`rclone_lane._project_rel_for_path`, known rels first, the
+  year/series/project heuristic as the fallback because an unopened project
+  is often not ticked here). CR-232's rule: a personal project entirely off
+  the tree stays silent. Skipped: the project open here (the watcher owns
+  it), `ignored_resolve_projects` names, and the whole pass while local_root
+  is broken, the drive is out or a grade swap has P: on the server (the
+  `_classify_pool_once` refusals). The count is unique files, which is what
+  FIX ALL lists. The skip tracker is NOT consulted: since CR-356/CR-382
+  nothing persisted suppresses an out-of-tree clip.
+- Nag: a tray balloon on the first finding and every 30 minutes after it
+  until a sweep comes back clean ("45 clips in 'Animals - Pangolins and
+  Bears' are only on this computer (Desktop\Music Docs). Open that project
+  in Resolve and press FIX ALL."). Never about the project open at that
+  moment; off where `popup_enabled = false` (no FIX ALL to press there; the
+  report still carries it). Also on the tray's Resolve count line ("1 other
+  project with clips only here") and the Settings window's RESOLVE section.
+- Opening the project IS the fix path, and it already surfaces bin clips,
+  not just timeline ones: the media-tree pass (`media_tree_refresh_interval`,
+  120 s) walks the WHOLE pool and `_classify_pool_once` hands OUT_OF_TREE
+  clips to the FIX ALL popup, subject to the usual popup snooze and
+  `popup_enabled`.
+- Report: `sync_guard.resolve_health.unopened_out_of_tree` =
+  `[{"project", "count"}]` (largest first, cap 20, never a path) and
+  `unopened_scan_at`; both None until a sweep has completed. The list is
+  LG-1 `resolve_project` data: a row in `telemetry_policy.FIELDS` and the
+  dashboard's `telemetry_fields.FIELDS` (pinned equal), a line in
+  `docs/legal/TELEMETRY.md`; the scan time names nothing and stays.
+- Tests: the conftest library guard now also stubs
+  `postgres_libraries_from_log`, `disk_project_dbs` and `read_all_pools`
+  (a started app's sweep thread would otherwise read the fleet's FF5 from
+  the base rig two minutes into a test run). `tests/test_unopened_scan.py`,
+  the CR-383 block in `tests/test_library.py`, and the telemetry pins.
+
+**Fix, dashboard.** `ResolveHealthIn` declares `unopened_out_of_tree`
+(`UnopenedProjectIn`, truncated at 20) and `unopened_scan_at` (SYS-3:
+declared before the companion ships). Schema v61 adds
+`machine_state.resolve_unopened_out_of_tree` (JSON) and
+`resolve_unopened_scan_at`, written by `store_resolve_health` on the LATCH
+rule (an absent list clears the old one) and NULLed by
+`_clear_categories` under `resolve_project`. New alert kind
+`unopened_out_of_tree` (SEV_WARN, "projects and footage" group), subject
+`editor/machine`, title "footage on one computer only in '<project>'" (and
+"N other projects"); withdrawn without a mail when the computer or site
+withholds `resolve_project`. `_synced_project` is used for the detail's
+slugs, NOT as a filter: the companion's evidence (a clip under a project
+root) is stronger than a name match, and a project nobody opens is exactly
+the one whose name nobody mapped, so filtering on it would silence this
+incident. The fleet WHY sentence, the [ DETAILS ] notes and a fleet-grid
+chip say it too. Tests: `dashboard/tests/test_cr383_unopened_out_of_tree.py`;
+`test_original_picks.py`'s head pin is now `>= 60`.
+
+**Deploy order: the dashboard first.** A 0.7.77 dashboard drops the new
+key inside `resolve_health` and names it as an ignored section on every
+0.9.88 report.

@@ -56,6 +56,10 @@ def _full_payload() -> dict:
             "resolve_health": {"open_project": "FF5 Civil Defence",
                                "project_open": "FF5 Civil Defence",
                                "missing": 1,
+                               "unopened_out_of_tree": [
+                                   {"project": "Animals - Pangolins and Bears",
+                                    "count": 45}],
+                               "unopened_scan_at": "2026-11-08T10:00:00Z",
                                "missing_clips": [{"name": "a", "path": "P:/x/a.mov"}],
                                "non_canonical_refused": [{"name": "b", "path": "F:/b.mov"}]},
             "sync_conflicts": {"count": 2, "paths": ["P:/x/a.sync-conflict.mov"]},

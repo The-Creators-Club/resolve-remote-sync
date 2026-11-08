@@ -96,12 +96,16 @@ PINNED_RESOLVE_HEALTH = sorted([
     "bad_prefix", "connected", "ignored_this_session",
     "last_scan_at", "missing", "missing_clips", "non_canonical_refused",
     "open_project", "out_of_tree", "project_open", "proxy_attach", "proxy_gaps",
-    "skipped_ever", "standins_owed", "stills", "wedged_call", "wedged_seconds",
+    "skipped_ever", "standins_owed", "stills", "unopened_out_of_tree",
+    "unopened_scan_at", "wedged_call", "wedged_seconds",
 ])
 NOT_PERSONAL_RESOLVE_HEALTH = {
     "bad_prefix", "connected", "ignored_this_session",
     "last_scan_at", "missing", "out_of_tree", "proxy_attach", "proxy_gaps",
     "skipped_ever", "standins_owed", "wedged_call", "wedged_seconds",
+    # CR-383: when the unopened-projects sweep last finished. Its list
+    # (`unopened_out_of_tree`) names projects and is a resolve_project row.
+    "unopened_scan_at",
 }
 # `stills.path` is the stills folder the site configured.
 STILL_SENT_RESOLVE_HEALTH = {"stills"}
@@ -265,3 +269,19 @@ def test_the_local_file_names_in_skipped_exists_are_switchable():
 def test_the_undo_answer_is_switchable_with_the_project_name():
     assert "resolve_undo_applied[].detail" in tp.FIELDS[tp.RESOLVE_PROJECT]
     assert tp.MASKED["resolve_undo_applied[].detail"] == "undo_detail"
+
+
+def test_the_unopened_projects_list_is_switchable_with_the_project_name():
+    # CR-383 (2026-11-08): project names, so the resolve_project switch
+    # withholds them; the scan time beside them names nothing.
+    assert ("sync_guard.resolve_health.unopened_out_of_tree"
+            in tp.FIELDS[tp.RESOLVE_PROJECT])
+    payload = {"sync_guard": {"resolve_health": {
+        "unopened_out_of_tree": [{"project": "Animals - Pangolins and Bears", "count": 45}],
+        "unopened_scan_at": "2026-11-08T10:00:00Z", "out_of_tree": 0}}}
+    eff = tp.effective({"report_resolve_project": False}, None)
+    health = tp.strip(payload, eff)["sync_guard"]["resolve_health"]
+    assert "unopened_out_of_tree" not in health
+    assert health["unopened_scan_at"] == "2026-11-08T10:00:00Z"
+    kept = tp.strip(payload, tp.effective({}, None))["sync_guard"]["resolve_health"]
+    assert kept["unopened_out_of_tree"][0]["count"] == 45

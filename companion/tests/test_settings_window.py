@@ -651,7 +651,7 @@ def test_the_skipped_clip_line_appears_in_sync_lanes():
     app = _resolve_app(ignored_this_session=14)
     lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     # comp-ui-4 (2026-09-11): "clip(s)" -> ui_copy.count.
-    assert any("14 clips skipped this session" in l for l in lines)
+    assert any("14 clips skipped for now" in l for l in lines)
 
 
 def test_no_leave_alone_lines_or_forget_buttons_any_more():

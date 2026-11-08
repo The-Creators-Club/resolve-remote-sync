@@ -7293,7 +7293,7 @@ def test_diagnostics_names_the_clips_somebody_dismissed(tmp_path):
     text = app.build_diagnostics()
     assert "resolve media:" in text
     assert "65 clip(s) outside the tree" in text
-    assert "1 skipped this session" in text
+    assert "1 skipped for now (30 min)" in text
 
 
 def test_the_mapping_toast_tells_the_editor_the_truth(tmp_path, monkeypatch):

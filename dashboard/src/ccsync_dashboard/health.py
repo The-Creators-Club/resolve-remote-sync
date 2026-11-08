@@ -1362,6 +1362,12 @@ def detail_notes(row: Mapping[str, Any]) -> list[str]:
     if out_of_tree:
         notes.append(f"{out_of_tree} clip{'' if out_of_tree == 1 else 's'} "
                      "outside the tree")
+    # CR-383 (2026-11-08): projects NOT open there with clips only there.
+    unopened = guard.get("resolve_unopened_out_of_tree") or []
+    if unopened:
+        n = len(unopened)
+        notes.append(f"{n} project{'' if n == 1 else 's'} not open with clips "
+                     "only on this computer")
     stray = guard.get("stray_projects_count")
     if stray:
         notes.append(f"{stray} stray project folder{'' if stray == 1 else 's'}")

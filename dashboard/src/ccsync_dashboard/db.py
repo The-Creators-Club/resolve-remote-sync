@@ -2094,6 +2094,16 @@ CREATE TABLE IF NOT EXISTS original_picks (
 CREATE INDEX IF NOT EXISTS ix_original_picks_project ON original_picks(project_slug);
 """
 
+# CR-383 (2026-11-08): the Resolve projects NOT open on a computer whose clips
+# exist only on that computer (companion 0.9.88, unopened_scan.py). JSON
+# [{project, count}] rather than a table: it is one machine's latest verdict,
+# read whole by one alert and two sentences, and replaced whole on every
+# report like the v38 counters beside it. NULL is "has not said".
+SCHEMA_V61 = """
+ALTER TABLE machine_state ADD COLUMN resolve_unopened_out_of_tree TEXT;
+ALTER TABLE machine_state ADD COLUMN resolve_unopened_scan_at TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -2257,6 +2267,9 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # 60: originals on request (docs/SELECTIVE_ORIGINALS.md, 2026-10-31). One
     # new table, and gapless like every one before it.
     (60, SCHEMA_V60),
+    # 61: the unopened-projects sweep (CR-383, 2026-11-08). Two nullable
+    # columns, and gapless like every one before it.
+    (61, SCHEMA_V61),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -7844,6 +7857,31 @@ def fetch_alerts(
     return [dict(r) for r in conn.execute(q, params)]
 
 
+def _unopened_list(text: Any) -> list[dict[str, Any]] | None:
+    """The v61 column read back: [{project, count}], or None for NULL and
+    for anything damaged ("cannot tell" is never "nothing found")."""
+    if text is None:
+        return None
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    out = []
+    for entry in data:
+        if not isinstance(entry, Mapping):
+            continue
+        name = str(entry.get("project") or "").strip()
+        try:
+            count = max(0, int(entry.get("count") or 0))
+        except (TypeError, ValueError):
+            count = 0
+        if name:
+            out.append({"project": name, "count": count})
+    return out
+
+
 def store_resolve_health(
     conn: sqlite3.Connection, editor: str, machine: str,
     guard: Mapping[str, Any] | None,
@@ -7870,13 +7908,17 @@ def store_resolve_health(
               SET resolve_out_of_tree=?, resolve_bad_prefix=?, resolve_missing=?,
                   resolve_ignored=?, resolve_last_scan_at=?,
                   stray_projects_count=?, stray_projects_bytes=?,
-                  moved_project_dirs_count=?, ingest_staging_bytes=?
+                  moved_project_dirs_count=?, ingest_staging_bytes=?,
+                  resolve_unopened_out_of_tree=?, resolve_unopened_scan_at=?
             WHERE editor_username=? AND machine=?""",
         (guard.get("resolve_out_of_tree"), guard.get("resolve_bad_prefix"),
          guard.get("resolve_missing"), guard.get("resolve_ignored"),
          guard.get("resolve_last_scan_at"),
          guard.get("stray_projects_count"), guard.get("stray_projects_bytes"),
          guard.get("moved_project_dirs_count"), guard.get("ingest_staging_bytes"),
+         # CR-383 (v61): same LATCH rule - an absent list clears the old one.
+         guard.get("resolve_unopened_out_of_tree"),
+         guard.get("resolve_unopened_scan_at"),
          editor, machine),
     )
     store_resolve_health_detail(conn, editor, machine, guard)
@@ -8845,6 +8887,12 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
             "stray_projects_bytes": r["stray_projects_bytes"],
             "moved_project_dirs_count": r["moved_project_dirs_count"],
             "ingest_staging_bytes": r["ingest_staging_bytes"],
+            # v61 (CR-383, 2026-11-08): [{project, count}] for the projects
+            # NOT open on that computer whose clips exist only there, or None
+            # when it has not said (never a reassuring []).
+            "resolve_unopened_out_of_tree": _unopened_list(
+                r["resolve_unopened_out_of_tree"]),
+            "resolve_unopened_scan_at": r["resolve_unopened_scan_at"],
             # v47 (CMEDIA-3, usability sweep 2026-09-04). All NULL is "a
             # companion too old to say", which the reader must not render as
             # bound: the b-roll and music pages' one dependency on this
@@ -8877,6 +8925,7 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
                       resolve_ignored, resolve_last_scan_at,
                       stray_projects_count, stray_projects_bytes,
                       moved_project_dirs_count, ingest_staging_bytes,
+                      resolve_unopened_out_of_tree, resolve_unopened_scan_at,
                       loopback_enabled, loopback_bound, loopback_port,
                       loopback_error, loopback_since
                FROM machine_state"""
@@ -9582,6 +9631,12 @@ def _clear_categories(conn: sqlite3.Connection, editor: str, machine: str,
                   AND (resolve_project IS NOT NULL OR cap_resolve_project IS NOT NULL)""",
             (editor, machine)).rowcount
         meta_delete(conn, f"{RESOLVE_HEALTH_META_PREFIX}{editor}/{machine}")
+        # CR-383 (2026-11-08): the unopened-projects list is project NAMES.
+        counts["machine_state.resolve_unopened_out_of_tree"] = conn.execute(
+            """UPDATE machine_state SET resolve_unopened_out_of_tree=NULL
+                WHERE editor_username=? AND machine=?
+                  AND resolve_unopened_out_of_tree IS NOT NULL""",
+            (editor, machine)).rowcount
         # Note J (plan §4.1): the journals are KEPT with their project name
         # blanked, the shape the companion sends when it withholds the name
         # and undo keys on the journal id. If G2a finds undo keys on the name

@@ -2811,6 +2811,12 @@ def resolve_count_phrases(health: Optional[dict]) -> list[str]:
         n = _count(key)
         if n:
             out.append(singular if n == 1 else plural.format(n=n))
+    # CR-383 (2026-11-08): projects NOT open here with clips only on this
+    # computer (unopened_scan.py). None before the first sweep: nothing said.
+    unopened = health.get("unopened_out_of_tree")
+    if isinstance(unopened, list) and unopened:
+        n = len(unopened)
+        out.append(f"{n} other project{'' if n == 1 else 's'} with clips only here")
     attach = health.get("proxy_attach")
     if isinstance(attach, dict):
         try:
@@ -3795,7 +3801,8 @@ def _ignored_line(guard: dict) -> Optional[str]:
     if not session:
         return None
     # comp-ui-4 (2026-09-11): real plurals here too.
-    return (f"⚠ {ui_copy.count(session, 'clip')} skipped this session and still "
+    # CR-382 (2026-11-08): a skip lasts 30 minutes now, not the session.
+    return (f"⚠ {ui_copy.count(session, 'clip')} skipped for now and still "
             "not syncing - Settings > SCAN WHOLE PROJECT offers them again")
 
 

@@ -275,6 +275,46 @@ def test_the_folder_layer_api_is_gone():
         assert not hasattr(tracker, name), name
 
 
+def test_a_skip_runs_out_after_thirty_minutes():
+    """CR-382 (2026-11-08): SKIP FOR NOW used to hold until the tray
+    restarted, which on Ruskin's machine was six days. It now holds 30
+    minutes, then the clip is offered again."""
+    now = [1000.0]
+    tracker = fixer.IgnoreTracker(clock=lambda: now[0])
+    assert fixer.SKIP_FOR_SECONDS == 30 * 60
+    path = r"C:\Users\user\Desktop\Music Docs\a.aac"
+    tracker.ignore(path)
+    now[0] += 29 * 60
+    assert tracker.is_ignored(path) is True
+    assert tracker.session_count() == 1
+    now[0] += 60
+    assert tracker.is_ignored(path) is False
+    assert tracker.session_count() == 0
+
+
+def test_skipping_again_restarts_the_thirty_minutes_never_more():
+    now = [0.0]
+    tracker = fixer.IgnoreTracker(clock=lambda: now[0])
+    tracker.ignore("a.aac")
+    now[0] += 20 * 60
+    tracker.ignore("a.aac")
+    now[0] += 29 * 60
+    assert tracker.is_ignored("a.aac") is True
+    now[0] += 60
+    assert tracker.is_ignored("a.aac") is False
+
+
+def test_an_expired_skip_keeps_its_ledger_record(tmp_path):
+    """The persisted count is a record, not the suppression: expiry must not
+    erase the fact that the clip was skipped."""
+    now = [0.0]
+    tracker = fixer.IgnoreTracker(tmp_path / "state", clock=lambda: now[0])
+    tracker.ignore("a.aac")
+    now[0] += fixer.SKIP_FOR_SECONDS + 1
+    assert tracker.is_ignored("a.aac") is False
+    assert tracker.skipped_count() == 1
+
+
 def test_a_tracker_with_no_state_dir_is_the_old_session_only_behaviour():
     tracker = fixer.IgnoreTracker()
     tracker.ignore("clip.mov")
@@ -284,7 +324,7 @@ def test_a_tracker_with_no_state_dir_is_the_old_session_only_behaviour():
 
 def test_skipped_clips_are_recorded_across_a_restart(tmp_path):
     """UX-4: the ledger is a RECORD, not a suppression list. A restart offers
-    the clip again (the button says "this session" and means it) -- what
+    the clip again (a skip lasts 30 minutes at most, CR-382) -- what
     survives is the COUNT nobody could see before."""
     state = tmp_path / "state"
     tracker = fixer.IgnoreTracker(state)

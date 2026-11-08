@@ -334,7 +334,8 @@ def test_perform_fix_all_continues_past_failures():
 
 
 def test_the_folder_button_and_its_helpers_are_gone():
-    """CR-356: the only dismissal left is SKIP FOR NOW (this session)."""
+    """CR-356: the only dismissal left is SKIP FOR NOW, which CR-382
+    (2026-11-08) limited to 30 minutes and labelled so."""
     import inspect
 
     from ccsync_companion import popup
@@ -345,7 +346,8 @@ def test_the_folder_button_and_its_helpers_are_gone():
     assert not hasattr(popup.PopupDialog, "_on_ignore_folder")
     assert "_folder_btn" not in popup.PopupDialog.WIDGET_ATTRS
     source = inspect.getsource(popup.PopupDialog)
-    assert '"SKIP FOR NOW (this session)"' in source
+    assert '"SKIP FOR 30 MINUTES"' in source
+    assert '"SKIP FOR NOW (this session)"' not in source
     assert "self._folder_btn" not in source
 
 
@@ -1170,7 +1172,7 @@ def test_end_to_end_skipped_file_is_never_relinked_in_resolve(tmp_path):
 
 def test_a_skipped_file_is_not_added_to_the_ignore_tracker(tmp_path):
     """CHOSEN SEMANTICS: skipping ONE copy attempt is not "never offer me
-    this clip again". Only the popup's [ SKIP FOR NOW (this session) ] button
+    this clip again". Only the popup's [ SKIP FOR 30 MINUTES ] button
     (perform_ignore_all) touches the IgnoreTracker; an abandoned copy leaves
     it alone, so the clip is offered again on the next scan."""
     from ccsync_companion import popup

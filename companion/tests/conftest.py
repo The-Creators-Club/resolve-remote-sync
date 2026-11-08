@@ -200,6 +200,17 @@ def _no_live_project_library(request, monkeypatch):
         yield
         return
     monkeypatch.setattr(library, "locate", lambda *a, **k: None)
+    # CR-383 (2026-11-08): the unopened-projects sweep finds EVERY library
+    # the same way (Resolve's log, the disk library folders) and reads them
+    # whole. A test that starts the app starts that thread; on the base rig
+    # it would read the fleet's FF5 over the network two minutes later.
+
+    def _no_library(*_a, **_k):
+        raise library.LibraryUnavailable("no live project library in tests")
+
+    monkeypatch.setattr(library, "postgres_libraries_from_log", lambda: [])
+    monkeypatch.setattr(library, "disk_project_dbs", lambda: [])
+    monkeypatch.setattr(library, "read_all_pools", _no_library)
     yield
 
 

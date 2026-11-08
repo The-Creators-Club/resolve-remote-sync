@@ -713,6 +713,15 @@ keep_awake_while_syncing = true
 # value shown IS the default, commented out for the reason given above.
 # drive_reminder_minutes = 30
 
+# CR-383: how often (minutes) every project in this computer's Resolve project
+# libraries is read for clips that exist only on this computer, outside the
+# sync folder, in projects not open here. While any are found the tray reminds
+# every 30 minutes until a check comes back clean (open the project and press
+# FIX ALL). Libraries are found from Resolve's own log and its disk library
+# folders, and read with SELECTs only. 0 turns the check off. The value shown
+# IS the default, commented out for the reason given above.
+# unopened_scan_minutes = 30
+
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and
 # dashboard reporting keep working; all sync lanes stay off.

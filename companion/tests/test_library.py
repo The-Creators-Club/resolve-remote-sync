@@ -1041,3 +1041,142 @@ def test_locate_accepts_a_host_override_with_no_log_at_all(tmp_path, monkeypatch
     info = library.locate(None, "Civil Defence", {"library_db_host": "10.1.1.1",
                                                   "library_db_name": "FF5"})
     assert (info.kind, info.host, info.name) == ("PostgreSQL", "10.1.1.1", "FF5")
+
+
+# --------------------------------------------------------------------------
+# every project of a library (CR-383, 2026-11-08)
+# --------------------------------------------------------------------------
+
+def _two_projects(conn):
+    """FF5's shape: several projects in ONE library, each with its own bins."""
+    b = Builder(conn)
+    pool_a = _uid("pool/Pangolins")
+    b.project("Animals - Pangolins and Bears", pool_a)
+    root_a = b.folder("ra", "Master", media_pool=pool_a)
+    music = b.folder("music", "Music", owner=root_a)
+    b.clip("a1", "track.wav", music, r"C:\Users\user\Desktop\Music Docs", "track.wav",
+           audio_only=True)
+    b.clip("a2", "A001.braw", root_a, r"P:\Projects\2026\Animals\Pangolins\Footage",
+           "A001.braw")
+    pool_b = _uid("pool/Elections")
+    b.project("Elections", pool_b)
+    root_b = b.folder("rb", "Master", media_pool=pool_b)
+    b.clip("b1", "e.mov", root_b, r"P:\Projects\2026\FF5\Elections", "e.mov")
+    return b
+
+
+def test_read_all_pools_reads_every_project_on_one_connection(db, monkeypatch):
+    conn, path = db
+    _two_projects(conn)
+    conn.commit()
+
+    opened = []
+    real = library._open_backend
+
+    def counting(info):
+        opened.append(info)
+        return real(info)
+
+    monkeypatch.setattr(library, "_open_backend", counting)
+    info = library.LibraryInfo(kind="Disk", name="Local", sqlite_path=str(path))
+    result = library.read_all_pools(info)
+    assert len(opened) == 1
+    assert sorted(result.pools) == ["Animals - Pangolins and Bears", "Elections"]
+    pangolins = {i["clip_name"]: i for i in result.pools["Animals - Pangolins and Bears"]}
+    assert pangolins["track.wav"]["file_path"] == r"C:\Users\user\Desktop\Music Docs\track.wav"
+    assert pangolins["track.wav"]["bin_path"] == "Music"
+    assert pangolins["A001.braw"]["bin_path"] == ""
+    assert [i["clip_name"] for i in result.pools["Elections"]] == ["e.mov"]
+    assert result.duplicates == [] and result.no_pool == []
+
+
+def test_read_all_pools_matches_the_open_project_reader(db):
+    """One set of helpers behind both readers: the two must agree item for
+    item, or the sweep and the popup would disagree about a bin."""
+    conn, path = db
+    _two_projects(conn)
+    conn.commit()
+    info = library.LibraryInfo(kind="Disk", name="Local", sqlite_path=str(path))
+    every = library.read_all_pools(info).pools
+    for name in every:
+        lib = library.ProjectLibrary(info, name)
+        try:
+            key = lambda i: i["media_pool_uid"]
+            assert sorted(lib.pool_items(), key=key) == sorted(every[name], key=key)
+        finally:
+            lib.close()
+
+
+def test_read_all_pools_leaves_out_a_name_held_twice(db):
+    """bug-comp-resolve-8's rule: nothing in a row says which one is which."""
+    conn, path = db
+    b = _two_projects(conn)
+    conn.execute(
+        'INSERT INTO "SM_Project" ("SM_Project_id","ProjectName","MediaPool",'
+        '"LastModTimeInSecs","UpToDate") VALUES (?,?,?,?,?)',
+        (_uid("project/second Elections"), "Elections", _uid("pool/E2"), 1, 0))
+    b.folder("re2", "Master", media_pool=_uid("pool/E2"))
+    conn.commit()
+    info = library.LibraryInfo(kind="Disk", name="Local", sqlite_path=str(path))
+    result = library.read_all_pools(info)
+    assert result.duplicates == ["Elections"]
+    assert sorted(result.pools) == ["Animals - Pangolins and Bears"]
+
+
+def test_read_all_pools_is_unavailable_for_a_dead_library():
+    info = library.LibraryInfo(kind="PostgreSQL", name="FF5", host="127.0.0.1", port=1)
+    with pytest.raises(library.LibraryUnavailable):
+        library.read_all_pools(info)
+
+
+def test_read_all_pools_closes_its_connection_when_a_query_fails(monkeypatch):
+    monkeypatch.setattr(_FakeBackend, "opened", [], raising=False)
+    monkeypatch.setattr(library, "_PostgresBackend", _FakeBackend)
+    with pytest.raises(library.LibraryUnavailable):
+        library.read_all_pools(library.LibraryInfo(kind="PostgreSQL", name="FF5",
+                                                   host="10.0.0.1"))
+    assert [b.closed for b in _FakeBackend.opened] == [True]
+
+
+def test_every_postgres_library_in_the_log_is_listed(fake_log):
+    fake_log(WINDOWS_LOG + "[0x1] 25.08 09:00:01.200 | postgres project library FF4 "
+             "at 10.0.0.9 version 13.23 (ok)\n")
+    found = library.postgres_libraries_from_log()
+    assert [(i.kind, i.name, i.host) for i in found] == [
+        ("PostgreSQL", "FF4", "10.0.0.9"), ("PostgreSQL", "FF5", "100.71.216.3")]
+
+
+def test_database_list_keeps_the_postgres_entries_and_never_raises():
+    class Manager:
+        def GetDatabaseList(self):
+            return [{"DbType": "PostgreSQL", "DbName": "FF5", "IpAddress": "100.71.216.3"},
+                    {"DbType": "Disk", "DbName": "Local Database"}]
+
+    class Resolve:
+        def GetProjectManager(self):
+            return Manager()
+
+    assert [(i.name, i.host) for i in library.database_list(Resolve())] == [
+        ("FF5", "100.71.216.3")]
+
+    class Resolve21:
+        def GetProjectManager(self):
+            raise RuntimeError("went away")
+
+    assert library.database_list(Resolve21()) == []
+    assert library.database_list(None) == []
+
+
+def test_disk_project_dbs_finds_every_project_in_every_disk_library(fake_log):
+    support = fake_log(MACOS_LOG)
+    base = support / "Resolve Project Library"
+    local = base / "Resolve Projects" / "Users" / "guest" / "Projects"
+    named = base / "Archive" / "Resolve Projects" / "Users" / "guest" / "Projects"
+    for db_path in (local / "Reef" / "Project.db",
+                    local / "Folder A" / "Nested" / "Project.db",
+                    named / "Old Show" / "Project.db"):
+        db_path.parent.mkdir(parents=True)
+        db_path.write_bytes(b"")
+    found = sorted(library.disk_project_dbs())
+    assert [(name, os.path.basename(os.path.dirname(p))) for name, p in found] == [
+        ("Archive", "Old Show"), ("Local Database", "Nested"), ("Local Database", "Reef")]

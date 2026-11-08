@@ -213,7 +213,11 @@ class FakeMediaPool:
             return self.import_result
         items = []
         for path in paths:
-            item = FakeMediaPoolItem(path, name=os.path.basename(path))
+            # Either separator (2026-11-08): the tests feed Windows spellings
+            # ("P:\\a.mp4"), and os.path.basename on the macOS runner left the
+            # whole string as the clip name, failing two tests there since
+            # 2026-11-01. Resolve names a clip after the file on any host.
+            item = FakeMediaPoolItem(path, name=path.replace("\\", "/").rsplit("/", 1)[-1])
             self._current.add_clip(item)
             items.append(item)
         return items

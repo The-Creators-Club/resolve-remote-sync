@@ -360,6 +360,12 @@ def test_detect_resolve_never_claims_an_edition(tmp_path, monkeypatch):
     assert rp.detect_resolve()["installed"] is False
 
 
+# Windows hosts only (2026-11-08): this checks a REAL file at a path built
+# from a backslash-separated constant, and on the macOS runner a backslash is
+# part of a file name, not a separator -- so the test failed there on every
+# run since 2026-11-01 while the code it covers only ever runs on Windows.
+@pytest.mark.skipif(__import__("sys").platform != "win32",
+                    reason="builds a real Windows path on disk")
 def test_detect_resolve_windows_default_path_present_and_absent(monkeypatch, tmp_path):
     # CR-373 / GL-29 (2026-10-07): a missing constant was swallowed and every
     # Windows seat answered installed=None. No env override here on purpose.

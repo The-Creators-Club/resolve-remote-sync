@@ -1753,7 +1753,11 @@ def test_a_wedged_call_is_named_in_the_log_by_the_thread_stuck_behind_it(
             pass
     stuck.join(timeout=5.0)
 
-    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    # ccsync.resolve only (2026-11-08): caplog collects every logger, and on
+    # the release-windows runner a Timeline Cards role thread left running by
+    # an earlier test logged three WARNINGs of its own into this window.
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno >= logging.WARNING and r.name == "ccsync.resolve"]
     # ONE line per episode, not one per timeout per waiting thread: four
     # threads behind a wedge would otherwise flood the rotating log.
     assert len(warnings) == 1

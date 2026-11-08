@@ -182,6 +182,36 @@ class TestNothingPassesOnTrust:
         result = _scan(component, tmp_path)
         assert any("no installed distribution" in f for f in result.failures)
 
+    def test_a_versioninfo_call_in_the_exe_toc_is_read_not_refused(self, tmp_path):
+        """2026-11-08: PyInstaller writes the VERSIONINFO resource into
+        EXE-00.toc as a constructor call, and every Windows release build
+        since 2026-11-01 stopped at CANNOT SCAN. The triples beside it must
+        still be read, so a stray file in the same TOC still fails."""
+        site, component = _world(tmp_path, [])
+        stray = site / "mystery.py"
+        stray.write_text("", encoding="utf-8")
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "EXE-00.toc").write_text(
+            "('dist/ccsync-companion.exe',\n False,\n ['icon.ico'],\n"
+            " versioninfo.VSVersionInfo(ffi=versioninfo.FixedFileInfo("
+            "filevers=(0, 9, 88, 0), mask=0x3f), kids=[]),\n"
+            f" [('mystery', {str(stray)!r}, 'PYMODULE')])\n",
+            encoding="utf-8")
+        result = _scan(component, tmp_path)
+        assert any("no installed distribution" in f for f in result.failures)
+
+    def test_a_toc_that_is_not_literals_still_cannot_scan(self, tmp_path):
+        """Only CALLS are neutralised: anything else unreadable is still a
+        failed build, never an empty (and therefore passing) scan."""
+        _site, component = _world(tmp_path, [])
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "EXE-00.toc").write_text("('a', some_name, 'b')\n", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            _scan(component, tmp_path)
+        assert exc.value.code == 2
+
     def test_no_toc_is_cannot_scan_not_ok(self, tmp_path):
         _site, component = _world(tmp_path, [])
         (tmp_path / "work").mkdir()

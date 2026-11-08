@@ -169,11 +169,36 @@ def read_tocs(workpath: Path) -> list[tuple[str, str, str]]:
     entries: list[tuple[str, str, str]] = []
     for toc in tocs:
         try:
-            data = ast.literal_eval(toc.read_text(encoding="utf-8"))
+            data = _literal_toc(toc.read_text(encoding="utf-8"))
         except (ValueError, SyntaxError, OSError) as exc:
             raise SystemExit(_die(f"{toc} did not parse as a TOC ({exc})"))
         _walk(data, entries)
     return entries
+
+
+class _CallsToNone(ast.NodeTransformer):
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        return ast.copy_location(ast.Constant(value=None), node)
+
+
+def _literal_toc(text: str) -> object:
+    """A TOC file as Python literals, with any constructor call read as None.
+
+    2026-11-08: since the VERSIONINFO resource arrived (CR-373 / GL-30,
+    build.spec `version=`), PyInstaller writes the parsed resource into
+    EXE-00.toc as `versioninfo.VSVersionInfo(...)` -- a call, which
+    ast.literal_eval refuses -- and every Windows release build stopped at
+    "CANNOT SCAN" from 2026-11-01 on. Only call nodes are neutralised: the
+    (dest, source, typecode) triples this scan reads are plain strings and
+    pass through untouched, and anything else that is not a literal still
+    refuses to parse, so a TOC we cannot read is still a failed build.
+    """
+    try:
+        return ast.literal_eval(text)
+    except ValueError:
+        tree = ast.parse(text, mode="eval")
+        tree = ast.fix_missing_locations(_CallsToNone().visit(tree))
+        return ast.literal_eval(tree)
 
 
 def _walk(node: object, out: list[tuple[str, str, str]]) -> None:

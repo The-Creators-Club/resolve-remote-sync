@@ -249,7 +249,10 @@ _CSRF_EXEMPT_RE = re.compile(
     r"^(/api/v1/jobs/(claim|\d+/(heartbeat|result))"
     r"|/cards/agent/(state|result)"
     # the companion's card reports and card-copy receipts (sorter.py)
-    r"|/sorter/agent/cards|/sorter/agent/ingest/\d+/(receipt|progress))$")
+    r"|/sorter/agent/cards|/sorter/agent/ingest/\d+/(receipt|progress)"
+    # ...and the ledger browser's: volume reports, a drive scan's chunks, finish
+    # and progress, and the copies a companion filed (sorter.py)
+    r"|/sorter/agent/volumes|/sorter/agent/ledger/(scan/\d+/(chunk|finish|progress)|copies))$")
 # The mounted Timeline Cards PAGE (phase 3). Its forty-odd POST routes are
 # the sub-app's own fetches and carry no CSRF token, exactly like the three
 # mounts in _CSRF_EXEMPT_PREFIXES above -- but this one drives a Resolve
@@ -314,7 +317,14 @@ _BODY_LIMITS = {"/api/v1/report": ("POST", MAX_REPORT_BODY_BYTES),
                 "/cards/agent/state": ("POST", MAX_CARDS_STATE_BODY_BYTES),
                 "/cards/agent/result": ("POST", MAX_CARDS_RESULT_BODY_BYTES),
                 # a companion's camera cards, each listed file by file (sorter.py)
-                "/sorter/agent/cards": ("POST", sorter.MAX_CARDS_REPORT_BYTES)}
+                "/sorter/agent/cards": ("POST", sorter.MAX_CARDS_REPORT_BYTES),
+                # ...its volume report and the copies it files (sorter.py)
+                "/sorter/agent/volumes": ("POST", sorter.MAX_VOLUMES_REPORT_BYTES),
+                "/sorter/agent/ledger/copies": ("POST", sorter.MAX_LEDGER_COPIES_BYTES)}
+# A drive scan's chunk has the job id in its path, so it cannot be an _BODY_LIMITS key. It is
+# gzip: this bounds the COMPRESSED body (buffered, counted, and credential-checked first, like
+# the exact paths above); sorter.decode_chunk_body bounds the decompressed size.
+_BODY_LIMIT_PATTERNS = ((re.compile(sorter.LEDGER_CHUNK_PATH_RE), "POST", sorter.MAX_LEDGER_CHUNK_BYTES),)
 # Companion-authenticated POSTs: the token check runs BEFORE the body is read,
 # so no unauthenticated caller can spend the single-worker container's memory
 # on a body it will refuse anyway (B15).
@@ -323,7 +333,8 @@ _COMPANION_TOKEN_PATHS = ("/api/v1/report", "/api/v1/diagnostics",
                           # is checked before a timeline-sized body is read.
                           "/cards/agent/state", "/cards/agent/result",
                           # ...and the Footage Sorter's card listing (sorter.py)
-                          "/sorter/agent/cards")
+                          "/sorter/agent/cards", "/sorter/agent/volumes",
+                          "/sorter/agent/ledger/copies")
 # (path prefix, method, limit) -- the packages route has the platform and
 # version in its path, so it can't be matched exactly. These are declaration
 # checks ONLY: api_publish_package streams its body to disk and counts the
@@ -1197,6 +1208,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if await _buffer_body(request, limit):
                 return _too_large(limit)
             return await call_next(request)
+        for pattern, method, limit in _BODY_LIMIT_PATTERNS:
+            if request.method == method and pattern.match(request.url.path):
+                if _declared_too_large(request, limit):
+                    return _too_large(limit)
+                denial = _report_auth_denial(request)
+                if denial is not None:
+                    return denial
+                if await _buffer_body(request, limit):
+                    return _too_large(limit)
+                return await call_next(request)
         for prefix, method, value in _BODY_LIMIT_PREFIXES:
             if request.method == method and request.url.path.startswith(prefix):
                 if _declared_too_large(request, value):

@@ -529,7 +529,11 @@ def test_the_package_route_is_not_buffered_by_the_gate():
     assert set(appmod._BODY_LIMITS) == {"/api/v1/report", "/api/v1/diagnostics",
                                         "/api/v1/files/locate",
                                         "/cards/agent/state", "/cards/agent/result",
-                                        "/sorter/agent/cards"}
+                                        "/sorter/agent/cards",
+                                        # the ledger browser's (2026-11-09): a volume report and the copies
+                                        # a companion files; a scan chunk has the job id in its path, so it
+                                        # is in _BODY_LIMIT_PATTERNS (test_sorter_ledger_routes.py)
+                                        "/sorter/agent/volumes", "/sorter/agent/ledger/copies"}
     assert appmod._BODY_LIMIT_PREFIXES[0][0] == "/api/v1/admin/packages/"
 
 

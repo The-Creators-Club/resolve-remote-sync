@@ -876,6 +876,17 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # and take its card-ingest / drive-copy jobs. On by default; a dashboard with
 # no sorter makes this back off quietly.
 # sorter_cards_enabled = true
+# The ledger browser (footage-sorter docs/LEDGER-BROWSER-DESIGN.md): report every
+# drive in this computer to the Footage Sorter, take its drive scans (a read-only
+# walk of a drive's folders) and send the copies made here to its ledger. On by
+# default; a dashboard with no sorter makes this back off quietly.
+# sorter_ledger_enabled = true
+# How often the loop looks at the drives, in seconds. A report goes out on a
+# change and every five minutes anyway; free space alone at most once a minute.
+# sorter_ledger_volume_seconds = 10
+# Where the unsent-copies file and the offline ledger mirror live; blank is ~/.ccsync.
+# ledger_outbox_path = ""
+# ledger_mirror_path = ""
 # Which copier writes card footage to the NAS: "auto" (TeraCopy on Windows when
 # installed with verify on, Options.ini [Transfer] TestAlways=1; else the built-in
 # Python copier) or "python" (never TeraCopy).

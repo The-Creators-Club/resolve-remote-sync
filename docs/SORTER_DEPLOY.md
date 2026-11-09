@@ -22,6 +22,8 @@ pool is ONE bind are in `docs/DOCKER.md`, "The Footage Sorter mounts".
 /mnt/tank/apps/ccsync-dashboard/sorter-web   ->  /sorter-app:ro    (the commit)
 /mnt/tank/apps/ccsync-dashboard/sorter-data  ->  /sorter-data:rw   (3000:3000, 770)
 /mnt/tank/TheCreatorsPool                    ->  /pool:rw          (site.toml pool_host)
+/mnt/tank/backups/cloud                      ->  /cloud-state:ro   (site.toml cloud_state, optional)
+/mnt/tank/backups/sorter                     ->  /backup-out:rw    (site.toml backup_out, optional)
 ```
 
 
@@ -39,6 +41,8 @@ pool is ONE bind are in `docs/DOCKER.md`, "The Footage Sorter mounts".
    legacy_id_roots = { "/pool/Temp Transfer" = "W:\\Temp Transfer", "/pool/Creators_Club" = "P:\\" }
    vault_root = "/vault/Vault/2026/FF5"
    # pool_gid = "3000"   # only if 3000:3001 cannot already write Temp Transfer
+   # cloud_state = "/mnt/tank/backups/cloud"   # ledger browser: the cloud backup's state, read-only
+   # backup_out = "/mnt/tank/backups/sorter"   # what the sorter writes for the cloud upload script
    ```
 
 2. **Open the pool's directories to the container** (once, on the NAS; the
@@ -75,6 +79,54 @@ pool is ONE bind are in `docs/DOCKER.md`, "The Footage Sorter mounts".
    on it before the first start. After the first start, run one scan
    (`Scan` on the page): it re-reads the pool under its `/pool` names, and the
    clip count should equal the Node sorter's.
+
+4. **The cloud backup (ledger browser; optional).** The sorter decides WHEN
+   the nightly cloud upload runs and shows its progress; the NAS script
+   (footage-sorter `nas/cloud-backup.sh`, v2) does the upload and holds the
+   restic password. Three pieces, in this order:
+
+   * **Folders and mounts.** Set `cloud_state = "/mnt/tank/backups/cloud"`
+     (mounted `/cloud-state:ro`) and `backup_out = "/mnt/tank/backups/sorter"`
+     (mounted `/backup-out:rw`) in `[footage_sorter]`. The deploy creates
+     `backup_out`, `control/` and `snapshots/` ONLY IF MISSING, as
+     `alex:editors` mode `2770` (setgid; `backup_out_owner` names another user),
+     and never chowns or chmods one that exists. The container runs as
+     `broll:editors` and also gets the `editors` group as a supplementary group
+     (`group_add`), with the gid read from the NAS at install time and never
+     written down, so it can write there and alex, who runs the upload script,
+     can read what it writes. Check after the deploy:
+
+     ```bash
+     ls -ld /mnt/tank/backups/sorter /mnt/tank/backups/sorter/{control,snapshots}   # alex editors drwxrws---
+     docker exec ix-ccsync-dashboard-dashboard-1 sh -c 'id; touch /backup-out/control/.t && rm /backup-out/control/.t && echo writable'
+     ```
+
+   * **The v2 script.** Install it by writing a temp file beside the live one
+     and `mv`-ing it over; NEVER edit the live file in place (a running `sh`
+     keeps reading the old inode, and an in-place edit changes what it reads
+     next):
+
+     ```bash
+     cp footage-sorter/nas/cloud-backup.sh /mnt/tank/backups/bin/cloud-backup.sh.new   # from creator-1, e.g. over scp
+     chmod 755 /mnt/tank/backups/bin/cloud-backup.sh.new
+     mv /mnt/tank/backups/bin/cloud-backup.sh.new /mnt/tank/backups/bin/cloud-backup.sh
+     ```
+
+   * **The schedule.** v2 is started by TrueNAS cron job 4 every 10 minutes
+     and uploads only when the sorter has asked (`control/run-now`) or the
+     nightly time in `control/schedule.json` has passed (`flock` makes a run
+     that is still going skip every start). Change the job from its old nightly
+     schedule:
+
+     ```bash
+     midclt call cronjob.query '[["id","=",4]]'          # read the current job first
+     midclt call cronjob.update 4 '{"schedule": {"minute": "*/10", "hour": "*", "dom": "*", "month": "*", "dow": "*"}}'
+     ```
+
+   Once `/sorter` shows the cloud panel with real numbers (progress, last
+   snapshot, box usage), retire the `cloud-backup-status` app on :8798: stop
+   and delete the app, then remove its entry from whatever links to it. The
+   panel reads the same `progress.json` and `last-summary.json`.
 
 
 ## The usual deploy (the recipe)

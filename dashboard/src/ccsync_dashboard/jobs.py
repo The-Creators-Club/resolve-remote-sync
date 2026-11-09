@@ -60,6 +60,8 @@ JOB_IDLE_FLOOR_SECONDS: dict[str, int] = {
     # zero says so for a job an admin re-queues unforced
     db.JOB_KIND_CARD_INGEST: 0,
     db.JOB_KIND_DRIVE_COPY: 0,
+    # a metadata walk, queued by the sorter for a drive that is plugged in now
+    db.JOB_KIND_LEDGER_SCAN: 0,
 }
 JOB_IDLE_FLOOR_DEFAULT = 300
 

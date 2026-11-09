@@ -257,7 +257,11 @@ def default_request(method: str, url: str, body: Optional[dict],
     carries the fleet token and urlopen follows 3xx while stripping only
     Authorization.
     """
-    data = json.dumps(body).encode("utf-8") if body is not None else None
+    # bytes go as they are (a gzip scan chunk, the ledger browser): the caller set Content-Encoding
+    if isinstance(body, (bytes, bytearray)):
+        data = bytes(body)
+    else:
+        data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with upgrade_mod.build_no_redirect_opener().open(req, timeout=timeout) as resp:

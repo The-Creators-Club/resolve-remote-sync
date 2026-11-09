@@ -464,3 +464,129 @@ def test_the_site_reader_keeps_absolute_paths_and_backslashes(monkeypatch):
         "/pool/Temp Transfer": "W:\\Temp Transfer"}
     assert ida._site_strings("footage_sorter", "nope") == []
     assert ida._site_string_table("footage_sorter", "source_roots") == {}
+
+
+# ------------------------------------------------------- the cloud state mount (ledger browser)
+
+def test_no_cloud_state_means_no_mount_and_unchanged_settings(studio):
+    assert not any(":/cloud-state" in v for v in _dashboard(sorter_enabled="1")["volumes"])
+    assert "cloudState" not in json.loads(ida.sorter_settings_json())
+    assert ida.sorter_settings_json() == STUDIO_JSON
+
+
+def test_cloud_state_is_one_read_only_mount_beside_the_pool(studio, monkeypatch):
+    monkeypatch.setattr(ida, "SITE_SORTER_CLOUD_STATE", "/mnt/tank/backups/cloud")
+    volumes = _dashboard(sorter_enabled="1")["volumes"]
+    assert "/mnt/tank/backups/cloud:/cloud-state:ro" in volumes
+    # the pool is still exactly one read-write bind, and nothing but the cloud folder is read-only
+    assert [v for v in volumes if v.split(":")[1:2] == ["/pool"]] == ["/mnt/tank/TheCreatorsPool:/pool:rw"]
+    assert [v for v in volumes if v.endswith(":/cloud-state:rw")] == []
+    # the sorter is told where it is, as a setting
+    assert json.loads(ida.sorter_settings_json())["cloudState"] == "/cloud-state"
+    assert _dashboard(sorter_enabled="1")["environment"]["DASH_SORTER_SETTINGS"] == ida.sorter_settings_json()
+    assert ida.sorter_problems() == []
+
+
+def test_the_cloud_setting_survives_the_rendered_yaml(studio, monkeypatch):
+    monkeypatch.setattr(ida, "SITE_SORTER_CLOUD_STATE", "/mnt/tank/backups/cloud")
+    for template in (ida.COMPOSE_TEMPLATE, IMAGE_TEMPLATE):
+        _text, scalar = _rendered_setting_line(template)
+        assert json.loads(_unquote_single(scalar))["cloudState"] == "/cloud-state", template.name
+
+
+def test_cloud_state_problems_are_named(studio, monkeypatch):
+    monkeypatch.setattr(ida, "SITE_SORTER_CLOUD_STATE", "backups/cloud")
+    assert any("absolute HOST path" in p for p in ida.sorter_problems())
+    monkeypatch.setattr(ida, "SITE_SORTER_CLOUD_STATE", "/mnt/tank/backups/cloud")
+    monkeypatch.setattr(ida, "SITE_SORTER_POOL_HOST", "")
+    assert any("cloud_state is set but pool_host is not" in p for p in ida.sorter_problems())
+
+
+# --------------------------------------------- the sorter's backup folder (nas/cloud-backup.sh's control + snapshots)
+
+BACKUP_OUT = "/mnt/tank/backups/sorter"
+
+
+def test_no_backup_out_means_nothing_extra(studio):
+    assert not any(":/backup-out" in v for v in _dashboard(sorter_enabled="1")["volumes"])
+    assert "backupOut" not in json.loads(ida.sorter_settings_json())
+    assert ida.sorter_backup_out_command("editors") == ""
+    assert "group_add" not in _dashboard(sorter_enabled="1")
+
+
+def test_backup_out_is_a_read_write_mount_and_a_setting(studio, monkeypatch):
+    monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", BACKUP_OUT)
+    monkeypatch.setattr(ida, "SITE_SORTER_CLOUD_STATE", "/mnt/tank/backups/cloud")
+    volumes = _dashboard(sorter_enabled="1")["volumes"]
+    assert f"{BACKUP_OUT}:/backup-out:rw" in volumes
+    assert "/mnt/tank/backups/cloud:/cloud-state:ro" in volumes            # unchanged beside it
+    assert [v for v in volumes if v.split(":")[1:2] == ["/pool"]] == ["/mnt/tank/TheCreatorsPool:/pool:rw"]
+    settings = json.loads(ida.sorter_settings_json())
+    assert settings["backupOut"] == "/backup-out" and settings["cloudState"] == "/cloud-state"
+    assert ida.sorter_problems() == []
+    for template in (ida.COMPOSE_TEMPLATE, IMAGE_TEMPLATE):
+        _t, scalar = _rendered_setting_line(template)
+        assert json.loads(_unquote_single(scalar))["backupOut"] == "/backup-out", template.name
+
+
+def test_the_container_gets_the_editors_group_from_the_live_gid_never_a_literal(studio, monkeypatch):
+    monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", BACKUP_OUT)
+    # the gid the installer read from the NAS is what is used, whatever it is
+    assert ida.compose_config(8480, HOST_ROOT, "http://gui:8384", "k", "t", sorter_enabled="1",
+                              app_gid=65536)["services"]["dashboard"]["group_add"] == ["65536"]
+    assert ida.compose_config(8480, HOST_ROOT, "http://gui:8384", "k", "t", sorter_enabled="1",
+                              app_gid=4242)["services"]["dashboard"]["group_add"] == ["4242"]
+    # once, beside the other groups, and the same gid as the pool's is not doubled
+    monkeypatch.setattr(ida, "SITE_SORTER_POOL_GID", "4242")
+    assert ida.compose_config(8480, HOST_ROOT, "http://gui:8384", "k", "t", sorter_enabled="1",
+                              app_gid=4242)["services"]["dashboard"]["group_add"] == ["4242"]
+    monkeypatch.setattr(ida, "SITE_SORTER_POOL_GID", "3002")
+    assert ida.dashboard_group_add(4242) == ["3002", "4242"]
+    # no backup folder, no extra group
+    monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", "")
+    monkeypatch.setattr(ida, "SITE_SORTER_POOL_GID", "")
+    assert ida.dashboard_group_add(4242) == []
+
+
+def test_the_folders_are_created_only_if_missing_with_names_not_ids(monkeypatch):
+    monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", BACKUP_OUT)
+    cmd = ida.sorter_backup_out_command("editors")
+    for d in (BACKUP_OUT, BACKUP_OUT + "/control", BACKUP_OUT + "/snapshots"):
+        q = f"'{d}'"
+        assert f"[ -d {q} ] || {{ mkdir -p {q} && chown 'alex:editors' {q} && chmod 2770 {q}; }}" in cmd
+    # nothing recursive and nothing unconditional: an existing folder is never touched
+    assert "-R" not in cmd and "chown -R" not in cmd
+    monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT_OWNER", "sam")
+    assert "chown 'sam:editors'" in ida.sorter_backup_out_command("editors")
+
+
+def test_the_created_folders_behave_on_a_real_shell(tmp_path, monkeypatch):
+    """Run the command for real (sh, with chown/chmod stubbed to record): a missing folder is made with
+    the right owner and mode; an existing one is left exactly alone."""
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("no sh")
+    monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", str(tmp_path / "backups" / "sorter"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "log"
+    for tool in ("chown", "chmod"):
+        stub = bin_dir / tool
+        stub.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{log.as_posix()}"\n', encoding="utf-8")
+        stub.chmod(0o755)
+    env = {"PATH": f"{bin_dir.as_posix()}:/usr/bin:/bin"}
+    cmd = ida.sorter_backup_out_command("editors")
+    proc = subprocess.run([sh, "-c", cmd], env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    root = tmp_path / "backups" / "sorter"
+    assert (root / "control").is_dir() and (root / "snapshots").is_dir()
+    first = log.read_text(encoding="utf-8").splitlines()
+    assert len(first) == 6 and sum(l.startswith("chmod 2770") for l in first) == 3
+    log.write_text("", encoding="utf-8")
+    proc = subprocess.run([sh, "-c", cmd], env=env, capture_output=True, text=True)
+    assert proc.returncode == 0 and log.read_text(encoding="utf-8") == ""          # second run: nothing touched
+
+
+def test_a_relative_backup_out_is_named_as_a_problem(studio, monkeypatch):
+    monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", "backups/sorter")
+    assert any("backup_out" in p and "absolute HOST path" in p for p in ida.sorter_problems())

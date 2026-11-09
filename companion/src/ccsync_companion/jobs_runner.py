@@ -72,7 +72,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
-from . import card_copy, job_paths, jobs_media, sorter_cards
+from . import card_copy, job_paths, jobs_media, ledger_outbox, ledger_scan, sorter_cards
 from . import proc_tree
 
 log = logging.getLogger("ccsync.jobs")
@@ -348,6 +348,13 @@ class JobRunner:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # THE LEDGER SCAN'S OWN LANE. A `ledger-scan` walks a whole drive and can take an hour;
+        # run on the claiming thread it would hold every card-ingest job behind it, and the
+        # gate (`_job`) would read "busy" for all of it. So it runs on a thread of its own,
+        # `_job` stays None, and the next tick is free to claim a card copy. One scan at a
+        # time per machine (`runnable_kinds` stops offering the kind while one runs).
+        self._scan_thread: Optional[threading.Thread] = None
+        self._scan_current: Optional[dict[str, Any]] = None
 
     # -- what the app hands us ------------------------------------------
     def note_report_reply(self, resp: Any) -> None:
@@ -683,6 +690,9 @@ class JobRunner:
         # capability): in-process, no ffmpeg, and read-only against the card.
         if caps.get("sorter_cards"):
             kinds.extend(card_copy.CARD_KINDS)
+        # ...and the ledger browser's drive scan: read-only metadata, on its own lane, one at a time
+        if caps.get("sorter_ledger") and not self._scan_running():
+            kinds.append(ledger_scan.KIND)
         # ...AND THIS MACHINE'S OWN ALLOW-LIST (phase 4), from the same
         # capabilities section the scheduler filtered on, so the two answers
         # cannot disagree. Empty is every kind. Honoured on BOTH sides
@@ -949,6 +959,8 @@ class JobRunner:
             with self._lock:
                 current = dict(self._current) if self._current else {}
                 if int(current.get("id") or 0) != int(job_id):
+                    current = dict(self._scan_current) if self._scan_current else {}
+                if int(current.get("id") or 0) != int(job_id):
                     current = {}
                 entry = {
                     "id": int(job_id),
@@ -984,6 +996,9 @@ class JobRunner:
         thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout=5.0)
+        scan = self._scan_thread
+        if scan is not None and scan is not threading.current_thread():
+            scan.join(timeout=3.0)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -1058,6 +1073,9 @@ class JobRunner:
             return
         if kind in card_copy.CARD_KINDS:
             self._execute_card(job)
+            return
+        if kind == ledger_scan.KIND:
+            self._start_scan_lane(job)
             return
         if kind != "whisper":
             # Claimed something this build cannot run: hand it straight back,
@@ -1332,6 +1350,8 @@ class JobRunner:
         partial = bool(job_obj.stopped) and not cancelled["yes"]
         delivered = self._post_receipt(job_id, result, final=not partial)
         small["receipt"] = delivered
+        if not delivered:
+            self._outbox_receipt(result)
         if job_obj.stopped:
             log.warning("jobs: job #%s (%s) stopped: %s", job_id, kind,
                         job_obj.stopped)
@@ -1350,6 +1370,121 @@ class JobRunner:
                               retryable=True)
             return
         self._post_result(job_id, True, result=small)
+
+    def _outbox_receipt(self, receipt: dict[str, Any]) -> None:
+        """A receipt the dashboard could not take: the copies that landed on a LOCAL drive go to the
+        ledger outbox, so the ledger hears of them when the dashboard is back even if this job is
+        never re-run. Idempotent at the other end, so the retried receipt doubling it is harmless.
+        Never raises."""
+        try:
+            path = ledger_outbox.path_for(self.cfg)
+            if path is None or not ledger_outbox_enabled(self.cfg):
+                return
+            copies = ledger_outbox.copies_from_receipt(receipt, self._volumes_fn)
+            if copies and ledger_outbox.append(copies, path):
+                log.info("jobs: %d copies queued in the ledger outbox", len(copies))
+        except Exception:                                       # noqa: BLE001
+            log.debug("jobs: could not queue the receipt's copies", exc_info=True)
+
+    # -- the ledger scan lane ------------------------------------------------
+    def _scan_running(self) -> bool:
+        t = self._scan_thread
+        return t is not None and t.is_alive()
+
+    def _start_scan_lane(self, job: dict[str, Any]) -> None:
+        """Hand a claimed `ledger-scan` to its own thread and return at once, so this claiming
+        thread goes back to the gate (see __init__)."""
+        job_id = int(job["id"])
+        with self._lock:
+            busy = self._scan_running()
+            if not busy:
+                self._scan_current = {"id": job_id, "kind": ledger_scan.KIND, "rel_path": "",
+                                      "started_at": _now_iso(), "forced_reason": None}
+                t = threading.Thread(target=self._scan_lane, args=(job,),
+                                     name="ccsync-ledger-scan", daemon=True)
+                self._scan_thread = t
+        if busy:
+            # only a race with a second claim: hand it back for another try
+            self._post_result(job_id, False, "a drive scan is already running on this computer", retryable=True)
+            return
+        t.start()
+
+    def _scan_lane(self, job: dict[str, Any]) -> None:
+        job_id = int(job["id"])
+        inputs = job.get("inputs") or {}
+        lease_lost = threading.Event()
+        finished = threading.Event()
+        cancelled = {"yes": False}
+        serial = str(inputs.get("serial") or "").strip().upper()
+        if not serial and str(inputs.get("volumeId") or "").lower().startswith("vol:"):
+            serial = str(inputs["volumeId"]).split(":", 1)[1].upper()
+
+        def should_stop() -> str:
+            if self._cancel_requested(job_id):
+                cancelled["yes"] = True
+                return CANCELLED_ERROR
+            if lease_lost.is_set():
+                return "the lease was lost"
+            if self._halted():
+                return "a fleet halt stopped this job"
+            if self._stop.is_set():
+                return "this computer is shutting down"
+            if serial and serial in sorter_cards.busy_serials():
+                return "the drive is being copied from"       # a copy owns it; the next scan will do
+            return ""
+
+        def beat() -> None:
+            while not finished.wait(HEARTBEAT_SECONDS):
+                try:
+                    if not self._heartbeat(job_id, None):
+                        lease_lost.set()
+                        return
+                except Exception:                               # noqa: BLE001
+                    log.debug("jobs: the heartbeat for scan #%s raised", job_id, exc_info=True)
+
+        threading.Thread(target=beat, name="ccsync-jobs-heartbeat", daemon=True).start()
+        started = self._clock()
+        try:
+            scan = ledger_scan.ScanJob(
+                job_id, inputs, self._dashboard_url, self._scan_request, self._headers,
+                self._volumes_fn, should_stop=should_stop, clock=self._clock,
+                wait=lambda seconds: self._stop.wait(seconds))
+            result = scan.run()
+        except ledger_scan.ScanError as exc:
+            finished.set()
+            log.warning("jobs: scan #%s cannot run: %s", job_id, exc)
+            self._post_result(job_id, False, str(exc), retryable=exc.retryable and not cancelled["yes"])
+            return
+        except Exception as exc:                                # noqa: BLE001
+            finished.set()
+            log.exception("jobs: scan #%s raised", job_id)
+            self._post_result(job_id, False, str(exc), retryable=True)
+            return
+        finally:
+            finished.set()
+        small = {"files": result["files"], "bytes": result["bytes"], "chunks": result["chunks"],
+                 "complete": result["complete"], "seconds": round(self._clock() - started, 1)}
+        if not result["complete"]:
+            reason = str(result.get("reason") or "the scan was cut short")
+            log.warning("jobs: scan #%s stopped: %s", job_id, reason)
+            # a cancel is final; a vanished drive or a drive a copy owns is not worth an immediate
+            # retry; a halt or a shutdown is
+            retryable = not cancelled["yes"] and "gone" not in reason and "copied from" not in reason
+            self._post_result(job_id, False, reason, result=small, retryable=retryable)
+            return
+        log.info("jobs: scan #%s listed %d files (%d bytes)", job_id, result["files"], result["bytes"])
+        if not result.get("delivered"):
+            self._post_result(job_id, False, "the scan finished but its finish could not be delivered",
+                              result=small, retryable=True)
+            return
+        self._post_result(job_id, True, result=small)
+
+    def _scan_request(self, method: str, url: str, body: Any, headers: dict, timeout: float) -> tuple[int, Any]:
+        request = self._request
+        if request is None:
+            from .broll_ingest import default_request
+            request = default_request
+        return request(method, url, body, headers, timeout)
 
     def _sorter_call(self, method: str, path: str, body: Optional[dict]) -> tuple[int, Any]:
         request = self._request
@@ -1604,6 +1739,14 @@ def _minutes(seconds: Any) -> str:
     if value >= 60:
         return "a minute"
     return f"{value:.0f} seconds"
+
+
+def ledger_outbox_enabled(cfg: dict[str, Any]) -> bool:
+    """`sorter_ledger_enabled` (default on), tolerating a hand-edited string."""
+    raw = (cfg or {}).get("sorter_ledger_enabled", True)
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("0", "false", "no", "off", "")
+    return bool(raw)
 
 
 def _default_recent_path(cfg: dict[str, Any]) -> Optional[Path]:

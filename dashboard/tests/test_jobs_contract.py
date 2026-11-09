@@ -208,7 +208,9 @@ def test_the_kinds_the_two_sides_know_do_not_drift():
                                      "ffprobe": True,
                                      # reads camera cards for the Footage Sorter
                                      # (card-ingest, drive-copy)
-                                     "sorter_cards": True})
+                                     "sorter_cards": True,
+                                     # and its drives (ledger-scan)
+                                     "sorter_ledger": True})
     assert sorted(runner.runnable_kinds()) == sorted(dbmod.JOB_KINDS)
     # ...and a machine that has reported nothing asks for nothing, rather
     # than for everything.

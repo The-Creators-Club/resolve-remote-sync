@@ -18,6 +18,7 @@ anything new:
     whisper    two configured paths, both present on disk
     mounts     job_paths.mounts()            (root NAMES, never paths)
     sorter_cards  sorter_cards.enabled()     (card-ingest / drive-copy)
+    sorter_ledger sorter_volumes.enabled()   (volume reports, ledger-scan)
     idle_*     idle.IdleProbe.seconds_idle()
     resolve    resolve_prefs.resolve_is_running + the watcher's project name
 
@@ -50,7 +51,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
-from . import card_copy, ffmpeg_tools, job_paths, jobs_media, sorter_cards, teracopy
+from . import (card_copy, ffmpeg_tools, job_paths, jobs_media, ledger_scan, sorter_cards,
+               sorter_volumes, teracopy)
 
 log = logging.getLogger("ccsync.capabilities")
 
@@ -66,7 +68,7 @@ NVENC_ENCODERS = ("h264_nvenc", "hevc_nvenc")
 # are absent and must stay absent (§4.2): every edit is a synthetic keystroke
 # into whatever Resolve has open on ONE machine.
 KNOWN_KINDS = (("whisper",) + tuple(jobs_media.MEDIA_KINDS)
-               + tuple(card_copy.CARD_KINDS))
+               + tuple(card_copy.CARD_KINDS) + (ledger_scan.KIND,))
 
 _lock = threading.Lock()
 _cache: Optional[tuple[float, dict[str, Any]]] = None
@@ -354,6 +356,9 @@ def _build(
         # `sorter_cards_enabled` (default on). The cards themselves ride their
         # own report (sorter_cards.py), not this section.
         "sorter_cards": sorter_cards.enabled(cfg),
+        # ...and the ledger browser: this computer's drives reported to the sorter, and its
+        # `ledger-scan` jobs (a read-only walk of a drive). `sorter_ledger_enabled`, default on.
+        "sorter_ledger": sorter_volumes.enabled(cfg),
         # TeraCopy is the card copier on Windows (teracopy.detect); the Python
         # copier is the fallback. `teracopy` = installed here, `teracopy_verify`
         # = its verify is on (Options.ini TestAlways=1), without which it is

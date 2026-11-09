@@ -881,6 +881,18 @@ DEFAULTS: dict[str, Any] = {
     # `drive-copy` jobs. A dashboard with no sorter answers 404/503 and this
     # backs off quietly. Set false to opt the machine out of both.
     "sorter_cards_enabled": True,
+    # The ledger browser (footage-sorter docs/LEDGER-BROWSER-DESIGN.md): report every drive
+    # in this computer (POST {dashboard_url}/sorter/agent/volumes), take the dashboard's
+    # `ledger-scan` jobs (a read-only walk of a drive's folders), and send the copies it
+    # made to the ledger (the outbox). A dashboard with no sorter answers 404/503 and this
+    # backs off quietly. Set false to opt the machine out of all of it.
+    "sorter_ledger_enabled": True,
+    # How often the loop looks at the drives (seconds). A report goes out on a change and
+    # every five minutes regardless; free space alone, at most once a minute.
+    "sorter_ledger_volume_seconds": 10,
+    # Where the unsent-copies file and the offline ledger mirror live; blank = ~/.ccsync.
+    "ledger_outbox_path": "",
+    "ledger_mirror_path": "",
     # Which copier writes card footage to the NAS. "auto" = TeraCopy on a
     # Windows PC that has it with verify on (Options.ini [Transfer]
     # TestAlways=1), the built-in Python copier otherwise; "python" = never
@@ -1619,6 +1631,12 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # Report camera cards in this computer's readers to the Footage Sorter, and
 # take its card-ingest / drive-copy jobs. On by default.
 # sorter_cards_enabled = true
+# The ledger browser: report this computer's drives to the Footage Sorter, take its
+# drive scans, and send the copies made here. On by default.
+# sorter_ledger_enabled = true
+# sorter_ledger_volume_seconds = 10
+# ledger_outbox_path = ""
+# ledger_mirror_path = ""
 # Card copier: "auto" (TeraCopy on Windows when installed with verify on,
 # else the built-in Python copier) or "python".
 # card_copier = "auto"

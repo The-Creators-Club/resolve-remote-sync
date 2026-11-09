@@ -35,7 +35,9 @@ from . import broll_standins
 from . import canon
 from . import capabilities as capabilities_mod
 from . import jobs_runner as jobs_runner_mod
+from . import ledger_outbox as ledger_outbox_mod
 from . import sorter_cards as sorter_cards_mod
+from . import sorter_volumes as sorter_volumes_mod
 from . import timeline_cards_role as cards_role_mod
 from . import config as config_mod
 from . import crash_report
@@ -2501,6 +2503,25 @@ class CompanionApp:
         except Exception:
             log.exception("failed to build the sorter card reporter")
             self.sorter_cards = None
+
+        # The ledger browser's two small threads (footage-sorter docs/LEDGER-BROWSER-DESIGN.md),
+        # each behind its own try like the reporters above: the drives this computer has
+        # (POST /sorter/agent/volumes), and the outbox of copies the dashboard has not heard
+        # about yet. Both no-ops unless `sorter_ledger_enabled`.
+        self.sorter_volumes: Any = None
+        self.ledger_outbox: Any = None
+        try:
+            self.sorter_volumes = sorter_volumes_mod.VolumeReporter(
+                cfg, identity_token_fn=lambda: self.identity.token)
+        except Exception:
+            log.exception("failed to build the sorter volume reporter")
+            self.sorter_volumes = None
+        try:
+            self.ledger_outbox = ledger_outbox_mod.OutboxFlusher(
+                cfg, identity_token_fn=lambda: self.identity.token)
+        except Exception:
+            log.exception("failed to build the ledger outbox flusher")
+            self.ledger_outbox = None
 
         # The Timeline Cards role (TIMELINE-CARDS-INTO-CCSYNC.md phase 2):
         # this machine's Resolve serving the cards page, through the
@@ -10601,6 +10622,11 @@ class CompanionApp:
             # only talks to a dashboard that has a sorter.
             if self.sorter_cards is not None:
                 self.sorter_cards.start()
+            # ...and the drives and the outbox, the same way
+            if self.sorter_volumes is not None:
+                self.sorter_volumes.start()
+            if self.ledger_outbox is not None:
+                self.ledger_outbox.start()
         except Exception:
             log.exception("failed to start the proxy generator")
         # ...and the Timeline Cards role, behind its OWN try: it is the only
@@ -12033,6 +12059,12 @@ class CompanionApp:
                 self.sorter_cards.stop()
         except Exception:
             log.exception("failed to stop the sorter card reporter")
+        for _name in ("sorter_volumes", "ledger_outbox"):
+            try:
+                if getattr(self, _name, None) is not None:
+                    getattr(self, _name).stop()
+            except Exception:
+                log.exception("failed to stop %s", _name)
         # Beside it, and before the lanes: it is holding Resolve open for a
         # page somebody may be looking at, and letting go is the polite half
         # of "one Resolve client per machine".

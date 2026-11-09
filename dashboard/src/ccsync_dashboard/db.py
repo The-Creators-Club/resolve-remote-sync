@@ -12336,8 +12336,14 @@ JOB_KIND_PEAKS = "peaks"
 # the receipt travel on /sorter/agent/ingest/<id>, not in the row (16 KB cap).
 JOB_KIND_CARD_INGEST = "card-ingest"
 JOB_KIND_DRIVE_COPY = "drive-copy"
+# The ledger browser's (2026-11-09, footage-sorter docs/LEDGER-BROWSER-DESIGN.md):
+# walk a drive's roots read-only on the machine it is plugged into and upload the
+# listing. Forced and TARGETED like the copies, and also tiny in the row: the
+# manifest and the rows travel on /sorter/agent/ledger/scan/<id>.
+JOB_KIND_LEDGER_SCAN = "ledger-scan"
 JOB_KINDS = (JOB_KIND_WHISPER, JOB_KIND_PROXY_480P, JOB_KIND_AUDIO_EXTRACT,
-             JOB_KIND_PEAKS, JOB_KIND_CARD_INGEST, JOB_KIND_DRIVE_COPY)
+             JOB_KIND_PEAKS, JOB_KIND_CARD_INGEST, JOB_KIND_DRIVE_COPY,
+             JOB_KIND_LEDGER_SCAN)
 
 # What the fleet grid calls a kind. Data rather than a chain of ifs in the
 # template, and NOT `kind.upper()`: "PROXY-480P" is the shape of a database
@@ -12349,6 +12355,7 @@ JOB_KIND_LABELS = {
     JOB_KIND_PEAKS: "PEAKS",
     JOB_KIND_CARD_INGEST: "CARD COPY",
     JOB_KIND_DRIVE_COPY: "DRIVE COPY",
+    JOB_KIND_LEDGER_SCAN: "DRIVE SCAN",
 }
 
 
@@ -12380,6 +12387,9 @@ JOB_RETRY_BUDGET = {
     # landed, so it costs only what is missing
     JOB_KIND_CARD_INGEST: 2,
     JOB_KIND_DRIVE_COPY: 2,
+    # a read-only walk: the same machine again is cheap, and a half-listing
+    # is recorded as partial and marks nothing missing
+    JOB_KIND_LEDGER_SCAN: 2,
 }
 JOB_RETRY_BUDGET_DEFAULT = 3
 
@@ -12402,6 +12412,8 @@ JOB_MAX_RUNNING = {
     # side is the limit, not the readers
     JOB_KIND_CARD_INGEST: 4,
     JOB_KIND_DRIVE_COPY: 2,
+    # one walk per drive, on whichever machine holds it; metadata reads only
+    JOB_KIND_LEDGER_SCAN: 4,
 }
 JOB_MAX_RUNNING_DEFAULT = 4
 

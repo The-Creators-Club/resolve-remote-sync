@@ -578,6 +578,19 @@ project_acl = "per-project"
 # The group that may WRITE the pool's directories; the container is added to it
 # (`group_add`). Leave out when 3000:3001 is already enough.
 # pool_gid = "3000"
+# The cloud backup's state folder on the NAS (progress.json, last-summary.json and
+# snapshot-ls.jsonl.gz, written by the restic upload script), as a HOST path. Bound
+# READ-ONLY at /cloud-state; the ledger browser reads the cloud as a volume from it
+# and shows the upload's progress. Needs pool_host (the setting rides the same JSON).
+# cloud_state = "/mnt/tank/backups/cloud"
+# The folder the sorter WRITES for the NAS's cloud-backup script (footage-sorter nas/cloud-backup.sh):
+# control/ (run-now, schedule.json) and snapshots/ (the ledger and state snapshots that ride into the
+# cloud). Bound READ-WRITE at /backup-out. The deploy creates it and control/ and snapshots/ only if
+# missing, as backup_out_owner:editors mode 2770 (setgid), and never chowns or chmods one that exists;
+# the container gets the editors group (the live gid, read at install time) as a supplementary group.
+# backup_out = "/mnt/tank/backups/sorter"
+# The user the upload script runs as (it reads what the container writes). Default alex.
+# backup_out_owner = "alex"
 
 [security]
 # Whether the ONE shared fleet report token (DASH_REPORT_TOKEN) is still

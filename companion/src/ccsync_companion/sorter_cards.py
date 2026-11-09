@@ -152,6 +152,7 @@ def _windows_volumes(scope: str, skip: set[str]) -> list[dict[str, Any]]:
     except Exception:                                         # noqa: BLE001
         pass
     out: list[dict[str, Any]] = []
+    system_drive = (os.environ.get("SystemDrive") or "C:").upper()
     try:
         mask = int(kernel32.GetLogicalDrives())
         for i in range(26):
@@ -166,13 +167,19 @@ def _windows_volumes(scope: str, skip: set[str]) -> list[dict[str, Any]]:
             if dtype not in wanted:
                 continue
             label = ctypes.create_unicode_buffer(261)
+            fsname = ctypes.create_unicode_buffer(64)
             serial = wintypes.DWORD(0)
             ok = kernel32.GetVolumeInformationW(
-                root, label, 261, ctypes.byref(serial), None, None, None, 0)
+                root, label, 261, ctypes.byref(serial), None, None, fsname, 64)
             if not ok:
                 continue                       # no media in the reader
             out.append({"serial": f"{serial.value:08X}", "label": label.value,
-                        "drive": drive, "root": root, "removable": dtype == 2})
+                        "drive": drive, "root": root, "removable": dtype == 2,
+                        # the volume report's extras (scope "all"): the file system,
+                        # "removable" | "fixed", and whether Windows lives here
+                        "fs": fsname.value,
+                        "drive_type": "removable" if dtype == 2 else "fixed",
+                        "system": drive.upper() == system_drive})
     finally:
         try:
             kernel32.SetThreadErrorMode(old.value, None)
@@ -207,17 +214,26 @@ def _mac_volumes(scope: str, skip: set[str]) -> list[dict[str, Any]]:
         uuid = str(info.get("VolumeUUID") or "").replace("-", "").upper()
         if not uuid:
             continue
+        try:
+            system = os.stat(root).st_dev == os.stat("/").st_dev
+        except OSError:
+            system = False
         out.append({"serial": uuid, "label": entry.name, "drive": root,
-                    "root": root, "removable": removable})
+                    "root": root, "removable": removable,
+                    "fs": str(info.get("FilesystemName") or info.get("FilesystemType") or ""),
+                    "drive_type": "removable" if removable else "fixed",
+                    "system": bool(info.get("SystemImage")) or system})
     return out
 
 
 def list_volumes(scope: str = "removable",
                  skip: Optional[set[str]] = None) -> list[dict[str, Any]]:
     """Volumes this computer can see, each {serial, label, drive, root,
-    capacity, free, removable}. `scope` is "removable" (card readers) or "local"
-    (also fixed drives, for a drive-copy). Roots in `skip` are not touched.
-    Never raises."""
+    capacity, free, removable, fs, drive_type, system}. `scope` is "removable"
+    (card readers), "local" (also fixed drives, for a drive-copy) or "all" (what
+    the ledger's volume report lists: the same set as "local", named for what it
+    is for; `drive_type` is "removable" or "fixed", `system` flags the drive the
+    OS lives on). Roots in `skip` are not touched. Never raises."""
     skip = set(skip or ())
     try:
         if os.name == "nt":

@@ -1066,6 +1066,20 @@ SITE_SORTER_VAULT_ROOT = site_value("footage_sorter", "vault_root").rstrip("/")
 # Blank = the container's own 3000:3001 is already enough (it is for the
 # Projects tree, which is broll:editors 2770), so no group is added.
 SITE_SORTER_POOL_GID = site_value("footage_sorter", "pool_gid")
+# The HOST path of the cloud backup's state folder (the NAS's restic upload script
+# writes progress.json, last-summary.json and snapshot-ls.jsonl.gz there), e.g.
+# /mnt/tank/backups/cloud. Mounted READ-ONLY at /cloud-state: the ledger browser reads
+# the cloud as a volume and shows its progress, and must never write to it.
+SITE_SORTER_CLOUD_STATE = site_value("footage_sorter", "cloud_state").rstrip("/")
+# The HOST folder footage-sorter WRITES for the NAS's cloud-backup script (nas/cloud-backup.sh):
+# `control/` (run-now, schedule.json) and `snapshots/` (the ledger and state snapshots that ride
+# along into the cloud). Mounted READ-WRITE at /backup-out. The host folder is owned by the
+# upload script's user (`backup_out_owner`, default alex) with group `editors`, mode 2770
+# (setgid): the script runs as that user and reads what the container writes, and the container
+# writes as the editors group (its primary gid, and also a supplementary one -- see
+# dashboard_group_add).
+SITE_SORTER_BACKUP_OUT = site_value("footage_sorter", "backup_out").rstrip("/")
+SITE_SORTER_BACKUP_OUT_OWNER = site_value("footage_sorter", "backup_out_owner") or "alex"
 
 
 def _site_strings(section: str, key: str) -> list:
@@ -1107,6 +1121,9 @@ SITE_SORTER_LEGACY_ID_ROOTS = _site_string_table("footage_sorter", "legacy_id_ro
 SORTER_POOL_MOUNT = "/pool"
 SORTER_APP_MOUNT = "/sorter-app"
 SORTER_DATA_MOUNT = "/sorter-data"
+SORTER_CLOUD_STATE_MOUNT = "/cloud-state"
+SORTER_BACKUP_OUT_MOUNT = "/backup-out"
+SORTER_BACKUP_OUT_SUBDIRS = ("control", "snapshots")
 SORTER_FFMPEG_DIR = "/opt/ffmpeg"   # compose already mounts the host's ffmpeg here
 # The ONLY top-level names of the footage-sorter repo that ship.
 SORTER_SHIP_DIRS = ("footage_sorter", "public")
@@ -1225,6 +1242,10 @@ def sorter_settings() -> dict:
         "ffmpegDir": SORTER_FFMPEG_DIR,
         "legacyIdRoots": dict(SITE_SORTER_LEGACY_ID_ROOTS),
         "vaultRoot": SITE_SORTER_VAULT_ROOT,
+        # Only when the site mounts it: a key for a folder that is not there would make the
+        # sorter look for a cloud listing that cannot exist.
+        **({"cloudState": SORTER_CLOUD_STATE_MOUNT} if SITE_SORTER_CLOUD_STATE else {}),
+        **({"backupOut": SORTER_BACKUP_OUT_MOUNT} if SITE_SORTER_BACKUP_OUT else {}),
     }
 
 
@@ -1286,9 +1307,17 @@ def sorter_volumes() -> list:
     pool the sorter reports that it has nothing to scan, and nothing else here
     is touched.
     """
-    if not SITE_SORTER_POOL_HOST:
-        return []
-    return [SITE_SORTER_POOL_HOST + ":" + SORTER_POOL_MOUNT + ":rw"]
+    out = []
+    if SITE_SORTER_POOL_HOST:
+        out.append(SITE_SORTER_POOL_HOST + ":" + SORTER_POOL_MOUNT + ":rw")
+    # ...and the cloud backup's state folder, READ-ONLY and a mount of its own (it is a
+    # different dataset from the pool, so no rename ever crosses it).
+    if SITE_SORTER_CLOUD_STATE:
+        out.append(SITE_SORTER_CLOUD_STATE + ":" + SORTER_CLOUD_STATE_MOUNT + ":ro")
+    # ...and the folder the sorter writes for the upload script: read-write, its own mount.
+    if SITE_SORTER_BACKUP_OUT:
+        out.append(SITE_SORTER_BACKUP_OUT + ":" + SORTER_BACKUP_OUT_MOUNT + ":rw")
+    return out
 
 
 def sorter_group_add() -> list:
@@ -1297,13 +1326,30 @@ def sorter_group_add() -> list:
     return [SITE_SORTER_POOL_GID] if (SITE_SORTER_POOL_HOST and SITE_SORTER_POOL_GID) else []
 
 
-def dashboard_group_add() -> list:
+def sorter_backup_out_command(editors_group: str, owner: str = "") -> str:
+    """Shell (run under sudo) that makes `backup_out` and its control/ and snapshots/ if they are
+    MISSING, as <owner>:<editors group> mode 2770, and touches nothing that exists: a folder that is
+    already there is never chowned or chmod-ed (its owner set it up, and a recursive chown of a
+    folder holding snapshots would rewrite who may read them). Names, not ids, so the NAS resolves
+    them. "" when the site has no backup_out."""
+    if not SITE_SORTER_BACKUP_OUT:
+        return ""
+    who = f"{owner or SITE_SORTER_BACKUP_OUT_OWNER}:{editors_group}"
+    parts = []
+    for d in (SITE_SORTER_BACKUP_OUT, *(SITE_SORTER_BACKUP_OUT + "/" + n for n in SORTER_BACKUP_OUT_SUBDIRS)):
+        q = shell_quote(d)
+        parts.append(f"[ -d {q} ] || {{ mkdir -p {q} && chown {shell_quote(who)} {q} && chmod 2770 {q}; }}")
+    return " && ".join(parts)
+
+
+def dashboard_group_add(editors_gid: "int | str | None" = None) -> list:
     """Every supplementary group the container needs, once each, in order: the
     Cards vault's, then the Footage Sorter's pool. Both may be the same gid
     (one NAS group owning both shares), and a duplicate group_add entry is an
     error in some compose implementations."""
     out = []
-    for gid in cards_group_add() + sorter_group_add():
+    extra = [str(editors_gid)] if (SITE_SORTER_BACKUP_OUT and editors_gid) else []
+    for gid in cards_group_add() + sorter_group_add() + extra:
         if gid not in out:
             out.append(gid)
     return out
@@ -1319,6 +1365,20 @@ def sorter_problems() -> list:
                    "will have no footage to scan and no place to move it to. "
                    "pool_host is the HOST path of the WHOLE footage dataset "
                    "(docs/DOCKER.md, \"The Footage Sorter mounts\").")
+    if SITE_SORTER_CLOUD_STATE and not SITE_SORTER_CLOUD_STATE.startswith("/"):
+        out.append(f"[footage_sorter] cloud_state {SITE_SORTER_CLOUD_STATE!r} is not an absolute "
+                   f"HOST path (e.g. /mnt/tank/backups/cloud); it is bound read-only at "
+                   f"{SORTER_CLOUD_STATE_MOUNT}.")
+    if SITE_SORTER_BACKUP_OUT and not SITE_SORTER_BACKUP_OUT.startswith("/"):
+        out.append(f"[footage_sorter] backup_out {SITE_SORTER_BACKUP_OUT!r} is not an absolute HOST path "
+                   f"(e.g. /mnt/tank/backups/sorter); it is bound read-write at {SORTER_BACKUP_OUT_MOUNT}.")
+    if SITE_SORTER_BACKUP_OUT and not SITE_SORTER_POOL_HOST:
+        out.append("[footage_sorter] backup_out is set but pool_host is not -- the sorter's settings "
+                   "(and with them the backup folder's path) are only passed to a site that mounts a pool.")
+    if SITE_SORTER_CLOUD_STATE and not SITE_SORTER_POOL_HOST:
+        out.append("[footage_sorter] cloud_state is set but pool_host is not -- the sorter's "
+                   "settings (and with them the cloud mount's path) are only passed to a site "
+                   "that mounts a pool.")
     if SITE_SORTER_POOL_HOST:
         if not SITE_SORTER_SOURCE_ROOTS:
             out.append("[footage_sorter] pool_host is set but source_roots is not -- "
@@ -3121,7 +3181,9 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                 #
                 # The Footage Sorter's pool group joins the same list when the
                 # site names one (dashboard_group_add): one key, each gid once.
-                **({"group_add": dashboard_group_add()} if dashboard_group_add() else {}),
+                # `gid` is the editors group's id as the NAS reported it at install time (main()
+                # reads it live and refuses a mismatch), never a literal.
+                **({"group_add": dashboard_group_add(gid)} if dashboard_group_add(gid) else {}),
                 "command": ["/bin/sh", "/app/deploy/run.sh"],
                 "environment": {
                     # IMAGE MODE ONLY, matching compose.image.yaml. An
@@ -6615,6 +6677,18 @@ def main():
           f"{root}/music-web, {root}/music-data, {root}/music-encoder, "
           f"{root}/music-proxies, {root}/ffmpeg, {root}/ytdl-web, {root}/ytdl-data, "
           f"{root}/cards-web, {root}/sorter-web, {root}/sorter-data, {root}/deno")
+    # The sorter's backup folder (nas/cloud-backup.sh reads it as the upload user): create-only, and
+    # by names -- alex:editors 2770. An existing folder is never chowned or chmod-ed.
+    backup_cmd = sorter_backup_out_command(EDITORS_GROUP)
+    if backup_cmd and not synology:
+        rc_b, _, err_b = run_ssh('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(backup_cmd),
+                                 dry_run=args.dry_run)
+        if rc_b != 0:
+            print(f"FAILED to create the sorter's backup folder {SITE_SORTER_BACKUP_OUT}: {err_b}",
+                  file=sys.stderr)
+            return 1
+        print(f"sorter backup folder ready: {SITE_SORTER_BACKUP_OUT} "
+              f"({', '.join(SORTER_BACKUP_OUT_SUBDIRS)}), created only if missing")
 
     # Where the 1.4 GB music artefacts are staged (OPS-8). /tmp on the NAS may
     # be RAM-backed and holds the whole component until the swap `cp -a`s it

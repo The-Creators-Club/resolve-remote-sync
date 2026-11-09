@@ -242,6 +242,10 @@ def test_default_toml_text_documents_every_default_key():
         "sorter_cards_enabled", "card_copier", "teracopy_path",
         "teracopy_allow_unverified", "jobs_idle_seconds",
         "jobs_skip_while_resolve_running", "jobs_poll_seconds",
+        # The ledger browser's switch and knobs (2026-11-09): same class as
+        # sorter_cards_enabled.
+        "sorter_ledger_enabled", "sorter_ledger_volume_seconds",
+        "ledger_outbox_path", "ledger_mirror_path",
         # The volunteer window (section 10, 2026-08-30) is the tray
         # item's length, not a gate: it belongs beside the other jobs_*
         # tunables, and is commented out for the same reason they are.
@@ -351,6 +355,9 @@ EXAMPLE_COMMENTED_OUT = {
     "teracopy_allow_unverified", "jobs_idle_seconds",
     "jobs_skip_while_resolve_running", "jobs_poll_seconds",
     "jobs_volunteer_minutes",
+    # the ledger browser (2026-11-09): same class as sorter_cards_enabled
+    "sorter_ledger_enabled", "sorter_ledger_volume_seconds",
+    "ledger_outbox_path", "ledger_mirror_path",
     # The Timeline Cards role (phase 2, 2026-08-30): commented out because it
     # belongs on exactly ONE machine, and a shipped `cards_agent = false` in
     # every editor's file is the switch for a second Resolve client one edit

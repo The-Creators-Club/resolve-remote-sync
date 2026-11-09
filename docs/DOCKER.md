@@ -388,6 +388,7 @@ configures none of it gets `/sorter: {"status": "disabled"}` on
 | the code (another repo's commit) | `[footage_sorter] src` names the checkout, the deploy ships a `git archive` export of one commit of it, **`footage_sorter/` and `public/` only** → `<host-root>/sorter-web` (`SORTER_SRC` overrides with a directory as it stands) | `/sorter-app:ro` |
 | its own state | created by the deploy, `<host-root>/sorter-data`, owned `3000:3000` mode `770` like `music-data` (manifest, catalogue, move journal; thumbnails and filmstrips in `sorter-data/cache`) | `/sorter-data:rw` |
 | the footage pool | `[footage_sorter] pool_host`, the host path of the **whole** dataset | `/pool:rw` |
+| the cloud backup's state (ledger browser, optional) | `[footage_sorter] cloud_state`, e.g. `/mnt/tank/backups/cloud`: `progress.json`, `last-summary.json`, `snapshot-ls.jsonl.gz` written by the NAS's restic script. Read-only, and passed to the sorter as the `cloudState` setting | `/cloud-state:ro` |
 
 * **Only two directories ship.** The footage-sorter repo also holds the retired
   Node server (`server.js`, `lib/`), the live `data/` and `cache/`,

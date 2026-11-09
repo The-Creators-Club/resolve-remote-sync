@@ -309,10 +309,15 @@ def sorter_agent_cards(payload: dict[str, Any], request: Request) -> dict:
 # JSON at 16 KB and replaces anything bigger with {}, and one card's list is
 # hundreds of files. Only the editor whose machine CLAIMED the job may read the
 # list or file the receipt (the verified identity, never the body's).
-AGENT_PATH_RE = r"^/sorter/agent/(cards|ingest/\d+(/(receipt|progress))?)$"
+AGENT_PATH_RE = (r"^/sorter/agent/(cards|volumes|ingest/\d+(/(receipt|progress))?"
+                 r"|ledger/(scan/\d+(/(chunk|finish|progress))?|copies|mirror))$")
+
+COPY_JOB_KINDS = ("card-ingest", "drive-copy")
+SCAN_JOB_KINDS = ("ledger-scan",)
 
 
-def _claimed_job(request: Request, job_id: int, barred: str = "allow") -> tuple[Any, str]:
+def _claimed_job(request: Request, job_id: int, barred: str = "allow",
+                 kinds: tuple[str, ...] = COPY_JOB_KINDS) -> tuple[Any, str]:
     from . import api, db
     conn = db.connect(request.app.state.settings.db_path)
     try:
@@ -320,8 +325,8 @@ def _claimed_job(request: Request, job_id: int, barred: str = "allow") -> tuple[
         job = db.get_job(conn, int(job_id))
     finally:
         conn.close()
-    if not job or job.get("kind") not in ("card-ingest", "drive-copy"):
-        raise HTTPException(404, "no such card copy job")
+    if not job or job.get("kind") not in kinds:
+        raise HTTPException(404, "no such scan job" if kinds == SCAN_JOB_KINDS else "no such card copy job")
     if str(job.get("claimed_by") or "").lower() != editor.lower():
         raise HTTPException(409, "this job is not claimed by you")
     engine = getattr(request.app.state, "sorter_engine", None)
@@ -367,6 +372,172 @@ def sorter_agent_ingest_progress(job_id: int, payload: dict[str, Any], request: 
         raise HTTPException(404, str(e)) from None
     except ValueError as e:
         raise HTTPException(422, str(e)) from None
+
+
+# ------------------------------------------------------------------ the ledger (the companion's half)
+#
+# footage-sorter docs/LEDGER-BROWSER-DESIGN.md. The NAS holds the ledger; a
+# companion tells it which volumes this machine can see, walks the roots of a
+# drive on request (a `ledger-scan` fleet job), and files each verified copy it
+# makes. All of these are the card routes' door: fleet token + signed identity,
+# no session, no CSRF (app.py's regexes), and a job-bound call is the CLAIMANT's.
+# The logic is the sorter's (`engine.ledger`); these routes only authenticate,
+# bound the body, and translate its ValueError / LookupError into 422 / 404.
+
+MAX_VOLUMES_REPORT_BYTES = 1 * 1024 * 1024
+MAX_VOLUMES_PER_REPORT = 64
+MAX_LEDGER_COPIES_BYTES = 4 * 1024 * 1024
+MAX_LEDGER_COPIES_PER_POST = 5000
+# A scan chunk is 5,000 rows of [path, size, mtimeMs]: about 1 MB of JSON, 150 KB gzipped.
+# The wire cap is the COMPRESSED size (app.py's body gate); the decompressed cap is ours,
+# and is what stops a few KB of zeros from becoming a gigabyte (a gzip bomb).
+MAX_LEDGER_CHUNK_BYTES = 4 * 1024 * 1024
+MAX_LEDGER_CHUNK_DECOMPRESSED = 16 * 1024 * 1024
+MAX_LEDGER_CHUNK_ROWS = 10000          # the ledger's own cap (5,000 is what a companion sends)
+LEDGER_CHUNK_PATH_RE = r"^/sorter/agent/ledger/scan/\d+/chunk$"
+
+
+def _ledger(request: Request) -> Any:
+    engine = getattr(request.app.state, "sorter_engine", None)
+    ledger = getattr(engine, "ledger", None) if engine is not None else None
+    if ledger is None:
+        raise HTTPException(503, "the Footage Sorter's ledger is not running on this dashboard")
+    return ledger
+
+
+def _fleet_editor(request: Request, barred: str = "allow") -> str:
+    from . import api, db
+    conn = db.connect(request.app.state.settings.db_path)
+    try:
+        return api._require_fleet_caller(request, conn, barred=barred)
+    finally:
+        conn.close()
+
+
+def _ledger_call(fn: Callable[..., Any], *args: Any, **kw: Any) -> Any:
+    """Run an engine.ledger method; its errors are the caller's, not a 500.
+
+    LookupError (no such scan) is 404; `LedgerGone` (the scan is finished or abandoned: stop) is 409,
+    like the card list's "already finished"; any other ValueError is a bad request, 422. LedgerGone
+    subclasses ValueError and lives in the sorter's repo, so it is told by name."""
+    try:
+        return fn(*args, **kw)
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from None
+    except ValueError as e:
+        if any(c.__name__ == "LedgerGone" for c in type(e).__mro__):
+            raise HTTPException(409, str(e)) from None
+        raise HTTPException(422, str(e)) from None
+
+
+def decode_chunk_body(raw: bytes, encoding: str) -> dict:
+    """A scan chunk's body -> its JSON object. gzip (`Content-Encoding: gzip`) or plain, both bounded.
+
+    The decompressed size is capped as it is produced (zlib's max_length), so a bomb is refused at the
+    cap, not after it has been inflated. HTTPException 400 (not gzip / not JSON), 413 (too large)."""
+    import zlib
+    enc = (encoding or "").strip().lower()
+    if enc in ("gzip", "x-gzip"):
+        d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            data = d.decompress(raw, MAX_LEDGER_CHUNK_DECOMPRESSED + 1)
+        except zlib.error:
+            raise HTTPException(400, "the chunk is not valid gzip") from None
+        if len(data) > MAX_LEDGER_CHUNK_DECOMPRESSED:
+            raise HTTPException(413, f"a chunk may be at most {MAX_LEDGER_CHUNK_DECOMPRESSED // (1024 * 1024)} MB decompressed")
+        if not d.eof:
+            raise HTTPException(400, "the chunk's gzip stream is truncated")
+    elif enc in ("", "identity"):
+        data = raw
+        if len(data) > MAX_LEDGER_CHUNK_DECOMPRESSED:
+            raise HTTPException(413, "the chunk is too large")
+    else:
+        raise HTTPException(415, f"unsupported Content-Encoding {enc!r}")
+    try:
+        body = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(400, "the chunk is not JSON") from None
+    if not isinstance(body, dict):
+        raise HTTPException(422, "expected {rows: [...], seq}")
+    return body
+
+
+@agent_router.post("/volumes")
+def sorter_agent_volumes(payload: dict[str, Any], request: Request) -> dict:
+    """This machine's volumes (drives, cards, the fixed D:), on change and every five minutes.
+    Answers {scan: [{volumeId, roots, jobId}]}: what the ledger wants scanned now."""
+    editor = _fleet_editor(request)
+    ledger = _ledger(request)
+    machine = str((payload or {}).get("machine") or "").strip()[:128]
+    volumes = (payload or {}).get("volumes")
+    if not machine or not isinstance(volumes, list):
+        raise HTTPException(422, "expected {machine, volumes: [...], digest}")
+    if len(volumes) > MAX_VOLUMES_PER_REPORT:
+        raise HTTPException(413, f"at most {MAX_VOLUMES_PER_REPORT} volumes in one report")
+    return _ledger_call(ledger.report_volumes, editor, machine, volumes, str((payload or {}).get("digest") or "")[:128])
+
+
+@agent_router.get("/ledger/scan/{job_id}")
+def sorter_agent_scan_manifest(job_id: int, request: Request) -> dict:
+    # "gone" like the card list: a suspended account's companion reads 410 as "stop"
+    _claimed_job(request, job_id, barred="gone", kinds=SCAN_JOB_KINDS)
+    return _ledger_call(_ledger(request).scan_manifest, job_id)
+
+
+@agent_router.post("/ledger/scan/{job_id}/chunk")
+async def sorter_agent_scan_chunk(job_id: int, request: Request) -> dict:
+    from starlette.concurrency import run_in_threadpool
+    raw = await request.body()
+    encoding = request.headers.get("content-encoding", "")
+
+    def work() -> dict:
+        _claimed_job(request, job_id, kinds=SCAN_JOB_KINDS)          # before a byte of it is inflated
+        body = decode_chunk_body(raw, encoding)
+        rows = body.get("rows")
+        seq = body.get("seq")
+        if not isinstance(rows, list) or isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+            raise HTTPException(422, "expected {rows: [...], seq: n}")
+        if len(rows) > MAX_LEDGER_CHUNK_ROWS:
+            raise HTTPException(413, f"at most {MAX_LEDGER_CHUNK_ROWS} rows in one chunk")
+        return _ledger_call(_ledger(request).scan_chunk, job_id, seq, rows)
+
+    return await run_in_threadpool(work)
+
+
+@agent_router.post("/ledger/scan/{job_id}/finish")
+def sorter_agent_scan_finish(job_id: int, payload: dict[str, Any], request: Request) -> dict:
+    _claimed_job(request, job_id, kinds=SCAN_JOB_KINDS)
+    return _ledger_call(_ledger(request).scan_finish, job_id, payload or {})
+
+
+@agent_router.post("/ledger/scan/{job_id}/progress")
+def sorter_agent_scan_progress(job_id: int, payload: dict[str, Any], request: Request) -> dict:
+    _claimed_job(request, job_id, kinds=SCAN_JOB_KINDS)
+    return _ledger_call(_ledger(request).scan_progress, job_id, payload or {})
+
+
+@agent_router.post("/ledger/copies")
+def sorter_agent_ledger_copies(payload: dict[str, Any], request: Request) -> dict:
+    """Verified copies a companion made (a field copy's outbox, a drive copy). Idempotent on
+    volume + path + size + mtime, so a re-sent outbox is harmless. Answers {accepted, duplicates}."""
+    editor = _fleet_editor(request)
+    ledger = _ledger(request)
+    copies = (payload or {}).get("copies")
+    if not isinstance(copies, list):
+        raise HTTPException(422, "expected {copies: [...]}")
+    if len(copies) > MAX_LEDGER_COPIES_PER_POST:
+        raise HTTPException(413, f"at most {MAX_LEDGER_COPIES_PER_POST} copies in one post")
+    machine = str((payload or {}).get("machine") or "").strip()[:128]
+    return _ledger_call(ledger.record_copies, machine, copies, editor=editor)
+
+
+@agent_router.get("/ledger/mirror")
+def sorter_agent_ledger_mirror(request: Request, volumes: str = "", since: str = "", limit: int = 5000) -> dict:
+    """The ledger's copies for these volume ids, changed since the cursor ("seq:id", as the last answer
+    gave it), for the field page. Answers {cols, rows, cursor, more, volumes}; while `more`, ask again."""
+    _fleet_editor(request, barred="gone")
+    ids = [v.strip() for v in volumes.split(",") if v.strip()][:MAX_VOLUMES_PER_REPORT]
+    return _ledger_call(_ledger(request).mirror, ids, since.strip()[:64] or 0, max(1, min(int(limit), 20000)))
 
 
 def _job_hooks(settings: Settings, engine: Any) -> None:

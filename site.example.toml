@@ -546,6 +546,39 @@ project_acl = "per-project"
 # vendor build.
 # editor = true
 
+# --------------------------------------------------------------------------
+[footage_sorter]
+# --------------------------------------------------------------------------
+# The Footage Sorter, hosted BY THE DASHBOARD at /sorter (footage-sorter's
+# docs/DASHBOARD-MODULE-PLAN.md phase 3, 2026-11-09). Optional, and OFF is the
+# shipped state, exactly like [timeline_cards]. docs/SORTER_DEPLOY.md is the
+# recipe; docs/DOCKER.md, "The Footage Sorter mounts", is the why.
+# enabled = false
+# The footage-sorter checkout this ships FROM -- a pointer into its git repo:
+# the deploy exports the head of `master` (--sorter-commit <ref> pins another)
+# with `git archive`, and ONLY footage_sorter/ and public/ of it ship.
+# $SORTER_SRC in the deploying shell is the explicit "ship this directory's two
+# folders as they stand" override.
+# src = 'E:\Projects\Editing\footage-sorter'
+# THE FOOTAGE DATASET, as a HOST path, mounted read-write at /pool as ONE bind.
+# The WHOLE dataset, never two binds of parts of it: a rename across two bind
+# mounts is EXDEV even on one ZFS dataset, and the sorter refuses EXDEV.
+# pool_host = "/mnt/tank/TheCreatorsPool"
+# Where new footage arrives, and where it is moved to -- paths UNDER /pool, as
+# the container sees them. The first source root is also the staging root.
+# source_roots = ["/pool/Temp Transfer"]
+# dest_root = "/pool/Creators_Club/Projects"
+# The Windows prefix each root had when the sorter ran on creator-1. A clip's id
+# is derived from its path, so this keeps every existing assignment and
+# thumbnail on its key. Keys are container paths; values are verbatim.
+# legacy_id_roots = { "/pool/Temp Transfer" = "W:\\Temp Transfer", "/pool/Creators_Club" = "P:\\" }
+# The Vault's FF5 folder as the CONTAINER sees it (audio matching reads the
+# interview transcripts there). Optional; /vault is Timeline Cards' mount.
+# vault_root = "/vault/Vault/2026/FF5"
+# The group that may WRITE the pool's directories; the container is added to it
+# (`group_add`). Leave out when 3000:3001 is already enough.
+# pool_gid = "3000"
+
 [security]
 # Whether the ONE shared fleet report token (DASH_REPORT_TOKEN) is still
 # accepted beside the per-computer tokens a sign-in mints (CR-367 / GL-15,

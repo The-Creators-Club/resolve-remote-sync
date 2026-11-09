@@ -375,6 +375,100 @@ is exactly what it does on a machine with no CLI today.
 
 ---
 
+## The Footage Sorter mounts (`/sorter`)
+
+New 2026-11-09 (footage-sorter's `docs/DASHBOARD-MODULE-PLAN.md` phase 3). The
+dashboard hosts the Footage Sorter in-process at `/sorter`, deployed the way
+Timeline Cards is (the section above) and with the same tri-state: a site that
+configures none of it gets `/sorter: {"status": "disabled"}` on
+`GET /api/v1/health` and no other change at all.
+
+| what | where it comes from | mount |
+|---|---|---|
+| the code (another repo's commit) | `[footage_sorter] src` names the checkout, the deploy ships a `git archive` export of one commit of it, **`footage_sorter/` and `public/` only** → `<host-root>/sorter-web` (`SORTER_SRC` overrides with a directory as it stands) | `/sorter-app:ro` |
+| its own state | created by the deploy, `<host-root>/sorter-data`, owned `3000:3000` mode `770` like `music-data` (manifest, catalogue, move journal; thumbnails and filmstrips in `sorter-data/cache`) | `/sorter-data:rw` |
+| the footage pool | `[footage_sorter] pool_host`, the host path of the **whole** dataset | `/pool:rw` |
+
+* **Only two directories ship.** The footage-sorter repo also holds the retired
+  Node server (`server.js`, `lib/`), the live `data/` and `cache/`,
+  `node_modules/`, a cloud worker, the ingest tools and the docs. The export is
+  an allow-list, so a new top-level folder in that repo does not start shipping
+  by accident, and `data/` never lands on a `:ro` mount the new server would
+  mistake for its state.
+* **`/sorter-app` is a mount in image mode too**, and is not on `PYTHONPATH`,
+  for Timeline Cards' reasons: it is another repo's tree, so
+  `ccsync_dashboard.sorter` appends `DASH_SORTER_SRC` to `sys.path` itself.
+* **`DASH_SORTER_SETTINGS` is one JSON object**, built from the `[footage_sorter]`
+  table: `sourceRoots`, `destRoot`, `stagingRoot` (the first source root),
+  `ffmpegDir` (`/opt/ffmpeg`, already mounted), `legacyIdRoots`, `vaultRoot`.
+  It is single-quoted in the compose file (it holds backslashes and double
+  quotes; a double-quoted YAML scalar would treat every backslash as an escape
+  and TrueNAS would refuse the file at install).
+
+### ONE mount of the whole dataset, never two
+
+The sorter's job is moving footage from `Temp Transfer` into `Projects`, and it
+does it with `rename(2)`. **A rename across two bind mounts fails with `EXDEV`
+("invalid cross-device link") even when both are the same ZFS dataset**: the
+kernel compares mount points, not filesystems. The sorter *refuses* `EXDEV`
+rather than fall back to copy-and-delete (a half-copied card is the one thing it
+must never leave behind), so two binds would not degrade gracefully, every move
+would simply fail. Hence:
+
+* `pool_host` is the dataset root (`/mnt/tank/TheCreatorsPool`), bound **once**
+  at `/pool`;
+* `source_roots`, `dest_root` and every `legacy_id_roots` key are **paths under
+  `/pool`** (`/pool/Temp Transfer`, `/pool/Creators_Club/Projects`). The deploy
+  prints a NOTE for one that is not;
+* do not add a second bind of any part of the pool beside it for the sorter's
+  sake. (Timeline Cards' read-only `/media` is a separate mount of
+  `Creators_Club` and is fine: it never renames.)
+
+It also has to be **one dataset**. If `Temp Transfer` and `Creators_Club` are
+child datasets of `TheCreatorsPool` the container sees them as separate
+filesystems inside the one bind, and the rename is `EXDEV` again. Check after
+the first deploy:
+
+```bash
+docker exec ix-ccsync-dashboard-dashboard-1 python -c "import os; \
+print(os.stat('/pool/Temp Transfer').st_dev == os.stat('/pool/Creators_Club/Projects').st_dev)"
+```
+
+`True` is the answer you want.
+
+### Making the pool writable (once, before the first deploy)
+
+The dashboard runs as **3000:3001** (`broll:editors`). A rename needs write
+permission on the DIRECTORIES involved, not on the files, so only the folders
+the sorter moves between need opening up, not the whole pool:
+
+* `Creators_Club/Projects` is already `broll:editors` `2770` (setgid) and the
+  container's primary group is `editors`, so it needs nothing.
+* `Temp Transfer` usually belongs to somebody else. Give the group the sorter
+  joins write access to its directories, with setgid so new folders keep it:
+
+```bash
+# pool_gid = "3000" in site.toml  ->  group_add: ["3000"] on the container
+find "/mnt/tank/TheCreatorsPool/Temp Transfer" -type d \
+     -exec chgrp 3000 {} + -exec chmod g+rwx,g+s {} +
+```
+
+On an NFSv4-ACL dataset `chmod` may be ignored, so grant it as an ACL and read
+it back, as for the vault above (`setfacl -R -m group:3000:modify_set:fd:allow`,
+then `getfacl`). Neither half works alone: `pool_gid` without the write bit is a
+move refused with `EACCES`, and the chmod without `pool_gid` changes nothing.
+Leave `pool_gid` out when the container's own groups are already enough.
+
+Create-only on the host: `sorter-data` is made `3000:3000` `770` by the deploy and
+an existing one (the migrated manifest) is never touched. To migrate the Node
+sorter's state, copy its `data/` and `cache/thumbs` into `sorter-data/` and
+`sorter-data/cache/thumbs`, then `chown -R 3000:3000 sorter-data`.
+
+The deploy itself is `docs/SORTER_DEPLOY.md`; the settings are in
+`docs/CONFIG.md` (`DASH_SORTER_*`).
+
+---
+
 ## Migrating between the modes
 
 **Two commands, one each way** (2026-08-18). `server/install_dashboard_app.py`

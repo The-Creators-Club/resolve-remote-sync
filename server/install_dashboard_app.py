@@ -627,16 +627,21 @@ def git_out(args, cwd=None):
     return proc.returncode == 0, (proc.stdout or "").strip(), (proc.stderr or "").strip()
 
 
-def cards_repo_for(src: Path):
+def cards_repo_for(src: Path, label: str = "Timeline Cards",
+                   src_key: str = "[timeline_cards] src"):
     """(repo root, subtree prefix, error) for the checkout at `src`.
+
+    `label` and `src_key` only word the refusals: the Footage Sorter's snapshot
+    (below) uses this same function and must not tell its operator to fix a
+    Timeline Cards setting.
 
     The prefix is what `git archive` is asked for -- `Resolve/MulticamPipeline`
     for this studio -- and it is DERIVED, never hardcoded: the same script
     deploys a site whose Timeline Cards checkout is the repo root itself.
     """
     if not src.is_dir():
-        return None, "", (f"{src} is not a directory, so there is no Timeline "
-                          f"Cards repository to take a snapshot of.")
+        return None, "", (f"{src} is not a directory, so there is no {label} "
+                          f"repository to take a snapshot of.")
     ok_, top, err = git_out(["rev-parse", "--show-toplevel"], cwd=src)
     if not ok_ or not top:
         return None, "", (f"{src} is not inside a git repository "
@@ -663,12 +668,12 @@ def cards_repo_for(src: Path):
         return None, "", (f"{src} is not inside its own git repository root "
                           f"{root} - the two paths do not compare (a subst "
                           f"drive, a junction or a UNC spelling). Point "
-                          f"[timeline_cards] src at the checkout by the same "
+                          f"{src_key} at the checkout by the same "
                           f"path git reports.")
     return root, prefix, ""
 
 
-def cards_dirty_files(root: Path, prefix: str) -> list:
+def cards_dirty_files(root: Path, prefix: str, only: tuple = ()) -> list:
     """The uncommitted paths under `prefix` - modified, staged or untracked.
 
     server-tools-b-1 (2026-09-11b). The snapshot deploy made "half-finished
@@ -678,10 +683,17 @@ def cards_dirty_files(root: Path, prefix: str) -> list:
     compares the shipped commit against the ref's head, which are equal
     precisely when the work is uncommitted.
 
+    `only` narrows the question to those top-level names under `prefix` (the
+    Footage Sorter ships two directories of a repo that holds a great deal
+    that never ships, and reporting every untracked file in the other
+    directories would bury the one that matters).
+
     Best effort: a git that cannot answer is an empty list, never a refusal.
     """
     args = ["status", "--porcelain"]
-    if prefix:
+    if only:
+        args += ["--", *[f"{prefix}/{name}" if prefix else name for name in only]]
+    elif prefix:
         args += ["--", prefix]
     ok_, out, _err = git_out(args, cwd=root)
     if not ok_ or not out:
@@ -689,8 +701,24 @@ def cards_dirty_files(root: Path, prefix: str) -> list:
     return [line for line in out.splitlines() if line.strip()]
 
 
-def export_cards_snapshot(src: Path, ref: str, dest_parent=None):
+def export_cards_snapshot(src: Path, ref: str, dest_parent=None, *,
+                          label: str = "Timeline Cards",
+                          flag: str = "--cards-commit",
+                          src_key: str = "[timeline_cards] src",
+                          mount: str = "/cards",
+                          slug: str = "cards",
+                          default_ref: str = CARDS_DEFAULT_REF,
+                          include: tuple = ()):
     """Export `<ref>:<subtree>` out of the repo holding `src`.
+
+    The keyword arguments exist for the Footage Sorter (export_sorter_snapshot),
+    which is the same operation on another repo: they word the refusals and name
+    the temp dir, and `include` is the one real difference -- when given, ONLY
+    those top-level names of the subtree are unpacked. The sorter's repo holds
+    a Node server, its data, caches, a cloud worker and node_modules next to
+    the two directories that ship, and an allow-list is the only exclusion that
+    stays right when somebody adds another top-level directory next month. All
+    defaults are Timeline Cards', so its callers and tests are unchanged.
 
     Returns (directory, info, error). The directory is a fresh temp tree that
     the caller ships and then forgets; `info` is what went into the marker and
@@ -702,16 +730,16 @@ def export_cards_snapshot(src: Path, ref: str, dest_parent=None):
     import tarfile
     import tempfile
 
-    ref = (ref or "").strip() or CARDS_DEFAULT_REF
-    root, prefix, err = cards_repo_for(src)
+    ref = (ref or "").strip() or default_ref
+    root, prefix, err = cards_repo_for(src, label, src_key)
     if err:
         return None, None, err
 
     ok_, sha, git_err = git_out(["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=root)
     if not ok_ or not sha:
-        return None, None, (f"no commit '{ref}' in the Timeline Cards repository "
+        return None, None, (f"no commit '{ref}' in the {label} repository "
                             f"at {root} ({git_err or 'git rev-parse failed'}). "
-                            f"Pass --cards-commit with a branch, tag or hash "
+                            f"Pass {flag} with a branch, tag or hash "
                             f"that exists there.")
 
     spec = f"{sha}:{prefix}" if prefix else sha
@@ -719,10 +747,10 @@ def export_cards_snapshot(src: Path, ref: str, dest_parent=None):
         ok_, kind, git_err = git_out(["cat-file", "-t", spec], cwd=root)
         if not ok_ or kind != "tree":
             return None, None, (f"commit {sha[:12]} ({ref}) of {root} has no "
-                                f"'{prefix}' directory, so there is no Timeline "
-                                f"Cards tree to ship from it.")
+                                f"'{prefix}' directory, so there is no {label} "
+                                f"tree to ship from it.")
 
-    dest = Path(tempfile.mkdtemp(prefix="ccsync-cards-snapshot-",
+    dest = Path(tempfile.mkdtemp(prefix=f"ccsync-{slug}-snapshot-",
                                  dir=(str(dest_parent) if dest_parent else None)))
     tar_path = dest / "_snapshot.tar"
     out = dest / "tree"
@@ -738,10 +766,17 @@ def export_cards_snapshot(src: Path, ref: str, dest_parent=None):
             # filter="data" is the 3.12+ default-to-be and refuses absolute
             # paths, .. and device nodes; older Pythons reject the keyword, and
             # the tar here is one we produced from a git tree seconds ago.
+            members = None
+            if include:
+                # Top-level name of each member; a plain FILE at the top
+                # (server.js, package.json) has itself as its top-level name
+                # and is therefore not in the allow-list either.
+                members = [m for m in tf.getmembers()
+                           if m.name.lstrip("./").split("/", 1)[0] in include]
             try:
-                tf.extractall(out, filter="data")
+                tf.extractall(out, members=members, filter="data")
             except TypeError:
-                tf.extractall(out)
+                tf.extractall(out, members=members)
     except (tarfile.TarError, OSError) as exc:
         shutil.rmtree(dest, ignore_errors=True)
         return None, None, (f"the snapshot of {spec} could not be unpacked "
@@ -751,7 +786,7 @@ def export_cards_snapshot(src: Path, ref: str, dest_parent=None):
     if not any(out.iterdir()):
         shutil.rmtree(dest, ignore_errors=True)
         return None, None, (f"the snapshot of {spec} is EMPTY. Shipping it "
-                            f"would leave the NAS with an absent /cards behind "
+                            f"would leave the NAS with an absent {mount} behind "
                             f"a green healthcheck, so nothing was shipped.")
 
     _, subject, _ = git_out(["log", "-1", "--format=%s", sha], cwd=root)
@@ -760,7 +795,7 @@ def export_cards_snapshot(src: Path, ref: str, dest_parent=None):
     # the snapshot is the checked-out commit: a deploy pinned with
     # --cards-commit is a deliberate act, and every edit since is expected to
     # be absent from it.
-    dirty = cards_dirty_files(root, prefix)
+    dirty = cards_dirty_files(root, prefix, tuple(include))
     _, head_sha, _ = git_out(["rev-parse", "--verify", "HEAD^{commit}"], cwd=root)
     if dirty and head_sha == sha:
         shown = ", ".join(line[3:].strip() for line in dirty[:6])
@@ -785,11 +820,11 @@ def export_cards_snapshot(src: Path, ref: str, dest_parent=None):
         # anyone reading DEPLOYED_COMMIT on the NAS see it months later.
         "dirty_at_export": str(len(dirty)),
     }
-    write_cards_marker(out, info)
+    write_cards_marker(out, info, label)
     return out, info, ""
 
 
-def write_cards_marker(tree: Path, info: dict) -> Path:
+def write_cards_marker(tree: Path, info: dict, label: str = "Timeline Cards") -> Path:
     """Write DEPLOYED_COMMIT into the shipped tree.
 
     The NAS copy is not a git checkout and never was (nothing there pulls), so
@@ -799,7 +834,7 @@ def write_cards_marker(tree: Path, info: dict) -> Path:
     """
     marker = tree / CARDS_MARKER_NAME
     lines = [
-        "# Timeline Cards, shipped by server/install_dashboard_app.py.",
+        f"# {label}, shipped by server/install_dashboard_app.py.",
         "# cards snapshot deploy, 2026-09-11: this tree is a `git archive`",
         "# export of one commit, not a checkout and not a working copy --",
         "# nothing untracked, dirty or ignored can be in it.",
@@ -828,32 +863,34 @@ def read_cards_marker(path: Path) -> dict:
     return out
 
 
-def cards_deploy_record_path() -> Path:
-    """Where THIS machine records what it last shipped to /cards.
+def cards_deploy_record_path(kind: str = "cards") -> Path:
+    """Where THIS machine records what it last shipped to /cards (or, with
+    kind="sorter", to /sorter: sorter_deployed.json beside it).
 
     The drift doctor runs on the base rig with no NAS shell, so the marker it
     reports has to exist locally too. Beside ~/.ccsync/snapshot_log.jsonl,
     which is the same kind of fact about the same kind of operation.
     """
-    override = os.environ.get("CCSYNC_CARDS_RECORD", "").strip()
+    override = os.environ.get(f"CCSYNC_{kind.upper()}_RECORD", "").strip()
     if override:
         return Path(override)
-    return Path.home() / ".ccsync" / "state" / "cards_deployed.json"
+    return Path.home() / ".ccsync" / "state" / f"{kind}_deployed.json"
 
 
-def write_cards_deploy_record(info: dict) -> None:
+def write_cards_deploy_record(info: dict, kind: str = "cards") -> None:
     """Record the shipped commit locally. BEST EFFORT, like the snapshot log:
     an unwritable ~/.ccsync must never be why a deploy fails."""
     import json
     try:
-        path = cards_deploy_record_path()
+        path = cards_deploy_record_path(kind)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(dict(info), indent=2) + "\n", encoding="utf-8")
     except (OSError, TypeError, ValueError):
         pass
 
 
-def record_cards_deploy(cards_src, info: dict | None, dry_run: bool) -> None:
+def record_cards_deploy(cards_src, info: dict | None, dry_run: bool,
+                        kind: str = "cards") -> None:
     """Record what THIS deploy shipped to /cards, whatever shape it was.
 
     server-tools-b-3 (2026-09-11b): the record used to be written only for a
@@ -870,7 +907,7 @@ def record_cards_deploy(cards_src, info: dict | None, dry_run: bool) -> None:
     if dry_run:
         return
     if info:
-        write_cards_deploy_record(info)
+        write_cards_deploy_record(info, kind)
         return
     if not cards_src:
         return
@@ -882,7 +919,7 @@ def record_cards_deploy(cards_src, info: dict | None, dry_run: bool) -> None:
         "subtree": "",
         "override": str(cards_src),
         "exported": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    })
+    }, kind)
 
 
 def cards_head_moved_on(info: dict) -> str:
@@ -993,6 +1030,312 @@ def cards_env(enabled: str, cards_token: str = "") -> dict:
         "DASH_CARDS_SERVER_URL": SITE_CARDS_SERVER_URL,
         "DASH_CARDS_TOKEN": cards_token,
     }
+
+
+# --------------------------------------------------------------------------
+# The Footage Sorter (footage-sorter repo), mounted in-process at /sorter
+# --------------------------------------------------------------------------
+# footage-sorter's docs/DASHBOARD-MODULE-PLAN.md, phase 3 (2026-11-09).
+# Deployed the way Timeline Cards is, line for line, and for the same reasons:
+# the code is ANOTHER REPO'S (E:\Projects\Editing\footage-sorter), it ships as
+# an EXPORT OF A COMMIT to <host-root>/sorter-web, the container mounts it
+# read-only at /sorter-app, and ccsync_dashboard.sorter appends that path to
+# sys.path itself. Three things are the sorter's own:
+#
+#   * ONLY TWO DIRECTORIES SHIP. The repo is also the retired Node server
+#     (server.js, lib/), the live data and caches (data/, cache/ -- hundreds of
+#     MB of somebody's catalogue), node_modules/, a cloud worker (cloud/), the
+#     ingest tools and the docs. None of it is imported by the Python package,
+#     and the data directories in particular must never reach a :ro mount
+#     that the NEW server would then think is its state. So the exclusion is
+#     an ALLOW-LIST (SORTER_SHIP_DIRS), not a deny-list that has to be
+#     remembered each time the repo grows a top-level folder.
+#   * IT NEEDS ITS OWN WRITABLE STATE: <host-root>/sorter-data at
+#     /sorter-data (manifest, catalogue, move journal, thumbnails), owned
+#     like music-data -- 3000:3000, 770.
+#   * IT NEEDS THE FOOTAGE POOL, ONE MOUNT OF THE WHOLE DATASET at /pool (rw),
+#     per site. See sorter_volumes for why it must never be two.
+SITE_SORTER_ENABLED = site_bool("footage_sorter", "enabled", False)
+SITE_SORTER_SRC = site_value("footage_sorter", "src")
+# The HOST path of the whole footage dataset, e.g. /mnt/tank/TheCreatorsPool.
+SITE_SORTER_POOL_HOST = site_value("footage_sorter", "pool_host").rstrip("/")
+SITE_SORTER_DEST_ROOT = site_value("footage_sorter", "dest_root").rstrip("/")
+SITE_SORTER_VAULT_ROOT = site_value("footage_sorter", "vault_root").rstrip("/")
+# The group that may WRITE the pool, which this container must be a member of
+# (compose `group_add`), exactly as SITE_CARDS_VAULT_GID is for the vault.
+# Blank = the container's own 3000:3001 is already enough (it is for the
+# Projects tree, which is broll:editors 2770), so no group is added.
+SITE_SORTER_POOL_GID = site_value("footage_sorter", "pool_gid")
+
+
+def _site_strings(section: str, key: str) -> list:
+    """A list of strings from site.toml, VERBATIM apart from whitespace and a
+    trailing slash. Not site_list(): that one is for tree-relative names and
+    strips the LEADING slash and turns backslashes into slashes, which turns
+    the absolute container path /pool/Temp Transfer into pool/Temp Transfer."""
+    table = load_site().get(section) or {}
+    value = table.get(key) if isinstance(table, dict) else None
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(v).strip().rstrip("/") for v in value if str(v).strip()]
+
+
+def _site_string_table(section: str, key: str) -> dict:
+    """A table of string -> string from site.toml (inline or [section.key]),
+    verbatim. The VALUES carry backslashes (`W:\\Temp Transfer`), which is the
+    whole reason this goes through json.dumps and a single-quoted YAML scalar
+    on the way to the container."""
+    table = load_site().get(section) or {}
+    value = table.get(key) if isinstance(table, dict) else None
+    if not isinstance(value, dict):
+        return {}
+    return {str(k).strip().rstrip("/"): str(v) for k, v in value.items()
+            if str(k).strip()}
+
+
+# Under the pool, as the CONTAINER sees it; where the sorter looks for new
+# footage. The first one doubles as the staging root (where cards are dumped).
+SITE_SORTER_SOURCE_ROOTS = _site_strings("footage_sorter", "source_roots")
+# Container path -> the Windows id prefix the same files had when the sorter
+# ran on creator-1 (W:\Temp Transfer, P:\). A clip's id is derived from its
+# path, so without this table every existing assignment and thumbnail would
+# lose its key the day the sorter moves to the NAS.
+SITE_SORTER_LEGACY_ID_ROOTS = _site_string_table("footage_sorter", "legacy_id_roots")
+
+SORTER_POOL_MOUNT = "/pool"
+SORTER_APP_MOUNT = "/sorter-app"
+SORTER_DATA_MOUNT = "/sorter-data"
+SORTER_FFMPEG_DIR = "/opt/ffmpeg"   # compose already mounts the host's ffmpeg here
+# The ONLY top-level names of the footage-sorter repo that ship.
+SORTER_SHIP_DIRS = ("footage_sorter", "public")
+# Redundant with SORTER_SHIP_DIRS (a tree built by either route holds nothing
+# else) and deliberately NOT longer: a name like `data` or `cache` excluded at
+# any depth would silently drop a future footage_sorter/data/ subpackage.
+SORTER_EXCLUDE_DIRS = BROLL_EXCLUDE_DIRS
+# footage-sorter's trunk is `master` (its remote HEAD is origin/master); there
+# is no `main` there, so Cards' "main" would be a refusal on the first deploy.
+SORTER_DEFAULT_REF = "master"
+
+
+def sorter_web_source():
+    """The footage-sorter checkout named by this site, or None (cards_web_source's
+    twin: SORTER_SRC in the environment is the explicit "ship this directory as
+    it stands" override, [footage_sorter] src the pointer into the git repo)."""
+    raw = (os.environ.get("SORTER_SRC", "").strip() or SITE_SORTER_SRC).strip()
+    return Path(raw) if raw else None
+
+
+def export_sorter_snapshot(src: Path, ref: str, dest_parent=None):
+    """export_cards_snapshot for the footage-sorter repo: `footage_sorter/` and
+    `public/` of one commit, plus the DEPLOYED_COMMIT marker. Same return shape
+    and the same refusals, worded for the sorter."""
+    return export_cards_snapshot(
+        src, ref or SORTER_DEFAULT_REF, dest_parent,
+        label="Footage Sorter", flag="--sorter-commit",
+        src_key="[footage_sorter] src", mount="/sorter", slug="sorter",
+        default_ref=SORTER_DEFAULT_REF, include=SORTER_SHIP_DIRS)
+
+
+def stage_sorter_dir(src: Path, dest_parent=None) -> Path:
+    """The two shipping directories of a WORKING COPY, as they stand, in a temp
+    tree -- for the explicit override (--sorter-src-dir / SORTER_SRC) and for a
+    src that is not a git checkout.
+
+    Not simply `src`: the override points at a checkout root, and shipping that
+    as it stands would put node_modules/, data/ and cache/ on the NAS (the
+    upload would also take an hour). The override keeps its meaning --
+    uncommitted edits included -- for the two directories that ship. A missing
+    `src` is returned untouched so the caller's "no package here" NOTE names
+    the path the operator typed.
+    """
+    import tempfile
+    if not src.is_dir():
+        return src
+    dest = Path(tempfile.mkdtemp(prefix="ccsync-sorter-dir-",
+                                 dir=(str(dest_parent) if dest_parent else None)))
+    out = dest / "tree"
+    out.mkdir()
+    for name in SORTER_SHIP_DIRS:
+        if (src / name).is_dir():
+            shutil.copytree(src / name, out / name,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    import atexit
+    atexit.register(shutil.rmtree, str(dest), True)
+    return out
+
+
+def resolve_sorter_tree(args=None):
+    """What to ship as the Footage Sorter: (tree, info, error). The Timeline
+    Cards rules (resolve_cards_tree), word for word:
+
+      * an EXPLICIT directory (--sorter-src-dir, or SORTER_SRC) ships as it
+        stands -- its two shipping directories, uncommitted edits and all;
+      * otherwise [footage_sorter] src is a pointer into a git repo and a
+        commit is exported out of it (default SORTER_DEFAULT_REF);
+      * a named src that is not in a git repo ships as a directory, with a NOTE.
+
+    An error is fatal ON PURPOSE and arrives before anything has moved.
+    """
+    explicit = ((getattr(args, "sorter_src_dir", "") or "").strip()
+                or os.environ.get("SORTER_SRC", "").strip())
+    if explicit:
+        print(f"Footage Sorter: shipping the DIRECTORY {explicit} as it stands "
+              f"(explicit override), not a commit snapshot.")
+        return stage_sorter_dir(Path(explicit)), None, ""
+    src = sorter_web_source()
+    if src is None:
+        return None, None, ""
+    ref = (getattr(args, "sorter_commit", "") or "").strip() or SORTER_DEFAULT_REF
+    _root, _prefix, repo_err = cards_repo_for(src, "Footage Sorter",
+                                              "[footage_sorter] src")
+    if repo_err:
+        if src.is_dir():
+            print(f"NOTE: {repo_err} Shipping the directory as it stands. "
+                  f"Snapshot deploys need [footage_sorter] src to point inside "
+                  f"a checkout of the footage-sorter repository.",
+                  file=sys.stderr)
+        return stage_sorter_dir(src), None, ""
+    tree, info, err = export_sorter_snapshot(src, ref)
+    if err:
+        return None, None, err
+    import atexit
+    atexit.register(shutil.rmtree, str(tree.parent), True)
+    return tree, info, ""
+
+
+def sorter_enabled_for_site(ship_sorter: bool) -> str:
+    """1 only when this site asked for it AND a tree is going out -- both halves,
+    for the reason cards_enabled_for_site gives."""
+    return "1" if (SITE_SORTER_ENABLED and ship_sorter) else "0"
+
+
+def sorter_settings() -> dict:
+    """What the CONTAINER knows, as ccsync_dashboard.sorter.host_settings reads
+    it (footage_sorter.config's keys). Every path is a path under /pool."""
+    roots = list(SITE_SORTER_SOURCE_ROOTS)
+    return {
+        "sourceRoots": roots,
+        "destRoot": SITE_SORTER_DEST_ROOT,
+        # Where cards are dumped when not sorted straight away: the first
+        # source root, which is Temp Transfer -- on the same dataset as the
+        # destination, so putting a card away is a rename too.
+        "stagingRoot": roots[0] if roots else "",
+        "ffmpegDir": SORTER_FFMPEG_DIR,
+        "legacyIdRoots": dict(SITE_SORTER_LEGACY_ID_ROOTS),
+        "vaultRoot": SITE_SORTER_VAULT_ROOT,
+    }
+
+
+def sorter_settings_json() -> str:
+    """Compact JSON of sorter_settings(), or "" when there is no pool.
+
+    Blank without a pool for the reason DASH_CARDS_MEDIA_MAP is blank without a
+    media mount: roots under /pool are meaningless when nothing is mounted
+    there, and a sorter that scans a missing directory reports an empty
+    library, which looks like data loss. json.dumps with ASCII escapes: the
+    value crosses a YAML file, a TrueNAS middleware and an environment block,
+    and a studio's folder names are not all ASCII.
+    """
+    import json
+    if not SITE_SORTER_POOL_HOST:
+        return ""
+    return json.dumps(sorter_settings(), separators=(",", ":"))
+
+
+def compose_single_quoted(value: str) -> str:
+    """`value` as the BODY of a single-quoted YAML scalar in the compose FILE.
+
+    Two escapes and no more. YAML single quotes: a backslash is literal (the
+    legacy ids are `W:\\Temp Transfer`, and in a DOUBLE-quoted scalar every one
+    would be an escape -- TrueNAS parses this file, so it would fail at install,
+    not at run time) and a quote is written twice. Compose interpolation: it
+    runs over the parsed value, `$` starts a substitution, and `$$` is a literal
+    dollar; a folder called `Cash$` would otherwise be an unset variable.
+    """
+    return str(value).replace("'", "''").replace("$", "$$")
+
+
+def sorter_env(enabled: str) -> dict:
+    """The DASH_SORTER_* block. Every key always present, blank when unset --
+    the rule cards_env states, and test_safety diffs the key sets on it."""
+    return {
+        "DASH_SORTER_ENABLED": enabled,
+        "DASH_SORTER_SRC": SORTER_APP_MOUNT if enabled == "1" else "",
+        "DASH_SORTER_DATA": SORTER_DATA_MOUNT,
+        "DASH_SORTER_CACHE": SORTER_DATA_MOUNT + "/cache",
+        "DASH_SORTER_SETTINGS": sorter_settings_json(),
+    }
+
+
+def sorter_volumes() -> list:
+    """The per-site mount: the WHOLE footage dataset, rw, at /pool.
+
+    ONE MOUNT OF THE WHOLE DATASET, NEVER TWO BINDS OF PARTS OF IT. The
+    sorter's job is to move footage from Temp Transfer into Projects, and it
+    does that with rename(2). A rename across two bind mounts fails with EXDEV
+    ("invalid cross-device link") EVEN WHEN BOTH BINDS ARE THE SAME ZFS DATASET,
+    because the kernel compares mount points, not filesystems. The sorter
+    refuses EXDEV rather than fall back to copy-and-delete (a half-copied card
+    is the one thing it must never leave), so two binds would not degrade
+    gracefully -- every single move would fail. Hence `pool_host` is the
+    dataset root and the source/destination roots are PATHS UNDER /pool.
+
+    rw, because the moves are renames inside it. Absent by default: with no
+    pool the sorter reports that it has nothing to scan, and nothing else here
+    is touched.
+    """
+    if not SITE_SORTER_POOL_HOST:
+        return []
+    return [SITE_SORTER_POOL_HOST + ":" + SORTER_POOL_MOUNT + ":rw"]
+
+
+def sorter_group_add() -> list:
+    """The supplementary group that makes the pool writable (SITE_SORTER_POOL_GID),
+    only on a site that mounts one and names one. cards_group_add's twin."""
+    return [SITE_SORTER_POOL_GID] if (SITE_SORTER_POOL_HOST and SITE_SORTER_POOL_GID) else []
+
+
+def dashboard_group_add() -> list:
+    """Every supplementary group the container needs, once each, in order: the
+    Cards vault's, then the Footage Sorter's pool. Both may be the same gid
+    (one NAS group owning both shares), and a duplicate group_add entry is an
+    error in some compose implementations."""
+    out = []
+    for gid in cards_group_add() + sorter_group_add():
+        if gid not in out:
+            out.append(gid)
+    return out
+
+
+def sorter_problems() -> list:
+    """Sentences for a site whose [footage_sorter] section will not work, for
+    main() to print as NOTEs. Never fatal: like Cards, a half-configured
+    sorter is a dashboard that reports the mount's state in one line."""
+    out = []
+    if SITE_SORTER_ENABLED and not SITE_SORTER_POOL_HOST:
+        out.append("[footage_sorter] enabled is set but pool_host is not -- /sorter "
+                   "will have no footage to scan and no place to move it to. "
+                   "pool_host is the HOST path of the WHOLE footage dataset "
+                   "(docs/DOCKER.md, \"The Footage Sorter mounts\").")
+    if SITE_SORTER_POOL_HOST:
+        if not SITE_SORTER_SOURCE_ROOTS:
+            out.append("[footage_sorter] pool_host is set but source_roots is not -- "
+                       "the sorter has nowhere to look for new footage.")
+        if not SITE_SORTER_DEST_ROOT:
+            out.append("[footage_sorter] pool_host is set but dest_root is not -- "
+                       "the sorter has nowhere to move footage to.")
+        named = (list(SITE_SORTER_SOURCE_ROOTS) + [SITE_SORTER_DEST_ROOT]
+                 + list(SITE_SORTER_LEGACY_ID_ROOTS))
+        for path in named:
+            if path and not (path == SORTER_POOL_MOUNT
+                             or path.startswith(SORTER_POOL_MOUNT + "/")):
+                out.append(f"[footage_sorter] {path!r} is not under {SORTER_POOL_MOUNT}. "
+                           f"Every root is a CONTAINER path inside the one pool "
+                           f"mount; a path outside it is on another filesystem "
+                           f"and every move to or from it would fail with EXDEV.")
+    return out
 
 
 def jobs_env() -> dict:
@@ -2687,6 +3030,12 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                    # nothing else changes -- the default key set and volume
                    # list are byte-for-byte what they were.
                    cards_editor: str = "0",
+                   # The Footage Sorter at /sorter (2026-11-09). "0" is the
+                   # vendor build, as cards_enabled is: the mount needs
+                   # another repo's checkout and a pool bind, and a dashboard
+                   # that was not asked for it must behave exactly as before.
+                   # Projects site.toml's [footage_sorter].
+                   sorter_enabled: str = "0",
                    # Which datasets the protection panel checks the snapshot
                    # schedule against (2026-09-03, see datasets_env). Blank
                    # here means "ask site.toml and no further": only main()
@@ -2769,7 +3118,10 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                 # exactly that share. Absent by default: an empty group_add
                 # is not the same as none in every compose implementation,
                 # and a key nobody needs is a key that can be wrong.
-                **({"group_add": cards_group_add()} if cards_group_add() else {}),
+                #
+                # The Footage Sorter's pool group joins the same list when the
+                # site names one (dashboard_group_add): one key, each gid once.
+                **({"group_add": dashboard_group_add()} if dashboard_group_add() else {}),
                 "command": ["/bin/sh", "/app/deploy/run.sh"],
                 "environment": {
                     # IMAGE MODE ONLY, matching compose.image.yaml. An
@@ -3046,6 +3398,8 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # --- Timeline Cards at /cards (see cards_env) ------------
                     **cards_env(cards_enabled, cards_token),
                     **(cards_editor_env() if cards_editor == "1" else {}),
+                    # --- the Footage Sorter at /sorter (see sorter_env) ------
+                    **sorter_env(sorter_enabled),
                     # --- the roots a PINNED fleet job is placed against ------
                     **jobs_env(),
                     # --- which datasets have to be in a snapshot task -------
@@ -3134,6 +3488,18 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # reports "no vault is mounted here" and the dashboard is
                     # otherwise untouched.
                     *cards_volumes(),
+                    # The Footage Sorter's code, on the /app posture, and
+                    # NOT dropped in image mode for Cards' reason: it is
+                    # another repo's tree. An empty dir is the normal state
+                    # and /sorter then reports itself absent.
+                    f"{host_root}/sorter-web:{SORTER_APP_MOUNT}:ro",
+                    # WRITABLE: the sorter's manifest, catalogue, move journal
+                    # and (in sorter-data/cache) thumbnails and filmstrips.
+                    # 3000:3000 mode 770, like music-data.
+                    f"{host_root}/sorter-data:{SORTER_DATA_MOUNT}:rw",
+                    # ...and the footage pool, per site: ONE bind of the whole
+                    # dataset (sorter_volumes says why it must never be two).
+                    *sorter_volumes(),
                     # The NAS's own snapshots, READ-ONLY, so Settings ->
                     # RECOVERY can browse and restore from one without a root
                     # shell (OPS-3). Absent unless the deploy VERIFIED the
@@ -3368,6 +3734,13 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
         # dashboard reports an enabled-but-absent tree in one honest line.
         **{k: v for k, v in cards_env("1" if SITE_CARDS_ENABLED else "0").items()
            if k != "DASH_CARDS_TOKEN"},
+        # The Footage Sorter's block, the same way. ENABLED is the site's
+        # intent for the same reason Cards' is. SETTINGS is the one value that
+        # is a document rather than a word: the template single-quotes it, so
+        # it goes in already escaped for that (compose_single_quoted), and the
+        # dict above carries the raw JSON.
+        **{**sorter_env("1" if SITE_SORTER_ENABLED else "0"),
+           "DASH_SORTER_SETTINGS": compose_single_quoted(sorter_settings_json())},
         **jobs_env(),
         # Which datasets the protection panel checks (2026-09-03). site.toml
         # is the floor here too; a name main() got from the NAS wins.
@@ -5266,8 +5639,11 @@ SYNOLOGY_HOST_DIRS = (
     # unconditional because a bind whose host path is missing stops the
     # container from starting at all.
     ("cards-web", "code"),
+    # The Footage Sorter's code (the same posture, the same reason) and its
+    # writable state, private like music-data.
+    ("sorter-web", "code"),
     ("venv", "private"), ("data", "private"), ("music-data", "private"),
-    ("ytdl-data", "private"),
+    ("ytdl-data", "private"), ("sorter-data", "private"),
     ("syncthing-config", "private"),
 )
 
@@ -5480,6 +5856,19 @@ def main():
                          "commit snapshot, warts and all (CARDS_SRC does the "
                          "same). For a tree that is not a git checkout, or for "
                          "testing a working copy on purpose.")
+    # The Footage Sorter ships the same way (2026-11-09): a commit of the
+    # footage-sorter repo, `footage_sorter/` and `public/` only.
+    ap.add_argument("--sorter-commit", default=os.environ.get("SORTER_COMMIT", ""),
+                    help="which Footage Sorter commit to ship: a branch, tag or "
+                         f"hash in the repo holding [footage_sorter] src "
+                         f"(default '{SORTER_DEFAULT_REF}'; SORTER_COMMIT also "
+                         f"works). Exactly that commit's footage_sorter/ and "
+                         f"public/ are exported with `git archive`; nothing else "
+                         f"in the repo ships.")
+    ap.add_argument("--sorter-src-dir", default="",
+                    help="ship this DIRECTORY's footage_sorter/ and public/ as "
+                         "the Footage Sorter instead of a commit snapshot, "
+                         "uncommitted edits and all (SORTER_SRC does the same).")
     ap.add_argument("--no-ffmpeg", action="store_true",
                     help="skip provisioning static ffmpeg/ffprobe onto the host. "
                          "Only /music's queued ingest uses them, and it answers 503 "
@@ -5787,6 +6176,35 @@ def main():
               "cannot turn the path an agent names (P:\\...) into the same "
               "bytes under /media, and the lane plays no audio for any clip "
               "with no rendered WAV.", file=sys.stderr)
+    # Footage Sorter pre-flight: Timeline Cards' rules again. A NOTE and a
+    # skip for an unnamed or package-less tree; a bad --sorter-commit stops the
+    # deploy here, before anything has moved.
+    sorter_src, sorter_info, sorter_err = resolve_sorter_tree(args)
+    if sorter_err:
+        print(f"FAILED: {sorter_err}", file=sys.stderr)
+        return 1
+    if sorter_info:
+        moved = cards_head_moved_on(sorter_info)
+        print(f"Footage Sorter snapshot: {sorter_info['short']} "
+              f"({sorter_info['ref']}) of {sorter_info['repo']}"
+              + (f" -- {sorter_info['subject']}" if sorter_info.get("subject") else "")
+              + (f"; {moved}" if moved else ""))
+    ship_sorter = bool(sorter_src and (sorter_src / "footage_sorter"
+                                       / "web.py").is_file())
+    if sorter_src and not ship_sorter:
+        print(f"NOTE: no Footage Sorter package at {sorter_src} (looked for "
+              f"{sorter_src / 'footage_sorter' / 'web.py'}) -- deploying WITHOUT "
+              f"the /sorter UI; the dashboard will report the mount 'absent' "
+              f"and hide the nav link. That tree is the footage-sorter repo, "
+              f"not this one: point SORTER_SRC (or site.toml's "
+              f"[footage_sorter] src) at a checkout of it."
+              + (f" This tree is the snapshot of commit {sorter_info['short']}, "
+                 f"so the package is missing AT THAT COMMIT, not on disk."
+                 if sorter_info else ""),
+              file=sys.stderr)
+    sorter_enabled = sorter_enabled_for_site(ship_sorter)
+    for problem in sorter_problems():
+        print(f"NOTE: {problem}", file=sys.stderr)
     music_data_mode = (args.music_data or "").strip().lower() or MUSIC_DATA_PUSH_DEFAULT
     music_forced, music_data_err = parse_music_data_push(music_data_mode)
     if music_data_err:
@@ -6155,12 +6573,15 @@ def main():
             # host path does not exist is a container that will not start.
             f"mkdir -p {shell_quote(root + '/ytdl-web')} "
             f"{shell_quote(root + '/cards-web')} "
+            f"{shell_quote(root + '/sorter-web')} "
             f"{shell_quote(root + '/deno')} && "
             f"chown root:root {shell_quote(root + '/ytdl-web')} "
             f"{shell_quote(root + '/cards-web')} "
+            f"{shell_quote(root + '/sorter-web')} "
             f"{shell_quote(root + '/deno')} && "
             f"chmod 755 {shell_quote(root + '/ytdl-web')} "
             f"{shell_quote(root + '/cards-web')} "
+            f"{shell_quote(root + '/sorter-web')} "
             f"{shell_quote(root + '/deno')} && "
             # ...and Node's, for the new Timeline Cards editor (2026-11-05):
             # the same posture, created on every site for the reason cards-web
@@ -6175,7 +6596,15 @@ def main():
             # live job ledger in it) is left alone.
             f"mkdir -p {shell_quote(root + '/ytdl-data')} && "
             f"chown {private_owner} {shell_quote(root + '/ytdl-data')} && "
-            f"chmod 770 {shell_quote(root + '/ytdl-data')}"
+            f"chmod 770 {shell_quote(root + '/ytdl-data')} && "
+            # Footage Sorter DATA root (manifest, catalogue, move journal,
+            # thumbnails): music-data's posture -- 3000:3000 mode 770, group
+            # 3000 and NOT 3001/editors, for the same C-2 reason. Create-only;
+            # an existing one (the migrated manifest) is left alone. Its CODE
+            # dir, sorter-web, is in the root:root chain above.
+            f"mkdir -p {shell_quote(root + '/sorter-data')} && "
+            f"chown {private_owner} {shell_quote(root + '/sorter-data')} && "
+            f"chmod 770 {shell_quote(root + '/sorter-data')}"
         ),
         dry_run=args.dry_run,
     )
@@ -6185,7 +6614,7 @@ def main():
     print(f"host dirs ready: {root}/app, {root}/venv, {root}/data, {root}/broll-web, "
           f"{root}/music-web, {root}/music-data, {root}/music-encoder, "
           f"{root}/music-proxies, {root}/ffmpeg, {root}/ytdl-web, {root}/ytdl-data, "
-          f"{root}/cards-web, {root}/deno")
+          f"{root}/cards-web, {root}/sorter-web, {root}/sorter-data, {root}/deno")
 
     # Where the 1.4 GB music artefacts are staged (OPS-8). /tmp on the NAS may
     # be RAM-backed and holds the whole component until the swap `cp -a`s it
@@ -6551,6 +6980,25 @@ def main():
                   f"{root}/cards-web"
                   + (f"; {moved}" if moved else ""))
 
+    # Step 2g2: ship the Footage Sorter tree into sorter-web, Timeline Cards'
+    # route again: another repo's tree, a commit snapshot (footage_sorter/ and
+    # public/ only), shipped in image mode too, and a record for the drift
+    # tooling. Its data dir needs no push: the container creates its state in
+    # sorter-data on first start.
+    if ship_sorter:
+        if not install_tree(root, "sorter-web", sorter_src, args.dry_run,
+                            excludes=SORTER_EXCLUDE_DIRS,
+                            staging_slug="ccsync-sorterweb-upload",
+                            staging_parent=code_staging_parent):
+            return fail_after_app_swap(args.dry_run)
+        record_cards_deploy(sorter_src, sorter_info, args.dry_run, "sorter")
+        if sorter_info and not args.dry_run:
+            moved = cards_head_moved_on(sorter_info)
+            print(f"installed Footage Sorter: commit {sorter_info['short']} "
+                  f"({sorter_info['ref']}), marker {CARDS_MARKER_NAME} in "
+                  f"{root}/sorter-web"
+                  + (f"; {moved}" if moved else ""))
+
     # Step 2h (image mode): get the image onto the NAS before the app is
     # created, so a create job that pulls has nothing left to fetch and a
     # RESTART -- which never pulls -- at least runs against an up-to-date local
@@ -6687,6 +7135,7 @@ def main():
         anthropic_api_key=anthropic_api_key,
         cards_enabled=cards_enabled, cards_token=cards_token,
         cards_editor=cards_editor,
+        sorter_enabled=sorter_enabled,
         tree_dataset=datasets["DASH_TREE_DATASET"],
         apps_dataset=datasets["DASH_UPDATE_SNAPSHOT_DATASET"],
         snapshot=snapshot,

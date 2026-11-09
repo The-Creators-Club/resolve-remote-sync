@@ -353,6 +353,33 @@ services:
       # during the transition (§7.4).
       DASH_CARDS_SERVER_URL: ""
       DASH_CARDS_TOKEN: "REPLACE_ME"
+      # --- THE FOOTAGE SORTER, hosted here at /sorter -----------------------
+      # footage-sorter's docs/DASHBOARD-MODULE-PLAN.md phase 3 (2026-11-09).
+      # Mounted exactly as /cards is: ANOTHER REPO'S checkout, shipped to the
+      # host by install_dashboard_app.py as a commit snapshot (footage_sorter/
+      # and public/ only), appended to sys.path by ccsync_dashboard.sorter at
+      # mount time. Blank/"0" is the shipped state: /sorter reports
+      # `disabled` with the reason and nothing else changes.
+      #
+      # ONE OF ITS INPUTS IS A MOUNT, NOT A SETTING: the footage POOL at /pool
+      # (rw), the WHOLE dataset in a single bind. It is added to the volume
+      # list by install_dashboard_app.py when site.toml's [footage_sorter]
+      # names pool_host -- see the note in the volumes block below, and
+      # docs/DOCKER.md, "The Footage Sorter mounts", for why it must never be
+      # two binds (EXDEV).
+      DASH_SORTER_ENABLED: "0"
+      DASH_SORTER_SRC: ""
+      DASH_SORTER_DATA: "/sorter-data"
+      DASH_SORTER_CACHE: "/sorter-data/cache"
+      # What the CONTAINER knows, as one JSON object: the source roots, the
+      # destination root and the staging root (all paths under /pool), the
+      # ffmpeg dir, the legacy-id table and the Vault root. Single-quoted: the
+      # JSON is full of double quotes and the legacy ids carry backslashes
+      # (`W:\Temp Transfer`), and a backslash in a DOUBLE-quoted YAML scalar is
+      # an escape character -- TrueNAS parses this file, so it would fail at
+      # install rather than at run time. A quote inside the JSON is written
+      # twice and a dollar sign `$$`, both done by the renderer.
+      DASH_SORTER_SETTINGS: ''
       # WHAT THIS CONTAINER CALLS THE FLEET'S ROOT NAMES, for the jobs it
       # runs ITSELF (TIMELINE-CARDS-INTO-CCSYNC.md phase 4's pin: a media job
       # the fleet spent its retry budget on is handed to the engine mounted
@@ -674,6 +701,25 @@ services:
       # Mounted in IMAGE MODE TOO, unlike the four above: the vendor image
       # cannot carry another repo's tree.
       - /mnt/tank/apps/ccsync-dashboard/cards-web:/cards-app:ro
+      # The Footage Sorter's code: the footage-sorter checkout's
+      # footage_sorter/ and public/, shipped to the host by
+      # install_dashboard_app.py (SORTER_SRC overrides the source), read-only
+      # like every other code mount. An empty dir here is a supported state --
+      # /sorter reports `absent` and nothing else changes.
+      # Mounted in IMAGE MODE TOO, for the reason cards-web is.
+      - /mnt/tank/apps/ccsync-dashboard/sorter-web:/sorter-app:ro
+      # The sorter's own WRITABLE state: manifest, catalogue, move journal and
+      # (in sorter-data/cache) thumbnails and filmstrips. Owned 3000:3000 mode
+      # 770, like /music-data and /ytdl-data and for the same C-2 reason --
+      # group 3000, NOT editors.
+      - /mnt/tank/apps/ccsync-dashboard/sorter-data:/sorter-data:rw
+      # NOTE: the footage POOL (/pool:rw) is NOT here, deliberately -- it is a
+      # per-site mount like the vault, added by install_dashboard_app.py only
+      # when site.toml's [footage_sorter] names pool_host (with `group_add` if
+      # it names pool_gid). It is ONE bind of the WHOLE dataset and never two:
+      # a rename across two bind mounts is EXDEV even on one ZFS dataset, and
+      # the sorter refuses EXDEV rather than copy. docs/DOCKER.md, "The
+      # Footage Sorter mounts".
       # NOTE: the VAULT (/vault:rw) and the FOOTAGE SHARE (/media:ro) are
       # NOT here, and that is deliberate -- they are a per-site pair like
       # the deno mount below, added by install_dashboard_app.py only when

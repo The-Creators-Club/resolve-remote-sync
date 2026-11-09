@@ -208,7 +208,17 @@ def _under(base: Path, rel: str) -> Path:
     if any(p == ".." for p in parts) or not parts:
         raise job_paths.JobPathError(
             f"{rel!r} climbs out of its volume", retryable=False)
-    return base.joinpath(*parts)
+    # a ":" in ANY part is a drive (`DCIM/E:/x` re-roots a Windows join onto E:) or an alternate data stream
+    if any(":" in p for p in parts) or any(os.path.isabs(p) for p in parts):
+        raise job_paths.JobPathError(
+            f"{rel!r} has a drive or stream marker in it", retryable=False)
+    out = base.joinpath(*parts)
+    try:
+        out.resolve().relative_to(base.resolve())
+    except (ValueError, OSError):
+        raise job_paths.JobPathError(
+            f"{rel!r} resolves outside its volume", retryable=False) from None
+    return out
 
 
 class CardJob:

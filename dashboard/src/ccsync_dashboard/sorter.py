@@ -265,7 +265,10 @@ def sorter_agent_cards(payload: dict[str, Any], request: Request) -> dict:
         raise HTTPException(422, "expected {machine, cards: [...]}")
     if len(cards) > MAX_CARDS_PER_REPORT:
         raise HTTPException(413, f"at most {MAX_CARDS_PER_REPORT} cards in one report")
-    return engine.ingest.report(editor, machine, cards)
+    try:
+        return engine.ingest.report(editor, machine, cards)
+    except ValueError as e:
+        raise HTTPException(413, str(e)) from None
 
 
 # The two calls a companion makes for a claimed card-ingest job. The copy list
@@ -276,11 +279,11 @@ def sorter_agent_cards(payload: dict[str, Any], request: Request) -> dict:
 AGENT_PATH_RE = r"^/sorter/agent/(cards|ingest/\d+(/receipt)?)$"
 
 
-def _claimed_job(request: Request, job_id: int) -> tuple[Any, str]:
+def _claimed_job(request: Request, job_id: int, barred: str = "allow") -> tuple[Any, str]:
     from . import api, db
     conn = db.connect(request.app.state.settings.db_path)
     try:
-        editor = api._require_fleet_caller(request, conn, barred="allow")
+        editor = api._require_fleet_caller(request, conn, barred=barred)
         job = db.get_job(conn, int(job_id))
     finally:
         conn.close()
@@ -296,7 +299,9 @@ def _claimed_job(request: Request, job_id: int) -> tuple[Any, str]:
 
 @agent_router.get("/ingest/{job_id}")
 def sorter_agent_ingest_manifest(job_id: int, request: Request) -> dict:
-    engine, _editor = _claimed_job(request, job_id)
+    # "gone": a suspended account's companion reads the 410 as "this job is not yours, stop"; the receipt
+    # door stays "allow", it only retires work already claimed
+    engine, _editor = _claimed_job(request, job_id, barred="gone")
     try:
         return engine.ingest.manifest_for(job_id)
     except LookupError as e:
@@ -322,9 +327,9 @@ def _job_hooks(settings: Settings, engine: Any) -> None:
     """Plug the dashboard's fleet job queue into the sorter's ingest service."""
     from . import db
 
-    def submit_job(kind: str, inputs: dict, requires: dict, target_machine: str, user: str) -> int:
-        s = next((x for x in engine.ingest.cards.sessions.values() if x["machine"] == target_machine), None)
-        target = f"{s['editor']}/{target_machine}" if s and s.get("editor") else target_machine
+    def submit_job(kind: str, inputs: dict, requires: dict, target_machine: str, user: str, editor: str = "") -> int:
+        # the session's own editor, passed by the sorter: two editors may both have a machine called LAPTOP
+        target = f"{editor}/{target_machine}" if editor else target_machine
         conn = db.connect(settings.db_path)
         try:
             job_id = db.create_job(conn, kind, inputs, requires, created_by=f"sorter:{user or 'unknown'}",

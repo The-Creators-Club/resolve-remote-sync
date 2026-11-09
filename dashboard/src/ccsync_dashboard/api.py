@@ -3542,6 +3542,64 @@ def _active_project_label(conn: sqlite3.Connection, slug: str) -> str:
     return str(row["label"])
 
 
+_RENAME_NOREPLACE = 1
+_AT_FDCWD = -100
+_renameat2_cache: list = []        # [fn or None], filled on first use
+
+
+def _renameat2_fn():
+    """libc's renameat2, or None where there is none (Windows, old libc, musl without it)."""
+    if not _renameat2_cache:
+        fn = None
+        if os.name == "posix":
+            try:
+                import ctypes
+                import ctypes.util
+
+                libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+                fn = libc.renameat2
+                fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            except (OSError, AttributeError):
+                fn = None
+        _renameat2_cache.append(fn)
+    return _renameat2_cache[0]
+
+
+def _rename_noreplace(src, dst) -> None:
+    """Rename src to dst and REFUSE to replace anything at dst (the same approach as the footage
+    sorter's moves.rename_noreplace; copied, not imported). `dest.exists()` then `rename()` leaves a
+    window in which a file arriving at dst is silently replaced on Linux, where rename() replaces.
+
+    Windows: os.rename already refuses an existing target. Linux: renameat2(RENAME_NOREPLACE).
+    If the filesystem lacks it (EINVAL/ENOSYS) or there is no renameat2: a file is hard-linked then
+    the old name unlinked (link() fails if dst exists); a directory claims dst with mkdir (atomic,
+    fails if anything is there) and renames onto that empty directory of ours."""
+    if os.name == "nt":
+        Path(src).rename(dst)           # never replaces on Windows
+        return
+    src, dst = os.fspath(src), os.fspath(dst)
+    fn = _renameat2_fn()
+    if fn is not None:
+        import ctypes
+        import errno
+
+        if fn(_AT_FDCWD, os.fsencode(src), _AT_FDCWD, os.fsencode(dst), _RENAME_NOREPLACE) == 0:
+            return
+        err = ctypes.get_errno()
+        if err not in (errno.EINVAL, errno.ENOSYS):         # this filesystem cannot do it: fall through
+            raise OSError(err, os.strerror(err), src, None, dst)
+    if os.path.isdir(src) and not os.path.islink(src):
+        os.mkdir(dst)
+        try:
+            os.rename(src, dst)
+        except OSError:
+            os.rmdir(dst)               # only the empty directory just made above
+            raise
+        return
+    os.link(src, dst, follow_symlinks=False)
+    os.unlink(src)
+
+
 def _proxy_stem_key(stem: str) -> str:
     """A stem folded for COMPARISON only (bug-dash-api-2, 2026-09-25): NFC
     then lower-case, the companion's file_moves._stem_key. A clip named on a
@@ -3606,17 +3664,17 @@ def _move_proxy_siblings(src: Path, dest: Path) -> tuple[int, list[str]]:
                     # candidate, so go through a third name, the way the
                     # companion's _rename_case_only does.
                     staging = candidate.with_name(f".ccsync-move-{candidate.name}")
-                    candidate.rename(staging)
+                    _rename_noreplace(candidate, staging)
                     try:
-                        staging.rename(target)
+                        _rename_noreplace(staging, target)
                     except OSError:
-                        staging.rename(candidate)
+                        _rename_noreplace(staging, candidate)
                         raise
                     moved += 1
                     continue
                 failed.append(f"{candidate.name} (something is already at the destination)")
                 continue
-            candidate.rename(target)
+            _rename_noreplace(candidate, target)
             moved += 1
         except OSError as exc:
             log.warning("file move: proxy %s did not follow (%s)", candidate, exc)
@@ -3691,7 +3749,7 @@ def move_project_files(settings, conn: sqlite3.Connection, from_slug: str,
     conn.commit()
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        src.rename(dest)
+        _rename_noreplace(src, dest)
     except OSError as exc:
         # A rename across two mounts, a permission the container lacks, a
         # file Resolve holds open on the share: all of them leave the file

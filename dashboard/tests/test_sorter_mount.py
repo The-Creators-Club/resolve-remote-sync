@@ -275,3 +275,109 @@ def test_a_card_is_copied_by_the_machine_that_holds_it(mounted, tmp_path):
     st = client.get(f"/sorter/api/ingest/status?sessionId={sid}").json()
     assert st["state"] == "done" and st["done"] == 2
     assert all(pool.joinpath(*c["dst"]["rel"].split("/")).is_relative_to(pool / "Temp Transfer") for c in copies)
+
+
+# ------------------------------------------------------------------ card ingest: the hunt's fixes
+
+def _report(client, editor, machine, cards):
+    client.cookies.clear()
+    return client.post("/sorter/agent/cards", json={"machine": machine, "cards": cards}, headers=fleet_headers(editor))
+
+
+def _claimed_run(client, app, editor="alex", machine="creator-1", serial_card=CARD):
+    """owen presses Copy on a card `editor` reported; `editor`'s machine claims the job. -> (job id, copies)."""
+    from ccsync_dashboard import db
+    me = login(client, "owen")
+    h = {"x-csrf-token": me["csrf"]}
+    sid = next(s["id"] for s in client.get("/sorter/api/ingest/sessions").json()["sessions"]
+               if s["machine"] == machine and s["serial"] == serial_card["serial"])
+    plan = client.post("/sorter/api/ingest/plan", json={"sessionId": sid, "mode": "stage"}, headers=h).json()
+    job_id = client.post("/sorter/api/ingest/run", json={"sessionId": sid, "planId": plan["planId"]}, headers=h).json()["jobId"]
+    conn = db.connect(app.state.settings.db_path)
+    try:
+        target = db.get_job(conn, job_id)["target_machine"]
+        conn.execute("UPDATE jobs SET state='running', claimed_by=?, claimed_machine=? WHERE id=?", (editor, machine, job_id))
+        conn.commit()
+    finally:
+        conn.close()
+    client.cookies.clear()
+    copies = client.get(f"/sorter/agent/ingest/{job_id}", headers=fleet_headers(editor)).json()["copies"]
+    return job_id, copies, sid, target
+
+
+def test_two_editors_with_one_machine_name_do_not_share_cards(mounted):
+    client, app, *_ = mounted
+    login(client, "owen")
+    bob_card = {**CARD, "serial": "BOB1"}
+    assert _report(client, "alex", "LAPTOP", [CARD]).status_code == 200
+    assert _report(client, "bob", "LAPTOP", [bob_card]).status_code == 200
+    login(client, "owen")
+    assert len(client.get("/sorter/api/ingest/sessions").json()["sessions"]) == 2
+    assert _report(client, "bob", "LAPTOP", []).status_code == 200            # bob's empty report is bob's
+    login(client, "owen")
+    assert [s["serial"] for s in client.get("/sorter/api/ingest/sessions").json()["sessions"]] == [CARD["serial"]]
+    assert _report(client, "bob", "LAPTOP", [bob_card]).status_code == 200
+    _jid, _copies, _sid, target = _claimed_run(client, app, editor="bob", machine="LAPTOP", serial_card=bob_card)
+    assert target == "bob/LAPTOP"
+
+
+def test_a_report_with_a_drive_that_is_a_server_path_is_dropped(mounted):
+    client, app, *_ = mounted
+    login(client, "owen")
+    _report(client, "alex", "creator-1", [{**CARD, "drive": "/etc"}])
+    login(client, "owen")
+    assert client.get("/sorter/api/ingest/sessions").json()["sessions"] == []
+    flood = [_report(client, "alex", f"fake-{m}", [CARD]).status_code for m in range(6)]
+    assert flood[:4] == [200] * 4 and flood[4:] == [413, 413]
+
+
+def test_a_forged_receipt_lands_nothing(mounted):
+    client, app, projects, _staged = mounted
+    login(client, "owen")
+    assert _report(client, "alex", "creator-1", [CARD]).status_code == 200
+    job_id, copies, sid, _t = _claimed_run(client, app)
+    forged = {"copied": [{**c, "dst": {"root": "pool", "rel": "../../../../etc/" + c["src"].split("/")[-1]}, "verified": True}
+                         for c in copies], "skipped": [], "conflicts": [], "failed": []}
+    r = client.post(f"/sorter/agent/ingest/{job_id}/receipt", json=forged, headers=fleet_headers("alex"))
+    assert r.status_code == 200 and r.json()["state"] == "error"
+    cat = app.state.sorter_engine.catalog
+    assert not any(e.get("locations") for e in cat.doc["clips"].values() if e.get("stem") in ("C0001", "C0002")
+                   and any(l.get("root") in ("staging", "final") for l in e["locations"]))
+
+
+def test_a_halted_receipt_keeps_the_run_open_and_the_list_available(mounted):
+    client, app, projects, _staged = mounted
+    login(client, "owen")
+    assert _report(client, "alex", "creator-1", [CARD]).status_code == 200
+    job_id, copies, sid, _t = _claimed_run(client, app)
+    pool = projects.parent.parent
+    first = copies[0]
+    dst = pool.joinpath(*first["dst"]["rel"].split("/"))
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(b"x" * first["size"])
+    r = client.post(f"/sorter/agent/ingest/{job_id}/receipt", headers=fleet_headers("alex"), json={
+        "copied": [{**first, "verified": True}], "skipped": [], "conflicts": [], "failed": [], "final": False})
+    assert r.status_code == 200 and r.json()["final"] is False
+    assert client.get(f"/sorter/agent/ingest/{job_id}", headers=fleet_headers("alex")).json()["copies"] == copies
+    login(client, "owen")
+    st = client.get(f"/sorter/api/ingest/status?sessionId={sid}").json()
+    assert st["state"] not in ("done", "error") and st["done"] == 1
+
+
+def test_the_copy_list_is_refused_to_a_suspended_account_but_its_receipt_is_taken(mounted):
+    from ccsync_dashboard import db
+    client, app, projects, _staged = mounted
+    login(client, "owen")
+    assert _report(client, "alex", "creator-1", [CARD]).status_code == 200
+    job_id, copies, sid, _t = _claimed_run(client, app)
+    conn = db.connect(app.state.settings.db_path)
+    try:
+        db.record_known_editor(conn, "alex", "admin")
+        assert db.suspend_editor(conn, "alex", by="owen", reason="test")
+        conn.commit()
+    finally:
+        conn.close()
+    assert client.get(f"/sorter/agent/ingest/{job_id}", headers=fleet_headers("alex")).status_code == 410
+    r = client.post(f"/sorter/agent/ingest/{job_id}/receipt", headers=fleet_headers("alex"),
+                    json={"copied": [], "skipped": [], "conflicts": [], "failed": []})
+    assert r.status_code == 200

@@ -586,3 +586,14 @@ def test_a_receipt_that_never_lands_fails_the_job_retryably(tmp_path, monkeypatc
     assert res["ok"] is False and res["retryable"] is True
     assert res["result"]["receipt"] is False
     assert (w.pool / "Footage/Day1/a.MP4").read_bytes() == b"12345"
+
+
+@pytest.mark.parametrize("rel", ["DCIM/E:/Projects/evil.MP4", "DCIM/D:x.MP4", "DCIM/C:/Windows/x", "a/b.MP4:stream",
+                                 "../x", "a/../../x", "/abs/x", "C:/x"])
+def test_under_refuses_drives_streams_and_climbs(tmp_path, rel):
+    with pytest.raises(card_copy.job_paths.JobPathError):
+        card_copy._under(tmp_path, rel)
+
+
+def test_under_keeps_an_ordinary_card_path(tmp_path):
+    assert card_copy._under(tmp_path, "PRIVATE\\M4ROOT/CLIP/C0001.MP4") == tmp_path / "PRIVATE" / "M4ROOT" / "CLIP" / "C0001.MP4"

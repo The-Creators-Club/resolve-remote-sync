@@ -767,6 +767,7 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     # an engine that could not be built is not mounted at all), so this is
     # simply "did it fully take".
     context.setdefault("cards_mounted", getattr(request.app.state, "cards_mounted", False))
+    context.setdefault("sorter_mounted", getattr(request.app.state, "sorter_mounted", False))
     # UX-10 (2026-08-28): how many problems the server has found, in the bar
     # that is on every page. FULL PAGES ONLY -- the partials re-render on 2 s
     # and 15 s timers, and a count on each of those would be one extra

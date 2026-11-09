@@ -612,6 +612,22 @@ class Settings:
     cards_db_write_allow: str = ""
     cards_db_backups: str = ""
     cards_media_map: str = ""
+    # --- the Footage Sorter at /sorter (sorter.py, 2026-11-09) ----------------
+    # Another repo's checkout (footage-sorter's `footage_sorter` package),
+    # shipped to `<apps>/sorter-web` and mounted /sorter-app:ro like /cards-app.
+    # `sorter_data` is its own writable state (manifest, catalog, clips, move
+    # journal); `sorter_cache` its thumbnails and filmstrips (default
+    # <data>/cache). `sorter_settings` is JSON of what the CONTAINER knows:
+    # {"sourceRoots": ["/pool/Temp Transfer"], "destRoot":
+    # "/pool/Creators_Club/Projects", "ffmpegDir": "/opt/ffmpeg",
+    # "legacyIdRoots": {"/pool/Temp Transfer": "W:\Temp Transfer",
+    # "/pool/Creators_Club": "P:\\"}, ...}. The pool is ONE mount of the whole
+    # dataset, so a staging -> Projects move is a rename (DOCKER.md).
+    sorter_enabled: bool = False
+    sorter_src: str = ""
+    sorter_data: str = ""
+    sorter_cache: str = ""
+    sorter_settings: str = ""
     # --- the NEW Timeline Cards editor, beside the old page (2026-11-05) ----
     # `cards_edit.py`: a Node child process the dashboard starts and proxies
     # at /cards/edit (docs/CARDS_EDITOR.md). OFF in the vendor build: it needs
@@ -1004,6 +1020,12 @@ class Settings:
             cards_db_write_allow=env.get("DASH_CARDS_DB_WRITE_ALLOW", "").strip(),
             cards_db_backups=env.get("DASH_CARDS_DB_BACKUPS", "").strip(),
             cards_media_map=env.get("DASH_CARDS_MEDIA_MAP", "").strip(),
+            # "1" and nothing else, like DASH_CARDS_ENABLED.
+            sorter_enabled=env.get("DASH_SORTER_ENABLED", "") == "1",
+            sorter_src=env.get("DASH_SORTER_SRC", "").strip(),
+            sorter_data=env.get("DASH_SORTER_DATA", "").strip(),
+            sorter_cache=env.get("DASH_SORTER_CACHE", "").strip(),
+            sorter_settings=env.get("DASH_SORTER_SETTINGS", "").strip(),
             # "1" and nothing else, like DASH_CARDS_ENABLED.
             cards_editor=env.get("DASH_CARDS_EDITOR", "") == "1",
             cards_editor_port=max(0, int(num("DASH_CARDS_EDITOR_PORT", 0))),

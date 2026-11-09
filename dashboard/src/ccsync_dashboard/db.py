@@ -12329,8 +12329,15 @@ JOB_KIND_WHISPER = "whisper"
 JOB_KIND_PROXY_480P = "proxy-480p"
 JOB_KIND_AUDIO_EXTRACT = "audio-extract"
 JOB_KIND_PEAKS = "peaks"
+# The Footage Sorter's (sorter.py, 2026-11-09): a camera card in a PC's reader
+# copied to the footage pool, and a PC drive copied the same way. Always
+# submitted FORCED and TARGETED at the machine holding the card: somebody is
+# standing there with it, and no other machine can read it. The copy list and
+# the receipt travel on /sorter/agent/ingest/<id>, not in the row (16 KB cap).
+JOB_KIND_CARD_INGEST = "card-ingest"
+JOB_KIND_DRIVE_COPY = "drive-copy"
 JOB_KINDS = (JOB_KIND_WHISPER, JOB_KIND_PROXY_480P, JOB_KIND_AUDIO_EXTRACT,
-             JOB_KIND_PEAKS)
+             JOB_KIND_PEAKS, JOB_KIND_CARD_INGEST, JOB_KIND_DRIVE_COPY)
 
 # What the fleet grid calls a kind. Data rather than a chain of ifs in the
 # template, and NOT `kind.upper()`: "PROXY-480P" is the shape of a database
@@ -12340,6 +12347,8 @@ JOB_KIND_LABELS = {
     JOB_KIND_PROXY_480P: "PROXY 480p",
     JOB_KIND_AUDIO_EXTRACT: "AUDIO",
     JOB_KIND_PEAKS: "PEAKS",
+    JOB_KIND_CARD_INGEST: "CARD COPY",
+    JOB_KIND_DRIVE_COPY: "DRIVE COPY",
 }
 
 
@@ -12366,6 +12375,11 @@ JOB_RETRY_BUDGET = {
     JOB_KIND_PROXY_480P: 3,
     JOB_KIND_AUDIO_EXTRACT: 2,
     JOB_KIND_PEAKS: 2,
+    # ONE machine can do it, so a retry is the same machine again: worth one
+    # more go (a reader that dropped out), and a re-run skips what already
+    # landed, so it costs only what is missing
+    JOB_KIND_CARD_INGEST: 2,
+    JOB_KIND_DRIVE_COPY: 2,
 }
 JOB_RETRY_BUDGET_DEFAULT = 3
 
@@ -12384,6 +12398,10 @@ JOB_MAX_RUNNING = {
     JOB_KIND_PROXY_480P: 4,
     JOB_KIND_AUDIO_EXTRACT: 4,
     JOB_KIND_PEAKS: 4,
+    # each one is a different card in a different reader: the share's write
+    # side is the limit, not the readers
+    JOB_KIND_CARD_INGEST: 4,
+    JOB_KIND_DRIVE_COPY: 2,
 }
 JOB_MAX_RUNNING_DEFAULT = 4
 

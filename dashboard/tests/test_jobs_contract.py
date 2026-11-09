@@ -205,7 +205,10 @@ def test_the_kinds_the_two_sides_know_do_not_drift():
     _caps, _paths, jobs_runner = companion()
     runner = jobs_runner.JobRunner(
         {}, capabilities_fn=lambda: {"whisper": True, "ffmpeg": True,
-                                     "ffprobe": True})
+                                     "ffprobe": True,
+                                     # reads camera cards for the Footage Sorter
+                                     # (card-ingest, drive-copy)
+                                     "sorter_cards": True})
     assert sorted(runner.runnable_kinds()) == sorted(dbmod.JOB_KINDS)
     # ...and a machine that has reported nothing asks for nothing, rather
     # than for everything.

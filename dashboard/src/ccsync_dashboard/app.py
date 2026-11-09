@@ -37,7 +37,7 @@ from . import (
     dashboard_update, db, gear_ai, internal_sftp, jobs, local_users, mount_status, music,
     notices,
     oidc, release_feed,
-    secrets_boot, sessions, setup_api, setup_routes, site_store, ui, ytdl,
+    secrets_boot, sessions, setup_api, setup_routes, site_store, sorter, ui, ytdl,
 )
 from .collector import Collector
 from .settings import Settings
@@ -247,7 +247,9 @@ _CSRF_EXEMPT_PREFIXES = ("/api/v1/selection/", "/api/v1/admin/packages/",
 # (phase 3) and stays session-gated.
 _CSRF_EXEMPT_RE = re.compile(
     r"^(/api/v1/jobs/(claim|\d+/(heartbeat|result))"
-    r"|/cards/agent/(state|result))$")
+    r"|/cards/agent/(state|result)"
+    # the companion's card reports and card-copy receipts (sorter.py)
+    r"|/sorter/agent/cards|/sorter/agent/ingest/\d+/receipt)$")
 # The mounted Timeline Cards PAGE (phase 3). Its forty-odd POST routes are
 # the sub-app's own fetches and carry no CSRF token, exactly like the three
 # mounts in _CSRF_EXEMPT_PREFIXES above -- but this one drives a Resolve
@@ -310,14 +312,18 @@ _BODY_LIMITS = {"/api/v1/report": ("POST", MAX_REPORT_BODY_BYTES),
                 # default would refuse a real state push, and smaller than the
                 # report's 8 MB because nothing here streams.
                 "/cards/agent/state": ("POST", MAX_CARDS_STATE_BODY_BYTES),
-                "/cards/agent/result": ("POST", MAX_CARDS_RESULT_BODY_BYTES)}
+                "/cards/agent/result": ("POST", MAX_CARDS_RESULT_BODY_BYTES),
+                # a companion's camera cards, each listed file by file (sorter.py)
+                "/sorter/agent/cards": ("POST", sorter.MAX_CARDS_REPORT_BYTES)}
 # Companion-authenticated POSTs: the token check runs BEFORE the body is read,
 # so no unauthenticated caller can spend the single-worker container's memory
 # on a body it will refuse anyway (B15).
 _COMPANION_TOKEN_PATHS = ("/api/v1/report", "/api/v1/diagnostics",
                           # Same B15 reasoning for the tunnel: the credential
                           # is checked before a timeline-sized body is read.
-                          "/cards/agent/state", "/cards/agent/result")
+                          "/cards/agent/state", "/cards/agent/result",
+                          # ...and the Footage Sorter's card listing (sorter.py)
+                          "/sorter/agent/cards")
 # (path prefix, method, limit) -- the packages route has the platform and
 # version in its path, so it can't be matched exactly. These are declaration
 # checks ONLY: api_publish_package streams its body to disk and counts the
@@ -938,6 +944,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # worker.
             executor.stop()
             cards.stop_engine(app)
+            sorter.stop_sorter(app)
             # The new editor's child process: stopped GRACEFULLY, because its
             # SIGTERM handler is what flushes every open cut list (cards_edit).
             await cards_edit.shutdown(app)
@@ -1315,6 +1322,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # documentary and stays fully session-gated. Widening this to the prefix
     # would publish it to anything holding a fleet token.
     _cards_fleet_re = re.compile(r"^/cards/agent/(state|pending|result)$")
+    # the Footage Sorter's fleet routes: the card report, and a claimed card
+    # copy's file list and receipt (sorter.py; each re-checks the claimant)
+    _sorter_fleet_re = re.compile(sorter.AGENT_PATH_RE)
     # The mounted page's JSON and media, per episode: `/cards/p/<slug>/api/…`,
     # `…/audio`, `…/video`, `…/peaks`. A regex rather than four more literal
     # prefixes because the slug sits in the middle of each of them.
@@ -1415,6 +1425,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # ...and the machine with Resolve open serving the Timeline Cards
             # page (TIMELINE-CARDS-INTO-CCSYNC.md phase 2)
             or (_cards_fleet_re.match(path) is not None and _companion_token_ok(request))
+            # ...and a companion reporting the camera cards in its readers to
+            # the Footage Sorter (sorter.py). Exact path, POST only: /sorter/
+            # itself is the page and stays session-gated. The two
+            # /sorter/agent/ingest/<job> calls ride the same check.
+            or (_sorter_fleet_re.match(path) is not None and _companion_token_ok(request))
             # ...and a lane B pass asking where the files it is about to
             # trash have gone (HAND_MOVES_ON_THE_SERVER.md phase 2). Same
             # posture as the fleet routes above: no session on the far end,
@@ -1472,6 +1487,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     status_code=401)
             if (path.startswith(("/broll/api/", "/broll/media/",
                                  "/music/api/", "/ytdl/api/", "/cards/agent/",
+                                 # the sorter's fetches, <img> thumbnails and
+                                 # <video> previews (sorter.py)
+                                 "/sorter/api/",
                                  "/cards/api/", "/cards/audio", "/cards/video",
                                  "/cards/peaks",
                                  # the new editor's fetches and <audio>/<video>
@@ -1707,6 +1725,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # can never be shadowed by it (phase 3 replaces the proxy with an
     # in-process call and leaves these three routes exactly where they are).
     app.include_router(cards_tunnel.router)
+    # ...and the sorter's one fleet route, before the /sorter mount can shadow it
+    app.include_router(sorter.agent_router)
 
     # Whatever a previous app in this process decided is not evidence about
     # this one (DDIAG-7): the registry is module-level on purpose, so a second
@@ -1782,6 +1802,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.cards_mounted = app.state.cards_status == cards.MOUNTED
     _record_mount(app, "cards", app.state.cards_status, app.state.cards_detail,
                   cards.MOUNTED)
+    # And the Footage Sorter (2026-11-09, sorter.py; footage-sorter's
+    # docs/DASHBOARD-MODULE-PLAN.md): the same contract again -- another repo's
+    # checkout, in-process, tri-state, never fatal, no nav link unless it took.
+    # Its engine LOADS in a thread (55 MB of clips and catalog), so boot does
+    # not wait for it; the gate holds the first requests until it is ready.
+    app.state.sorter_status, app.state.sorter_detail = sorter.mount_sorter(app, settings)
+    app.state.sorter_mounted = app.state.sorter_status == sorter.MOUNTED
+    _record_mount(app, "sorter", app.state.sorter_status, app.state.sorter_detail,
+                  sorter.MOUNTED)
     # wire-2 (2026-09-18): the SAME busy answer on every mounted sub-app.
     # `@app.exception_handler(Exception)` above is installed on the PARENT's
     # ServerErrorMiddleware, and `/broll`, `/music` and `/ytdl` are real ASGI

@@ -1734,7 +1734,8 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
 
 
 def _mounts_block(request: Request) -> dict[str, dict[str, str]]:
-    """{name: {status, detail}} for /broll, /music, /ytdl and /cards.
+    """{name: {status, detail}} for every in-process mount (mount_status.NAMES:
+    /broll, /music, /ytdl, /cards, /sorter).
 
     Read from `mount_status`, which the boot block wrote and the ytdl feature
     gate keeps current, and falling back to app.state for a mount that never
@@ -1749,7 +1750,7 @@ def _mounts_block(request: Request) -> dict[str, dict[str, str]]:
         recorded = mount_status.snapshot()
     except Exception:  # noqa: BLE001 - a health route always answers
         recorded = {}
-    for name in ("broll", "music", "ytdl", "cards"):
+    for name in mount_status.NAMES:
         status, detail = recorded.get(name, ("", ""))
         if not status:
             state = request.app.state

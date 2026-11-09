@@ -37,7 +37,7 @@ _STATE: dict[str, tuple[str, str]] = {}
 # The four this dashboard mounts, in boot order. Exported so a reader can tell
 # "not mounted" from "never recorded" -- a dashboard too old to record, or one
 # that died before the boot block reached that line.
-NAMES = ("broll", "music", "ytdl", "cards")
+NAMES = ("broll", "music", "ytdl", "cards", "sorter")
 
 
 # res-fleet-2 (2026-09-11): name -> (the data root that mount is serving, the

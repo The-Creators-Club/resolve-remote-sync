@@ -38,6 +38,7 @@
     {% if music_mounted %}<a class="hud-lowpri" href="/music/"{{ ' aria-current="page"' | safe if nav_current == 'music' }}><span class="hud-slash" aria-hidden="true">&gt;</span>music</a>{% endif %}
     {% if ytdl_mounted %}<a class="hud-lowpri" href="/ytdl/"{{ ' aria-current="page"' | safe if nav_current == 'ytdl' }}><span class="hud-slash" aria-hidden="true">&gt;</span>youtube</a>{% endif %}
     {% if cards_mounted %}<a href="/cards/"{{ ' aria-current="page"' | safe if nav_current == 'cards' }}><span class="hud-slash" aria-hidden="true">&gt;</span>cards</a>{% endif %}
+    {% if sorter_mounted %}<a href="/sorter/"{{ ' aria-current="page"' | safe if nav_current == 'sorter' }}><span class="hud-slash" aria-hidden="true">&gt;</span>sorter</a>{% endif %}
     <a href="/transfers"{{ ' aria-current="page"' | safe if nav_current == 'transfers' }}><span class="hud-slash" aria-hidden="true">&gt;</span>transfers</a>
     {% if session_is_admin %}<a href="{{ SETTINGS_LANDING }}"{{ ' aria-current="page"' | safe if hud_in_settings }}><span class="hud-slash" aria-hidden="true">&gt;</span>settings</a>{% endif %}
     {# 601 to 900 px only (hud-common): music and youtube fold into the
@@ -93,6 +94,7 @@
   <a href="/"{{ ' aria-current="page"' | safe if nav_current == 'fleet' }}><span class="hud-g" aria-hidden="true">&#8645;</span>sync</a>
   {% if broll_mounted %}<a href="/broll/"{{ ' aria-current="page"' | safe if nav_current == 'broll' }}><span class="hud-g" aria-hidden="true">&#9635;</span>b-roll</a>{% endif %}
   {% if cards_mounted %}<a href="/cards/"{{ ' aria-current="page"' | safe if nav_current == 'cards' }}><span class="hud-g" aria-hidden="true">&#8801;</span>cards</a>{% endif %}
+  {% if sorter_mounted %}<a href="/sorter/"{{ ' aria-current="page"' | safe if nav_current == 'sorter' }}><span class="hud-g" aria-hidden="true">&#9638;</span>sorter</a>{% endif %}
   <a href="/transfers"{{ ' aria-current="page"' | safe if nav_current == 'transfers' }}><span class="hud-g" aria-hidden="true">&#8597;</span>transfers</a>
   <button type="button" popovertarget="hud-more"><span class="hud-g" aria-hidden="true">&#8230;</span>more</button>
 </nav>

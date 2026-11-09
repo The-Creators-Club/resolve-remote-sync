@@ -528,7 +528,8 @@ def test_the_package_route_is_not_buffered_by_the_gate():
     # which a pydantic 422 would have replaced.
     assert set(appmod._BODY_LIMITS) == {"/api/v1/report", "/api/v1/diagnostics",
                                         "/api/v1/files/locate",
-                                        "/cards/agent/state", "/cards/agent/result"}
+                                        "/cards/agent/state", "/cards/agent/result",
+                                        "/sorter/agent/cards"}
     assert appmod._BODY_LIMIT_PREFIXES[0][0] == "/api/v1/admin/packages/"
 
 

@@ -56,6 +56,10 @@ JOB_IDLE_FLOOR_SECONDS: dict[str, int] = {
     db.JOB_KIND_PROXY_480P: 300,
     db.JOB_KIND_AUDIO_EXTRACT: 60,
     db.JOB_KIND_PEAKS: 60,
+    # submitted forced (somebody is standing at the card), so never waited on;
+    # zero says so for a job an admin re-queues unforced
+    db.JOB_KIND_CARD_INGEST: 0,
+    db.JOB_KIND_DRIVE_COPY: 0,
 }
 JOB_IDLE_FLOOR_DEFAULT = 300
 

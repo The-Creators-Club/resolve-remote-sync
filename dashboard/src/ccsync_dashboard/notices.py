@@ -739,6 +739,7 @@ _MOUNT_LABELS = {
     "music": "MUSIC",
     "ytdl": "YOUTUBE",
     "cards": "TIMELINE CARDS",
+    "sorter": "FOOTAGE SORTER",
 }
 
 

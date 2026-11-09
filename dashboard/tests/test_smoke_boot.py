@@ -116,10 +116,16 @@ def test_every_mount_is_mounted_and_says_so_on_health(booted):
 
     body = _sign_in(client).get("/api/v1/health").json()
     assert body["ok"] is True
-    assert set(body["mounts"]) == set(mount_status.NAMES) == set(MOUNTS)
+    # every mount the dashboard knows is on the health route; the four booted
+    # here are mounted. /sorter is the one not booted: its code is another
+    # repo's checkout (footage-sorter), which CI does not have, so here it is
+    # off and says so. Its real boot is tests/test_sorter_mount.py.
+    assert set(body["mounts"]) == set(mount_status.NAMES) == set(MOUNTS) | {"sorter"}
     for name in MOUNTS:
         assert body["mounts"][name]["status"] == "mounted", body["mounts"][name]
         assert body["mounts"][name]["detail"], f"{name} reported no sentence"
+    assert body["mounts"]["sorter"]["status"] == "disabled", body["mounts"]["sorter"]
+    assert body["mounts"]["sorter"]["detail"]
 
 
 def test_each_mount_root_answers_a_signed_in_get(booted):

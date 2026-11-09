@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Field backup</title>
+<link rel="stylesheet" href="/field/field.css">
+</head>
+<body>
+<header class="top">
+  <h1>Field backup</h1>
+  <div class="chips" id="chips" aria-live="polite"></div>
+</header>
+
+<main>
+  <div class="col">
+    <section aria-labelledby="h-cards">
+      <div class="sec-head">
+        <h2 id="h-cards">Cards</h2>
+        <button type="button" class="btn" id="refresh">Look again</button>
+      </div>
+      <div id="cards" class="stack"></div>
+    </section>
+
+    <section aria-labelledby="h-dests">
+      <div class="sec-head"><h2 id="h-dests">Copy to</h2></div>
+      <div id="dests" class="stack"></div>
+      <form id="add-folder" class="addfolder" autocomplete="off">
+        <label for="folder-path" class="sr">A folder on this computer</label>
+        <input id="folder-path" type="text" inputmode="url" placeholder="Add a folder, like D:\FieldBackup" spellcheck="false">
+        <button type="submit" class="btn">Add folder</button>
+      </form>
+      <div class="actionbar">
+        <button type="button" class="btn accent" id="go" disabled>Copy to all</button>
+        <span id="go-note" class="note" role="status"></span>
+      </div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section aria-labelledby="h-runs">
+      <div class="sec-head"><h2 id="h-runs">Progress</h2></div>
+      <div id="runs" class="stack"></div>
+    </section>
+
+    <section aria-labelledby="h-sync">
+      <div class="sec-head"><h2 id="h-sync">Ledger</h2></div>
+      <div id="sync" class="panel"></div>
+    </section>
+  </div>
+</main>
+
+<div id="toast" role="alert" hidden></div>
+<noscript><p class="panel">This page needs JavaScript. It does not need the internet.</p></noscript>
+<script src="/field/field.js"></script>
+</body>
+</html>

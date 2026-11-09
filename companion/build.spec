@@ -267,6 +267,10 @@ a = Analysis(
         ("src/ccsync_companion/assets/icon.png", "ccsync_companion/assets"),
         ("src/ccsync_companion/assets/ccsync_mark.png", "ccsync_companion/assets"),
         ("src/ccsync_companion/assets/cc_mark_white.png", "ccsync_companion/assets"),
+        # The field backup page (field_server.py), served from disk so it works with no network.
+        ("src/ccsync_companion/assets/field/index.html", "ccsync_companion/assets/field"),
+        ("src/ccsync_companion/assets/field/field.css", "ccsync_companion/assets/field"),
+        ("src/ccsync_companion/assets/field/field.js", "ccsync_companion/assets/field"),
         # The licence the editor accepted in the wizard (2026-08-17,
         # docs/COMMERCIAL_READINESS.md item 3). eula.py reads its version out
         # of this file to decide whether ~/.ccsync/eula_accepted.json is still

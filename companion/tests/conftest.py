@@ -27,6 +27,15 @@ def _never_launch_real_teracopy(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_field_page(monkeypatch):
+    """CompanionApp.start() would bind the field backup page's port (8898) for real. Tests of the
+    page build their own server on an ephemeral port with field_server.make_server."""
+    from ccsync_companion import field_server
+
+    monkeypatch.setattr(field_server, "start", lambda cfg, service: None)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_ccsync_home(tmp_path, monkeypatch):
     """Point EVERYTHING that resolves under ~/.ccsync at a per-test temp dir.
 

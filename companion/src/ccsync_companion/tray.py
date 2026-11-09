@@ -4708,6 +4708,22 @@ def action_open_dashboard(app: "CompanionApp", url: str) -> None:
     _spawn(app, "Open dashboard", lambda: _open_dashboard(url, app))
 
 
+def action_open_field(app: "CompanionApp") -> None:
+    """Open the field backup page (field_server.py) in the browser. It is served by this very
+    process, so it opens with no network; when it is off or its port was taken, say so."""
+    def _do() -> None:
+        url = ""
+        getter = getattr(app, "field_page_url", None)
+        if callable(getter):
+            url = str(getter() or "")
+        if not url:
+            _notify(app, "The field backup page is not running on this computer (it is switched off in "
+                         "the config, or its port is taken). The log says which.")
+            return
+        _open_dashboard(url, app)
+    _spawn(app, "Field backup", _do)
+
+
 def action_open_log(app: "CompanionApp") -> None:
     _spawn(app, "Open log", lambda: _open_log(app.log_path))
 
@@ -4900,6 +4916,9 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     def on_open_dashboard(icon, item):
         action_open_dashboard(app, snap["dashboard_url"])
 
+    def on_open_field(icon, item):
+        action_open_field(app)
+
     def on_open_settings(icon, item):
         from . import settings_window
         _spawn(app, "Settings", lambda: settings_window.show_settings(app))
@@ -4940,6 +4959,11 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     dashboard_items = (
         [tray_backend.MenuItem("Open dashboard", on_open_dashboard)]
         if snap["dashboard_url"] else []
+    )
+    # Card backup in the field, offline (field_server.py): shown wherever the page is built.
+    field_items = (
+        [tray_backend.MenuItem("Field backup…", on_open_field)]
+        if getattr(app, "field_service", None) is not None else []
     )
 
     # "nothing syncs until you do" is only TRUE when login is required. With
@@ -5118,6 +5142,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         ),
         tray_backend.MenuItem("Open my sync drive", on_open_sync_drive),
         *dashboard_items,
+        *field_items,
         tray_backend.MenuItem("Settings…", on_open_settings),
         tray_backend.Menu.SEPARATOR,
         # APP-13 (sweep 2026-09-03): three pieces of copy tell an editor to

@@ -392,7 +392,9 @@ MAX_LEDGER_COPIES_PER_POST = 5000
 # The wire cap is the COMPRESSED size (app.py's body gate); the decompressed cap is ours,
 # and is what stops a few KB of zeros from becoming a gigabyte (a gzip bomb).
 MAX_LEDGER_CHUNK_BYTES = 4 * 1024 * 1024
-MAX_LEDGER_CHUNK_DECOMPRESSED = 16 * 1024 * 1024
+# 5,000 rows of [path, size, mtimeMs] is ~0.6 MB; 10,000 long paths ~3 MB. A bigger cap only buys a
+# hostile body more heap (json.loads of dense `{},` costs ~25x its size), so it is not bigger.
+MAX_LEDGER_CHUNK_DECOMPRESSED = 3 * 1024 * 1024
 MAX_LEDGER_CHUNK_ROWS = 10000          # the ledger's own cap (5,000 is what a companion sends)
 LEDGER_CHUNK_PATH_RE = r"^/sorter/agent/ledger/scan/\d+/chunk$"
 
@@ -430,6 +432,28 @@ def _ledger_call(fn: Callable[..., Any], *args: Any, **kw: Any) -> Any:
         raise HTTPException(422, str(e)) from None
 
 
+def _serial_only(copies: list) -> list:
+    """A fleet caller names a volume by its SERIAL and nothing else: an `id` would let any companion
+    file copies onto `nas:thecreatorspool` or `cloud:hetzner`, and a `kind` would let it decide what
+    counts as a backup. The ledger ignores both from a fleet caller; they are dropped here as well,
+    so it is true however the ledger is configured."""
+    out = []
+    for c in copies:
+        if isinstance(c, dict) and isinstance(c.get("volume"), dict):
+            c = {**c, "volume": {k: v for k, v in c["volume"].items() if k not in ("id", "kind")}}
+        out.append(c)
+    return out
+
+
+def _takes_attempt(fn: Callable[..., Any]) -> bool:
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "attempt" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 def decode_chunk_body(raw: bytes, encoding: str) -> dict:
     """A scan chunk's body -> its JSON object. gzip (`Content-Encoding: gzip`) or plain, both bounded.
 
@@ -455,7 +479,7 @@ def decode_chunk_body(raw: bytes, encoding: str) -> dict:
         raise HTTPException(415, f"unsupported Content-Encoding {enc!r}")
     try:
         body = json.loads(data.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         raise HTTPException(400, "the chunk is not JSON") from None
     if not isinstance(body, dict):
         raise HTTPException(422, "expected {rows: [...], seq}")
@@ -499,7 +523,13 @@ async def sorter_agent_scan_chunk(job_id: int, request: Request) -> dict:
             raise HTTPException(422, "expected {rows: [...], seq: n}")
         if len(rows) > MAX_LEDGER_CHUNK_ROWS:
             raise HTTPException(413, f"at most {MAX_LEDGER_CHUNK_ROWS} rows in one chunk")
-        return _ledger_call(_ledger(request).scan_chunk, job_id, seq, rows)
+        ledger = _ledger(request)
+        # the scan attempt this chunk belongs to (the manifest hands it out; a reclaimed job gets a
+        # new one, so a stale companion's chunks are refused): handed on when the ledger takes one
+        attempt = body.get("attempt")
+        if attempt is not None and _takes_attempt(ledger.scan_chunk):
+            return _ledger_call(ledger.scan_chunk, job_id, seq, rows, attempt=attempt)
+        return _ledger_call(ledger.scan_chunk, job_id, seq, rows)
 
     return await run_in_threadpool(work)
 
@@ -528,7 +558,7 @@ def sorter_agent_ledger_copies(payload: dict[str, Any], request: Request) -> dic
     if len(copies) > MAX_LEDGER_COPIES_PER_POST:
         raise HTTPException(413, f"at most {MAX_LEDGER_COPIES_PER_POST} copies in one post")
     machine = str((payload or {}).get("machine") or "").strip()[:128]
-    return _ledger_call(ledger.record_copies, machine, copies, editor=editor)
+    return _ledger_call(ledger.record_copies, machine, _serial_only(copies), editor=editor)
 
 
 @agent_router.get("/ledger/mirror")

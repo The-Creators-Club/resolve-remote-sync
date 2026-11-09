@@ -887,6 +887,16 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # Where the unsent-copies file and the offline ledger mirror live; blank is ~/.ccsync.
 # ledger_outbox_path = ""
 # ledger_mirror_path = ""
+# The field backup page (tray "Field backup..."): http://127.0.0.1:<port>/field copies a card to
+# field drives, laptop folders and the NAS pool at once, with no network. Folders offered as
+# destinations, and the folder made under a drive or the pool.
+# field_server_enabled = true
+# field_server_port = 8898
+# field_dest_folders = ["D:\\FieldBackup"]
+# field_pool_folder = "FieldBackup"
+# Where the page keeps its last choices and the copies made here; blank is ~/.ccsync.
+# field_state_path = ""
+# field_copies_path = ""
 # Which copier writes card footage to the NAS: "auto" (TeraCopy on Windows when
 # installed with verify on, Options.ini [Transfer] TestAlways=1; else the built-in
 # Python copier) or "python" (never TeraCopy).

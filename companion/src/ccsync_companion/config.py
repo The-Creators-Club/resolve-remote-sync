@@ -893,6 +893,18 @@ DEFAULTS: dict[str, Any] = {
     # Where the unsent-copies file and the offline ledger mirror live; blank = ~/.ccsync.
     "ledger_outbox_path": "",
     "ledger_mirror_path": "",
+    # The field backup page (field_server.py): http://127.0.0.1:<port>/field, opened from the tray's
+    # "Field backup...". Copies a card to every ticked drive, laptop folder and the NAS pool at once,
+    # and works with no network. `field_dest_folders` are laptop folders offered as destinations (the
+    # page can add more); `field_pool_folder` is the folder made under the pool and on a drive.
+    "field_server_enabled": True,
+    "field_server_port": 8898,
+    "field_dest_folders": [],
+    "field_pool_folder": "FieldBackup",
+    # Where the page keeps its last choices and the copies made here that the ledger mirror cannot
+    # know yet; blank = ~/.ccsync.
+    "field_state_path": "",
+    "field_copies_path": "",
     # Which copier writes card footage to the NAS. "auto" = TeraCopy on a
     # Windows PC that has it with verify on (Options.ini [Transfer]
     # TestAlways=1), the built-in Python copier otherwise; "python" = never
@@ -1637,6 +1649,13 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # sorter_ledger_volume_seconds = 10
 # ledger_outbox_path = ""
 # ledger_mirror_path = ""
+# The field backup page: copy a card to field drives, laptop folders and the NAS at once, offline.
+# field_server_enabled = true
+# field_server_port = 8898
+# field_dest_folders = ["D:\\\\FieldBackup"]
+# field_pool_folder = "FieldBackup"
+# field_state_path = ""
+# field_copies_path = ""
 # Card copier: "auto" (TeraCopy on Windows when installed with verify on,
 # else the built-in Python copier) or "python".
 # card_copier = "auto"

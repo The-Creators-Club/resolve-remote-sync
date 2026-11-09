@@ -70,6 +70,36 @@ def enabled(cfg: dict[str, Any]) -> bool:
     return bool(raw)
 
 
+# VIRTUAL DRIVES are not drives. Google Drive for desktop mounts a "drive" (labelled "Google Drive",
+# FAT32, a made-up 4 TB, and the SAME serial on every machine), OneDrive/Dropbox/iCloud do the same
+# with folders: their files are the cloud's, a scan of one is a scan of somebody's account, and a
+# constant serial would make every machine's copy "the same volume" in the ledger.
+VIRTUAL_LABELS = ("google drive", "googledrive", "my drive", "onedrive", "dropbox", "icloud", "box drive",
+                  "proton drive", "nextcloud", "pcloud", "mega", "sync.com")
+VIRTUAL_FS = ("fuse", "webdav", "vboxsf", "virtiofs", "9p", "cdfs", "udf", "afs", "nfs", "cifs", "smbfs")
+VIRTUAL_SERIALS = frozenset({"19831116"})       # Google Drive for desktop, every machine, seen on razer 2026-11-09
+NO_SERIALS = frozenset({"", "00000000", "FFFFFFFF"})
+FAT32_FAKE_BYTES = 2 * 1024 ** 4                # FAT32 volumes this big are a driver's fiction, not a disk
+
+
+def is_virtual(vol: dict[str, Any]) -> bool:
+    """Should this volume be left out of the report? A volume with no real serial (0 / blank), a
+    known virtual serial, a cloud-sync label, a network or pseudo file system, or a FAT32 'disk' of
+    2 TiB or more."""
+    serial = str(vol.get("serial") or "").strip().upper()
+    if serial in NO_SERIALS or serial in VIRTUAL_SERIALS:
+        return True
+    label = str(vol.get("label") or "").strip().lower()
+    if any(label == v or label.startswith(v + " ") or label.startswith(v + "(") or label.startswith(v + "-")
+           for v in VIRTUAL_LABELS):
+        return True
+    fs = str(vol.get("fs") or "").strip().lower()
+    if fs in VIRTUAL_FS:
+        return True
+    size = int(vol.get("capacity") or vol.get("size") or 0)
+    return fs == "fat32" and size >= FAT32_FAKE_BYTES
+
+
 def to_wire(vol: dict[str, Any]) -> dict[str, Any]:
     """A `sorter_cards.list_volumes` entry -> the report's volume object. Nothing path-like but
     the drive letter goes up: the server needs identity, size and where it is plugged in."""
@@ -192,7 +222,7 @@ class VolumeReporter:
         """Look at the drives -> wire volumes. A volume being copied from is not touched: it is
         reported as it was last seen."""
         busy = sorter_cards.busy_roots()
-        found = [to_wire(v) for v in self._volumes("all", busy)]
+        found = [to_wire(v) for v in self._volumes("all", busy) if not is_virtual(v)]
         present = {v["serial"] for v in found}
         known = {**self._known, **{v["serial"]: v for v in found}}
         for serial in sorted(sorter_cards.busy_serials() - present):

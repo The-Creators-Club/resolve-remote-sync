@@ -123,6 +123,16 @@ pool is ONE bind are in `docs/DOCKER.md`, "The Footage Sorter mounts".
      midclt call cronjob.update 4 '{"schedule": {"minute": "*/10", "hour": "*", "dom": "*", "month": "*", "dow": "*"}}'
      ```
 
+   * **The clock.** The dashboard container sets no `TZ` and runs UTC, but the NAS script and its cron run in the
+     NAS's local time, and the sorter's 04:00 ledger snapshot and 04:30 NAS scan must agree with them. The deploy
+     passes the sorter a `timezone` setting: `[footage_sorter] timezone` if set, otherwise the NAS's own zone read at
+     install time (`/etc/timezone`, else `timedatectl`), never a literal. The container needs a zone database for it
+     (the `python:3.12-slim` base carries `/usr/share/zoneinfo`; check, don't assume):
+
+     ```bash
+     docker exec ix-ccsync-dashboard-dashboard-1 python -c "import zoneinfo; print(zoneinfo.ZoneInfo('$(cat /etc/timezone)'))"
+     ```
+
    Once `/sorter` shows the cloud panel with real numbers (progress, last
    snapshot, box usage), retire the `cloud-backup-status` app on :8798: stop
    and delete the app, then remove its entry from whatever links to it. The

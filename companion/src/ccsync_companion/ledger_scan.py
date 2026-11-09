@@ -8,7 +8,10 @@ listing of the roots, `[path, size, mtimeMs]` per tracked file, and streams it:
   GET  /sorter/agent/ledger/scan/<job>            {volumeId, roots, rules}
   POST /sorter/agent/ledger/scan/<job>/chunk      {rows, seq}   gzip, 5,000 rows
   POST /sorter/agent/ledger/scan/<job>/progress   {filesDone, bytesSeen, bps, current}   every 2 s
-  POST /sorter/agent/ledger/scan/<job>/finish     {files, bytes, complete}
+  POST /sorter/agent/ledger/scan/<job>/finish     {files, bytes, complete, unreadable}
+
+Every post carries the manifest's `attempt` token when it names one: a job that was reclaimed gets
+a new attempt, and the server refuses what an old attempt still sends.
 
 RULES OF THE WALK, each with its reason:
 
@@ -22,11 +25,18 @@ RULES OF THE WALK, each with its reason:
     copy of the ledger's), so a 4 TB drive of caches does not upload a million
     rows the server would throw away. The server re-applies its own rules, so
     this is only ever an optimisation: when in doubt a file is KEPT.
-  * **`complete` IS TRUE UNLESS THE SCAN WAS CUT SHORT** (the drive vanished, a
-    cancel, a halt, shutdown). An incomplete scan is recorded `partial` and marks
-    nothing missing, which is the safe way to fail. A folder that cannot be read
-    while the drive is still there is counted in `unreadable`, not a failure:
-    its files were never listed, so there is nothing for the server to lose.
+  * **`complete` IS FALSE FOR A REAL OMISSION, AND ONLY THEN.** A scan cut short (the drive
+    vanished, a cancel, a halt, shutdown, a lost chunk) is recorded `partial` and marks nothing
+    missing: the safe way to fail. A FOLDER THAT WOULD NOT OPEN (or an entry whose stat failed) is
+    different: it is named in the finish's `unreadable` list (folders relative to the volume root,
+    "" meaning the whole drive) and the server EXEMPTS those subtrees from "gone", so the scan stays
+    `complete: true` and the rest of the drive is still brought up to date. The list is cut at 200
+    folders; if there were more than that the rest are not exempted, so that scan is `complete:
+    false`. A junction or other reparse point is NOT followed (it can lead off the volume, or round
+    in a circle) and is not a failure; they are counted in `links`.
+  * **LONG PATHS**: on Windows the walk uses the extended-length path prefix, so a path past
+    260 characters is listed, not silently dropped.
+  * **A SYSTEM VOLUME IS NEVER WALKED FROM ITS ROOT**: only the explicit roots a watch names.
   * **A CHUNK IS RETRIED UNDER THE SAME `seq`**, so the server (idempotent on
     seq) applies it once however many times the answer was lost.
   * **BOUNDED MEMORY**: one chunk of rows at a time, whatever the drive holds.
@@ -48,6 +58,8 @@ PROGRESS_SECONDS = 2.0
 CHUNK_TRIES = 5
 CHUNK_RETRY_SECONDS = 3.0
 ALIVE_CHECK_SECONDS = 5.0
+MAX_UNREADABLE_LISTED = 200
+STALE_REASON = "this scan attempt is no longer current (the server gave the job to a newer attempt)"
 
 # -- the built-in copy of the ledger's rules: footage-sorter `footage_sorter/ledger_rules.py`
 #    (docs/LEDGER-BROWSER-DESIGN.md, "What is tracked"). The manifest's `rules` (that module's
@@ -189,16 +201,48 @@ class Progress:
                     "current": self.current, "dirs": self.dirs}
 
 
+BS = chr(92)
+BS2 = BS + BS
+REPARSE_POINT = 0x400
+
+
+def long_path(path: str) -> str:
+    """The Windows extended-length form of an absolute path (so the walk is not limited to 260
+    characters); any other platform's path as it is."""
+    if os.name != "nt" or path.startswith(BS2 + "?" + BS):
+        return path
+    full = os.path.abspath(path)
+    if full.startswith(BS2):
+        return BS2 + "?" + BS + "UNC" + BS + full[2:]
+    return BS2 + "?" + BS + full
+
+
+def is_link(entry: "os.DirEntry[str]") -> bool:
+    """A symlink, an NTFS junction or any other reparse point: a directory that may lead off the
+    volume or back round to a parent. Not followed."""
+    try:
+        if entry.is_symlink():
+            return True
+        junction = getattr(entry, "is_junction", None)
+        if junction is not None and junction():
+            return True
+        return bool(getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0) & REPARSE_POINT)
+    except OSError:
+        return True                      # cannot tell: do not go in
+
+
 def walk(volume_root: str, roots: Iterable[str], rules: Rules,
          should_stop: Callable[[], str] = lambda: "",
          progress: Optional[Progress] = None,
-         on_unreadable: Optional[Callable[[str, OSError], None]] = None) -> Iterable[list[Any]]:
+         on_unreadable: Optional[Callable[[str, OSError], None]] = None,
+         on_link: Optional[Callable[[str], None]] = None) -> Iterable[list[Any]]:
     """Yield `[path, size, mtimeMs]` for every tracked file under each root, depth first.
-    Stops (just returns) when `should_stop()` says anything. Never raises on a bad folder."""
+    Stops (just returns) when `should_stop()` says anything. Never raises on a bad folder: a folder
+    or entry that cannot be read goes to `on_unreadable(rel, exc)`. Links are not followed."""
     base = str(volume_root)
     for root in roots:
         start = os.path.join(base, *root.split("/")) if root else base
-        stack = [(start, root, False)]
+        stack = [(long_path(start), root, False)]
         while stack:
             if should_stop():
                 return
@@ -217,13 +261,20 @@ def walk(volume_root: str, roots: Iterable[str], rules: Rules,
                 rel = f"{rel_dir}/{name}" if rel_dir else name
                 try:
                     if e.is_dir(follow_symlinks=False):
-                        if not rules.skip_dir(name):
-                            stack.append((e.path, rel, in_proxy or rules.is_proxy_dir(name)))
+                        if rules.skip_dir(name):
+                            continue
+                        if is_link(e):
+                            if on_link is not None:
+                                on_link(rel)
+                            continue
+                        stack.append((e.path, rel, in_proxy or rules.is_proxy_dir(name)))
                         continue
                     if not e.is_file(follow_symlinks=False) or not rules.keep_file(name, in_proxy):
                         continue
                     st = e.stat(follow_symlinks=False)
-                except OSError:
+                except OSError as exc:
+                    if on_unreadable is not None:
+                        on_unreadable(rel_dir, exc)          # the FOLDER the entry is in: that is what is exempted
                     continue
                 size = int(st.st_size)
                 if progress is not None:
@@ -260,39 +311,58 @@ class LedgerScan:
         self.rows_per_chunk = max(1, int(rows_per_chunk))
         self.progress = progress or Progress(clock)
         self.unreadable: list[str] = []
+        self.unreadable_count = 0
+        self._unreadable_seen: set[str] = set()
+        self.links = 0
+        self._last_alive = clock()
         self.chunks = 0
         self.stopped = ""
         self.vanished = False
 
     # -- the drive ---------------------------------------------------------
+    def _check_alive(self) -> bool:
+        """Is the drive still there? At most once per ALIVE_CHECK_SECONDS: asking per failing folder
+        would hammer a dying drive (and the volume lister) once for every folder it cannot open.
+        False, with `vanished` set, when it is gone."""
+        if self._alive is None:
+            return True
+        now = self._clock()
+        if now - self._last_alive < ALIVE_CHECK_SECONDS:
+            return not self.vanished
+        self._last_alive = now
+        try:
+            ok = bool(self._alive())
+        except Exception:                                         # noqa: BLE001
+            ok = False
+        if not ok:
+            self.vanished = True
+        return ok
+
     def _stop_reason(self) -> str:
         reason = self._should_stop()
         if reason:
             return reason
-        if self._alive is not None:
-            now = self._clock()
-            if now - self._last_alive >= ALIVE_CHECK_SECONDS:
-                self._last_alive = now
-                try:
-                    ok = bool(self._alive())
-                except Exception:                                 # noqa: BLE001
-                    ok = False
-                if not ok:
-                    self.vanished = True
-                    return "the drive is gone"
+        if not self._check_alive():
+            return "the drive is gone"
         return ""
 
     def _note_unreadable(self, rel: str, exc: OSError) -> None:
-        if len(self.unreadable) < 50:
+        if isinstance(exc, FileNotFoundError):
+            # the folder is not there (a deleted watch root, a folder removed mid-walk): it HAS no
+            # files, which is an answer. Unless the whole drive left: that is checked, not assumed.
+            self._check_alive()
+            return
+        if rel in self._unreadable_seen:
+            return
+        self._unreadable_seen.add(rel)
+        self.unreadable_count += 1
+        if len(self.unreadable) < MAX_UNREADABLE_LISTED:
             self.unreadable.append(rel)
         log.debug("ledger scan: cannot read %r (%s)", rel, exc)
-        # a folder that errors because the whole drive went away is the drive vanishing
-        if self._alive is not None:
-            try:
-                if not self._alive():
-                    self.vanished = True
-            except Exception:                                     # noqa: BLE001
-                self.vanished = True
+        self._check_alive()                       # a folder that errors because the drive left is the drive leaving
+
+    def _note_link(self, rel: str) -> None:
+        self.links += 1
 
     # -- sending -----------------------------------------------------------
     def _send_with_retry(self, seq: int, rows: list[list[Any]]) -> None:
@@ -335,7 +405,7 @@ class LedgerScan:
                 self.stopped = reason
             return reason
 
-        for row in walk(volume_root, wanted, rule_set, stop, self.progress, self._note_unreadable):
+        for row in walk(volume_root, wanted, rule_set, stop, self.progress, self._note_unreadable, self._note_link):
             buf.append(row)
             files += 1
             total += int(row[1])
@@ -352,9 +422,14 @@ class LedgerScan:
             self._send_with_retry(seq, buf)
             seq += 1
             self.chunks = seq
-        complete = not self.stopped and not self.vanished
-        return {"files": files, "bytes": total, "complete": complete, "reason": self.stopped,
-                "chunks": seq, "unreadable": list(self.unreadable)}
+        reason = self.stopped
+        if not reason and self.unreadable_count > len(self.unreadable):
+            # more unreadable folders than the finish can name: the unnamed ones would be read as gone
+            reason = f"{self.unreadable_count} folders could not be read (more than can be listed)"
+        complete = not reason and not self.vanished
+        return {"files": files, "bytes": total, "complete": complete, "reason": reason,
+                "chunks": seq, "unreadable": list(self.unreadable),
+                "unreadableCount": self.unreadable_count, "links": self.links}
 
 
 def volume_alive(volume_root: str, serial: str,
@@ -385,10 +460,13 @@ FINISH_RETRY_SECONDS = 3.0
 RequestFn = Callable[[str, str, Any, dict, float], tuple[int, Any]]
 
 
-def gzip_chunk(rows: list[list[Any]], seq: int) -> bytes:
+def gzip_chunk(rows: list[list[Any]], seq: int, attempt: Any = None) -> bytes:
     import gzip
     import json
-    return gzip.compress(json.dumps({"rows": rows, "seq": seq}, separators=(",", ":")).encode("utf-8"))
+    body: dict[str, Any] = {"rows": rows, "seq": seq}
+    if attempt is not None:
+        body["attempt"] = attempt
+    return gzip.compress(json.dumps(body, separators=(",", ":")).encode("utf-8"))
 
 
 class ScanJob:
@@ -423,6 +501,8 @@ class ScanJob:
         self.rows_per_chunk = rows_per_chunk
         self.progress_seconds = float(progress_seconds)
         self.progress = Progress(clock)
+        self.attempt: Any = None           # the manifest's token for THIS claim of the job
+        self.stale = False                 # the server answered 409: this attempt is over, stop
 
     # -- the wire ----------------------------------------------------------
     def _path(self, suffix: str = "") -> str:
@@ -441,11 +521,13 @@ class ScanJob:
 
     def _send_chunk(self, seq: int, rows: list[list[Any]]) -> int:
         headers = {**self._headers(), "Content-Encoding": "gzip"}
-        status, _ = self._request("POST", self._path("/chunk"), gzip_chunk(rows, seq), headers,
+        status, _ = self._request("POST", self._path("/chunk"), gzip_chunk(rows, seq, self.attempt), headers,
                                   SORTER_TIMEOUT_SECONDS)
         return int(status)
 
     def _post_json(self, suffix: str, body: dict[str, Any]) -> int:
+        if self.attempt is not None:
+            body = {**body, "attempt": self.attempt}
         status, _ = self._request("POST", self._path(suffix), body, self._headers(), SORTER_TIMEOUT_SECONDS)
         return int(status)
 
@@ -455,7 +537,8 @@ class ScanJob:
         if result.get("reason"):
             body["reason"] = str(result["reason"])[:200]
         if result.get("unreadable"):
-            body["unreadable"] = list(result["unreadable"])[:50]
+            body["unreadable"] = list(result["unreadable"])[:MAX_UNREADABLE_LISTED]
+            body["unreadableCount"] = int(result.get("unreadableCount") or len(result["unreadable"]))
         for attempt in range(FINISH_TRIES):
             try:
                 status = self._post_json("/finish", body)
@@ -478,20 +561,35 @@ class ScanJob:
         vid = str(manifest.get("volumeId") or self.inputs.get("volumeId") or "")
         return vid.split(":", 1)[1].upper() if vid.lower().startswith("vol:") else ""
 
-    def _find_root(self, serial: str) -> str:
+    def _find_volume(self, serial: str) -> dict[str, Any]:
         if not serial:
-            return ""
+            return {}
         for v in self._volumes("all", set()):
             if str(v.get("serial") or "").upper() == serial:
-                return str(v.get("root") or "")
-        return ""
+                return v
+        return {}
+
+    def _find_root(self, serial: str) -> str:
+        return str(self._find_volume(serial).get("root") or "")
 
     # -- the run -------------------------------------------------------------
     def run(self) -> dict[str, Any]:
         manifest = self.manifest()
+        self.attempt = manifest.get("attempt")
         serial = self._serial(manifest)
-        root = self._find_root(serial)
+        volume = self._find_volume(serial)
+        root = str(volume.get("root") or "")
         roots = manifest.get("roots", self.inputs.get("roots", [""]))
+        if root and volume.get("system"):
+            # NEVER A SYSTEM VOLUME'S ROOT: Windows, Program Files and every user's profile live there, and a
+            # listing of it is a million rows of nothing the ledger tracks. Only folders a watch names.
+            named = [r for r in clean_roots(roots) if r]
+            if not named:
+                result = {"files": 0, "bytes": 0, "complete": False, "chunks": 0, "unreadable": [],
+                          "reason": "the system drive is only scanned through a watched folder, never from its root"}
+                self._finish(result)
+                raise ScanError(result["reason"], retryable=False)
+            roots = named
         if not root:
             result = {"files": 0, "bytes": 0, "complete": False, "reason": "the drive is not plugged in here",
                       "chunks": 0, "unreadable": []}
@@ -504,8 +602,11 @@ class ScanJob:
                 rows_per_chunk = asked
         except (TypeError, ValueError):
             pass
+        def should_stop() -> str:
+            return self._should_stop() or (STALE_REASON if self.stale else "")
+
         scan = LedgerScan(
-            self._send_chunk, self._should_stop,
+            self._send_chunk, should_stop,
             alive=lambda: volume_alive(root, serial, self._volumes),
             clock=self._clock, wait=self._wait, rows_per_chunk=rows_per_chunk, progress=self.progress)
         done = threading.Event()
@@ -513,7 +614,8 @@ class ScanJob:
         def post_progress() -> None:
             while not done.wait(self.progress_seconds):
                 try:
-                    self._post_json("/progress", self.progress.snapshot())      # best effort, always
+                    if self._post_json("/progress", self.progress.snapshot()) == 409:     # best effort otherwise
+                        self.stale = True                                                  # LedgerGone: stop this scan
                 except Exception:                                 # noqa: BLE001
                     log.debug("ledger scan: progress post failed", exc_info=True)
 
@@ -524,7 +626,8 @@ class ScanJob:
         except ScanError as exc:
             done.set()
             self._finish({"files": scan.progress.files, "bytes": scan.progress.bytes, "complete": False,
-                          "reason": str(exc), "unreadable": scan.unreadable})
+                          "reason": str(exc), "unreadable": scan.unreadable,
+                          "unreadableCount": scan.unreadable_count})
             raise
         finally:
             done.set()

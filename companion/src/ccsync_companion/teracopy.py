@@ -55,7 +55,9 @@ import logging
 import os
 import sqlite3
 import subprocess
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -383,6 +385,9 @@ def default_spawn(command: str) -> Any:
                             stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True)
 
 
+_LAUNCH_LOCK = threading.Lock()      # one stub hands its job over at a time (see launch)
+
+
 class TeraCopy:
     """One TeraCopy install. Every seam (clock, sleep, process check, spawn,
     status reader, log) is injectable so the suite never launches TeraCopy,
@@ -443,7 +448,10 @@ class TeraCopy:
     def _write_list(self, list_file: str, files: list[str]) -> None:
         """UTF-8, no BOM, one path per line; written to a temp name and renamed
         so TeraCopy can never open a half-written list."""
-        tmp = f"{list_file}.tmp-{os.getpid()}"
+        # Unique per write, not per process: field mode runs several lanes off
+        # one card in one process at once (a shared .tmp-<pid> name made two of
+        # three lanes fail with "Permission denied", found live 2026-11-09).
+        tmp = f"{list_file}.tmp-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}"
         with open(tmp, "w", encoding="utf-8", newline="") as fh:
             fh.write("\r\n".join(files) + "\r\n")
         os.replace(tmp, list_file)
@@ -465,27 +473,59 @@ class TeraCopy:
         # job from an earlier one into the same folder.
         since = int(self._now())
         label = sanitise_tag(tag)
-        list_file = os.path.join(self.list_dir, f"{label}-{since}.txt")
-        n = 2
-        while os.path.exists(list_file):        # never let one list replace another
-            list_file = os.path.join(self.list_dir, f"{label}-{since}-{n}.txt")
-            n += 1
+        # Never let one list replace another: claim the name atomically
+        # (O_EXCL), because lanes launched in the same second from the same
+        # card folder pick the same label and second.
+        n = 1
+        while True:
+            name = f"{label}-{since}.txt" if n == 1 else f"{label}-{since}-{n}.txt"
+            list_file = os.path.join(self.list_dir, name)
+            try:
+                os.close(os.open(list_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                break
+            except FileExistsError:
+                n += 1
         self._write_list(list_file, files)
-        try:
-            known = set(os.listdir(self.history_dir))
-        except OSError:
-            known = set()
         command = copy_command(self.exe, list_file, str(dest), switch or DEFAULT_SWITCH)
         if command is None:
             raise ValueError("teracopy: unusable path (empty, or contains a quote)")
-        self._log(f"TeraCopy ({label}): {command}")
-        pid = None
-        try:
-            child = self._spawn(command)
-            pid = getattr(child, "pid", None)
-        except OSError as exc:
-            self._log(f"TeraCopy ({label}): could not launch: {exc}", "warn")
+        # ONE LAUNCH AT A TIME. Several TeraCopy.exe stubs handing jobs to the
+        # single instance in the same moment lose all but one of them: three
+        # field lanes launched together made one job and two silent no-shows
+        # (found live 2026-11-09, creator-1). So launches are serialised, and
+        # each waits until TeraCopy has REGISTERED its job (its history
+        # database appears; it is created at submit, before the copy starts,
+        # even when queued behind other jobs). The jobs still run side by side.
+        with _LAUNCH_LOCK:
+            try:
+                known = set(os.listdir(self.history_dir))
+            except OSError:
+                known = set()
+            self._log(f"TeraCopy ({label}): {command}")
+            pid = None
+            try:
+                child = self._spawn(command)
+                pid = getattr(child, "pid", None)
+            except OSError as exc:
+                self._log(f"TeraCopy ({label}): could not launch: {exc}", "warn")
+            if pid is not None and os.path.isdir(self.history_dir):
+                self._await_registration(known, label)
         return {"since": since, "list_file": list_file, "pid": pid, "known": known}
+
+    def _await_registration(self, known: set[str], label: str,
+                            seconds: float = 20.0, step: float = 0.25) -> bool:
+        """Wait (bounded by a count of polls, so a fake clock cannot hang it)
+        until a history database that was not there before appears."""
+        for _ in range(max(1, int(seconds / step))):
+            try:
+                if any(n.endswith(".db") and n not in known for n in os.listdir(self.history_dir)):
+                    return True
+            except OSError:
+                return False
+            self._sleep(step)
+        self._log(f"TeraCopy ({label}): no history record within {seconds:.0f} s of launch; "
+                  "the next launch goes ahead anyway", "warn")
+        return False
 
     def _prune_lists(self, days: int = 14) -> None:
         cutoff = self._now() - days * 86400

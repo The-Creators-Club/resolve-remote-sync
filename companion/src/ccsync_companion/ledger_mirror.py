@@ -260,6 +260,13 @@ class LedgerMirror:
                 out["error"] = f"the dashboard answered HTTP {status}"
                 return out
             rows = _page_rows(parsed)
+            if not same:
+                # The set of volumes changed. Rows of a volume no longer pulled would stay "live" for
+                # ever (nothing will ever tell this mirror they went missing), and a field page would
+                # keep saying "already on the drive that went home". Dropped only now that the
+                # dashboard has answered, so a pull that cannot reach it leaves the mirror as it was.
+                self._forget_other_volumes(ids)
+                same = True
             infos = parsed.get("volumes")
             new_cursor = str(parsed.get("cursor") if parsed.get("cursor") is not None else cursor)
             self.apply(rows)
@@ -290,6 +297,21 @@ class LedgerMirror:
             break
         out["ok"], out["cursor"] = True, cursor
         return out
+
+    def _forget_other_volumes(self, keep: list[str]) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                with conn:
+                    marks = ",".join("?" * len(keep))
+                    if keep:
+                        conn.execute(f"DELETE FROM copies WHERE volume_id NOT IN ({marks})", keep)
+                    else:
+                        conn.execute("DELETE FROM copies")
+                    known = {k: v for k, v in self._volume_info(conn).items() if k in set(keep)}
+                    self._set_meta(conn, "volume_info", json.dumps(known))
+            finally:
+                conn.close()
 
     # -- what the server called the volumes -------------------------------------
     def _volume_info(self, conn: sqlite3.Connection) -> dict[str, Any]:

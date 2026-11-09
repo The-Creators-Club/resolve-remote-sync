@@ -548,45 +548,153 @@ def test_the_container_gets_the_editors_group_from_the_live_gid_never_a_literal(
     assert ida.dashboard_group_add(4242) == []
 
 
-def test_the_folders_are_created_only_if_missing_with_names_not_ids(monkeypatch):
+def test_the_folders_are_made_under_a_temp_name_and_moved_into_place(monkeypatch):
     monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", BACKUP_OUT)
     cmd = ida.sorter_backup_out_command("editors")
+    assert cmd.count("if [ -d") == 3 and cmd.count('mv "$t" "$d"') == 3     # one if-block per folder
     for d in (BACKUP_OUT, BACKUP_OUT + "/control", BACKUP_OUT + "/snapshots"):
-        q = f"'{d}'"
-        assert f"[ -d {q} ] || {{ mkdir -p {q} && chown 'alex:editors' {q} && chmod 2770 {q}; }}" in cmd
-    # nothing recursive and nothing unconditional: an existing folder is never touched
-    assert "-R" not in cmd and "chown -R" not in cmd
+        assert f"d='{d}'" in cmd
+    assert "chown 'alex:editors' \"$t\" && chmod 2770 \"$t\" && mv" in cmd      # done on the temp name, then moved
+    assert "-R" not in cmd                                                       # nothing recursive
     monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT_OWNER", "sam")
     assert "chown 'sam:editors'" in ida.sorter_backup_out_command("editors")
 
 
-def test_the_created_folders_behave_on_a_real_shell(tmp_path, monkeypatch):
-    """Run the command for real (sh, with chown/chmod stubbed to record): a missing folder is made with
-    the right owner and mode; an existing one is left exactly alone."""
+def _shell(tmp_path, cmd, chown_fails=False, stat_uid=None):
+    """Run `cmd` on a real sh with chown/chmod (and optionally stat) stubbed."""
     sh = shutil.which("sh")
     if sh is None:
         pytest.skip("no sh")
-    monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", str(tmp_path / "backups" / "sorter"))
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     log = tmp_path / "log"
-    for tool in ("chown", "chmod"):
-        stub = bin_dir / tool
-        stub.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{log.as_posix()}"\n', encoding="utf-8")
-        stub.chmod(0o755)
-    env = {"PATH": f"{bin_dir.as_posix()}:/usr/bin:/bin"}
-    cmd = ida.sorter_backup_out_command("editors")
-    proc = subprocess.run([sh, "-c", cmd], env=env, capture_output=True, text=True)
-    assert proc.returncode == 0, proc.stderr
-    root = tmp_path / "backups" / "sorter"
-    assert (root / "control").is_dir() and (root / "snapshots").is_dir()
-    first = log.read_text(encoding="utf-8").splitlines()
-    assert len(first) == 6 and sum(l.startswith("chmod 2770") for l in first) == 3
     log.write_text("", encoding="utf-8")
+    def stub(name, *lines):
+        (bin_dir / name).write_text(chr(10).join(["#!/bin/sh", *lines]) + chr(10), encoding="utf-8")
+
+    if chown_fails:
+        stub("chown", 'echo "chown: invalid user: $1" >&2', "exit 1")
+    else:
+        stub("chown", f'echo "chown $*" >> "{log.as_posix()}"')
+    stub("chmod", f'echo "chmod $*" >> "{log.as_posix()}"')
+    if stat_uid is not None:
+        stub("stat", f"echo {stat_uid}")
+    for f in bin_dir.iterdir():
+        f.chmod(0o755)
+    env = {"PATH": f"{bin_dir.as_posix()}:/usr/bin:/bin"}
     proc = subprocess.run([sh, "-c", cmd], env=env, capture_output=True, text=True)
-    assert proc.returncode == 0 and log.read_text(encoding="utf-8") == ""          # second run: nothing touched
+    return proc, log.read_text(encoding="utf-8").splitlines()
+
+
+def test_the_created_folders_behave_on_a_real_shell(tmp_path, monkeypatch):
+    """A missing folder is made with the right owner and mode; an existing one is left exactly alone."""
+    root = tmp_path / "backups" / "sorter"
+    monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", str(root))
+    cmd = ida.sorter_backup_out_command("editors")
+    proc, first = _shell(tmp_path, cmd)
+    assert proc.returncode == 0, proc.stderr
+    assert (root / "control").is_dir() and (root / "snapshots").is_dir()
+    assert len(first) == 6 and sum(l.startswith("chmod 2770") for l in first) == 3
+    assert not [p for p in root.parent.rglob("*") if ".new." in p.name]         # no temp folder left behind
+    (tmp_path / "log").write_text("", encoding="utf-8")
+    proc, second = _shell(tmp_path, cmd)
+    assert proc.returncode == 0 and second == []                                 # second run: nothing touched
+
+
+def test_a_failed_chown_leaves_nothing_at_the_real_name_and_stops_the_chain(tmp_path, monkeypatch):
+    """The review's t_backup_out.py: an owner the NAS does not have used to leave a root-owned 755 folder
+    that the next deploy took for 'already there' and went on to make the subfolders inside."""
+    root = tmp_path / "backups" / "sorter"
+    monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", str(root))
+    cmd = ida.sorter_backup_out_command("editors", owner="nosuchuser")
+    for attempt in (1, 2):
+        proc, log = _shell(tmp_path, cmd, chown_fails=True)
+        assert proc.returncode != 0 and "invalid user" in proc.stderr, attempt
+        assert not root.exists(), "the real name must not exist after a failed chown"
+        assert not (root / "control").exists()
+        assert not [p for p in tmp_path.rglob("*") if ".new." in p.name], "the temp folder is cleaned up"
+        assert log == []                                                          # chmod never ran either
+
+
+def test_a_root_owned_empty_folder_from_an_earlier_failed_run_is_repaired(tmp_path, monkeypatch):
+    root = tmp_path / "backups" / "sorter"
+    (root / "control").mkdir(parents=True)                                       # the old bug's leftover
+    (root / "snapshots").mkdir()
+    (root / "snapshots" / "keep.me").write_text("x")                              # ...and one that holds data
+    monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", str(root))
+    cmd = ida.sorter_backup_out_command("editors")
+    proc, log = _shell(tmp_path, cmd, stat_uid=0)                                 # stat says: owned by root
+    assert proc.returncode == 0, proc.stderr
+    touched = {l.split()[-1].strip(chr(34) + chr(39)).replace(chr(92), "/") for l in log}
+    assert touched == {root.as_posix() + "/control"}        # only the empty one; the root and snapshots hold things
+    # a folder owned by anybody else is never touched, empty or not
+    proc, log = _shell(tmp_path, cmd, stat_uid=1000)
+    assert proc.returncode == 0 and log == []
+
+
+def test_cloud_state_inside_the_pool_is_refused(studio, monkeypatch):
+    monkeypatch.setattr(ida, "SITE_SORTER_CLOUD_STATE", "/mnt/tank/TheCreatorsPool/backups/cloud")
+    assert not any(":/cloud-state" in v for v in _dashboard(sorter_enabled="1")["volumes"])
+    assert "cloudState" not in json.loads(ida.sorter_settings_json())
+    assert any("inside pool_host" in p for p in ida.sorter_problems())
+    monkeypatch.setattr(ida, "SITE_SORTER_CLOUD_STATE", "/mnt/tank/TheCreatorsPool")
+    assert ida.cloud_state_under_pool()
+    monkeypatch.setattr(ida, "SITE_SORTER_CLOUD_STATE", "/mnt/tank/TheCreatorsPoolOther")      # a sibling is fine
+    assert not ida.cloud_state_under_pool()
+    assert "/mnt/tank/TheCreatorsPoolOther:/cloud-state:ro" in _dashboard(sorter_enabled="1")["volumes"]
 
 
 def test_a_relative_backup_out_is_named_as_a_problem(studio, monkeypatch):
     monkeypatch.setattr(ida, "SITE_SORTER_BACKUP_OUT", "backups/sorter")
     assert any("backup_out" in p and "absolute HOST path" in p for p in ida.sorter_problems())
+
+
+# --------------------------------------------------- the sorter's time zone (the NAS script runs in local time)
+
+def test_no_timezone_means_no_key_and_unchanged_settings(studio, monkeypatch):
+    monkeypatch.setattr(ida, "SITE_SORTER_TIMEZONE", "")
+    monkeypatch.setattr(ida, "SORTER_TZ_PROBED", "")
+    assert "timezone" not in json.loads(ida.sorter_settings_json())
+    assert ida.sorter_settings_json() == STUDIO_JSON
+
+
+def test_the_site_timezone_wins_over_the_probed_one(studio, monkeypatch):
+    monkeypatch.setattr(ida, "SITE_SORTER_TIMEZONE", "Europe/Berlin")
+    monkeypatch.setattr(ida, "SORTER_TZ_PROBED", "Asia/Taipei")
+    assert json.loads(ida.sorter_settings_json())["timezone"] == "Europe/Berlin"
+    monkeypatch.setattr(ida, "SITE_SORTER_TIMEZONE", "")
+    assert json.loads(ida.sorter_settings_json())["timezone"] == "Asia/Taipei"     # read from the NAS at install time
+    assert _dashboard(sorter_enabled="1")["environment"]["DASH_SORTER_SETTINGS"] == ida.sorter_settings_json()
+    for template in (ida.COMPOSE_TEMPLATE, IMAGE_TEMPLATE):
+        _t, scalar = _rendered_setting_line(template)
+        assert json.loads(_unquote_single(scalar))["timezone"] == "Asia/Taipei", template.name
+
+
+@pytest.mark.parametrize("out,want", [
+    ("Asia/Taipei\n", "Asia/Taipei"), ("Timezone=Asia/Taipei\n", "Asia/Taipei"), ("UTC\n", "UTC"),
+    ("America/Argentina/Buenos_Aires", "America/Argentina/Buenos_Aires"),
+    ("", ""), ("not a zone name\n", ""), ("../../etc/passwd", ""), ("Asia/Taipei; rm -rf /", ""),
+    ("'quoted'", ""), ("a" * 200, ""), ("\n\nEurope/London\n", "Europe/London"),
+])
+def test_the_nas_probe_answer_is_parsed_and_nothing_odd_gets_through(out, want):
+    assert ida.parse_nas_timezone(out) == want
+
+
+def test_the_probe_asks_the_nas_and_never_when_the_site_names_one(monkeypatch):
+    asked = []
+    monkeypatch.setattr(ida, "run_ssh", lambda cmd, dry_run=False, timeout=0: (asked.append(cmd), (0, "Asia/Taipei\n", ""))[1])
+    monkeypatch.setattr(ida, "SITE_SORTER_TIMEZONE", "")
+    assert ida.probe_nas_timezone() == "Asia/Taipei" and "/etc/timezone" in asked[0] and "timedatectl" in asked[0]
+    assert ida.probe_nas_timezone(dry_run=True) == ""
+    monkeypatch.setattr(ida, "SITE_SORTER_TIMEZONE", "Europe/Berlin")
+    assert ida.probe_nas_timezone() == "" and len(asked) == 1
+    monkeypatch.setattr(ida, "SITE_SORTER_TIMEZONE", "")
+    monkeypatch.setattr(ida, "run_ssh", lambda *a, **k: (1, "", "boom"))
+    assert ida.probe_nas_timezone() == ""
+    monkeypatch.setattr(ida, "run_ssh", lambda *a, **k: (_ for _ in ()).throw(OSError("ssh down")))
+    assert ida.probe_nas_timezone() == ""
+
+
+def test_the_timezone_is_never_a_literal_in_the_installer():
+    src = Path(ida.__file__).read_text(encoding="utf-8")
+    assert "Asia/Taipei" not in src and "Taipei" not in src

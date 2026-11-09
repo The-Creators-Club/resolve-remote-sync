@@ -591,6 +591,10 @@ project_acl = "per-project"
 # backup_out = "/mnt/tank/backups/sorter"
 # The user the upload script runs as (it reads what the container writes). Default alex.
 # backup_out_owner = "alex"
+# The IANA zone the sorter reads its clock times in (the 04:00 ledger snapshot, the 04:30 NAS scan). The
+# dashboard container sets no TZ and runs UTC, while the NAS upload script runs in the NAS local time. Leave it
+# out and the deploy reads the NAS own zone (/etc/timezone, else timedatectl) at install time.
+# timezone = "Asia/Taipei"
 
 [security]
 # Whether the ONE shared fleet report token (DASH_REPORT_TOKEN) is still

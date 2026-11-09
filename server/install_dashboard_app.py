@@ -1122,8 +1122,72 @@ SORTER_POOL_MOUNT = "/pool"
 SORTER_APP_MOUNT = "/sorter-app"
 SORTER_DATA_MOUNT = "/sorter-data"
 SORTER_CLOUD_STATE_MOUNT = "/cloud-state"
+
+
+def cloud_state_under_pool() -> bool:
+    """Is `cloud_state` the pool or a folder inside it? Then a read-only bind of it is not read-only
+    to the sorter: the same files are reachable through the read-write /pool bind. Such a path is
+    refused (not mounted, not passed as a setting) and named in sorter_problems."""
+    c, p = SITE_SORTER_CLOUD_STATE, SITE_SORTER_POOL_HOST
+    return bool(c and p and (c == p or c.startswith(p + "/")))
+
+
+def cloud_state_host() -> str:
+    """The cloud-state host path to mount, or "" (unset, or refused by cloud_state_under_pool)."""
+    return "" if cloud_state_under_pool() else SITE_SORTER_CLOUD_STATE
 SORTER_BACKUP_OUT_MOUNT = "/backup-out"
 SORTER_BACKUP_OUT_SUBDIRS = ("control", "snapshots")
+
+# The zone the sorter's clock times (the 04:00 ledger snapshot, the 04:30 NAS scan) are read in. The
+# dashboard container sets no TZ, so it runs UTC, while the NAS script (cloud-backup.sh) and its cron run
+# in the NAS's local time: the two must name the same hour. `[footage_sorter] timezone` wins; otherwise
+# the NAS host's own zone, read at install time (SORTER_TZ_PROBED, set by main()); never a literal.
+SITE_SORTER_TIMEZONE = site_value("footage_sorter", "timezone")
+SORTER_TZ_PROBED = ""
+_TZ_NAME_RE = re.compile(r"^[A-Za-z0-9_+\-]+(/[A-Za-z0-9_+\-]+){0,2}$")
+
+
+def valid_timezone_name(name: str) -> bool:
+    """An IANA-looking zone name (Europe/London, UTC, America/Argentina/Buenos_Aires), nothing else:
+    the value is put in a JSON settings blob and a compose file."""
+    return bool(name) and len(name) <= 64 and bool(_TZ_NAME_RE.match(name))
+
+
+def sorter_timezone() -> str:
+    """The zone to hand the sorter: the site's, else the NAS's as probed at install time, else ""."""
+    for name in (SITE_SORTER_TIMEZONE, SORTER_TZ_PROBED):
+        if valid_timezone_name(str(name or "").strip()):
+            return str(name).strip()
+    return ""
+
+
+def parse_nas_timezone(out: str) -> str:
+    """The NAS probe's stdout (`cat /etc/timezone`, else `timedatectl show -p Timezone --value`) -> a zone
+    name, or ""."""
+    for line in str(out or "").splitlines():
+        line = line.strip()
+        if line.startswith("Timezone="):
+            line = line.split("=", 1)[1].strip()
+        if valid_timezone_name(line):
+            return line
+    return ""
+
+
+NAS_TZ_PROBE = ("cat /etc/timezone 2>/dev/null || timedatectl show -p Timezone --value 2>/dev/null || "
+                "readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||'")
+
+
+def probe_nas_timezone(dry_run: bool = False) -> str:
+    """Ask the NAS what zone it runs in. "" when it cannot say (dry run, no answer): the sorter then
+    falls back to its own defaults and the deploy says so."""
+    if dry_run or SITE_SORTER_TIMEZONE:
+        return ""
+    try:
+        rc, out, _err = run_ssh(NAS_TZ_PROBE, dry_run=False, timeout=30)
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"WARNING: could not read the NAS's time zone ({exc})", file=sys.stderr)
+        return ""
+    return parse_nas_timezone(out) if rc == 0 else ""
 SORTER_FFMPEG_DIR = "/opt/ffmpeg"   # compose already mounts the host's ffmpeg here
 # The ONLY top-level names of the footage-sorter repo that ship.
 SORTER_SHIP_DIRS = ("footage_sorter", "public")
@@ -1244,8 +1308,9 @@ def sorter_settings() -> dict:
         "vaultRoot": SITE_SORTER_VAULT_ROOT,
         # Only when the site mounts it: a key for a folder that is not there would make the
         # sorter look for a cloud listing that cannot exist.
-        **({"cloudState": SORTER_CLOUD_STATE_MOUNT} if SITE_SORTER_CLOUD_STATE else {}),
+        **({"cloudState": SORTER_CLOUD_STATE_MOUNT} if cloud_state_host() else {}),
         **({"backupOut": SORTER_BACKUP_OUT_MOUNT} if SITE_SORTER_BACKUP_OUT else {}),
+        **({"timezone": sorter_timezone()} if sorter_timezone() else {}),
     }
 
 
@@ -1312,8 +1377,8 @@ def sorter_volumes() -> list:
         out.append(SITE_SORTER_POOL_HOST + ":" + SORTER_POOL_MOUNT + ":rw")
     # ...and the cloud backup's state folder, READ-ONLY and a mount of its own (it is a
     # different dataset from the pool, so no rename ever crosses it).
-    if SITE_SORTER_CLOUD_STATE:
-        out.append(SITE_SORTER_CLOUD_STATE + ":" + SORTER_CLOUD_STATE_MOUNT + ":ro")
+    if cloud_state_host():
+        out.append(cloud_state_host() + ":" + SORTER_CLOUD_STATE_MOUNT + ":ro")
     # ...and the folder the sorter writes for the upload script: read-write, its own mount.
     if SITE_SORTER_BACKUP_OUT:
         out.append(SITE_SORTER_BACKUP_OUT + ":" + SORTER_BACKUP_OUT_MOUNT + ":rw")
@@ -1331,15 +1396,31 @@ def sorter_backup_out_command(editors_group: str, owner: str = "") -> str:
     MISSING, as <owner>:<editors group> mode 2770, and touches nothing that exists: a folder that is
     already there is never chowned or chmod-ed (its owner set it up, and a recursive chown of a
     folder holding snapshots would rewrite who may read them). Names, not ids, so the NAS resolves
-    them. "" when the site has no backup_out."""
+    them. "" when the site has no backup_out.
+
+    A missing folder is made under a TEMP name beside it, owned and moded there, and only then
+    `mv`-ed into place, so a chown that fails (an owner the NAS does not have) leaves nothing at
+    the real name: the old `mkdir && chown` left a root-owned 755 folder that the next deploy saw
+    as "already there" and never repaired. One if-block per folder, and a failure stops the whole
+    chain (the next folder is not made inside a folder that is not right). The one exception to
+    "never touch what exists" is the leftover of that old failure: an EMPTY folder owned by root
+    (uid 0) is repaired in place; a folder with anything in it, or any other owner, is not."""
     if not SITE_SORTER_BACKUP_OUT:
         return ""
-    who = f"{owner or SITE_SORTER_BACKUP_OUT_OWNER}:{editors_group}"
-    parts = []
-    for d in (SITE_SORTER_BACKUP_OUT, *(SITE_SORTER_BACKUP_OUT + "/" + n for n in SORTER_BACKUP_OUT_SUBDIRS)):
-        q = shell_quote(d)
-        parts.append(f"[ -d {q} ] || {{ mkdir -p {q} && chown {shell_quote(who)} {q} && chmod 2770 {q}; }}")
-    return " && ".join(parts)
+    who = shell_quote(f"{owner or SITE_SORTER_BACKUP_OUT_OWNER}:{editors_group}")
+    blocks = []
+    for path in (SITE_SORTER_BACKUP_OUT, *(SITE_SORTER_BACKUP_OUT + "/" + n for n in SORTER_BACKUP_OUT_SUBDIRS)):
+        q = shell_quote(path)
+        blocks.append(
+            f'd={q}; t="$d.new.$$"; '
+            f'if [ -d "$d" ]; then '
+            f'if [ "$(stat -c %u "$d")" = 0 ] && [ -z "$(ls -A "$d")" ]; then '
+            f'chown {who} "$d" && chmod 2770 "$d"; fi; '
+            f'else '
+            f'{{ mkdir -p "$(dirname "$d")" && mkdir "$t" && chown {who} "$t" && chmod 2770 "$t" '
+            f'&& mv "$t" "$d"; }} || {{ rmdir "$t" 2>/dev/null; false; }}; '
+            f'fi')
+    return " && ".join(blocks)
 
 
 def dashboard_group_add(editors_gid: "int | str | None" = None) -> list:
@@ -1365,6 +1446,11 @@ def sorter_problems() -> list:
                    "will have no footage to scan and no place to move it to. "
                    "pool_host is the HOST path of the WHOLE footage dataset "
                    "(docs/DOCKER.md, \"The Footage Sorter mounts\").")
+    if cloud_state_under_pool():
+        out.append(f"[footage_sorter] cloud_state {SITE_SORTER_CLOUD_STATE!r} is inside pool_host "
+                   f"{SITE_SORTER_POOL_HOST!r}: a read-only mount of a folder the read-write /pool bind "
+                   f"already reaches is not read-only. It is NOT mounted; put the cloud state folder "
+                   f"outside the pool dataset.")
     if SITE_SORTER_CLOUD_STATE and not SITE_SORTER_CLOUD_STATE.startswith("/"):
         out.append(f"[footage_sorter] cloud_state {SITE_SORTER_CLOUD_STATE!r} is not an absolute "
                    f"HOST path (e.g. /mnt/tank/backups/cloud); it is bound read-only at "
@@ -7172,6 +7258,16 @@ def main():
     # Is there a snapshot floor under the two things that matter at all
     # (OPS-9)? Read-only, applies nothing, fails no deploy.
     print_snapshot_schedule_warning(DEFAULT_CC_ROOT, root, args.dry_run)
+    # The sorter's clock zone: the site's, else the NAS's own (see SORTER_TZ_PROBED).
+    global SORTER_TZ_PROBED
+    if SITE_SORTER_POOL_HOST and not SITE_SORTER_TIMEZONE:
+        SORTER_TZ_PROBED = probe_nas_timezone(args.dry_run)
+        if SORTER_TZ_PROBED:
+            print(f"sorter time zone: {SORTER_TZ_PROBED} (read from the NAS)")
+        elif not args.dry_run:
+            print("NOTE: could not read the NAS's time zone and [footage_sorter] timezone is not set; the "
+                  "sorter will run its 04:00/04:30 jobs in UTC, not the NAS script's local time.",
+                  file=sys.stderr)
     # The create itself is the backend's: a custom_app POST on TrueNAS Apps,
     # `docker compose up -d` over SSH on DSM. Its printed lines -- including
     # the manual-YAML fallback and the SERVER-2 job wait -- moved with it

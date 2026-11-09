@@ -27,9 +27,11 @@ THE FILE is `~/.ccsync/ledger-outbox.jsonl`, one JSON object per line
 `{"copy": {...}, "queued": "<iso>"}`. Appends are one write + fsync under a lock;
 a torn last line (power cut mid-write) is skipped on read, never fatal. Nothing
 is deleted until the dashboard has said 200 for it; a batch the dashboard
-REFUSES (a 4xx that is not about credentials) moves to
+REFUSES AS MALFORMED (400, 413 or 422 and nothing else: a stale token is answered with a
+redirect to /login, and a redirect is no verdict on the copies) moves to
 `ledger-outbox.rejected.jsonl` beside it, so a poison line cannot wedge the
-queue and is not lost either.
+queue and is not lost either. `requeue_rejected()` brings them back, and the OutboxFlusher does it by itself
+when the dashboard's version changes. A line with a bad byte costs that line, not the file.
 """
 from __future__ import annotations
 
@@ -56,6 +58,11 @@ POST_TIMEOUT_SECONDS = 30.0
 FLUSH_SECONDS = 60.0
 NO_SORTER_BACKOFF_SECONDS = 600.0
 VERIFIED_LEVELS = ("listed", "quick", "full")
+# The ONLY answers that mean "these copies, as they are, will never be accepted": a malformed body (400),
+# too large (413), unprocessable (422). Everything else is about the credential, the route or the day.
+SET_ASIDE_STATUSES = (400, 413, 422)
+VERSION_FILENAME = "ledger-outbox.version"
+VOLUME_KINDS = ("nas", "ours", "client", "card", "laptop", "unknown")   # the ledger's, without cloud
 
 _lock = threading.RLock()
 
@@ -105,8 +112,12 @@ def normalize(copy: Any) -> Optional[dict[str, Any]]:
         verified = str(copy.get("verified") or "full")
         if verified not in VERIFIED_LEVELS:
             verified = "listed"
+        volume = {"serial": serial, "label": str(vol.get("label") or "")}
+        kind = str(vol.get("kind") or "")
+        if kind in VOLUME_KINDS:                    # the field page knows what it was told a drive is
+            volume["kind"] = kind
         return {
-            "volume": {"serial": serial, "label": str(vol.get("label") or "")},
+            "volume": volume,
             "path": rel,
             "name": str(copy.get("name") or rel.rsplit("/", 1)[-1]),
             "size": size,
@@ -128,14 +139,14 @@ def _read(path: Path) -> list[dict[str, Any]]:
     """Every readable line. A torn or foreign line is skipped (and left for the next rewrite to drop)."""
     out: list[dict[str, Any]] = []
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
+        with open(path, "rb") as fh:
+            for raw in fh:                      # bytes, decoded PER LINE: one bad byte costs one line, not the file
+                raw = raw.strip()
+                if not raw:
                     continue
                 try:
-                    item = json.loads(line)
-                except ValueError:
+                    item = json.loads(raw.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError, RecursionError):
                     continue
                 if isinstance(item, dict) and isinstance(item.get("copy"), dict):
                     out.append(item)
@@ -148,7 +159,8 @@ def _read(path: Path) -> list[dict[str, Any]]:
 
 def _write_all(path: Path, items: list[dict[str, Any]]) -> None:
     """Replace the file with exactly these lines (write a sibling, fsync, replace)."""
-    tmp = path.with_name(path.name + ".tmp")
+    # unique per process and thread: two writers (the field page and the runner) must not share a temp
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     if not items:
         try:
             path.unlink()
@@ -236,8 +248,9 @@ def flush(send: Optional[SendFn] = None, path: Optional[Path | str] = None,
 
     `send(copies) -> (status, parsed)` is the seam; without one, the dashboard in `cfg` is called
     with the fleet credential. 200 removes the batch. A transport failure, 5xx, 404/503 (no sorter
-    here yet), 401 or 403 stops the flush and keeps everything. Another 4xx moves the batch to the
-    rejected file (it will never be accepted as it is) and carries on. Never raises."""
+    here yet), 401, 403, a redirect, 408, 429 or anything unexpected stops the flush and keeps
+    everything. Only 400, 413 and 422 move the batch to the rejected file (it will never be accepted as
+    it is) and carry on. Never raises."""
     target = _p(path)
     out = {"sent": 0, "accepted": 0, "duplicates": 0, "rejected": 0, "remaining": 0, "status": None}
     if send is None:
@@ -265,7 +278,9 @@ def flush(send: Optional[SendFn] = None, path: Optional[Path | str] = None,
                     out["duplicates"] += int(parsed.get("duplicates") or 0)
                 _drop(target, chunk)
                 continue
-            if status in (401, 403, 404, 503, 429) or status >= 500:
+            if status not in SET_ASIDE_STATUSES:
+                # 3xx (a stale token is answered with a redirect to /login), 401/403, 404/503, 408, 429,
+                # 5xx, and anything this code has not seen: not a verdict on the copies. Stop, keep them.
                 break
             log.warning("ledger outbox: the dashboard refused %d copies (HTTP %s); set aside in %s",
                         len(chunk), status, REJECTED_FILENAME)
@@ -275,6 +290,30 @@ def flush(send: Optional[SendFn] = None, path: Optional[Path | str] = None,
         log.warning("ledger outbox: flush failed", exc_info=True)
     out["remaining"] = pending(target)
     return out
+
+
+def requeue_rejected(path: Optional[Path | str] = None) -> int:
+    """Put the set-aside copies (`ledger-outbox.rejected.jsonl`) back in the outbox to be tried again,
+    and empty the rejected file. -> how many were queued (duplicates of something already waiting are
+    not). The rejected file only holds what a dashboard once refused as malformed; a newer dashboard
+    may take it, so OutboxFlusher does this by itself when the dashboard's version changes."""
+    target = _p(path)
+    side = target.with_name(REJECTED_FILENAME)
+    with _lock:
+        items = _read(side)
+        if not items:
+            try:
+                side.unlink()
+            except OSError:
+                pass
+            return 0
+        n = append([i["copy"] for i in items], target)
+        # append() skips what is queued already; either way these lines are now accounted for
+        try:
+            side.unlink()
+        except OSError:
+            log.debug("ledger outbox: could not clear %s", side, exc_info=True)
+        return n
 
 
 def _drop(target: Path, sent: list[dict[str, Any]]) -> None:
@@ -366,8 +405,10 @@ class OutboxFlusher:
 
     def __init__(self, cfg: dict[str, Any], identity_token_fn: Optional[Callable[[], Optional[str]]] = None,
                  path: Optional[Path | str] = None, send: Optional[SendFn] = None,
-                 clock: Callable[[], float] = time.monotonic, machine: str = "") -> None:
+                 clock: Callable[[], float] = time.monotonic, machine: str = "",
+                 version_fn: Optional[Callable[[], str]] = None) -> None:
         self.cfg = cfg if cfg is not None else {}
+        self._version_fn = version_fn
         self._identity = identity_token_fn
         self._path = path
         self._send = send
@@ -412,11 +453,37 @@ class OutboxFlusher:
                 log.exception("ledger outbox: the tick failed")
             self._wake.wait(FLUSH_SECONDS)
 
+    def _retry_rejected_on_new_dashboard(self, path: Path) -> None:
+        """When the dashboard's version is not the one the rejected copies were refused by, give them
+        another go. The last version seen is kept in a small file beside the outbox."""
+        if self._version_fn is None:
+            return
+        try:
+            now = str(self._version_fn() or "").strip()
+            if not now:
+                return                                              # an old dashboard names none: no verdict
+            marker = path.with_name(VERSION_FILENAME)
+            try:
+                before = marker.read_text(encoding="utf-8").strip()
+            except OSError:
+                before = ""
+            if before == now:
+                return
+            if before:                                              # first sight of any version is not a change
+                n = requeue_rejected(path)
+                if n:
+                    log.info("ledger outbox: dashboard %s -> %s, %d set-aside copies queued again", before, now, n)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(now, encoding="utf-8")
+        except Exception:                                           # noqa: BLE001
+            log.debug("ledger outbox: version check failed", exc_info=True)
+
     def tick(self) -> Optional[dict[str, Any]]:
         """One pass. -> the flush result, or None when nothing waited / it is backing off."""
         if not self.enabled or self._clock() < self._backoff_until:
             return None
         path = self._path or path_for(self.cfg) or default_path()
+        self._retry_rejected_on_new_dashboard(path)
         if pending(path) == 0:
             return None
         result = flush(self._send, path, self.cfg, self._identity, machine=self._machine)

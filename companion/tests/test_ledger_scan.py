@@ -101,7 +101,7 @@ def test_a_root_that_climbs_out_or_names_a_drive_is_dropped():
 def test_a_root_that_is_not_there_lists_nothing_and_still_completes(tmp_path):
     tree(tmp_path, {"a.braw": 1})
     _s, result, sent = listing(tmp_path, roots=["Gone"])
-    assert all_rows(sent) == [] and result["complete"] is True and result["unreadable"] == ["Gone"]
+    assert all_rows(sent) == [] and result["complete"] is True and result["unreadable"] == []      # absent = empty, an answer
 
 
 def test_the_manifest_rules_are_the_servers_and_override_the_built_in_ones(tmp_path):
@@ -233,7 +233,7 @@ def test_a_drive_that_vanishes_mid_scan_is_incomplete(tmp_path):
     assert scan.vanished is True
 
 
-def test_an_unreadable_folder_on_a_drive_that_is_still_there_is_counted_not_fatal(tmp_path, monkeypatch):
+def test_an_unreadable_folder_is_named_and_the_scan_stays_complete(tmp_path, monkeypatch):
     tree(tmp_path, {"ok/a.mov": 1, "locked/b.mov": 1})
     real = os.scandir
 
@@ -245,7 +245,8 @@ def test_an_unreadable_folder_on_a_drive_that_is_still_there_is_counted_not_fata
     monkeypatch.setattr(ledger_scan.os, "scandir", deny)
     _s, result, sent = listing(tmp_path, alive=lambda: True)
     assert [r[0] for r in all_rows(sent)] == ["ok/a.mov"]
-    assert result["complete"] is True and result["unreadable"] == ["locked"]
+    # a folder that would not open is NAMED, and the server exempts it from "gone": the scan stays complete
+    assert result["complete"] is True and result["unreadable"] == ["locked"] and result["unreadableCount"] == 1
 
 
 # ------------------------------------------------------------------ progress

@@ -1469,7 +1469,9 @@ class JobRunner:
             log.warning("jobs: scan #%s stopped: %s", job_id, reason)
             # a cancel is final; a vanished drive or a drive a copy owns is not worth an immediate
             # retry; a halt or a shutdown is
-            retryable = not cancelled["yes"] and "gone" not in reason and "copied from" not in reason
+            retryable = (not cancelled["yes"] and "gone" not in reason and "copied from" not in reason
+                         and "could not be read" not in reason and "system drive" not in reason
+                         and "no longer current" not in reason)
             self._post_result(job_id, False, reason, result=small, retryable=retryable)
             return
         log.info("jobs: scan #%s listed %d files (%d bytes)", job_id, result["files"], result["bytes"])

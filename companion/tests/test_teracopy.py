@@ -698,3 +698,48 @@ def test_a_stopped_copy_group_reports_unverified_files_as_not_landed(driver, tmp
 
 def test_a_plain_copy_defaults_to_skipall():
     assert tc_mod.DEFAULT_SWITCH == "/SkipAll" == tc_mod.SWITCH_SKIP
+
+
+def test_launches_from_several_threads_go_to_teracopy_one_at_a_time(tmp_path):
+    """Field mode launches lanes off one card at the same moment. TeraCopy's
+    single instance loses all but one of several stubs handed over at once
+    (found live 2026-11-09), so a launch holds the next one back until its
+    job's history database has appeared."""
+    import threading as _t
+    import time as _time
+    hist = tmp_path / "History"
+    hist.mkdir()
+    exe = tmp_path / "TeraCopy.exe"
+    exe.write_bytes(b"")
+    active = []
+    overlaps = []
+    counter = iter(range(100))
+
+    def spawn(command):
+        active.append(command)
+        if len(active) > 1:
+            overlaps.append(list(active))
+        _time.sleep(0.05)                       # the stub hands over...
+        (hist / f"job-{next(counter)}.db").write_bytes(b"")   # ...and TeraCopy registers it
+        _time.sleep(0.05)
+        active.remove(command)
+
+        class P:
+            pid = 1
+        return P()
+
+    t = TeraCopy(str(exe), history_dir=str(hist), options_ini=str(tmp_path / "x.ini"),
+                 list_dir=str(tmp_path / "lists"), spawn=spawn)
+    src = tmp_path / "card" / "A.MP4"
+    src.parent.mkdir()
+    src.write_bytes(b"x")
+    out = []
+    threads = [_t.Thread(target=lambda d=d: out.append(t.launch([str(src)], str(tmp_path / d), tag="CLIP")))
+               for d in ("a", "b", "c")]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert overlaps == []
+    assert len({o["list_file"] for o in out}) == 3          # three lists, none replaced another
+    assert len(list(hist.glob("*.db"))) == 3

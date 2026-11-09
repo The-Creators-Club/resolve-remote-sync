@@ -369,7 +369,8 @@ def real_rig(tmp_path, monkeypatch):
     try:
         with TestClient(app) as client:
             client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
-            client.get("/sorter/api/whoami")                       # waits for the engine to load
+            client.get("/sorter/api/state")                        # held until the engine (and its ledger) has loaded
+            assert getattr(app.state.sorter_engine, "ledger", None) is not None
             client.cookies.clear()
             yield client, app
     finally:

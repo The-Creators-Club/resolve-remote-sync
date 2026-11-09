@@ -34,6 +34,8 @@ from . import broll_server as broll_server_mod
 from . import broll_standins
 from . import canon
 from . import capabilities as capabilities_mod
+from . import field_server as field_server_mod
+from . import field_service as field_service_mod
 from . import jobs_runner as jobs_runner_mod
 from . import ledger_outbox as ledger_outbox_mod
 from . import sorter_cards as sorter_cards_mod
@@ -2518,10 +2520,23 @@ class CompanionApp:
             self.sorter_volumes = None
         try:
             self.ledger_outbox = ledger_outbox_mod.OutboxFlusher(
-                cfg, identity_token_fn=lambda: self.identity.token)
+                cfg, identity_token_fn=lambda: self.identity.token,
+                version_fn=lambda: getattr(self, "_dashboard_version", ""))
         except Exception:
             log.exception("failed to build the ledger outbox flusher")
             self.ledger_outbox = None
+
+        # The field backup page (field_server.py, tray "Field backup..."): a card copied to field
+        # drives with no network. Built behind its own try and bound late (_start_field_server).
+        self.field_service: Any = None
+        self._field_server: Any = None
+        try:
+            if field_service_mod.enabled(cfg):
+                self.field_service = field_service_mod.FieldService(
+                    cfg, identity_token_fn=lambda: self.identity.token)
+        except Exception:
+            log.exception("failed to build the field backup service")
+            self.field_service = None
 
         # The Timeline Cards role (TIMELINE-CARDS-INTO-CCSYNC.md phase 2):
         # this machine's Resolve serving the cards page, through the
@@ -10660,6 +10675,7 @@ class CompanionApp:
             ("root guard", self._start_root_guard),
             ("computer id check", self._warn_if_machine_id_is_unreadable),
             ("b-roll server", self._start_broll_server),
+            ("field backup page", self._start_field_server),
             ("yt-dlp manager", self._start_ytdlp_manager),
             ("Resolve menu scripts", self._start_resolve_menu_install),
             ("originals requests", self._start_originals_inbox),
@@ -10934,6 +10950,19 @@ class CompanionApp:
                 # relaunches within seconds and would read it as a squatter.
                 return
             self._start_broll_server_locked()
+
+    def _start_field_server(self) -> None:
+        """Serve the field backup page (field_server.py) on loopback. Its own port and its own
+        failure: a taken port costs the page and nothing else."""
+        if self.field_service is None or self._field_server is not None or self._shutdown_started:
+            return
+        self._field_server = field_server_mod.start(self.config, self.field_service)
+
+    def field_page_url(self) -> str:
+        """Where the tray's "Field backup..." opens, or "" when the page is off or not bound."""
+        if self._field_server is None:
+            return ""
+        return field_server_mod.page_url(self.config, self._field_server)
 
     def _start_broll_server_locked(self) -> None:
         """The bind itself. Caller holds _broll_server_lock."""
@@ -12134,6 +12163,11 @@ class CompanionApp:
         with self._broll_server_lock:
             broll_server_mod.stop(self._broll_server)
             self._broll_server = None
+        try:
+            field_server_mod.stop(getattr(self, "_field_server", None))
+            self._field_server = None
+        except Exception:
+            log.exception("failed to stop the field backup page")
         # Join both Resolve-touching threads (bounded). A self-upgrade used
         # to exit the process while get_media_pool_items() was inside the
         # fusionscript C extension (AUDIT_2 §2-low). Bounded so a wedged

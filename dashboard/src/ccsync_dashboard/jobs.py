@@ -897,8 +897,15 @@ def policy_refusal(facts: Mapping[str, Any], kind: str,
         return (REFUSE_BREAKER,
                 "this computer's proxy download stopped itself, so it is "
                 "not in a state anyone should add work to")
-    if facts.get("live_jobs"):
-        held = facts["live_jobs"][0]
+    # A `ledger-scan` runs on the companion's own lane (a read-only walk that can take an hour), so
+    # it does not make the machine "busy" for anything else -- a forced card copy must still get
+    # through -- and a second scan on the same machine is the one thing it does refuse.
+    live = list(facts.get("live_jobs") or [])
+    scanning = [j for j in live if j.get("kind") == db.JOB_KIND_LEDGER_SCAN]
+    others = [j for j in live if j.get("kind") != db.JOB_KIND_LEDGER_SCAN]
+    held_jobs = scanning if kind == db.JOB_KIND_LEDGER_SCAN else others
+    if held_jobs:
+        held = held_jobs[0]
         return (REFUSE_BUSY_WITH_JOB,
                 f"this computer is already holding job #{held['id']} ({held['kind']})")
     caps = dict(facts.get("capabilities") or {})

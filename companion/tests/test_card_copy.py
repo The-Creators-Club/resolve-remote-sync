@@ -173,7 +173,8 @@ def test_a_card_ingest_copies_creates_folders_and_reports(tmp_path):
     assert result["copied"][0] == {
         "src": "PRIVATE/M4ROOT/CLIP/a.MP4",
         "dst": {"root": "pool", "rel": "Footage/Day1/a.MP4"},
-        "size": len(data), "verified": True}
+        "size": len(data), "verified": True, "filename": "a.MP4"}
+    assert result["copier"] == "python"
     assert result["skipped"] == result["conflicts"] == result["failed"] == []
     assert not partials(w.pool)
     # the copy keeps the card file's modification time
@@ -181,17 +182,42 @@ def test_a_card_ingest_copies_creates_folders_and_reports(tmp_path):
             == os.stat(w.card / "PRIVATE/M4ROOT/CLIP/a.MP4").st_mtime_ns)
 
 
-def test_a_same_size_destination_is_skipped_and_untouched(tmp_path):
+def test_a_same_size_identical_destination_is_skipped_and_verified(tmp_path):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    existing = w.write(w.pool, "Footage/Day1/a.MP4", b"12345")
+    old = existing.stat().st_mtime_ns
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)]))
+    result = res["result"]
+    assert res["ok"] is True
+    assert [s["src"] for s in result["skipped"]] == ["a.MP4"]
+    # compared against the card, byte for byte, so it can say verified
+    assert result["skipped"][0]["verified"] is True
+    assert result["copied"] == [] and result["conflicts"] == []
+    assert existing.read_bytes() == b"12345" and existing.stat().st_mtime_ns == old
+
+
+def test_a_same_size_destination_with_other_bytes_is_a_conflict_not_assumed_identical(tmp_path):
     w = World(tmp_path)
     w.write(w.card, "a.MP4", b"12345")
     existing = w.write(w.pool, "Footage/Day1/a.MP4", b"abcde")     # same size, other bytes
     old = existing.stat().st_mtime_ns
     _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)]))
     result = res["result"]
-    assert res["ok"] is True
-    assert [s["src"] for s in result["skipped"]] == ["a.MP4"]
-    assert result["copied"] == [] and result["conflicts"] == []
+    assert [c["src"] for c in result["conflicts"]] == ["a.MP4"]
+    assert "same size" in result["conflicts"][0]["why"]
+    assert result["skipped"] == [] and result["copied"] == []
     assert existing.read_bytes() == b"abcde" and existing.stat().st_mtime_ns == old
+
+
+def test_a_difference_deep_inside_a_same_size_destination_is_still_a_conflict(tmp_path):
+    w = World(tmp_path)
+    data = bytearray(os.urandom(5 * MIB))
+    w.write(w.card, "a.MP4", bytes(data))
+    data[2 * MIB + 7] ^= 0xFF               # not in the first or last MiB
+    w.write(w.pool, "Footage/Day1/a.MP4", bytes(data))
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5 * MIB)]))
+    assert len(res["result"]["conflicts"]) == 1 and res["result"]["skipped"] == []
 
 
 def test_a_different_file_at_the_destination_is_a_conflict_and_left_alone(tmp_path):
@@ -245,31 +271,32 @@ def test_a_job_that_climbs_out_of_the_card_fails_the_item(tmp_path):
 
 # ----------------------------------------------------------------- verifying
 
-def test_quick_verify_catches_a_difference_in_the_last_megabyte(tmp_path):
+def test_verify_whole_catches_a_difference_anywhere(tmp_path):
     a, b = tmp_path / "a", tmp_path / "b"
     data = bytearray(os.urandom(5 * MIB))
     a.write_bytes(bytes(data))
-    assert card_copy.quick_verify(a, a, len(data)) == ""
-    data[-10] ^= 0xFF
-    b.write_bytes(bytes(data))
-    assert "last megabyte" in card_copy.quick_verify(a, b, len(data))
-    data[-10] ^= 0xFF
-    data[5] ^= 0xFF
-    b.write_bytes(bytes(data))
-    assert "first megabyte" in card_copy.quick_verify(a, b, len(data))
+    h = card_copy._new_hash()
+    h.update(bytes(data))
+    stop = lambda: ""           # noqa: E731
+    assert card_copy.verify_whole(a, len(data), h.digest(), stop) == ""
+    for where in (5, 2 * MIB + 3, len(data) - 10):      # first MiB, the middle, last MiB
+        flipped = bytearray(data)
+        flipped[where] ^= 0xFF
+        b.write_bytes(bytes(flipped))
+        assert "differs" in card_copy.verify_whole(b, len(data), h.digest(), stop)
     b.write_bytes(bytes(data)[:-1])
-    assert "bytes" in card_copy.quick_verify(a, b, len(data))
+    assert "bytes" in card_copy.verify_whole(b, len(data), h.digest(), stop)
 
 
 def test_a_verify_mismatch_is_reported_failed_and_nothing_is_left(tmp_path, monkeypatch):
     w = World(tmp_path)
     w.write(w.card, "a.MP4", b"12345")
-    monkeypatch.setattr(card_copy, "quick_verify",
-                        lambda *a, **k: "the last megabyte differs from the source")
+    monkeypatch.setattr(card_copy, "verify_whole",
+                        lambda *a, **k: "the copy read back differs from the source")
     _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)]))
     failed = res["result"]["failed"]
     assert failed == [{"src": "a.MP4", "dst": pool_ref("Footage/Day1/a.MP4"),
-                       "why": "verify failed: the last megabyte differs from the source"}]
+                       "why": "verify failed: the copy read back differs from the source"}]
     assert res["result"]["copied"] == []
     assert not (w.pool / "Footage/Day1/a.MP4").exists()
     assert not partials(w.pool)
@@ -278,14 +305,14 @@ def test_a_verify_mismatch_is_reported_failed_and_nothing_is_left(tmp_path, monk
 def test_a_file_that_appears_mid_copy_is_not_overwritten(tmp_path, monkeypatch):
     w = World(tmp_path)
     w.write(w.card, "a.MP4", b"12345")
-    real = card_copy.quick_verify
+    real = card_copy.verify_whole
 
-    def verify(src, dst, size):
+    def verify(path, size, digest, should_stop):
         # somebody else puts a file in place while ours is still a .partial
         w.write(w.pool, "Footage/Day1/a.MP4", b"theirs!")
-        return real(src, dst, size)
+        return real(path, size, digest, should_stop)
 
-    monkeypatch.setattr(card_copy, "quick_verify", verify)
+    monkeypatch.setattr(card_copy, "verify_whole", verify)
     _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)]))
     assert len(res["result"]["conflicts"]) == 1
     assert (w.pool / "Footage/Day1/a.MP4").read_bytes() == b"theirs!"
@@ -378,11 +405,8 @@ def test_a_halt_keeps_what_finished_before_it_in_the_result(tmp_path):
     w = World(tmp_path)
     w.write(w.card, "a.MP4", b"aaa")
     w.write(w.card, "b.MP4", b"bbb")
-    state = {"calls": 0}
-
     def halted():
-        state["calls"] += 1
-        return state["calls"] > 4               # after the first file's checks
+        return (w.pool / "Footage/Day1/a.MP4").exists()     # once the first file has landed
 
     dash = IngestDash(card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 3),
                                    copy_item("b.MP4", "Footage/Day1/b.MP4", 3, "c2")]))
@@ -531,7 +555,7 @@ def test_the_job_row_is_small_and_the_receipt_goes_to_the_sorter(tmp_path):
     w = World(tmp_path)
     w.write(w.card, "a.MP4", b"12345")
     w.write(w.card, "b.MP4", b"bb")
-    w.write(w.pool, "Footage/Day1/b.MP4", b"zz")
+    w.write(w.pool, "Footage/Day1/b.MP4", b"bb")
     dash, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5),
                                      copy_item("b.MP4", "Footage/Day1/b.MP4", 2, "c2")]))
     small = res["small"]
@@ -544,7 +568,9 @@ def test_the_job_row_is_small_and_the_receipt_goes_to_the_sorter(tmp_path):
     post = [c for c in dash.sorter_calls if c[0] == "POST"][0]
     assert post[1] == "http://dash.example/sorter/agent/ingest/21/receipt"
     assert post[3]["X-CCSync-Token"] == "tok"
-    assert set(post[2]) == {"copied", "skipped", "conflicts", "failed"}
+    assert set(post[2]) == {"copied", "skipped", "conflicts", "failed", "copier"}
+    assert post[2]["copier"] == "python"
+    assert small["copier"] == "python"
 
 
 @pytest.mark.parametrize("status,retryable", [(404, False), (409, False), (500, True)])
@@ -597,3 +623,463 @@ def test_under_refuses_drives_streams_and_climbs(tmp_path, rel):
 
 def test_under_keeps_an_ordinary_card_path(tmp_path):
     assert card_copy._under(tmp_path, "PRIVATE\\M4ROOT/CLIP/C0001.MP4") == tmp_path / "PRIVATE" / "M4ROOT" / "CLIP" / "C0001.MP4"
+
+
+# ============================================================ write modes (Python copier)
+
+def with_mode(item, mode):
+    return {**item, "mode": mode}
+
+
+def test_a_collision_is_written_beside_the_existing_file_under_a_renamed_name(tmp_path):
+    w = World(tmp_path)
+    data = os.urandom(MIB + 5)
+    w.write(w.card, "a.MP4", data)
+    existing = w.write(w.pool, "Footage/Day1/a.MP4", b"another clip")
+    old = existing.stat().st_mtime_ns
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", len(data)), "collision")]))
+    result = res["result"]
+    assert res["ok"] is True and result["conflicts"] == [] and result["failed"] == []
+    assert existing.read_bytes() == b"another clip" and existing.stat().st_mtime_ns == old
+    assert (w.pool / "Footage/Day1/a (2).MP4").read_bytes() == data
+    # the receipt echoes the PLANNED dst and carries the name actually written
+    assert result["copied"] == [{"src": "a.MP4", "dst": pool_ref("Footage/Day1/a.MP4"),
+                                 "size": len(data), "verified": True, "filename": "a (2).MP4"}]
+    assert not partials(w.pool)
+
+
+def test_a_collision_skips_to_the_next_free_name(tmp_path):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    w.write(w.pool, "Footage/Day1/a.MP4", b"one")
+    w.write(w.pool, "Footage/Day1/a (2).MP4", b"another one")
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", 5), "collision")]))
+    assert res["result"]["copied"][0]["filename"] == "a (3).MP4"
+    assert (w.pool / "Footage/Day1/a (3).MP4").read_bytes() == b"12345"
+
+
+def test_a_collision_run_again_finds_its_earlier_renamed_copy(tmp_path):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    w.write(w.pool, "Footage/Day1/a.MP4", b"other")
+    w.write(w.pool, "Footage/Day1/a (2).MP4", b"12345")       # an interrupted run already made it
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", 5), "collision")]))
+    result = res["result"]
+    assert result["copied"] == [] and not (w.pool / "Footage/Day1/a (3).MP4").exists()
+    assert result["skipped"] == [{"src": "a.MP4", "dst": pool_ref("Footage/Day1/a.MP4"), "size": 5,
+                                  "verified": True, "filename": "a (2).MP4"}]
+
+
+def test_a_collision_with_nothing_there_is_an_ordinary_copy(tmp_path):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", 5), "collision")]))
+    assert res["result"]["copied"][0]["filename"] == "a.MP4"
+
+
+def test_a_resume_appends_to_the_partial_and_verifies_the_whole_file(tmp_path):
+    w = World(tmp_path)
+    data = os.urandom(3 * MIB + 17)
+    w.write(w.card, "a.MP4", data)
+    have = MIB + 5
+    part = w.write(w.pool, "Footage/Day1/a.MP4", data[:have])
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", len(data)), "resume")]))
+    result = res["result"]
+    assert result["copied"] == [{"src": "a.MP4", "dst": pool_ref("Footage/Day1/a.MP4"),
+                                 "size": len(data), "verified": True, "filename": "a.MP4"}]
+    assert part.read_bytes() == data and not partials(w.pool)
+
+
+def test_a_resume_of_a_file_that_is_not_the_start_is_a_conflict_and_left_alone(tmp_path):
+    w = World(tmp_path)
+    data = os.urandom(2 * MIB)
+    w.write(w.card, "a.MP4", data)
+    other = os.urandom(MIB)
+    part = w.write(w.pool, "Footage/Day1/a.MP4", other)
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", len(data)), "resume")]))
+    assert len(res["result"]["conflicts"]) == 1 and res["result"]["copied"] == []
+    assert part.read_bytes() == other
+
+
+def test_a_resume_with_a_destination_larger_than_the_source_is_a_conflict(tmp_path):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"123")
+    part = w.write(w.pool, "Footage/Day1/a.MP4", b"123456")
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", 3), "resume")]))
+    assert len(res["result"]["conflicts"]) == 1 and part.read_bytes() == b"123456"
+
+
+def test_a_resume_with_no_partial_there_is_an_ordinary_copy(tmp_path):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", 5), "resume")]))
+    assert len(res["result"]["copied"]) == 1
+    assert (w.pool / "Footage/Day1/a.MP4").read_bytes() == b"12345"
+
+
+def test_a_resume_that_fails_its_verify_is_truncated_back_to_the_partial(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    data = os.urandom(2 * MIB)
+    w.write(w.card, "a.MP4", data)
+    part = w.write(w.pool, "Footage/Day1/a.MP4", data[:MIB])
+    monkeypatch.setattr(card_copy, "verify_whole", lambda *a, **k: "the copy read back differs from the source")
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", len(data)), "resume")]))
+    assert res["result"]["failed"][0]["why"].startswith("verify failed")
+    assert part.read_bytes() == data[:MIB]
+
+
+def test_a_halt_during_a_resume_keeps_the_appended_prefix(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    monkeypatch.setattr(card_copy, "BUFFER_BYTES", 1024)
+    data = os.urandom(64 * 1024)
+    w.write(w.card, "a.MP4", data)
+    part = w.write(w.pool, "Footage/Day1/a.MP4", data[:4096])
+    halted = {"now": False}
+    real = card_copy.resume_file
+
+    def resume_then_halt(src, dst, size, have, should_stop, on_bytes):
+        n = {"n": 0}
+
+        def stop():
+            n["n"] += 1
+            if n["n"] == 12:
+                halted["now"] = True
+            return should_stop()
+
+        return real(src, dst, size, have, stop, on_bytes)
+
+    monkeypatch.setattr(card_copy, "resume_file", resume_then_halt)
+    dash = IngestDash(card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", len(data)), "resume")]))
+    r = runner(w, dash, halted=lambda: halted["now"])
+    r.note_report_reply({"commands": {"jobs": {"offered": [21]}}})
+    r.tick()
+    assert final(dash)["ok"] is False
+    got = part.read_bytes()
+    assert 4096 < len(got) < len(data) and got == data[:len(got)]      # still a true prefix
+
+
+def test_an_unknown_mode_fails_the_item_and_writes_nothing(tmp_path):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", 5), "overwrite")]))
+    assert "overwrite" in res["result"]["failed"][0]["why"]
+    assert not (w.pool / "Footage/Day1/a.MP4").exists()
+
+
+# ============================================ a job that stops early posts what landed
+
+def test_a_halted_job_posts_its_receipt_not_final_and_fails_retryably(tmp_path):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"aaa")
+    w.write(w.card, "b.MP4", b"bbb")
+    dash = IngestDash(card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 3),
+                                copy_item("b.MP4", "Footage/Day1/b.MP4", 3, "c2")]))
+    r = runner(w, dash, halted=lambda: (w.pool / "Footage/Day1/a.MP4").exists())
+    r.note_report_reply({"commands": {"jobs": {"offered": [21]}}})
+    r.tick()
+    res = final(dash)
+    assert res["ok"] is False and res["retryable"] is True
+    assert dash.receipts[-1]["final"] is False and dash.receipts[-1]["copier"] == "python"
+    assert [c["src"] for c in dash.receipts[-1]["copied"]] == ["a.MP4"]
+
+
+def test_the_retry_after_a_halt_reports_the_landed_file_as_skipped_and_verified(tmp_path):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"aaa")
+    w.write(w.card, "b.MP4", b"bbb")
+    copies = [copy_item("a.MP4", "Footage/Day1/a.MP4", 3), copy_item("b.MP4", "Footage/Day1/b.MP4", 3, "c2")]
+    dash = IngestDash(card_job(copies))
+    r = runner(w, dash, halted=lambda: (w.pool / "Footage/Day1/a.MP4").exists())
+    r.note_report_reply({"commands": {"jobs": {"offered": [21]}}})
+    r.tick()
+    retry_dash, res = run_job(w, card_job(copies))      # the retry: the same list, nothing halted
+    result = res["result"]
+    assert [s["src"] for s in result["skipped"]] == ["a.MP4"] and result["skipped"][0]["verified"] is True
+    assert [c["src"] for c in result["copied"]] == ["b.MP4"]
+    assert "final" not in retry_dash.receipts[-1]
+
+
+def test_a_finished_job_posts_no_final_flag(tmp_path):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"aaa")
+    dash, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 3)]))
+    assert "final" not in dash.receipts[-1]
+
+
+def test_a_card_pulled_mid_copy_stops_the_job_and_posts_what_landed(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"aaa")
+    w.write(w.card, "b.MP4", b"bbb")
+    w.write(w.card, "c.MP4", b"ccc")
+    real = card_copy.copy_file
+
+    def pull_the_card(src, dst, size, should_stop, on_bytes):
+        if src.name == "b.MP4":
+            w.card_serial = None                         # out of the reader
+            raise OSError(22, "The device is not ready")
+        return real(src, dst, size, should_stop, on_bytes)
+
+    monkeypatch.setattr(card_copy, "copy_file", pull_the_card)
+    job = card_job([copy_item(n, f"Footage/Day1/{n}", 3, n) for n in ("a.MP4", "b.MP4", "c.MP4")])
+    dash = IngestDash(job)
+    r = runner(w, dash)
+    r.note_report_reply({"commands": {"jobs": {"offered": [21]}}})
+    r.tick()
+    res = final(dash)
+    assert res["ok"] is False and res["retryable"] is True and "taken out" in res["error"]
+    body = dash.receipts[-1]
+    assert body["final"] is False and [c["src"] for c in body["copied"]] == ["a.MP4"]
+    assert body["failed"] == []                           # not three failures: one stop
+    assert not (w.pool / "Footage/Day1/c.MP4").exists()
+
+
+# ====================================================== the TeraCopy copier (fake TeraCopy)
+
+class FakeTeraCopy:
+    """Stands in for teracopy.TeraCopy: copies with shutil and answers like the
+    history database would, so the whole CardJob path runs without TeraCopy."""
+
+    def __init__(self, result=3, halt=None):
+        self.calls: list[tuple[list[str], str, str]] = []
+        self.result = result
+        self.halt = halt
+
+    def copy_group(self, files, dest, switch, tag="", on_tick=None, expect_verify=True):
+        import shutil
+        self.calls.append((list(files), dest, switch))
+        receipts = []
+        for f in files:
+            target = Path(dest) / Path(f).name
+            filename = None
+            if target.exists() and switch == "/RenameCopied":
+                n = 2
+                while card_copy.renamed(target, n).exists():
+                    n += 1
+                target = card_copy.renamed(target, n)
+                filename = target.name
+            shutil.copy2(f, target)
+            receipts.append({"source": f, "size": target.stat().st_size, "is_folder": False,
+                             "result": self.result, "verified": self.result == 3, "hash": "AA",
+                             "filename": filename, "message": None})
+        if on_tick:
+            on_tick({"state": "done"}, 1)
+        if self.halt:
+            self.halt()
+        return {"code": 0 if self.result == 3 else 10, "status": {}, "receipts": receipts,
+                "list_file": "x.txt", "since": 1}
+
+
+windows_only = pytest.mark.skipif(os.name != "nt", reason="TeraCopy is Windows-only")
+
+
+@pytest.fixture()
+def fake_tc(monkeypatch):
+    from ccsync_companion import teracopy as teracopy_mod
+    box = {"tc": FakeTeraCopy()}
+    monkeypatch.setattr(teracopy_mod, "detect", lambda cfg=None: (box["tc"], ""))
+    return box
+
+
+@windows_only
+def test_teracopy_copies_when_it_is_available_and_the_receipt_says_so(tmp_path, fake_tc):
+    w = World(tmp_path)
+    data = os.urandom(MIB + 3)
+    w.write(w.card, "a.MP4", data)
+    w.write(w.card, "b.MP4", b"bee")
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", len(data)),
+                                  copy_item("b.MP4", "Footage/Day1/Proxy/b.MP4", 3, "c2")],
+                                 folders=[pool_ref("Footage/Day1"), pool_ref("Footage/Day1/Proxy")]))
+    result = res["result"]
+    assert result["copier"] == "teracopy" and res["small"]["copier"] == "teracopy"
+    assert [c["verified"] for c in result["copied"]] == [True, True]
+    assert (w.pool / "Footage/Day1/a.MP4").read_bytes() == data
+    calls = fake_tc["tc"].calls
+    assert [(Path(d).name, sw) for _, d, sw in calls] == [("Day1", "/OverwriteDiffSize"),
+                                                         ("Proxy", "/OverwriteDiffSize")]
+
+
+@windows_only
+def test_one_teracopy_job_per_folder_and_switch_with_modes_mapped(tmp_path, fake_tc):
+    w = World(tmp_path)
+    for n in "abcd":
+        w.write(w.card, f"{n}.MP4", n.encode() * 4)
+    w.write(w.pool, "Footage/Day1/c.MP4", b"zz")                 # collides with c
+    w.write(w.pool, "Footage/Day1/d.MP4", b"dd")                 # a partial of d
+    job = card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 4, "1"),
+                    copy_item("b.MP4", "Footage/Day1/b.MP4", 4, "1"),
+                    with_mode(copy_item("c.MP4", "Footage/Day1/c.MP4", 4, "2"), "collision"),
+                    with_mode(copy_item("d.MP4", "Footage/Day1/d.MP4", 4, "3"), "resume")])
+    _, res = run_job(w, job)
+    calls = fake_tc["tc"].calls
+    by_switch = {sw: [Path(f).name for f in files] for files, _, sw in calls}
+    assert by_switch == {"/OverwriteDiffSize": ["a.MP4", "b.MP4", "d.MP4"], "/RenameCopied": ["c.MP4"]}
+    assert len(calls) == 2
+    got = {c["src"]: c["filename"] for c in res["result"]["copied"]}
+    assert got == {"a.MP4": "a.MP4", "b.MP4": "b.MP4", "c.MP4": "c (2).MP4", "d.MP4": "d.MP4"}
+    assert (w.pool / "Footage/Day1/c.MP4").read_bytes() == b"zz"        # never over the existing
+
+
+@windows_only
+def test_what_cannot_be_copied_never_reaches_teracopy(tmp_path, fake_tc):
+    w = World(tmp_path)
+    w.write(w.card, "same.MP4", b"12345")
+    w.write(w.card, "diff.MP4", b"12345")
+    w.write(w.card, "new.MP4", b"12345")
+    w.write(w.pool, "Footage/Day1/same.MP4", b"12345")           # identical: skipped by a real compare
+    w.write(w.pool, "Footage/Day1/diff.MP4", b"abcde")           # same size, other bytes: a conflict
+    _, res = run_job(w, card_job([copy_item(n, f"Footage/Day1/{n}", 5, n)
+                                  for n in ("same.MP4", "diff.MP4", "new.MP4")]))
+    result = res["result"]
+    assert [Path(f).name for files, _, _ in fake_tc["tc"].calls for f in files] == ["new.MP4"]
+    assert [s["src"] for s in result["skipped"]] == ["same.MP4"] and result["skipped"][0]["verified"] is True
+    assert [c["src"] for c in result["conflicts"]] == ["diff.MP4"]
+    assert (w.pool / "Footage/Day1/diff.MP4").read_bytes() == b"abcde"
+
+
+@windows_only
+def test_a_partial_that_is_not_the_start_is_not_handed_to_teracopy_to_rewrite(tmp_path, fake_tc):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", os.urandom(2 * MIB))
+    other = w.write(w.pool, "Footage/Day1/a.MP4", os.urandom(MIB))
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", 2 * MIB), "resume")]))
+    assert fake_tc["tc"].calls == [] and len(res["result"]["conflicts"]) == 1
+    assert other.stat().st_size == MIB
+
+
+@windows_only
+def test_a_copy_teracopy_did_not_verify_is_reported_unverified(tmp_path, fake_tc):
+    fake_tc["tc"] = FakeTeraCopy(result=1)
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)]))
+    assert res["result"]["copied"][0]["verified"] is False
+    assert res["result"]["failed"] == []
+
+
+@windows_only
+def test_a_file_teracopy_left_short_is_failed_not_copied(tmp_path, fake_tc):
+    class Short(FakeTeraCopy):
+        def copy_group(self, files, dest, *a, **k):
+            out = super().copy_group(files, dest, *a, **k)
+            (Path(dest) / Path(files[0]).name).write_bytes(b"12")     # cut short after the "verify"
+            return out
+
+    fake_tc["tc"] = Short()
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)]))
+    assert res["result"]["copied"] == [] and "verified but" in res["result"]["failed"][0]["why"]
+
+
+@windows_only
+def test_a_halt_between_teracopy_jobs_launches_no_more_and_posts_not_final(tmp_path, fake_tc):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"aaa")
+    w.write(w.card, "b.MP4", b"bbb")
+    state = {"halt": False}
+    fake_tc["tc"] = FakeTeraCopy(halt=lambda: state.update(halt=True))
+    dash = IngestDash(card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 3),
+                                copy_item("b.MP4", "Footage/Day1/Proxy/b.MP4", 3, "c2")],
+                               folders=[pool_ref("Footage/Day1"), pool_ref("Footage/Day1/Proxy")]))
+    r = runner(w, dash, halted=lambda: state["halt"])
+    r.note_report_reply({"commands": {"jobs": {"offered": [21]}}})
+    r.tick()
+    res = final(dash)
+    assert res["ok"] is False and res["retryable"] is True
+    assert len(fake_tc["tc"].calls) == 1                       # the second folder's job was never launched
+    body = dash.receipts[-1]
+    assert body["final"] is False and body["copier"] == "teracopy"
+    assert [c["src"] for c in body["copied"]] == ["a.MP4"]
+
+
+@windows_only
+def test_a_file_whose_name_changes_goes_to_the_python_copier(tmp_path, fake_tc):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/renamed.MP4", 5)]))
+    assert fake_tc["tc"].calls == []
+    assert res["result"]["copier"] == "python" and len(res["result"]["copied"]) == 1
+
+
+@windows_only
+def test_a_teracopy_that_cannot_run_fails_its_files_not_the_job(tmp_path, fake_tc):
+    class Broken(FakeTeraCopy):
+        def copy_group(self, *a, **k):
+            raise ValueError("teracopy: unusable path (empty, or contains a quote)")
+
+    fake_tc["tc"] = Broken()
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)]))
+    assert res["ok"] is True and "could not be run" in res["result"]["failed"][0]["why"]
+
+
+def test_the_python_copier_is_used_when_there_is_no_teracopy(tmp_path):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)]))
+    assert res["result"]["copier"] == "python"
+
+
+# ================================================== live progress and speed to the sorter
+
+def test_the_poster_reports_bytes_files_current_phase_and_speed_over_the_window():
+    prog = card_copy.Progress(of=4, total_bytes=1000)
+    prog.copier = "teracopy"
+    t = {"now": 100.0}
+    poster = card_copy.ProgressPoster(prog, lambda: t["now"])
+    assert poster.body()["bps"] == 0                       # one sample: no speed yet
+    t["now"], prog.bytes, prog.done, prog.current = 102.0, 400, 1, "A/b.MP4"
+    body = poster.body()
+    assert body == {"bytesDone": 400, "bytesTotal": 1000, "filesDone": 1, "filesTotal": 4,
+                    "current": "A/b.MP4", "bps": 200, "phase": "copy", "copier": "teracopy"}
+    t["now"], prog.bytes = 110.0, 400                      # stalled for 8 s: the old samples age out
+    poster.body()
+    t["now"] = 112.0
+    assert poster.body()["bps"] == 0
+    prog.phase = "verify"
+    t["now"], prog.bytes = 114.0, 900
+    assert poster.body()["bps"] == 0                       # no speed claimed for a read-back
+
+
+def test_a_progress_post_that_fails_is_dropped_not_raised(tmp_path):
+    w = World(tmp_path)
+
+    class Down(IngestDash):
+        def request(self, method, url, body, headers, timeout):
+            if url.endswith("/progress"):
+                raise OSError("network down")
+            return super().request(method, url, body, headers, timeout)
+
+    r = runner(w, Down())
+    assert r._post_progress(21, {"bytesDone": 1}) is False
+
+
+def test_a_copy_posts_progress_while_it_runs_and_a_refused_post_does_not_fail_it(tmp_path, monkeypatch):
+    import time as _t
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"aaa")
+    monkeypatch.setattr(runner_mod, "PROGRESS_SECONDS", 0.01)
+    real = card_copy.copy_file
+
+    def slow(*a, **k):
+        _t.sleep(0.15)
+        return real(*a, **k)
+
+    monkeypatch.setattr(card_copy, "copy_file", slow)
+
+    class Refuses(IngestDash):
+        def request(self, method, url, body, headers, timeout):
+            if url.endswith("/progress"):
+                self.sorter_calls.append((method, url, body, headers))
+                return 409, {"detail": "no"}
+            return super().request(method, url, body, headers, timeout)
+
+    dash = Refuses(card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 3)]))
+    r = runner(w, dash)
+    r.note_report_reply({"commands": {"jobs": {"offered": [21]}}})
+    r.tick()
+    assert final(dash)["ok"] is True
+    posts = [c for c in dash.sorter_calls if c[1].endswith("/ingest/21/progress")]
+    assert posts and posts[0][0] == "POST" and posts[0][2]["bytesTotal"] == 3
+    assert posts[0][2]["copier"] == "python" and posts[0][3]["X-CCSync-Token"] == "tok"

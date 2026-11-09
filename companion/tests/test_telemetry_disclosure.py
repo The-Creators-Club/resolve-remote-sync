@@ -33,7 +33,8 @@ PINNED_CAPABILITIES = sorted([
     "cards_agent", "claude", "companion_version", "cpu_count", "ffmpeg", "ffprobe",
     "gpu_name", "gpu_present", "gpu_vram_gb", "idle_seconds", "job_kinds",
     "jobs_enabled", "jobs_gate", "jobs_idle_seconds", "load", "mounts", "nvenc",
-    "resolve", "sorter_cards", "volunteer_until", "whisper", "whisper_detail",
+    "resolve", "sorter_cards", "teracopy", "teracopy_verify", "volunteer_until", "whisper",
+    "whisper_detail",
 ])
 
 # Keys that carry none of the four switchable kinds of data, each with why.
@@ -52,7 +53,8 @@ NOT_PERSONAL_CAPABILITIES = {
     "cards_agent",   # "still sent": only when the editor turned the agent on
     "claude", "companion_version", "cpu_count", "ffmpeg", "ffprobe", "gpu_name",
     "gpu_present", "gpu_vram_gb", "job_kinds", "jobs_enabled", "jobs_gate",
-    "jobs_idle_seconds", "load", "mounts", "nvenc", "sorter_cards", "volunteer_until",
+    "jobs_idle_seconds", "load", "mounts", "nvenc", "sorter_cards", "teracopy",
+    "teracopy_verify", "volunteer_until",
     "whisper", "whisper_detail",
 }
 

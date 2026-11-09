@@ -381,3 +381,26 @@ def test_the_copy_list_is_refused_to_a_suspended_account_but_its_receipt_is_take
     r = client.post(f"/sorter/agent/ingest/{job_id}/receipt", headers=fleet_headers("alex"),
                     json={"copied": [], "skipped": [], "conflicts": [], "failed": []})
     assert r.status_code == 200
+
+
+def test_progress_is_the_claimants_alone_and_shows_in_the_status(mounted):
+    client, app, projects, _staged = mounted
+    login(client, "owen")
+    assert _report(client, "alex", "creator-1", [CARD]).status_code == 200
+    job_id, copies, sid, _t = _claimed_run(client, app)
+    total = sum(c["size"] for c in copies)
+    body = {"bytesDone": total // 2, "bytesTotal": total, "filesDone": 1, "filesTotal": len(copies),
+            "current": "PRIVATE/M4ROOT/CLIP/C0001.MP4", "bps": 1000, "phase": "copy", "copier": "teracopy"}
+    url = f"/sorter/agent/ingest/{job_id}/progress"
+    client.cookies.clear()
+    assert client.post(url, json=body, headers=fleet_headers("bob")).status_code == 409   # not the claimant
+    assert client.post("/sorter/agent/ingest/99999/progress", json=body, headers=fleet_headers("alex")).status_code == 404
+    r = client.post(url, json=body, headers=fleet_headers("alex"))
+    assert r.status_code == 200 and r.json()["ok"] is True, r.text
+    login(client, "owen")
+    st = client.get(f"/sorter/api/ingest/status?sessionId={sid}").json()
+    assert st["bytesDone"] == total // 2 and st["bps"] == 1000 and st["phase"] == "copy"
+    assert st["copier"] == "teracopy" and st["currentFile"] == body["current"] and st["filesTotal"] == len(copies)
+    assert st["etaSeconds"] == (total - total // 2) // 1000
+    assert st["done"] == 0 and st["state"] not in ("done", "error")                   # nothing was applied
+    assert not app.state.sorter_engine.catalog.final_paths_for("x")

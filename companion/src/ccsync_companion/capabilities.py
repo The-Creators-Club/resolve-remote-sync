@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
-from . import card_copy, ffmpeg_tools, job_paths, jobs_media, sorter_cards
+from . import card_copy, ffmpeg_tools, job_paths, jobs_media, sorter_cards, teracopy
 
 log = logging.getLogger("ccsync.capabilities")
 
@@ -70,6 +70,13 @@ KNOWN_KINDS = (("whisper",) + tuple(jobs_media.MEDIA_KINDS)
 
 _lock = threading.Lock()
 _cache: Optional[tuple[float, dict[str, Any]]] = None
+
+
+def _teracopy(cfg: dict[str, Any]) -> tuple[bool, bool]:
+    try:
+        return teracopy.status_for_capabilities(cfg)
+    except Exception:                                           # noqa: BLE001
+        return False, False
 
 
 def reset_cache() -> None:
@@ -347,6 +354,12 @@ def _build(
         # `sorter_cards_enabled` (default on). The cards themselves ride their
         # own report (sorter_cards.py), not this section.
         "sorter_cards": sorter_cards.enabled(cfg),
+        # TeraCopy is the card copier on Windows (teracopy.detect); the Python
+        # copier is the fallback. `teracopy` = installed here, `teracopy_verify`
+        # = its verify is on (Options.ini TestAlways=1), without which it is
+        # not used unless `teracopy_allow_unverified`.
+        "teracopy": _teracopy(cfg)[0],
+        "teracopy_verify": _teracopy(cfg)[1],
         "cpu_count": os.cpu_count(),
         "load": _load(),
         "companion_version": config_mod.VERSION,

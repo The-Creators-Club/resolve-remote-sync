@@ -170,6 +170,8 @@ RECEIPT_RETRY_SECONDS = 3.0
 # comp-ytdl-jobs-1). Only a 410 -- the dashboard saying the job is not ours
 # any more -- stops the work.
 HEARTBEAT_SECONDS = 30.0
+# How often a card copy posts its live progress and speed to the sorter.
+PROGRESS_SECONDS = 2.0
 # How much of the pipeline's own output rides back with the result. Enough to
 # carry its summary line and a traceback; nowhere near enough to be a log
 # shipping channel.
@@ -1279,9 +1281,23 @@ class JobRunner:
 
         job_obj = card_copy.CardJob(self.cfg, should_stop=should_stop,
                                     volumes_fn=self._volumes_fn, progress=progress)
+        poster = card_copy.ProgressPoster(progress, self._clock)
+
+        def post_progress() -> None:
+            # Best effort, always: a refused or failed post is dropped; the
+            # copy and its receipt do not depend on it.
+            while not finished.wait(PROGRESS_SECONDS):
+                try:
+                    self._post_progress(job_id, poster.body())
+                except Exception:                               # noqa: BLE001
+                    log.debug("jobs: progress post for job #%s failed", job_id, exc_info=True)
+
         beater = threading.Thread(target=beat, name="ccsync-jobs-heartbeat",
                                   daemon=True)
         beater.start()
+        if kind == card_copy.KIND_CARD_INGEST:
+            threading.Thread(target=post_progress, name="ccsync-jobs-progress",
+                             daemon=True).start()
         started = self._clock()
         try:
             result = job_obj.run(kind, inputs)
@@ -1307,13 +1323,20 @@ class JobRunner:
         small = {k: len(result[k]) for k in
                  ("copied", "skipped", "conflicts", "failed")}
         small["seconds"] = round(self._clock() - started, 1)
-        delivered = self._post_receipt(job_id, result)
+        small["copier"] = result.get("copier") or "python"
+        # A job that stopped early (halt, card pulled, lease lost, shutdown) posts
+        # what DID land with final:false, so the sorter applies it and keeps the
+        # run open; the retry fetches the list again and the landed files come
+        # back as skipped, verified only if they are re-verified. A cancel is the
+        # admin ending the run, so its receipt closes it as before.
+        partial = bool(job_obj.stopped) and not cancelled["yes"]
+        delivered = self._post_receipt(job_id, result, final=not partial)
         small["receipt"] = delivered
         if job_obj.stopped:
             log.warning("jobs: job #%s (%s) stopped: %s", job_id, kind,
                         job_obj.stopped)
             self._post_result(job_id, False, job_obj.stopped, result=small,
-                              retryable=not cancelled["yes"])
+                              retryable=job_obj.stop_retryable and not cancelled["yes"])
             return
         log.info("jobs: job #%s (%s) copied %d, skipped %d, %d conflicts, %d failed",
                  job_id, kind, small["copied"], small["skipped"],
@@ -1356,10 +1379,24 @@ class JobRunner:
                 retryable=True)
         return {**inputs, **parsed}
 
-    def _post_receipt(self, job_id: int, receipt: dict[str, Any]) -> bool:
-        """POST the full receipt, a few tries on a network error. -> delivered."""
-        body = {k: receipt.get(k, []) for k in
-                ("copied", "skipped", "conflicts", "failed")}
+    def _post_progress(self, job_id: int, body: dict[str, Any]) -> bool:
+        """POST /sorter/agent/ingest/<id>/progress once. -> accepted. Never raises."""
+        try:
+            status, _ = self._sorter_call(
+                "POST", f"/sorter/agent/ingest/{int(job_id)}/progress", body)
+        except Exception:                                       # noqa: BLE001
+            return False
+        return status == 200
+
+    def _post_receipt(self, job_id: int, receipt: dict[str, Any],
+                      final: bool = True) -> bool:
+        """POST the full receipt, a few tries on a network error. -> delivered.
+        `final: false` says the job stopped early and will be retried."""
+        body: dict[str, Any] = {k: receipt.get(k, []) for k in
+                                ("copied", "skipped", "conflicts", "failed")}
+        body["copier"] = receipt.get("copier") or "python"
+        if not final:
+            body["final"] = False
         for attempt in range(RECEIPT_TRIES):
             try:
                 status, _ = self._sorter_call(

@@ -1,30 +1,58 @@
 """The copier behind the `card-ingest` and `drive-copy` fleet jobs.
 
 Step 3 of "Card ingest through the companion: the protocol"
-(footage-sorter docs/DASHBOARD-MODULE-PLAN.md, 2026-11-09). A portable
-replacement for TeraCopy (which was Windows-only): plain Python, large
-buffers, no subprocess.
+(footage-sorter docs/DASHBOARD-MODULE-PLAN.md, 2026-11-09).
+
+TWO COPIERS (Alex, 2026-11-09). On Windows, when TeraCopy is installed with
+verify on (teracopy.detect) and the destination is a Windows path, TeraCopy
+copies: footage goes over SMB to the NAS and the plain-Python copier, which
+reads and writes strictly in turn through one buffer, is too slow for that.
+Everywhere else (a Mac, a PC with no TeraCopy, `card_copier = "python"`) the
+Python copier below runs. The receipt says which: `"copier": "teracopy"|"python"`.
+
+Each copy carries a write `mode` from the sorter's plan (a missing one is
+`copy`):
+
+  copy       write the file. An existing destination is never replaced: the
+             same size and byte-identical is `skipped`; anything else is a
+             `conflict` and is left alone.
+  resume     the destination is a partial of this very file. Python: check
+             that it is the start of the card's file, append the rest, then
+             verify the whole file. TeraCopy: `/OverwriteDiffSize` rewrites it
+             (run.js's resume), after the same start-of-file check on a sample.
+  collision  a DIFFERENT file is at the destination: write beside it under a
+             renamed name (`name (2).ext`, as TeraCopy's `/RenameCopied`),
+             never over it. The receipt's `filename` is the name written. A
+             renamed copy that an earlier, interrupted run already made is
+             found and reported `skipped`, not copied a third time.
 
 Rules, each with its reason:
 
-  * **NEVER OVERWRITE.** A destination that exists at the same size is
-    `skipped`; anything else there is a `conflict` and is left alone. Footage
-    is irreplaceable and a copier that "fixes" a mismatch by writing over it
-    has destroyed whichever side was right.
-  * **A FILE APPEARS ONLY WHEN IT IS WHOLE AND VERIFIED.** Bytes go to
-    `<dst>.partial`, are fsynced, quick-verified (size, plus the first and
-    last 1 MiB byte-identical to the source: the verification Alex chose for
-    footage), and only then renamed into place. A halt, a verify mismatch or
-    an error deletes the `.partial`; none is ever left behind. The rename
+  * **NEVER OVERWRITE.** See the modes. A same-size destination is NOT assumed
+    identical: it is read back against the card, and a mismatch is a conflict.
+    (TeraCopy's skip path verifies nothing with `TestSkippedFiles=0`, which is
+    why this compare is done here, in both copiers.)
+  * **A FILE APPEARS ONLY WHEN IT IS WHOLE AND VERIFIED** (Python copier).
+    Bytes go to `<dst>.partial`, are fsynced, read back IN FULL against a
+    hash taken while copying (not first and last MiB: the fallback is the slow
+    path anyway and correctness wins), and only then renamed into place. A
+    halt, a verify mismatch or an error deletes the `.partial`. The rename
     cannot clobber (Windows `rename` refuses an existing name; elsewhere a
-    hard link is made and the partial unlinked), so a file that arrived
-    between the check and the rename is a conflict, not a casualty.
+    hard link is made and the partial unlinked). A resume appends in place to
+    the existing partial and, on a failed verify, truncates it back.
+    TeraCopy writes IN PLACE with no `.partial`, as it did under the Node
+    original (lib/teracopy.js); a job that stops mid-file leaves a short file
+    at the final name, which the sorter's next plan sees as `partial` and
+    resumes. `verified: true` from TeraCopy means its own hash verify
+    (Target.result 3), nothing weaker.
   * **THE WRONG CARD IS REFUSED.** The job names a card by volume serial. If
     the drive now holds another card, or the card is not in a reader here,
     nothing is copied and the failure is not retryable: the job was aimed at
     this machine and another machine cannot fix it.
   * **THE VOLUME IS NOT READ BY ANYTHING ELSE WHILE IT IS COPIED**
     (`sorter_cards.ingest_busy`).
+  * **A CARD PULLED MID-COPY STOPS THE JOB** (retryable) instead of failing
+    every remaining file one by one; the caller posts what landed first.
 
 Roots in a copy's `src` / `dst`: `{"root": "pool"|"vault"|"media"|"tree", "rel"}`
 placed by job_paths; `local:<volume serial>` for a PC drive (a `drive-copy`);
@@ -34,12 +62,15 @@ and, for a card-ingest, a bare string `src` is a path on the card named by
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import job_paths, sorter_cards
+from . import teracopy as teracopy_mod
 
 log = logging.getLogger("ccsync.cardcopy")
 
@@ -48,7 +79,6 @@ KIND_DRIVE_COPY = "drive-copy"
 CARD_KINDS = (KIND_CARD_INGEST, KIND_DRIVE_COPY)
 
 BUFFER_BYTES = 8 * 1024 * 1024
-VERIFY_BYTES = 1024 * 1024
 PARTIAL_SUFFIX = ".partial"
 
 
@@ -76,6 +106,10 @@ class Progress:
         self.total_bytes = int(total_bytes)
         self.done = 0
         self.bytes = 0
+        # for the live progress the sorter shows (ProgressPoster)
+        self.current = ""            # the card-relative file in hand
+        self.phase = "copy"          # "copy" | "verify"
+        self.copier = "python"
 
     def snapshot(self) -> dict[str, int]:
         return {"done": int(self.done), "of": int(self.of), "bytes": int(self.bytes)}
@@ -90,34 +124,66 @@ class Progress:
 
 
 # -------------------------------------------------------------- primitives
-def _read_exact_at(fh: Any, offset: int, n: int) -> bytes:
-    fh.seek(offset)
-    return fh.read(n)
+MODES = ("copy", "resume", "collision")
+MAX_RENAMES = 99
+HEAD_TAIL_BYTES = 1024 * 1024           # a TeraCopy resume's start-of-file sample
 
 
-def quick_verify(src: Path, dst: Path, size: int) -> str:
-    """-> "" when `dst` matches `src` by quick verify, else the reason."""
+class _Conflict(Exception):
+    """A file there that must be left alone (a partial that is not the start of
+    the card's file, say). Reported as a `conflict`, never a failure."""
+
+
+def _new_hash() -> Any:
+    return hashlib.blake2b(digest_size=32)
+
+
+def verify_whole(path: Path, size: int, digest: bytes, should_stop: Callable[[], str]) -> str:
+    """Read `path` back IN FULL and compare with `digest`, the hash taken of the
+    source while it was copied. -> "" when it matches, else the reason."""
     try:
-        dst_size = dst.stat().st_size
+        got = path.stat().st_size
     except OSError as exc:
         return f"the copy cannot be read back ({exc})"
-    if dst_size != size:
-        return f"the copy is {dst_size} bytes and the source {size}"
-    if size == 0:
-        return ""
-    n = min(VERIFY_BYTES, size)
+    if got != size:
+        return f"the copy is {got} bytes and the source {size}"
+    h = _new_hash()
     try:
-        with open(src, "rb") as a, open(dst, "rb") as b:
-            if _read_exact_at(a, 0, n) != _read_exact_at(b, 0, n):
-                return "the first megabyte differs from the source"
-            if size > n:
-                tail = min(VERIFY_BYTES, size)
-                if (_read_exact_at(a, size - tail, tail)
-                        != _read_exact_at(b, size - tail, tail)):
-                    return "the last megabyte differs from the source"
+        with open(path, "rb") as fh:
+            while True:
+                reason = should_stop()
+                if reason:
+                    raise _Stopped(reason)
+                chunk = fh.read(BUFFER_BYTES)
+                if not chunk:
+                    break
+                h.update(chunk)
     except OSError as exc:
         return f"the copy could not be verified ({exc})"
+    if h.digest() != digest:
+        return "the copy read back differs from the source"
     return ""
+
+
+def files_identical(a: Path, b: Path, size: int, should_stop: Callable[[], str]) -> str:
+    """Compare two files byte for byte, stopping at the first difference.
+    -> "" when identical, else why not. Reads both sides in full otherwise."""
+    try:
+        if a.stat().st_size != size or b.stat().st_size != size:
+            return "the sizes differ"
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                reason = should_stop()
+                if reason:
+                    raise _Stopped(reason)
+                ca = fa.read(BUFFER_BYTES)
+                cb = fb.read(BUFFER_BYTES)
+                if ca != cb:
+                    return "the bytes differ"
+                if not ca:
+                    return ""
+    except OSError as exc:
+        return f"it could not be read ({exc})"
 
 
 def _publish(partial: Path, dst: Path) -> None:
@@ -149,15 +215,25 @@ def _discard(path: Path) -> None:
         log.warning("card copy: could not remove %s", path)
 
 
+def _stamp(src: Path, dst: Path) -> None:
+    try:
+        st = os.stat(src)
+        os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
+    except OSError:
+        pass
+
+
 def copy_file(src: Path, dst: Path, size: int, should_stop: Callable[[], str],
               on_bytes: Callable[[int], None]) -> str:
-    """Copy `src` to `<dst>.partial`, fsync, verify, publish. -> "" on success,
-    else the reason it failed (the `.partial` is gone either way). Raises
-    _Stopped when `should_stop` says so, after discarding the partial, and
-    FileExistsError when `dst` appeared mid-copy."""
+    """Copy `src` to `<dst>.partial`, fsync, read it all back against the hash
+    taken while copying, publish. -> "" on success, else the reason it failed
+    (the `.partial` is gone either way). Raises _Stopped when `should_stop`
+    says so, after discarding the partial, and FileExistsError when `dst`
+    appeared mid-copy."""
     partial = dst.with_name(dst.name + PARTIAL_SUFFIX)
     _discard(partial)                    # a corpse from a crashed run is ours
     written = 0
+    h = _new_hash()
     try:
         buf = bytearray(BUFFER_BYTES)
         view = memoryview(buf)
@@ -169,6 +245,7 @@ def copy_file(src: Path, dst: Path, size: int, should_stop: Callable[[], str],
                 n = a.readinto(buf)
                 if not n:
                     break
+                h.update(view[:n])
                 b.write(view[:n])
                 written += n
                 on_bytes(n)
@@ -176,12 +253,8 @@ def copy_file(src: Path, dst: Path, size: int, should_stop: Callable[[], str],
             os.fsync(b.fileno())
         if written != size:
             raise OSError(f"read {written} bytes but the source is {size}")
-        try:
-            st = os.stat(src)
-            os.utime(partial, ns=(st.st_atime_ns, st.st_mtime_ns))
-        except OSError:
-            pass
-        why = quick_verify(src, partial, size)
+        _stamp(src, partial)
+        why = verify_whole(partial, size, h.digest(), should_stop)
         if why:
             _discard(partial)
             return f"verify failed: {why}"
@@ -190,6 +263,97 @@ def copy_file(src: Path, dst: Path, size: int, should_stop: Callable[[], str],
     except BaseException:
         _discard(partial)
         raise
+
+
+def resume_file(src: Path, dst: Path, size: int, have: int, should_stop: Callable[[], str],
+                on_bytes: Callable[[int], None]) -> str:
+    """Finish a partial `dst` of `have` bytes: prove it is the start of `src`,
+    append the rest, read the WHOLE file back against the source's hash.
+    -> "" on success, else why not (the partial is truncated back to `have`
+    when the bytes appended did not verify). Raises _Conflict when the partial
+    is not the start of `src` (nothing is changed), _Stopped on a halt (what
+    was appended stays: it is still a true prefix and the next resume starts
+    from it)."""
+    h = _new_hash()
+    appended = False
+    try:
+        with open(src, "rb") as a, open(dst, "r+b") as b:
+            if os.fstat(b.fileno()).st_size != have:
+                raise _Conflict("the partial changed size while it was being checked")
+            pos = 0
+            while pos < have:
+                reason = should_stop()
+                if reason:
+                    raise _Stopped(reason)
+                n = min(BUFFER_BYTES, have - pos)
+                ca, cb = a.read(n), b.read(n)
+                if ca != cb or len(ca) != n:
+                    raise _Conflict("the file already there is not the start of the card's file")
+                h.update(ca)
+                pos += n
+                on_bytes(n)
+            buf = bytearray(BUFFER_BYTES)
+            view = memoryview(buf)
+            b.seek(have)
+            written = have
+            try:
+                while True:
+                    reason = should_stop()
+                    if reason:
+                        raise _Stopped(reason)
+                    n = a.readinto(buf)
+                    if not n:
+                        break
+                    h.update(view[:n])
+                    b.write(view[:n])
+                    appended = True
+                    written += n
+                    on_bytes(n)
+            finally:
+                b.flush()
+                os.fsync(b.fileno())
+            if written != size:
+                raise OSError(f"read {written} bytes but the source is {size}")
+        _stamp(src, dst)
+        why = verify_whole(dst, size, h.digest(), should_stop)
+        if why:
+            _truncate(dst, have)
+            return f"verify failed: {why}"
+        return ""
+    except OSError:
+        if appended:
+            _truncate(dst, have)
+        raise
+
+
+def _truncate(path: Path, size: int) -> None:
+    try:
+        with open(path, "r+b") as fh:
+            fh.truncate(size)
+    except OSError:
+        log.warning("card copy: could not truncate %s back to %d bytes", path, size)
+
+
+def renamed(dst: Path, n: int) -> Path:
+    """`clip.MP4` -> `clip (2).MP4`: the names TeraCopy's /RenameCopied makes."""
+    return dst.with_name(f"{dst.stem} ({n}){dst.suffix}")
+
+
+def _sample_matches(src: Path, dst: Path, have: int) -> bool:
+    """Is `dst` (a partial of `have` bytes) the start of `src`? Compared at its
+    first and last MiB: TeraCopy rewrites a resumed file whole, so this only has
+    to catch a file that is plainly some other file."""
+    n = min(HEAD_TAIL_BYTES, have)
+    try:
+        with open(src, "rb") as a, open(dst, "rb") as b:
+            for off in {0, max(0, have - n)}:
+                a.seek(off)
+                b.seek(off)
+                if a.read(n) != b.read(n):
+                    return False
+    except OSError:
+        return False
+    return True
 
 
 # ------------------------------------------------------------------- paths
@@ -231,12 +395,19 @@ class CardJob:
         should_stop: Callable[[], str] = lambda: "",
         volumes_fn: Optional[Callable[..., list[dict[str, Any]]]] = None,
         progress: Optional[Progress] = None,
+        teracopy_fn: Optional[Callable[[], tuple[Optional[teracopy_mod.TeraCopy], str]]] = None,
     ) -> None:
         self.cfg = cfg or {}
         self._should_stop = should_stop
         self._volumes = volumes_fn or sorter_cards.list_volumes
         self.progress = progress or Progress()
         self.stopped = ""
+        # whether a stop is worth retrying (a cancel is decided by the caller)
+        self.stop_retryable = True
+        # which copier ran, for the receipt; `teracopy_fn` -> (TeraCopy | None, why not)
+        self.teracopy_used = False
+        self._teracopy_fn = teracopy_fn or (lambda: teracopy_mod.detect(self.cfg))
+        self._ingest_serial = ""
         self._vol_cache: dict[tuple[str, str], Path] = {}
 
     # -- placing ---------------------------------------------------------
@@ -299,9 +470,9 @@ class CardJob:
 
     # -- the run ---------------------------------------------------------
     def run(self, kind: str, inputs: dict[str, Any]) -> dict[str, Any]:
-        """-> the protocol's result {copied, skipped, conflicts, failed}.
-        `self.stopped` holds the reason when a halt/cancel ended it early
-        (the lists then hold what was done before it)."""
+        """-> the protocol's result {copied, skipped, conflicts, failed, copier}.
+        `self.stopped` holds the reason when a halt/cancel/lost card ended it
+        early (the lists then hold what was done before it)."""
         if kind not in CARD_KINDS:
             raise CardJobError(f"{kind!r} is not a card copy kind")
         copies = inputs.get("copies")
@@ -312,7 +483,7 @@ class CardJob:
             # Find the card FIRST and fail before a folder is made if it is
             # the wrong one.
             self._volume("card", str(inputs.get("serial") or ""))
-        result: dict[str, list] = {"copied": [], "skipped": [], "conflicts": [], "failed": []}
+        result: dict[str, Any] = {"copied": [], "skipped": [], "conflicts": [], "failed": []}
         total = sum(int(c.get("size") or 0) for c in copies if isinstance(c, dict))
         self.progress.of, self.progress.total_bytes = len(copies), total
 
@@ -320,6 +491,7 @@ class CardJob:
         if kind == KIND_CARD_INGEST:
             busy_serial = str(inputs.get("serial") or "")
             busy_root = str(self._volume("card", busy_serial))
+            self._ingest_serial = busy_serial
         # Every destination root must be placeable HERE before a byte moves: a
         # pool that is not mounted is "not this machine" (retryable), not a
         # job whose every file fails one by one.
@@ -335,10 +507,37 @@ class CardJob:
                 self._do(kind, inputs, folders, copies, result)
         except _Stopped as stop:
             self.stopped = stop.reason
+        except CardJobError as exc:
+            # Mid-run (a folder that cannot be made): what landed before it
+            # still has to be reported, so it is a stop and not a raise.
+            self.stopped, self.stop_retryable = str(exc), exc.retryable
+        result["copier"] = "teracopy" if self.teracopy_used else "python"
         return result
 
+    def _pick_teracopy(self) -> Optional[teracopy_mod.TeraCopy]:
+        tc, why = self._teracopy_fn()
+        if tc is None:
+            log.info("card copy: using the Python copier (%s)", why)
+        return tc
+
+    def _card_gone(self) -> bool:
+        """Is the card this job reads no longer in a reader here? Asked only
+        after an I/O error, so a pulled card stops the job instead of failing
+        every remaining file."""
+        if not self._ingest_serial:
+            return False
+        try:
+            vols = self._volumes("removable", set())
+        except Exception:                                       # noqa: BLE001
+            return False
+        return not any(str(v["serial"]).upper() == self._ingest_serial.upper() for v in vols)
+
+    def _stop_if_card_gone(self) -> None:
+        if self._card_gone():
+            raise _Stopped("the card was taken out of its reader")
+
     def _do(self, kind: str, inputs: dict[str, Any], folders: list,
-            copies: list, result: dict[str, list]) -> None:
+            copies: list, result: dict[str, Any]) -> None:
         for folder in folders:
             if not isinstance(folder, dict):
                 continue
@@ -348,28 +547,44 @@ class CardJob:
             except OSError as exc:
                 raise CardJobError(f"could not make the folder {target}: {exc}",
                                    retryable=True) from exc
+        tc = self._pick_teracopy()
+        pending: list[_Work] = []
         for item in copies:
             reason = self._should_stop()
             if reason:
                 raise _Stopped(reason)
             if not isinstance(item, dict):
                 continue
-            self._one(kind, inputs, item, result)
-            self.progress.done += 1
+            work = self._prepare(kind, inputs, item, result)
+            if work is None:
+                self.progress.done += 1
+            elif tc is None or not self._teracopy_can(work):
+                self._python_one(work, result)
+                self.progress.done += 1
+            else:
+                pending.append(work)
+        if pending and tc is not None:
+            self._run_teracopy(tc, pending, result)
 
-    def _one(self, kind: str, inputs: dict[str, Any], item: dict[str, Any],
-             result: dict[str, list]) -> None:
+    # -- one file: the part both copiers share -----------------------------
+    def _note(self, result: dict[str, Any], bucket: str, w: "_Work", **extra: Any) -> None:
+        result[bucket].append({"src": w.src_wire, "dst": w.dst_wire, **extra})
+
+    def _fail(self, result: dict[str, Any], w: "_Work", why: str) -> None:
+        self._note(result, "failed", w, why=why)
+        self.progress.bytes += w.want
+
+    def _prepare(self, kind: str, inputs: dict[str, Any], item: dict[str, Any],
+                 result: dict[str, Any]) -> Optional["_Work"]:
+        """Place and stat one copy. -> the work, or None after recording why not."""
         src_wire = item.get("src")
         dst_wire = item.get("dst") if isinstance(item.get("dst"), dict) else {}
         want = int(item.get("size") or 0)
-
-        def record(bucket: str, **extra: Any) -> None:
-            result[bucket].append({"src": src_wire, "dst": dst_wire, **extra})
-
-        def fail(why: str) -> None:
-            result["failed"].append({"src": src_wire, "dst": dst_wire, "why": why})
-            self.progress.bytes += want
-
+        mode = str(item.get("mode") or "copy").strip().lower()
+        stub = _Work(src_wire, dst_wire, Path("."), Path("."), want, 0, mode)
+        if mode not in MODES:
+            self._fail(result, stub, f"{mode!r} is not a write mode this companion knows")
+            return None
         try:
             src_root, src_rel = self._src_ref(kind, inputs, item)
             src = self._place(src_root, src_rel)
@@ -377,59 +592,319 @@ class CardJob:
         except CardJobError:
             raise
         except (job_paths.JobPathError, ValueError, OSError) as exc:
-            fail(str(exc))
-            return
+            self._fail(result, stub, str(exc))
+            return None
         try:
             st = src.stat()
             if not src.is_file():
-                fail("the source is not a file")
-                return
+                self._fail(result, stub, "the source is not a file")
+                return None
         except OSError as exc:
-            fail(f"the source cannot be read ({exc})")
-            return
+            self._stop_if_card_gone()
+            self._fail(result, stub, f"the source cannot be read ({exc})")
+            return None
         size = int(st.st_size)
         if want and want != size:
-            fail(f"the source is {size} bytes now and the job listed {want}: "
-                 f"it changed since it was scanned")
+            self._fail(result, stub, f"the source is {size} bytes now and the job listed {want}: "
+                       f"it changed since it was scanned")
+            return None
+        return _Work(src_wire, dst_wire, src, dst, want, size, mode)
+
+    def _decide(self, w: "_Work", tc_names: bool = False) -> "_Decision":
+        """What to do about what is (or is not) at the destination. Never
+        replaces anything. `tc_names`: TeraCopy will pick a collision's new
+        name itself, so a free one is not chosen here."""
+        dst = w.dst
+        try:
+            exists = os.path.lexists(dst)
+            if not exists:
+                return _Decision("write", dst)
+            is_file = dst.is_file() and not dst.is_symlink()
+            have = dst.stat().st_size if is_file else -1
+            if w.mode == "collision":
+                # An earlier, interrupted run may already have made the copy:
+                # the plain name, then `name (2)` ... that is byte-identical.
+                if is_file and have == w.size and not files_identical(
+                        w.src, dst, w.size, self._should_stop):
+                    return _Decision("skipped", dst)
+                for n in range(2, MAX_RENAMES + 1):
+                    cand = renamed(dst, n)
+                    if not os.path.lexists(cand):
+                        return _Decision("write", dst if tc_names else cand, renamed=True)
+                    if cand.is_file() and cand.stat().st_size == w.size and not files_identical(
+                            w.src, cand, w.size, self._should_stop):
+                        return _Decision("skipped", cand)
+                return _Decision("conflict", why=f"{MAX_RENAMES} renamed copies of it are already there")
+            if not is_file:
+                return _Decision("conflict", why="a folder or link is already there; it was left alone")
+            if have == w.size:
+                # NOT assumed identical: read it back against the card.
+                why = files_identical(w.src, dst, w.size, self._should_stop)
+                if not why:
+                    return _Decision("skipped", dst)
+                return _Decision("conflict", why=f"a different file of the same size is already "
+                                 f"there ({why}); it was left alone")
+            if w.mode == "resume" and have < w.size:
+                return _Decision("write", dst, resume_from=have)
+            return _Decision("conflict", why="a different file is already there; it was left alone")
+        except OSError as exc:
+            return _Decision("failed", why=f"the destination cannot be read ({exc})")
+
+    def _settle(self, result: dict[str, Any], w: "_Work", d: "_Decision") -> bool:
+        """Record a decision that needs no copy. -> True when it did not."""
+        if d.kind == "skipped":
+            self._note(result, "skipped", w, size=w.size, verified=True, filename=d.dst.name)
+        elif d.kind == "conflict":
+            self._note(result, "conflicts", w, size=w.size, verified=False, why=d.why)
+        elif d.kind == "failed":
+            self._note(result, "failed", w, why=d.why)
+        else:
+            return False
+        self.progress.bytes += w.size
+        return True
+
+    # -- the Python copier -------------------------------------------------
+    def _python_one(self, w: "_Work", result: dict[str, Any]) -> None:
+        d = self._decide(w)
+        if self._settle(result, w, d):
             return
-        if os.path.lexists(dst):
-            try:
-                same = dst.is_file() and dst.stat().st_size == size
-            except OSError:
-                same = False
-            if same:
-                record("skipped", size=size, verified=False)
-            else:
-                record("conflicts", size=size, verified=False,
-                       why="a different file is already there; it was left alone")
-            self.progress.bytes += size
-            return
+        self._python_write(w, d, result)
+
+    def _python_write(self, w: "_Work", d: "_Decision", result: dict[str, Any]) -> None:
+        dst = d.dst
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            fail(f"could not make the destination folder ({exc})")
+            self._fail(result, w, f"could not make the destination folder ({exc})")
             return
         before = self.progress.bytes
+        self.progress.current = str(w.src_wire or "")
+        self.progress.phase = "copy"
+        seen = {"n": 0}
 
         def on_bytes(n: int) -> None:
             self.progress.bytes += n
+            seen["n"] += n
+            if seen["n"] >= w.size:        # everything is written: the read-back is next
+                self.progress.phase = "verify"
 
         try:
-            why = copy_file(src, dst, size, self._should_stop, on_bytes)
+            if d.resume_from:
+                why = resume_file(w.src, dst, w.size, d.resume_from, self._should_stop, on_bytes)
+            else:
+                why = copy_file(w.src, dst, w.size, self._should_stop, on_bytes)
         except _Stopped:
             self.progress.bytes = before
             raise
+        except _Conflict as exc:
+            self.progress.bytes = before + w.size
+            self._note(result, "conflicts", w, size=w.size, verified=False,
+                       why=f"{exc}; it was left alone")
+            return
         except FileExistsError:
-            self.progress.bytes = before + size
-            record("conflicts", size=size, verified=False,
-                   why="a file appeared at the destination during the copy; it was left alone")
+            self.progress.bytes = before + w.size
+            self._note(result, "conflicts", w, size=w.size, verified=False,
+                       why="a file appeared at the destination during the copy; it was left alone")
             return
         except OSError as exc:
-            self.progress.bytes = before + size
-            fail(f"the copy failed ({exc})")
+            self.progress.bytes = before
+            self._stop_if_card_gone()
+            self.progress.bytes = before + w.size
+            self._note(result, "failed", w, why=f"the copy failed ({exc})")
             return
-        self.progress.bytes = before + size
+        self.progress.bytes = before + w.size
+        self.progress.phase = "copy"
         if why:
-            result["failed"].append({"src": src_wire, "dst": dst_wire, "why": why})
+            self._note(result, "failed", w, why=why)
             return
-        record("copied", size=size, verified=True)
+        self._note(result, "copied", w, size=w.size, verified=True, filename=dst.name)
+
+    # -- the TeraCopy copier -----------------------------------------------
+    @staticmethod
+    def _teracopy_can(w: "_Work") -> bool:
+        """TeraCopy keeps the source name and copies flat into one folder, and
+        needs a Windows path; anything else goes to the Python copier."""
+        if os.name != "nt" or not os.path.splitdrive(str(w.dst))[0]:
+            return False
+        return w.dst.name.lower() == w.src.name.lower()
+
+    def _run_teracopy(self, tc: teracopy_mod.TeraCopy, works: list["_Work"],
+                      result: dict[str, Any]) -> None:
+        """One TeraCopy job per (destination folder, switch), one at a time,
+        masters before proxies as run.js ordered them."""
+        groups: dict[tuple[str, str], list[tuple[_Work, _Decision]]] = {}
+        for w in works:
+            reason = self._should_stop()
+            if reason:
+                raise _Stopped(reason)
+            d = self._decide(w, tc_names=True)
+            if self._settle(result, w, d):
+                self.progress.done += 1
+                continue
+            if d.resume_from and not _sample_matches(w.src, d.dst, d.resume_from):
+                self._note(result, "conflicts", w, size=w.size, verified=False,
+                           why="the file already there is not the start of the card's file; "
+                               "it was left alone")
+                self.progress.bytes += w.size
+                self.progress.done += 1
+                continue
+            switch = (teracopy_mod.SWITCH_RENAME if w.mode == "collision"
+                      else teracopy_mod.SWITCH_OVERWRITE_DIFF)
+            groups.setdefault((str(w.dst.parent), switch), []).append((w, d))
+        for (folder, switch), members in sorted(
+                groups.items(), key=lambda kv: (len(kv[0][0]), kv[0][0], kv[0][1])):
+            reason = self._should_stop()
+            if reason:
+                raise _Stopped(reason)
+            self._teracopy_group(tc, folder, switch, members, result)
+
+    def _teracopy_group(self, tc: teracopy_mod.TeraCopy, folder: str, switch: str,
+                        members: list[tuple["_Work", "_Decision"]],
+                        result: dict[str, Any]) -> None:
+        self.teracopy_used = True
+        self.progress.copier = "teracopy"
+        base = self.progress.bytes
+        files_base = self.progress.done
+        total = sum(w.size for w, _ in members)
+        try:
+            known = set(os.listdir(folder))
+        except OSError:
+            known = set()
+
+        def tick(status: dict[str, Any], _elapsed: int) -> None:
+            # TeraCopy writes in place, so the bytes on disk are the progress.
+            # The history DB says which phase it is in (Run rows: copy done,
+            # verify seen) and how many files have verified (Target rows).
+            got = 0
+            current = ""
+            for w, d in members[:64]:
+                try:
+                    n = min(w.size, os.stat(d.dst).st_size)
+                except OSError:
+                    n = 0
+                got += n
+                if not current and n < w.size:
+                    current = str(w.src_wire or "")
+            verifying = bool(status) and (status.get("copy_done") or status.get("verify_seen"))
+            self.progress.phase = "verify" if verifying else "copy"
+            self.progress.current = current or str(members[-1][0].src_wire or "")
+            self.progress.bytes = base + min(total, got)
+            if verifying:
+                self.progress.done = files_base + min(len(members), int(status.get("ok") or 0))
+
+        tag = os.path.basename(folder.rstrip("\\/")) or "job"
+        try:
+            out = tc.copy_group([str(w.src) for w, _ in members], folder, switch, tag,
+                                on_tick=tick, expect_verify=not self._unverified_ok())
+        except (OSError, ValueError) as exc:
+            self._stop_if_card_gone()
+            self.progress.bytes = base + total
+            for w, _ in members:
+                self._note(result, "failed", w, why=f"TeraCopy could not be run ({exc})")
+                self.progress.done += 1
+            return
+        by_src = {_key(r["source"]): r for r in out["receipts"]}
+        lost = 0
+        for w, d in members:
+            r = by_src.get(_key(w.src))
+            landed = self._landed_name(w, r, switch, known)
+            path = w.dst.with_name(landed) if landed else w.dst
+            try:
+                have: Optional[int] = path.stat().st_size
+            except OSError:
+                have = None
+            if r is not None and r.get("verified") and have == w.size:
+                self._note(result, "copied", w, size=w.size, verified=True, filename=path.name)
+            elif r is not None and r.get("verified"):
+                self._note(result, "failed", w,
+                           why=f"TeraCopy reported it verified but {path.name} is "
+                               f"{'missing' if have is None else str(have) + ' bytes'} at the destination")
+            elif r is not None and r.get("result") not in (None, teracopy_mod.RESULT_COPIED):
+                self._note(result, "failed", w,
+                           why=r.get("message") or f"TeraCopy gave result {r.get('result')} for it")
+            elif have == w.size:
+                # on disk at the right size, not hash-verified by TeraCopy
+                self._note(result, "copied", w, size=w.size, verified=False, filename=path.name)
+            else:
+                lost += 1
+                self._note(result, "failed", w,
+                           why="it did not reach the destination whole"
+                               + ("" if have is None else f" ({have} of {w.size} bytes)"))
+            self.progress.done += 1
+        self.progress.bytes = base + total
+        if lost:
+            self._stop_if_card_gone()
+
+    def _unverified_ok(self) -> bool:
+        return teracopy_mod._truthy(self.cfg.get("teracopy_allow_unverified"))
+
+    @staticmethod
+    def _landed_name(w: "_Work", r: Optional[dict[str, Any]], switch: str,
+                     known: set[str]) -> str:
+        """The name a TeraCopy-written file has: its record's `filename` when it
+        renamed one, else the planned name. With no record for a collision job
+        (the history was unreadable), the new file beside it of the right size."""
+        if r is not None and r.get("filename"):
+            return str(r["filename"])
+        if switch == teracopy_mod.SWITCH_RENAME and (r is None or r.get("result") is None):
+            for n in range(2, MAX_RENAMES + 1):
+                cand = renamed(w.dst, n)
+                if cand.name not in known and cand.is_file():
+                    try:
+                        if cand.stat().st_size == w.size:
+                            return cand.name
+                    except OSError:
+                        pass
+        return ""
+
+
+class ProgressPoster:
+    """Builds the body of POST /sorter/agent/ingest/<job>/progress from a
+    Progress: bytes and files, the file in hand, copy or verify, and the speed
+    over the last ~5 s. The clock is a parameter; the poster itself is
+    jobs_runner's (best effort: a failed post never touches the copy)."""
+
+    WINDOW_SECONDS = 5.0
+
+    def __init__(self, progress: Progress, clock: Callable[[], float]):
+        self.progress = progress
+        self._clock = clock
+        self._samples: list[tuple[float, int]] = []
+
+    def body(self) -> dict[str, Any]:
+        p = self.progress
+        now, done = self._clock(), int(p.bytes)
+        self._samples.append((now, done))
+        while len(self._samples) > 2 and now - self._samples[1][0] >= self.WINDOW_SECONDS:
+            self._samples.pop(0)
+        t0, b0 = self._samples[0]
+        bps = int((done - b0) / (now - t0)) if now - t0 > 0 and done >= b0 else 0
+        return {"bytesDone": done, "bytesTotal": int(p.total_bytes), "filesDone": int(p.done),
+                "filesTotal": int(p.of), "current": p.current or "",
+                "bps": max(0, bps) if p.phase == "copy" else 0, "phase": p.phase, "copier": p.copier}
+
+
+def _key(path: Any) -> str:
+    return str(path).replace("/", "\\").rstrip("\\").lower()
+
+
+@dataclass
+class _Work:
+    """One copy, placed and stat'ed."""
+    src_wire: Any
+    dst_wire: dict
+    src: Path
+    dst: Path
+    want: int
+    size: int
+    mode: str = "copy"
+
+
+@dataclass
+class _Decision:
+    """What to do about a copy's destination."""
+    kind: str                       # write | skipped | conflict | failed
+    dst: Path = Path(".")
+    resume_from: int = 0
+    why: str = ""
+    renamed: bool = False

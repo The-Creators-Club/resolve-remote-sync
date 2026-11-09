@@ -276,7 +276,7 @@ def sorter_agent_cards(payload: dict[str, Any], request: Request) -> dict:
 # JSON at 16 KB and replaces anything bigger with {}, and one card's list is
 # hundreds of files. Only the editor whose machine CLAIMED the job may read the
 # list or file the receipt (the verified identity, never the body's).
-AGENT_PATH_RE = r"^/sorter/agent/(cards|ingest/\d+(/receipt)?)$"
+AGENT_PATH_RE = r"^/sorter/agent/(cards|ingest/\d+(/(receipt|progress))?)$"
 
 
 def _claimed_job(request: Request, job_id: int, barred: str = "allow") -> tuple[Any, str]:
@@ -321,6 +321,19 @@ def sorter_agent_ingest_receipt(job_id: int, payload: dict[str, Any], request: R
         raise HTTPException(422, str(e)) from None
     log.info("sorter: job #%s receipt from %s: %s", job_id, editor, out)
     return out
+
+
+@agent_router.post("/ingest/{job_id}/progress")
+def sorter_agent_ingest_progress(job_id: int, payload: dict[str, Any], request: Request) -> dict:
+    """Live progress while the companion copies (about every 2 s). Same door as the receipt: only the editor
+    whose machine claimed the job. It is stored for the browser and touches nothing else."""
+    engine, _editor = _claimed_job(request, job_id)
+    try:
+        return engine.ingest.progress(job_id, payload)
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from None
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
 
 
 def _job_hooks(settings: Settings, engine: Any) -> None:

@@ -876,6 +876,14 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # and take its card-ingest / drive-copy jobs. On by default; a dashboard with
 # no sorter makes this back off quietly.
 # sorter_cards_enabled = true
+# Which copier writes card footage to the NAS: "auto" (TeraCopy on Windows when
+# installed with verify on, Options.ini [Transfer] TestAlways=1; else the built-in
+# Python copier) or "python" (never TeraCopy).
+# card_copier = "auto"
+# TeraCopy.exe, when it is not in Program Files.
+# teracopy_path = "C:\\Tools\\TeraCopy\\TeraCopy.exe"
+# Let TeraCopy copy with verify off; the copies are then reported unverified.
+# teracopy_allow_unverified = false
 
 # jobs_idle_seconds = 300
 # jobs_skip_while_resolve_running = true

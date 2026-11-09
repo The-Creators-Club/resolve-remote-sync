@@ -16,6 +16,17 @@ REAL_CCSYNC_HOME = Path.home() / ".ccsync"
 
 
 @pytest.fixture(autouse=True)
+def _never_launch_real_teracopy(monkeypatch):
+    """A card copy on this machine would otherwise pick the REAL TeraCopy (it
+    is installed here, with verify on) and run it at the test's temp dirs.
+    Tests that want TeraCopy pass `teracopy_fn=` to CardJob with a fake."""
+    from ccsync_companion import teracopy as teracopy_mod
+
+    monkeypatch.setattr(teracopy_mod, "detect",
+                        lambda cfg=None: (None, "tests never launch TeraCopy"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_ccsync_home(tmp_path, monkeypatch):
     """Point EVERYTHING that resolves under ~/.ccsync at a per-test temp dir.
 

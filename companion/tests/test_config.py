@@ -239,7 +239,8 @@ def test_default_toml_text_documents_every_default_key():
         # defaults a later re-tune has to be able to reach.
         "jobs_enabled", "jobs_whisper_python", "jobs_mulcam_pipeline",
         "jobs_vault_root", "jobs_media_root", "jobs_pool_root",
-        "sorter_cards_enabled", "jobs_idle_seconds",
+        "sorter_cards_enabled", "card_copier", "teracopy_path",
+        "teracopy_allow_unverified", "jobs_idle_seconds",
         "jobs_skip_while_resolve_running", "jobs_poll_seconds",
         # The volunteer window (section 10, 2026-08-30) is the tray
         # item's length, not a gate: it belongs beside the other jobs_*
@@ -346,7 +347,8 @@ EXAMPLE_COMMENTED_OUT = {
     # has to be able to reach.
     "jobs_enabled", "jobs_whisper_python", "jobs_mulcam_pipeline",
     "jobs_vault_root", "jobs_media_root", "jobs_pool_root",
-    "sorter_cards_enabled", "jobs_idle_seconds",
+    "sorter_cards_enabled", "card_copier", "teracopy_path",
+    "teracopy_allow_unverified", "jobs_idle_seconds",
     "jobs_skip_while_resolve_running", "jobs_poll_seconds",
     "jobs_volunteer_minutes",
     # The Timeline Cards role (phase 2, 2026-08-30): commented out because it

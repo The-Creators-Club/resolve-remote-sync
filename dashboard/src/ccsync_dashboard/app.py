@@ -249,7 +249,7 @@ _CSRF_EXEMPT_RE = re.compile(
     r"^(/api/v1/jobs/(claim|\d+/(heartbeat|result))"
     r"|/cards/agent/(state|result)"
     # the companion's card reports and card-copy receipts (sorter.py)
-    r"|/sorter/agent/cards|/sorter/agent/ingest/\d+/receipt)$")
+    r"|/sorter/agent/cards|/sorter/agent/ingest/\d+/(receipt|progress))$")
 # The mounted Timeline Cards PAGE (phase 3). Its forty-odd POST routes are
 # the sub-app's own fetches and carry no CSRF token, exactly like the three
 # mounts in _CSRF_EXEMPT_PREFIXES above -- but this one drives a Resolve

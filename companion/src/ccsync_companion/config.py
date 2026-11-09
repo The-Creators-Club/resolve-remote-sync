@@ -881,6 +881,15 @@ DEFAULTS: dict[str, Any] = {
     # `drive-copy` jobs. A dashboard with no sorter answers 404/503 and this
     # backs off quietly. Set false to opt the machine out of both.
     "sorter_cards_enabled": True,
+    # Which copier writes card footage to the NAS. "auto" = TeraCopy on a
+    # Windows PC that has it with verify on (Options.ini [Transfer]
+    # TestAlways=1), the built-in Python copier otherwise; "python" = never
+    # TeraCopy. `teracopy_path` overrides the Program Files search;
+    # `teracopy_allow_unverified` lets TeraCopy copy with verify off (the
+    # copies are then reported unverified).
+    "card_copier": "auto",
+    "teracopy_path": "",
+    "teracopy_allow_unverified": False,
     # Seconds of no keyboard or mouse before this machine will CLAIM a job.
     # proxy_gen's own default, deliberately: an editor should not have to
     # learn two meanings of "away".
@@ -1610,6 +1619,11 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # Report camera cards in this computer's readers to the Footage Sorter, and
 # take its card-ingest / drive-copy jobs. On by default.
 # sorter_cards_enabled = true
+# Card copier: "auto" (TeraCopy on Windows when installed with verify on,
+# else the built-in Python copier) or "python".
+# card_copier = "auto"
+# teracopy_path = "C:\\\\Program Files\\\\TeraCopy\\\\TeraCopy.exe"
+# teracopy_allow_unverified = false
 # jobs_idle_seconds = 300
 # jobs_skip_while_resolve_running = true
 # jobs_poll_seconds = 20

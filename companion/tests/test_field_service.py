@@ -89,7 +89,8 @@ class World:
                   store=field_mode.FieldStore(self.tmp / "state.json"),
                   local=field_mode.LocalCopies(self.tmp / "local.jsonl"),
                   request_fn=self.net.request, outbox_path=self.tmp / "outbox.jsonl",
-                  physical_fn=lambda root: "", machine_name="razer", auto_sync=False)
+                  physical_fn=lambda root: "", machine_name="razer", auto_sync=False,
+                  pool_check_fn=lambda root: (True, ""))
         kw.update(over)
         return FieldService(**kw)
 
@@ -302,8 +303,9 @@ def test_what_the_ledger_already_knows_counts_with_no_network(tmp_path):
     w.net.up = False
     mirror = w.svc.mirror
     t = int(T0 * 1000)
-    mirror.apply([{"id": 1, "volume_id": NAS, "path": "Trip/C0001.MP4", "name": "C0001.MP4", "size": 300_000, "mtime": t},
-                  {"id": 2, "volume_id": NAS, "path": "Trip/C0002.MP4", "name": "C0002.MP4", "size": 250_000, "mtime": t + 1000}])
+    mirror.apply([{"id": 1, "volume_id": NAS, "path": "Trip/PRIVATE/M4ROOT/CLIP/C0001.MP4", "name": "C0001.MP4", "size": 300_000, "mtime": t},
+                  {"id": 2, "volume_id": NAS, "path": "Trip/PRIVATE/M4ROOT/CLIP/C0002.MP4", "name": "C0002.MP4", "size": 250_000, "mtime": t + 1000}])
+    mirror.apply([{"id": 3, "volume_id": NAS, "path": "Trip/PRIVATE/M4ROOT/CLIP/C0001M01.XML", "name": "C0001M01.XML", "size": 6, "mtime": t}])
     conn = mirror._connect()
     with conn:
         mirror._set_meta(conn, "volume_info", json.dumps({NAS: {"label": "NAS pool", "kind": "nas"}}))

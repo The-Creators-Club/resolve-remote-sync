@@ -135,6 +135,7 @@ class PlanItem:
     action: str                        # copy | resume | there | elsewhere
     dst: Path                          # where it goes / is
     found: Optional[Path] = None       # for `elsewhere`: where the drive already has it
+    existed: bool = False              # something was at `dst` when the plan was made (so not ours)
 
 
 @dataclass
@@ -163,13 +164,13 @@ def plan_destination(card_files: list[list[Any]], dest: Destination, folder: str
             st = None
         if st is not None:
             if not dst.is_file():
-                plan.items.append(PlanItem(rel, size, mtime, "copy", dst))      # CardJob: a conflict
+                plan.items.append(PlanItem(rel, size, mtime, "copy", dst, existed=True))   # CardJob: a conflict
             elif st.st_size == size and field_mode.same_mtime(st.st_mtime * 1000.0, mtime):
-                plan.items.append(PlanItem(rel, size, mtime, "there", dst))
+                plan.items.append(PlanItem(rel, size, mtime, "there", dst, existed=True))
             elif st.st_size < size:
-                plan.items.append(PlanItem(rel, size, mtime, "resume", dst))
+                plan.items.append(PlanItem(rel, size, mtime, "resume", dst, existed=True))
             else:
-                plan.items.append(PlanItem(rel, size, mtime, "copy", dst))      # CardJob: skip or conflict
+                plan.items.append(PlanItem(rel, size, mtime, "copy", dst, existed=True))   # skip or conflict
             continue
         found = _already_on_volume(view, dest, rel, size, mtime) if view is not None else None
         if found is not None:
@@ -220,6 +221,7 @@ class Lane:
         self.counts = {"copied": 0, "skipped": 0, "there": 0, "conflicts": 0, "failed": 0, "unverified": 0}
         self.problems: list[dict[str, str]] = []
         self.recorded = 0
+        self.folder = ""                   # the card's folder on THIS destination (see pick_card_folder)
         self.started: Optional[float] = None
         self.finished: Optional[float] = None
         self._samples: list[tuple[float, int]] = []
@@ -268,7 +270,7 @@ class Lane:
         if prog is not None and self.state == "copying":
             files_done = self.files_done + int(prog.done)
         return {
-            "runId": self.run_id, "dest": self.dest.id, "label": self.dest.label,
+            "runId": self.run_id, "dest": self.dest.id, "label": self.dest.label, "folder": self.folder,
             "volumeKind": self.dest.volume_kind, "lane": self.dest.lane,
             "state": self.state, "message": self.message, "stage": self.stage,
             "phase": phase, "copier": (prog.copier if prog is not None and self.state == "copying"
@@ -317,6 +319,7 @@ class Services:
     on_run_done: Callable[[FieldRun], None] = lambda run: None
     free_fn: Callable[[str], int] = lambda p: int(shutil.disk_usage(p).free)
     alive_fn: Callable[[str], bool] = lambda p: os.path.isdir(p)
+    same_drive_fn: Callable[[Destination], bool] = lambda d: True     # is the drive at d.root still d?
     clock: Callable[[], float] = time.monotonic
 
 
@@ -342,6 +345,12 @@ class FieldCopier:
             return {l.dest.id for r in self.runs.values() if r.running for l in r.lanes
                     if l.state not in TERMINAL}
 
+    def busy_lanes(self) -> set[str]:
+        """Physical drives some running copy is using: a drive and a folder on that drive are one."""
+        with self._lock:
+            return {l.dest.lane or l.dest.id for r in self.runs.values() if r.running for l in r.lanes
+                    if l.state not in TERMINAL}
+
     def start(self, card: dict[str, Any], dests: list[Destination], folder: str) -> FieldRun:
         """Start one lane per physical drive. `card` = {serial, label, kind, root, files}. Raises
         ValueError (a sentence) for what cannot start at all."""
@@ -350,8 +359,8 @@ class FieldCopier:
         with self._lock:
             if self.active_for(card["serial"]):
                 raise ValueError("this card is already being copied: wait for it to finish, or stop it")
-            taken = self.busy_dest_ids()
-            clash = [d.label for d in dests if d.id in taken]
+            taken, taken_lanes = self.busy_dest_ids(), self.busy_lanes()
+            clash = [d.label for d in dests if d.id in taken or (d.lane or d.id) in taken_lanes]
             if clash:
                 raise ValueError(f"{', '.join(clash)} is busy with another copy")
             self._seq += 1
@@ -439,9 +448,17 @@ class FieldCopier:
                     log.exception("field: the lane-done hook failed")
 
     # -- one lane -------------------------------------------------------------------------------
-    def _stopper(self, run: FieldRun, dest: Destination) -> Callable[[], str]:
-        """The copier's should_stop: cancelled, the drive gone, or the drive full. The drive checks
-        run every ALIVE_SECONDS, not per buffer."""
+    def _card_present(self, serial: str) -> bool:
+        try:
+            return any(str(v.get("serial", "")).upper() == str(serial).upper()
+                       for v in self.s.volumes_fn("removable", set()))
+        except Exception:                                         # noqa: BLE001
+            return True                                           # cannot tell: the copier's own errors decide
+
+    def _stopper(self, run: FieldRun, dest: Destination, card_serial: str = "") -> Callable[[], str]:
+        """The copier's should_stop: cancelled, the card or the drive gone (or the drive's letter now
+        another drive), or the drive full. Looked at every ALIVE_SECONDS, not per buffer; TeraCopy's
+        wait asks it on every poll, so a pulled card is heard there too."""
         state = {"at": 0.0, "reason": ""}
 
         def stop() -> str:
@@ -457,6 +474,10 @@ class FieldCopier:
             try:
                 if not self.s.alive_fn(dest.root):
                     state["reason"] = f"{dest.label} was taken out (or went away) during the copy"
+                elif not self.s.same_drive_fn(dest):
+                    state["reason"] = f"{dest.label} is now a different drive (its letter changed hands)"
+                elif card_serial and not self._card_present(card_serial):
+                    state["reason"] = "the card was taken out of its reader"
                 elif self.s.free_fn(dest.root) < FULL_BYTES:
                     state["reason"] = f"{dest.label} is full"
             except OSError:
@@ -477,7 +498,8 @@ class FieldCopier:
             return
         card_root = Path(card["root"])
         files = [list(f) for f in card.get("files") or []]
-        plan = plan_destination(files, dest, run.folder, self.s.view)
+        lane.folder = field_mode.pick_card_folder(dest.base(""), run.folder, str(card["serial"]))
+        plan = plan_destination(files, dest, lane.folder, self.s.view)
         lane.files_total = len(plan.items)
         need = plan.copy_bytes
         try:
@@ -491,7 +513,8 @@ class FieldCopier:
                             f"{fmt_bytes(need)} more (plus {fmt_bytes(MARGIN_BYTES)} kept spare). "
                             f"Nothing was copied there.")
             return
-        stopper = self._stopper(run, dest)
+        stopper = self._stopper(run, dest, str(card["serial"]))
+        field_mode.write_card_marker(dest.base(lane.folder), str(card["serial"]), str(card.get("label") or ""))
         recorded: list[dict[str, Any]] = []
 
         # 1. what is already there: a quick verify against the card
@@ -507,12 +530,29 @@ class FieldCopier:
                     return
                 lane.current = item.rel
                 target = item.found or item.dst
-                res = field_mode.quick_compare(card_root.joinpath(*item.rel.split("/")), target)
+                src_file = card_root.joinpath(*item.rel.split("/"))
+                # "already there" is believed on a QUICK check only when this very copy was
+                # verified when it was made. Anything else (a file TeraCopy failed to verify leaves a
+                # full-size, right-dated file behind; a scan only proves a file of that size exists)
+                # is compared in full.
+                known = bool(dest.volume_id) and self.s.view.verified_record(
+                    dest.volume_id, dest.rel_of(target), target.name, item.size, item.mtime)
+                level = "quick" if known else "full"
+                try:
+                    if known:
+                        res = field_mode.quick_compare(src_file, target)
+                    else:
+                        lane.stage = f"comparing {item.rel} in full (nothing says it was verified)"
+                        why = card_copy.files_identical(src_file, target, item.size, stopper)
+                        res = {"ok": not why, "error": why, "unreadable": "could not be read" in why}
+                except card_copy._Stopped as halt:
+                    self._finish_stopped(lane, halt.reason, recorded, dest)
+                    return
                 lane._vf_bytes_done += min(item.size, 2 * field_mode.MIB)
                 lane.files_done += 1
                 if res.get("ok"):
                     lane.counts["there"] += 1
-                    recorded.append(self._entry(dest, target, item, "quick"))
+                    recorded.append(self._entry(dest, target, item, level, card))
                     if res.get("warning"):
                         lane.problem(item.rel, res["warning"])
                 else:
@@ -557,7 +597,7 @@ class FieldCopier:
         dest = lane.dest
         lane_cfg = {**self.s.cfg, "jobs_pool_root": dest.root}
         by_rel = {i.rel: i for i in todo}
-        root_prefix = "/".join(p for p in (dest.subdir.replace("\\", "/"), run.folder) if p)
+        root_prefix = "/".join(p for p in (dest.subdir.replace("\\", "/"), lane.folder) if p)
         copies = []
         for item in todo:
             copies.append({"src": {"root": f"card:{card['serial']}", "rel": item.rel},
@@ -596,22 +636,31 @@ class FieldCopier:
             target = planned.dst.with_name(str(item.get("filename") or planned.dst.name))
             if item.get("verified"):
                 lane.counts["copied"] += 1
-                recorded.append(self._entry(dest, target, planned, "full"))
+                recorded.append(self._entry(dest, target, planned, "full", card))
                 continue
-            res = field_mode.quick_compare(Path(card["root"]).joinpath(*rel.split("/")), target)
-            if res.get("ok"):
+            # The copier did not verify it (TeraCopy's verify never reached it, or timed out).
+            # Only a compare of EVERY byte against the card makes it a backup; a quick look at the
+            # first and last MiB passes a file that is wrong in the middle.
+            try:
+                why = card_copy.files_identical(Path(card["root"]).joinpath(*rel.split("/")), target,
+                                                planned.size, stopper)
+            except card_copy._Stopped:
+                why = "the compare was stopped"
+            if not why:
                 lane.counts["copied"] += 1
-                recorded.append(self._entry(dest, target, planned, "quick"))
+                recorded.append(self._entry(dest, target, planned, "full", card))
             else:
                 lane.counts["unverified"] += 1
-                lane.problem(rel, f"copied but not verified: {res.get('error')}")
+                aside = self._set_aside(target, planned)
+                lane.problem(rel, f"copied but not verified, and a full compare says: {why}."
+                             + (f" It was set aside as {aside.name}." if aside else ""))
         for item in result.get("skipped") or []:
             planned = by_rel.get(rel_of(item))
             if planned is None:
                 continue
             lane.counts["skipped"] += 1
             target = planned.dst.with_name(str(item.get("filename") or planned.dst.name))
-            recorded.append(self._entry(dest, target, planned, "full"))
+            recorded.append(self._entry(dest, target, planned, "full", card))
         for item in result.get("conflicts") or []:
             lane.counts["conflicts"] += 1
             lane.problem(rel_of(item), str(item.get("why") or "something different is already there")
@@ -620,7 +669,10 @@ class FieldCopier:
             lane.counts["failed"] += 1
             why = str(item.get("why") or "the copy failed")
             full_markers = full_markers or looks_full(why)
-            lane.problem(rel_of(item), why)
+            planned = by_rel.get(rel_of(item))
+            aside = self._set_aside(planned.dst, planned) if planned is not None else None
+            lane.problem(rel_of(item), why + (f" The file left behind was set aside as {aside.name}, "
+                                              f"so a later run cannot take it for a good copy." if aside else ""))
         if job.stopped:
             lane.state = "stopped" if run.cancelled.is_set() else "failed"
             lane.message = self._stopped_message(lane, job.stopped)
@@ -643,17 +695,44 @@ class FieldCopier:
         self._record(lane, recorded)
 
     # -- recording --------------------------------------------------------------------------------
-    def _entry(self, dest: Destination, target: Path, item: PlanItem, level: str) -> dict[str, Any]:
+    @staticmethod
+    def _set_aside(path: Path, item: PlanItem) -> Optional[Path]:
+        """A copy that failed its verify is renamed `<name>.failed` (the ledger skips that suffix),
+        never left under its real name: TeraCopy leaves such a file at full size with the card's
+        time, which a later quick check would accept. Only a file THIS run wrote is touched: one
+        that was already there is somebody's, and is left alone."""
+        if item.existed and item.action != "resume":
+            return None
+        try:
+            if not path.is_file():
+                return None
+            for n in range(1, 50):
+                aside = path.with_name(path.name + (".failed" if n == 1 else f".failed{n}"))
+                if not aside.exists():
+                    os.replace(path, aside)
+                    return aside
+        except OSError:
+            log.warning("field: could not set aside the failed copy %s", path, exc_info=True)
+        return None
+
+    def _entry(self, dest: Destination, target: Path, item: PlanItem, level: str,
+               card: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         try:
             mtime = int(round(os.stat(target).st_mtime * 1000))
         except OSError:
             mtime = None if item.mtime is None else int(round(float(item.mtime)))
         return {"path": dest.rel_of(target), "name": target.name, "size": item.size, "mtime": mtime,
-                "verified": level, "rel": item.rel}
+                "verified": level, "rel": item.rel, "card": str((card or {}).get("serial") or ""),
+                "phys": dest.lane}
 
     def _record(self, lane: Lane, entries: list[dict[str, Any]]) -> None:
-        keep = [e for e in entries if field_mode.is_recordable(e["rel"])]
+        keep = [e for e in entries if field_mode.is_judged(e["rel"]) or field_mode.is_recordable(e["rel"])]
         if not keep or not lane.dest.volume_id:
+            return
+        if not self.s.same_drive_fn(lane.dest):               # the letter now holds another drive
+            lane.problem("", f"{lane.dest.label} is now a different drive, so nothing was recorded for it.")
+            if lane.state not in ("stopped", "failed"):
+                lane.state, lane.message = "failed", f"{lane.dest.label} changed while copying; nothing was recorded."
             return
         try:
             lane.recorded += int(self.s.record_fn(lane.dest, keep) or 0)

@@ -125,6 +125,11 @@
       });
       S.ticksInit = true;
     }
+    // a tick on a drive that has gone, or is not usable, is forgotten: it must never ride along
+    Array.from(S.ticks).forEach(function (id) {
+      var d = dests.filter(function (x) { return x.id === id; })[0];
+      if (!d || !d.present) S.ticks.delete(id);
+    });
     var card = selectedCard();
     var per = (card && card.verdict && card.verdict.perDest) || {};
     var sig = JSON.stringify([S.card, dests.map(function (x) { return [x.id, x.label, x.kind, x.present, x.why, x.busy, x.detail, x.settable, x.removable]; }), per, Array.from(S.ticks)]);
@@ -317,7 +322,9 @@
   $('go').addEventListener('click', function () {
     var card = selectedCard();
     if (!card) return;
-    var ids = Array.from(S.ticks);
+    var usable = {};
+    ((S.data && S.data.destinations) || []).forEach(function (x) { if (x.present && !x.busy) usable[x.id] = true; });
+    var ids = Array.from(S.ticks).filter(function (id) { return usable[id]; });
     S.busy = true; updateGo();
     api('/field/api/copy', { serial: card.serial, dests: ids }).then(function () { S.busy = false; return refresh(true); })
       .catch(function (e) { S.busy = false; updateGo(); toast(e.message); });

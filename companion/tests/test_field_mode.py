@@ -347,7 +347,7 @@ def test_the_view_counts_a_copy_made_here_before_the_ledger_has_heard(tmp_path):
 def test_once_the_mirror_has_it_the_local_row_is_dropped_so_it_is_not_said_twice(tmp_path):
     lc = fm.LocalCopies(tmp_path / "c.jsonl")
     lc.add([local_row(), local_row(volume_id="vol:B", path="FieldBackup/d/A.braw")])
-    mirror = FakeMirror([{"name": "A.braw", "size": 10, "volume_id": "vol:A", "path": "Elsewhere/A.braw"}])
+    mirror = FakeMirror([{"name": "A.braw", "size": 10, "volume_id": "vol:A", "path": "FieldBackup/d/A.braw"}])
     view = fm.LedgerView(mirror, lc)
     got = view.copies("A.braw", 10, 1000)
     assert sorted((c["volume_id"], c["source"]) for c in got) == [("vol:A", "mirror"), ("vol:B", "local")]

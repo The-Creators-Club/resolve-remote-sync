@@ -118,9 +118,25 @@ def driver(tmp_path, exe):
         class Child:
             pid = 77
 
+        def spawn(cmd):
+            """The stub: records the command and, like TeraCopy, registers the job in its history
+            (a database listing the job's files and destination) so the launch's wait is over."""
+            calls.append(cmd)
+            parts = [p for p in cmd.split('"') if p.strip() and not p.strip().startswith("/")]
+            listing, target = parts[-2].lstrip("*"), parts[-1]
+            try:
+                srcs = Path(listing).read_text(encoding="utf-8").splitlines()
+            except OSError:
+                srcs = []
+            hdir = Path(kw["history_dir"])
+            if hdir.name == "no-history":
+                make_db(hdir / f"auto-{len(calls)}.db", [{"source": f, "size": 1} for f in srcs if f],
+                        [{"mode": COPY, "target": target}])
+            return Child()
+
         kw = dict(history_dir=str(tmp_path / "no-history"), options_ini=str(tmp_path / "Options.ini"),
                   list_dir=str(tmp_path / "lists"), now=clock.now, sleep=clock.sleep,
-                  is_running=lambda: True, spawn=lambda cmd: calls.append(cmd) or Child(),
+                  is_running=lambda: True, spawn=spawn,
                   log_fn=lambda msg, level="info": logs.append(str(msg)))
         kw.update(over)
         t = TeraCopy(exe, **kw)
@@ -714,13 +730,16 @@ def test_launches_from_several_threads_go_to_teracopy_one_at_a_time(tmp_path):
     active = []
     overlaps = []
     counter = iter(range(100))
+    src = tmp_path / "card" / "A.MP4"
 
     def spawn(command):
         active.append(command)
         if len(active) > 1:
             overlaps.append(list(active))
         _time.sleep(0.05)                       # the stub hands over...
-        (hist / f"job-{next(counter)}.db").write_bytes(b"")   # ...and TeraCopy registers it
+        target = [p for p in command.split('"') if p.strip() and not p.strip().startswith("/")][-1]
+        make_db(hist / f"job-{next(counter)}.db", [{"source": str(src), "size": 1}],   # ...and TeraCopy registers it
+                [{"mode": COPY, "target": target}])
         _time.sleep(0.05)
         active.remove(command)
 
@@ -730,7 +749,6 @@ def test_launches_from_several_threads_go_to_teracopy_one_at_a_time(tmp_path):
 
     t = TeraCopy(str(exe), history_dir=str(hist), options_ini=str(tmp_path / "x.ini"),
                  list_dir=str(tmp_path / "lists"), spawn=spawn)
-    src = tmp_path / "card" / "A.MP4"
     src.parent.mkdir()
     src.write_bytes(b"x")
     out = []
@@ -743,3 +761,113 @@ def test_launches_from_several_threads_go_to_teracopy_one_at_a_time(tmp_path):
     assert overlaps == []
     assert len({o["list_file"] for o in out}) == 3          # three lists, none replaced another
     assert len(list(hist.glob("*.db"))) == 3
+
+
+# ------------------------------------------------- a launch counts only when ITS job registered
+def _launcher(tmp_path, spawn, history=None, **kw):
+    exe = tmp_path / "TeraCopy.exe"
+    exe.write_bytes(b"")
+    hist_dir = history if history is not None else tmp_path / "History"
+    if history is None:
+        hist_dir.mkdir(exist_ok=True)
+    clock = Clock()
+    logs: list[str] = []
+    t = TeraCopy(str(exe), history_dir=str(hist_dir), options_ini=str(tmp_path / "x.ini"),
+                 list_dir=str(tmp_path / "lists"), spawn=spawn, now=clock.now, sleep=clock.sleep,
+                 log_fn=lambda m, level="info": logs.append(str(m)), **kw)
+    return t, logs, Path(hist_dir)
+
+
+class _P:
+    pid = 5
+
+
+@pytest.fixture(autouse=True)
+def _fresh_launch_state():
+    tc_mod._CLAIMED.clear()
+    tc_mod._BROKEN_AT = None
+    yield
+    tc_mod._CLAIMED.clear()
+    tc_mod._BROKEN_AT = None
+
+
+def test_an_empty_database_is_not_a_registered_job_and_the_job_is_launched_again(tmp_path):
+    spawns = []
+    holder = {}
+
+    def spawn(cmd):
+        spawns.append(cmd)
+        hist_dir = holder["hist"]
+        if len(spawns) == 1:                                  # TeraCopy woke, made a database, lost the job
+            make_db(hist_dir / "a.db", [], [])
+        else:
+            make_db(hist_dir / "b.db", [{"source": "H:\a.MP4", "size": 1}], [{"mode": COPY, "target": str(tmp_path / "d")}])
+        return _P()
+
+    t, logs, h = _launcher(tmp_path, spawn)
+    holder["hist"] = h
+    res = t.launch(["H:\a.MP4"], str(tmp_path / "d"), tag="x")
+    assert len(spawns) == 2 and "a.db" in res["known"]        # the empty one is excluded from the wait
+    assert any("launching it again" in m for m in logs)
+
+
+def test_another_lanes_late_database_is_not_this_jobs(tmp_path):
+    spawns = []
+    holder = {}
+
+    def spawn(cmd):
+        spawns.append(cmd)
+        # the only database that ever shows belongs to a job into ANOTHER destination
+        if len(spawns) == 1:
+            make_db(holder["hist"] / "other.db", [{"source": "H:\a.MP4", "size": 1}],
+                    [{"mode": COPY, "target": str(tmp_path / "elsewhere")}])
+        return _P()
+
+    t, logs, h = _launcher(tmp_path, spawn)
+    holder["hist"] = h
+    t.launch(["H:\a.MP4"], str(tmp_path / "d"), tag="x")
+    assert len(spawns) == tc_mod.LAUNCH_TRIES                  # never registered: launched again, then given up
+    assert tc_mod._BROKEN_AT is not None
+
+
+def test_a_cold_teracopy_has_no_history_folder_and_the_launch_waits_for_it(tmp_path):
+    hist_dir = tmp_path / "ColdHistory"                        # does not exist yet
+    spawns = []
+    t, logs, _ = _launcher(tmp_path, lambda cmd: (spawns.append(cmd), _P())[1], history=hist_dir)
+    polls = {"n": 0}
+    real_sleep = t._sleep
+
+    def sleep(step):
+        polls["n"] += 1
+        if polls["n"] == 8:                                    # TeraCopy finishes starting: folder, then job
+            hist_dir.mkdir()
+            make_db(hist_dir / "j.db", [{"source": "H:\a.MP4", "size": 1}], [{"mode": COPY, "target": str(tmp_path / "d")}])
+        real_sleep(step)
+
+    t._sleep = sleep
+    t.launch(["H:\a.MP4"], str(tmp_path / "d"), tag="x")
+    assert len(spawns) == 1 and polls["n"] >= 8                # waited for the cold start, did not skip or re-launch
+
+
+def test_a_broken_teracopy_does_not_hold_every_later_launch_for_the_full_wait(tmp_path):
+    t, logs, _ = _launcher(tmp_path, lambda cmd: _P())
+    waits = []
+    real = t._await_registration
+
+    def spy(*a, **k):
+        waits.append(k.get("seconds"))
+        return real(*a, **k)
+
+    t._await_registration = spy
+    t.launch(["H:\a.MP4"], str(tmp_path / "d1"), tag="x")
+    first = waits[0]
+    waits.clear()
+    t.launch(["H:\b.MP4"], str(tmp_path / "d2"), tag="x")
+    assert first == tc_mod.REGISTER_SECONDS and waits[0] == tc_mod.REGISTER_AGAIN_SECONDS
+
+
+def test_a_cancel_is_heard_while_a_launch_waits_for_registration(tmp_path):
+    spawns = []
+    t, logs, _ = _launcher(tmp_path, lambda cmd: (spawns.append(cmd), _P())[1])
+    res = t.launch(["H:\a.MP4"], str(tmp_path / "d"), tag="x", should_stop=lambda: "cancelled")
+    assert res["stopped"] is True and len(spawns) == 1

@@ -40,8 +40,9 @@ from typing import Any, Callable, Iterable, Optional
 
 from . import config as config_mod
 from . import ledger_scan
+from . import sorter_cards
 
-log = logging.getLogger("ccsync.fieldmode")
+log =logging.getLogger("ccsync.fieldmode")
 
 # -- the October rules (rules.js COUNTS / TIME_SLACK_MS) ------------------------------------------
 KINDS = ("nas", "ours", "laptop", "client", "card", "unknown")
@@ -86,6 +87,31 @@ def is_recordable(rel: str) -> bool:
     return is_proxy_path(rel) and _RULES.keep_file(name, in_proxy=True)
 
 
+# Everything a camera or recorder writes that is an ORIGINAL, whether or not the ledger tracks it:
+# the card is not safe to format while one of these has no second copy. Stills, 360 files, HEIF
+# and other raws are originals too (the ledger's masters list is narrower: it was made for video).
+ORIGINAL_EXTS = frozenset(
+    {"." + e for e in (set(ledger_scan.MASTER_EXTS) | set(ledger_scan.AUDIO_EXTS))}
+    | {e for e in sorter_cards.MEDIA_EXTS}
+    | {".hif", ".heif", ".360", ".insp", ".gpr", ".pef", ".srw", ".x3f", ".3fr", ".iiq", ".mpg", ".mpeg",
+       ".wmv", ".3gp", ".mka", ".ogg", ".opus", ".wma", ".aax"})
+_NOT_ORIGINAL_NAME = re.compile(r"(^\._)|(\.tmp\.[^./\\]+$)|(\.(part|partial|interrupted|failed)$)", re.IGNORECASE)
+
+
+def is_judged(rel: str) -> bool:
+    """Does the card's "safe to format" verdict wait for this file? Every original (video, audio,
+    stills, 360, raws), but never a sidecar (XML, THM, LRV, ...), a proxy, a thumbnail, or a
+    temp or half-written file. Never narrower than is_tracked."""
+    text = str(rel or "").replace("\\", "/")
+    name = text.rsplit("/", 1)[-1]
+    if is_tracked(text):
+        return True
+    if _NOT_ORIGINAL_NAME.search(name) or is_proxy_path(text) or name.lower() in sorter_cards.SKIP_FILE_NAMES:
+        return False
+    i = name.rfind(".")
+    return i > 0 and name[i:].lower() in ORIGINAL_EXTS
+
+
 def tracked_files(files: Iterable[Any]) -> list[list[Any]]:
     """[rel, size, mtimeMs] rows -> only the tracked ones."""
     return [list(f) for f in files if is_tracked(str(f[0]))]
@@ -122,6 +148,63 @@ def card_folder_name(label: str, serial: str, day: str) -> str:
     lab = clean_name(label)
     ident = clean_name(serial) if lab.lower() in _GENERIC_LABELS else lab
     return f"{day} {ident or 'card'}".strip()
+
+
+CARD_MARKER = ".ccsync-card"
+
+
+def folder_variants(name: str, serial: str) -> list[str]:
+    return [name, f"{name} {clean_name(serial)}"]
+
+
+def pick_card_folder(parent: "str | Path", name: str, serial: str) -> str:
+    """The folder under `parent` this card lands in. October's `<day> <label>` for the common case;
+    when a DIFFERENT card (same label, same day: two GoPro cards, "A001" twice) already owns that
+    folder, `<day> <label> <serial>`. A folder with no marker (made by the October tools) is taken
+    to be this card's: the marker is how the second card is told apart."""
+    base = Path(parent)
+    want = str(serial or "").strip().upper()
+    for cand in folder_variants(name, serial):
+        folder = base / cand
+        if not folder.exists():
+            return cand
+        try:
+            owner = (folder / CARD_MARKER).read_text(encoding="utf-8").strip().upper()
+        except OSError:
+            owner = ""
+        if owner in ("", want):
+            return cand
+    return folder_variants(name, serial)[1]
+
+
+def write_card_marker(folder: "str | Path", serial: str, label: str = "") -> None:
+    """Say whose folder this is, so a second card with the same label and day goes elsewhere. Never
+    raises: a drive that will not take a hidden file still takes the footage."""
+    try:
+        target = Path(folder)
+        target.mkdir(parents=True, exist_ok=True)
+        marker = target / CARD_MARKER
+        if not marker.exists():
+            marker.write_text(str(serial or "").strip().upper() + "\n", encoding="utf-8")
+    except OSError:
+        log.debug("field: could not write the card marker in %s", folder, exc_info=True)
+
+
+def row_is_this_file(row: dict[str, Any], rel: str, card_serial: str, folders: Iterable[str]) -> bool:
+    """Is a copy found by NAME, SIZE and TIME really this card's file? Two recorders at one bitrate
+    write take after take of identical length with linked start and stop, so name, size and time
+    alone can be somebody else's file. A copy this machine made carries its card's serial and must
+    match it. Any other copy must end with the file's card-relative path; a file at the card's top
+    level (a recorder's WAV, a BMCC clip) has no path to match, so it must sit in this card's own
+    folder. A copy that is none of these is not counted: a short verdict is safe, a long one is not."""
+    path = str(row.get("path") or "").replace("\\", "/").strip("/").lower()
+    r = str(rel or "").replace("\\", "/").strip("/").lower()
+    owner = str(row.get("card") or "").strip().upper()
+    if owner:
+        return owner == str(card_serial or "").strip().upper() and (path == r or path.endswith("/" + r))
+    if "/" in r:
+        return path == r or path.endswith("/" + r)
+    return any(path == f"{f.lower()}/{r}" or path.endswith(f"/{f.lower()}/{r}") for f in folders)
 
 
 # -- kinds ----------------------------------------------------------------------------------------
@@ -182,16 +265,23 @@ class KindResolver:
 
 
 # -- the verdict ----------------------------------------------------------------------------------
-def file_verdict(copies: list[dict[str, Any]], kind_of: Callable[[str], str]) -> dict[str, Any]:
+def file_verdict(copies: list[dict[str, Any]], kind_of: Callable[[str], str],
+                 phys_of: Optional[Callable[[str], str]] = None) -> dict[str, Any]:
     """One file's standing, from its live copies (each `{volume_id, ...}`; the card's own volume is
     expected to be excluded by the caller, and a card never counts anyway):
-    {safe, home, onLaptop, laptopOnly, counted, volumes}."""
+    {safe, home, onLaptop, laptopOnly, counted, volumes}.
+
+    TWO COPIES ON ONE PHYSICAL DISK ARE ONE COPY: volumes are counted by their physical key (a
+    row's own `phys`, else `phys_of(volume id)`, else the volume itself), so two partitions of one
+    disk, or a folder that is a junction onto a field drive, never make two."""
     vols: dict[str, str] = {}
+    phys: dict[str, str] = {}
     for c in copies:
         vid = str(c.get("volume_id") or "")
         if vid and vid not in vols:
             vols[vid] = kind_of(vid)
-    counted = {v for v, k in vols.items() if k in COUNTS}
+            phys[vid] = str(c.get("phys") or (phys_of(vid) if phys_of else "") or vid)
+    counted = {phys[v] for v, k in vols.items() if k in COUNTS}
     home = any(k == "nas" for k in vols.values())
     on_laptop = any(k == "laptop" for k in vols.values())
     elsewhere = any(k in ("ours", "nas") for k in vols.values())
@@ -202,8 +292,12 @@ def file_verdict(copies: list[dict[str, Any]], kind_of: Callable[[str], str]) ->
 
 def card_verdict(files: list[list[Any]], copies_of: Callable[[str, int, Any], list[dict[str, Any]]],
                  kind_of: Callable[[str], str], dest_volumes: Optional[dict[str, str]] = None,
-                 exclude_volumes: Iterable[str] = (), sample: int = 40) -> dict[str, Any]:
-    """The card's verdict from the ledger's copies of its tracked files.
+                 exclude_volumes: Iterable[str] = (), sample: int = 40,
+                 phys_of: Optional[Callable[[str], str]] = None,
+                 match_fn: Optional[Callable[[dict[str, Any], str], bool]] = None) -> dict[str, Any]:
+    """The card's verdict from the ledger's copies of its judged files (every original: see
+    is_judged). `match_fn(row, rel)` decides whether a copy found by name, size and time is really
+    THIS card's file (see row_is_this_file); `phys_of` maps a volume to its physical disk.
 
     `copies_of(name, size, mtime)` is the lookup (mirror + this machine's own); `dest_volumes`
     is {destination id: volume id} so the answer can say how much each destination already holds.
@@ -222,11 +316,12 @@ def card_verdict(files: list[list[Any]], copies_of: Callable[[str, int, Any], li
                            "atRisk": [], "notes": []}
     uncounted_labels: set[str] = set()
     for rel, size, mtime, *_rest in files:
-        if not is_tracked(rel):
+        if not is_judged(rel):
             continue
         size, name = int(size), str(rel).rsplit("/", 1)[-1]
-        rows = [c for c in copies_of(name, size, mtime) if c.get("volume_id") not in skip]
-        v = file_verdict(rows, kind_of)
+        rows = [c for c in copies_of(name, size, mtime) if c.get("volume_id") not in skip
+                and (match_fn is None or match_fn(c, str(rel)))]
+        v = file_verdict(rows, kind_of, phys_of)
         out["tracked"] += 1
         out["bytes"] += size
         held = set(v["volumes"])
@@ -253,7 +348,7 @@ def card_verdict(files: list[list[Any]], copies_of: Callable[[str, int, Any], li
             out["atRisk"].append({"path": rel, "size": size, "copies": n, "counted": v["counted"]})
     t = out["tracked"]
     if t == 0:
-        out["headline"] = "Nothing on this card needs backing up."
+        out["headline"] = "Nothing on this card needs backing up (no footage, audio or photos on it)."
         return out
     if out["safe"] == t:
         out["state"], out["safeToFormat"] = "safe", True
@@ -494,7 +589,8 @@ def _iso_to_epoch(text: Any) -> float:
 class LocalCopies:
     """The verified copies THIS machine made, kept until the ledger mirror has them too.
 
-    One JSON line per copy: {volume_id, label, kind, path, name, size, mtime, verified, at}.
+    One JSON line per copy: {volume_id, label, kind, path, name, size, mtime, verified, at, card,
+    rel, phys} (the card it came from and where on it, and the physical disk it went to).
     Appended durably as each lane finishes; loaded once; an entry is dropped when the mirror
     returns a live row for the same volume, or after LOCAL_COPY_DAYS."""
 
@@ -537,6 +633,8 @@ class LocalCopies:
                            "size": int(c["size"]),
                            "mtime": None if c.get("mtime") is None else int(c["mtime"]),
                            "verified": str(c.get("verified") or "quick"),
+                           "card": str(c.get("card") or "").upper(), "rel": str(c.get("rel") or ""),
+                           "phys": str(c.get("phys") or ""),
                            "at": str(c.get("at") or datetime.now(timezone.utc).replace(
                                microsecond=0).isoformat().replace("+00:00", "Z"))}
                 except (KeyError, TypeError, ValueError):
@@ -590,24 +688,62 @@ class LocalCopies:
 
 class LedgerView:
     """The mirror and this machine's own copies, as one lookup: `copies(name, size, mtime)` ->
-    live copies `[{volume_id, path, verified, source}]`. No network."""
+    live copies `[{volume_id, path, verified, source}]`. No network.
 
-    def __init__(self, mirror: Any, local: LocalCopies) -> None:
+    A COPY COUNTS ONLY IF IT IS STILL THERE. `root_of(volume id)` gives where an ATTACHED volume is
+    mounted right now (or None when it is not plugged in, or cannot be looked at); a copy on an
+    attached volume is checked on disk (size and time) and dropped when it is gone or changed. A
+    copy on a drive that is away is believed: that is what the ledger is for."""
+
+    def __init__(self, mirror: Any, local: LocalCopies,
+                 root_of: Optional[Callable[[str], Optional[str]]] = None) -> None:
         self.mirror = mirror
         self.local = local
+        self.root_of = root_of
 
-    def copies(self, name: str, size: int, mtime: Any = None) -> list[dict[str, Any]]:
+    def _present(self, row: dict[str, Any]) -> bool:
+        if self.root_of is None:
+            return True
+        try:
+            root = self.root_of(str(row.get("volume_id") or ""))
+        except Exception:                                         # noqa: BLE001
+            root = None
+        if not root or not row.get("path"):
+            return True
+        try:
+            st = os.stat(Path(root).joinpath(*str(row["path"]).split("/")))
+        except OSError:
+            return False
+        if st.st_size != int(row.get("size", st.st_size)):
+            return False
+        if row.get("mtime") is not None and abs(st.st_mtime * 1000.0 - float(row["mtime"])) > TIME_SLACK_MS:
+            return False
+        return True
+
+    def _raw(self, name: str, size: int, mtime: Any) -> list[dict[str, Any]]:
         try:
             rows = [dict(r, source="mirror") for r in self.mirror.where(name, size, mtime)]
         except Exception:                                         # noqa: BLE001
             log.debug("field: the mirror could not be read", exc_info=True)
             rows = []
-        have = {r["volume_id"] for r in rows}
+        seen = {(r["volume_id"], str(r["path"]).lower()) for r in rows}
         mine = self.local.matching(name, size, mtime)
-        covered = [m for m in mine if m["volume_id"] in have]
-        if covered:
+        covered = [m for m in mine if (m["volume_id"], str(m["path"]).lower()) in seen]
+        if covered:                                               # the mirror has this very copy now
             self.local.forget(covered)
         for m in mine:
-            if m["volume_id"] not in have:
+            if (m["volume_id"], str(m["path"]).lower()) not in seen:
                 rows.append(dict(m, source="local"))
         return rows
+
+    def copies(self, name: str, size: int, mtime: Any = None) -> list[dict[str, Any]]:
+        return [r for r in self._raw(name, size, mtime) if self._present(r)]
+
+    def verified_record(self, volume_id: str, path: str, name: str, size: int, mtime: Any = None) -> bool:
+        """Is there a record that a copy at exactly this volume and path was VERIFIED (quick or
+        full) when it was made? A scan's `listed` row proves only that a file of that size is there."""
+        want = str(path).replace("\\", "/").strip("/").lower()
+        for r in self._raw(name, size, mtime):
+            if r.get("volume_id") == volume_id and str(r.get("path") or "").strip("/").lower() == want                     and str(r.get("verified") or "") in ("quick", "full"):
+                return True
+        return False

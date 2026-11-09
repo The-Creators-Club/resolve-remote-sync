@@ -111,6 +111,47 @@ def physical_key(root: str) -> str:
         return ""
 
 
+POOL_MARKER = ".ccsync-pool"
+
+
+def wnet_connection(letter: str) -> str:
+    """The UNC path a mapped drive letter ("W:") points at, or "" (Windows; "" for a local disk)."""
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        size = wintypes.DWORD(1024)
+        buf = ctypes.create_unicode_buffer(1024)
+        rc = ctypes.windll.mpr.WNetGetConnectionW(letter, buf, ctypes.byref(size))   # type: ignore[attr-defined]
+        return buf.value if rc == 0 else ""
+    except Exception:                                             # noqa: BLE001
+        return ""
+
+
+def pool_identity(root: str, expect_unc: str = "", unc_fn: Callable[[str], str] = wnet_connection) -> tuple[bool, str]:
+    """Is the directory at `root` really the NAS pool, and not some other drive that holds that
+    letter today? Yes when it carries a `.ccsync-pool` marker file, or (Windows) it is a mapped network
+    drive whose UNC target starts with `field_pool_unc` (any network drive, if none is configured).
+    A local disk with no marker is NOT the pool. -> (ok, why not)."""
+    try:
+        if (Path(root) / POOL_MARKER).is_file():
+            return True, ""
+    except OSError:
+        pass
+    if os.name != "nt":
+        return True, ""                                           # /pool in the container, a mount on a Mac
+    text = str(root)
+    unc = text if text.startswith("\\\\") else unc_fn(os.path.splitdrive(text)[0])
+    if not unc:
+        return False, ("That drive is a local disk, not the NAS pool (a drive letter can change hands). "
+                       f"Put an empty {POOL_MARKER} file in the pool's top folder to say it is the pool.")
+    if expect_unc and not unc.lower().startswith(expect_unc.lower().rstrip("\\/")):
+        return False, f"That drive is {unc}, not the NAS pool ({expect_unc})."
+    return True, ""
+
+
 def _norm(path: str) -> str:
     return os.path.normcase(os.path.normpath(str(path))).rstrip("\\/")
 
@@ -138,6 +179,7 @@ class FieldService:
         probe_fn: Optional[Callable[[str], bool]] = None,
         free_fn: Optional[Callable[[str], int]] = None,
         alive_fn: Optional[Callable[[str], bool]] = None,
+        pool_check_fn: Optional[Callable[[str], tuple[bool, str]]] = None,
         machine_name: str = "",
         clock: Callable[[], float] = time.time,
         auto_sync: bool = True,
@@ -147,10 +189,17 @@ class FieldService:
         self._volumes = volumes_fn or sorter_cards.list_volumes
         self._classify = classify_fn or sorter_cards.classify
         self._list_card = list_card_fn or sorter_cards.list_card
-        self.store = store or field_mode.FieldStore(self.cfg.get("field_state_path") or None)
-        self.local = local or field_mode.LocalCopies(self.cfg.get("field_copies_path") or None)
-        self.mirror = mirror or ledger_mirror.LedgerMirror(
+        # `is None`, never `or`: an empty LocalCopies is falsy (it has a __len__), and a store or mirror
+        # handed in must be the one used
+        self.store = store if store is not None else field_mode.FieldStore(self.cfg.get("field_state_path") or None)
+        self.local = local if local is not None else field_mode.LocalCopies(self.cfg.get("field_copies_path") or None)
+        self.mirror = mirror if mirror is not None else ledger_mirror.LedgerMirror(
             self.cfg, request_fn=request_fn, identity_token_fn=identity_token_fn)
+        self._pool_check = pool_check_fn or (
+            lambda root: pool_identity(root, str(self.cfg.get("field_pool_unc") or "")))
+        self._pool_ok = False
+        self._root_by_vid: dict[str, str] = {}
+        self._phys_by_vid: dict[str, str] = {}
         self._request = request_fn
         self._teracopy_fn = teracopy_fn
         self._outbox_path = Path(outbox_path) if outbox_path else (
@@ -175,12 +224,36 @@ class FieldService:
         self._info: tuple[float, dict[str, Any]] = (-1e9, {})
         self.resolver = field_mode.KindResolver(
             overrides=self.store.kinds, info=self._volume_info, guesses=lambda: self._guesses)
-        self.view = field_mode.LedgerView(self.mirror, self.local)
+        self.view = field_mode.LedgerView(self.mirror, self.local, root_of=self._root_of)
         self.copier = field_copy.FieldCopier(field_copy.Services(
             cfg=self.cfg, view=self.view, volumes_fn=self._volumes, teracopy_fn=teracopy_fn,
             record_fn=self._record, on_lane_done=self._lane_done, on_run_done=self._run_done,
             free_fn=free_fn or (lambda p: int(shutil.disk_usage(p).free)),
-            alive_fn=alive_fn or os.path.isdir))
+            alive_fn=alive_fn or os.path.isdir, same_drive_fn=self._same_drive))
+
+    def _root_of(self, volume_id: str) -> Optional[str]:
+        """Where a volume is mounted right now, or None when it is away (or cannot be looked at)."""
+        if volume_id == self.pool_volume_id():
+            return str(self.cfg.get("jobs_pool_root") or "") if self._pool_ok else None
+        return self._root_by_vid.get(volume_id)
+
+    def _phys_of(self, volume_id: str) -> str:
+        if volume_id == self.pool_volume_id():
+            return "pool"
+        return self._phys_by_vid.get(volume_id, "")
+
+    def _same_drive(self, d: field_copy.Destination) -> bool:
+        """Does the drive at this destination's root still have the serial it had when the copy
+        was planned? A letter can change hands while a copy runs."""
+        if not d.serial or not d.volume_root:
+            return True
+        try:
+            for v in self._volumes("all", sorter_cards.busy_roots()):
+                if _norm(str(v.get("root") or "")) == _norm(d.volume_root):
+                    return str(v.get("serial") or "").upper() == d.serial.upper()
+        except Exception:                                         # noqa: BLE001
+            return True
+        return True
 
     def _volume_info(self) -> dict[str, Any]:
         """What the ledger calls each volume ({id: {label, kind}}), re-read from the mirror at most
@@ -215,8 +288,8 @@ class FieldService:
             with_folder = set()
             for folder in self.configured_folders():
                 holder = self._volume_for_path(folder, vols)
-                if holder is not None and holder.get("serial"):
-                    with_folder.add(str(holder["serial"]).upper())
+                if holder is not None and holder.get("serial") and not holder.get("removable"):
+                    with_folder.add(str(holder["serial"]).upper())          # a card or stick is never the laptop
             for v in vols:
                 serial = str(v.get("serial") or "").upper()
                 if serial:
@@ -225,6 +298,9 @@ class FieldService:
                     if serial in with_folder and guess in ("unknown", "card"):
                         guess = "laptop"
                     self._guesses[f"vol:{serial}"] = guess
+                    root = str(v.get("root") or "")
+                    self._root_by_vid[f"vol:{serial}"] = root
+                    self._phys_by_vid[f"vol:{serial}"] = self._lane_key(root, f"vol:{serial}")
             return vols
 
     def _cards_from(self, vols: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -325,7 +401,10 @@ class FieldService:
                 volume_label=label, volume_root=root, volume_kind=self.resolver.kind(vid), serial=serial,
                 lane=self._lane_key(root, vid)))
         for folder in self.configured_folders():
-            v = self._volume_for_path(folder, vols)
+            # through junctions and links: a folder "on the laptop" that is a junction onto a field
+            # drive is that drive, and counts once
+            real = os.path.realpath(folder)
+            v = self._volume_for_path(real, vols)
             name = Path(folder).name or folder
             if v is not None:
                 serial = str(v.get("serial") or "").upper()
@@ -333,17 +412,17 @@ class FieldService:
                 vol_label = (f"{self._machine} {v.get('drive')}" if self.resolver.kind(vid) == "laptop"
                              or not vid else self._label_for(vid, v))
                 kind = self.resolver.kind(vid) if vid else "unknown"
-                if kind in ("unknown", "card"):
+                if kind in ("unknown", "card") and not v.get("removable"):
                     kind = "laptop"                               # a folder you configured on a laptop's drive
                 out.append(field_copy.Destination(
-                    id=f"folder:{_norm(folder)}", kind="folder", label=name, root=folder, subdir="",
+                    id=f"folder:{_norm(folder)}", kind="folder", label=name, root=real, subdir="",
                     volume_id=vid, volume_label=vol_label, volume_root=str(v.get("root") or ""),
                     volume_kind=kind, serial=serial, lane=self._lane_key(str(v.get("root")), vid or folder),
                     recordable=bool(vid)))
             else:
                 out.append(field_copy.Destination(
-                    id=f"folder:{_norm(folder)}", kind="folder", label=name, root=folder, subdir="",
-                    volume_id="", volume_kind="unknown", lane=f"path:{_norm(folder)}", recordable=False))
+                    id=f"folder:{_norm(folder)}", kind="folder", label=name, root=real, subdir="",
+                    volume_id="", volume_kind="unknown", lane=f"path:{_norm(real)}", recordable=False))
         pool = str(self.cfg.get("jobs_pool_root") or "").strip()
         if pool:
             sub = str(self.cfg.get("field_pool_folder") or DRIVE_FOLDER).strip().strip("\\/")
@@ -359,6 +438,9 @@ class FieldService:
         if d.kind == "pool":
             present = self._probe(d.root)
             why = "" if present else "The NAS pool cannot be reached from here."
+            if present:
+                present, why = self._pool_check(d.root)         # a mapped letter must really BE the pool
+            self._pool_ok = bool(present)
         elif d.kind == "folder":
             v = self._volume_for_path(d.root, vols)
             present = v is not None
@@ -391,10 +473,14 @@ class FieldService:
         now = self._clock()
         if held and held[1] == stamp and now - held[0] < VERDICT_TTL_SECONDS:
             return held[2]
+        folders = field_mode.folder_variants(
+            field_mode.card_folder_name(card["label"], card["serial"], field_mode.card_day(card["files"])),
+            card["serial"])
         v = field_mode.card_verdict(
             card["files"], self.view.copies, self.resolver.kind,
             dest_volumes={d.id: d.volume_id for d in dests if d.volume_id},
-            exclude_volumes=[f"vol:{card['serial']}"])
+            exclude_volumes=[f"vol:{card['serial']}"], phys_of=self._phys_of,
+            match_fn=lambda row, rel: field_mode.row_is_this_file(row, rel, card["serial"], folders))
         mstat = self.mirror.status()
         if not mstat.get("rows") and not mstat.get("pulled_at"):
             v["notes"].append("This laptop has not heard from the ledger yet, so only copies made here count.")
@@ -426,7 +512,10 @@ class FieldService:
         public_dests = [self._dest_public(d, vols, last, busy) for d in dests]
         by_id = {p["id"]: p for p in public_dests}
         out_cards = []
-        runs = {r["card"]["serial"]: r for r in self.copier.snapshot()}
+        runs: dict[str, bool] = {}
+        for r in self.copier.snapshot():
+            serial_of = str(r["card"]["serial"] or "").upper()
+            runs[serial_of] = runs.get(serial_of, False) or bool(r["running"])
         for c in cards:
             usable = [d for d in dests if by_id[d.id]["present"]]
             verdict = self.card_verdict(c, usable)
@@ -436,7 +525,7 @@ class FieldService:
                 "capacity": c["capacity"], "free": c["free"], "files": len(files),
                 "bytes": sum(int(f[1]) for f in files), "folder": field_mode.card_folder_name(
                     c["label"], c["serial"], field_mode.card_day(files)),
-                "verdict": verdict, "copying": bool(runs.get(c["serial"], {}).get("running")),
+                "verdict": verdict, "copying": bool(runs.get(str(c["serial"]).upper(), False)),
             })
         if self._auto_sync and self._clock() - self._last_sync_try > SYNC_EVERY_SECONDS \
                 and not any(r["running"] for r in self.copier.snapshot()):
@@ -495,8 +584,12 @@ class FieldService:
         if not text or not os.path.isabs(text) or ".." in Path(text).parts:
             raise ValueError("give the full path of a folder, like D:\\FieldBackup")
         vols = self._scan()
-        if self._volume_for_path(text, vols) is None:
+        holder = self._volume_for_path(os.path.realpath(text), vols)
+        if holder is None:
             raise ValueError("that folder is not on a drive this computer has right now")
+        if holder.get("removable"):
+            raise ValueError("that folder is on a card or a USB stick, not on this laptop's own drive, so a "
+                             "copy there would not count. A plugged-in drive is listed under Copy to already.")
         out = self.store.add_folder(os.path.normpath(text))
         self._vols_at = 0.0                                       # look again: the kinds follow the folders
         return out
@@ -533,12 +626,14 @@ class FieldService:
         at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.local.add([{"volume_id": dest.volume_id, "label": dest.volume_label, "kind": kind,
                          "path": e["path"], "name": e["name"], "size": e["size"], "mtime": e["mtime"],
-                         "verified": e["verified"], "at": at} for e in entries])
-        if dest.recordable and dest.serial:
+                         "verified": e["verified"], "at": at, "card": e.get("card", ""),
+                         "rel": e.get("rel", ""), "phys": e.get("phys") or dest.lane} for e in entries])
+        tracked = [e for e in entries if field_mode.is_recordable(e.get("rel") or e["path"])]
+        if tracked and dest.recordable and dest.serial:
             ledger_outbox.append(
                 [{"volume": {"serial": dest.serial, "label": dest.volume_label, "kind": kind},
                   "path": e["path"], "name": e["name"], "size": e["size"], "mtime": e["mtime"],
-                  "verified": e["verified"], "tool": "field", "at": at} for e in entries],
+                  "verified": e["verified"], "tool": "field", "at": at} for e in tracked],
                 self._outbox_path)
         self.invalidate()
         return len(entries)

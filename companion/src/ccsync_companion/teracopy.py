@@ -386,6 +386,20 @@ def default_spawn(command: str) -> Any:
 
 
 _LAUNCH_LOCK = threading.Lock()      # one stub hands its job over at a time (see launch)
+LAUNCH_TRIES = 3                     # a job whose database never shows is launched again, twice
+REGISTER_SECONDS = 20.0              # how long a launch waits for its job's history database
+REGISTER_AGAIN_SECONDS = 6.0         # ...after a launch that never registered, and on every re-launch
+BROKEN_MEMORY_SECONDS = 300.0        # how long a failed registration shortens the waits
+MAYBE_POLLS = 12                     # our files, no run row for this long (3 s): queued, take it
+_BROKEN_AT: Optional[float] = None
+_CLAIMED: set[str] = set()           # history databases already taken by a launch
+_CLAIMED_MAX = 4000
+
+
+def _claim(name: str) -> None:
+    if len(_CLAIMED) > _CLAIMED_MAX:
+        _CLAIMED.clear()
+    _CLAIMED.add(name)
 
 
 class TeraCopy:
@@ -457,7 +471,7 @@ class TeraCopy:
         os.replace(tmp, list_file)
 
     def launch(self, files: list[str], dest: str, switch: str = DEFAULT_SWITCH,
-               tag: str = "") -> dict[str, Any]:
+               tag: str = "", should_stop: Optional[Callable[[], str]] = None) -> dict[str, Any]:
         """Write the list file and fire TeraCopy at it. Deliberately does NOT
         wait: this process is usually the IPC stub and waiting on it proves
         nothing. -> {since, list_file, pid}"""
@@ -496,36 +510,111 @@ class TeraCopy:
         # each waits until TeraCopy has REGISTERED its job (its history
         # database appears; it is created at submit, before the copy starts,
         # even when queued behind other jobs). The jobs still run side by side.
+        #
+        # A launch counts as REGISTERED only when the new history database lists THIS job's
+        # files and destination: an empty database (TeraCopy woke and lost the job) and another
+        # lane's late database are not it. A job whose database stays empty or never appears is
+        # launched again (safe: /SkipAll never replaces a file, and a job that did register
+        # twice finds its files already there). A TeraCopy that is cold has no History folder
+        # yet: that is "wait", not "skip the wait". After a launch that never registered, the
+        # next ones wait less, so a broken TeraCopy does not hold every lane for 20 s each.
+        global _BROKEN_AT
+        stopped = False
+        pid = None
         with _LAUNCH_LOCK:
-            try:
-                known = set(os.listdir(self.history_dir))
-            except OSError:
-                known = set()
-            self._log(f"TeraCopy ({label}): {command}")
-            pid = None
-            try:
-                child = self._spawn(command)
-                pid = getattr(child, "pid", None)
-            except OSError as exc:
-                self._log(f"TeraCopy ({label}): could not launch: {exc}", "warn")
-            if pid is not None and os.path.isdir(self.history_dir):
-                self._await_registration(known, label)
-        return {"since": since, "list_file": list_file, "pid": pid, "known": known}
+            known: set[str] = set()
+            for attempt in range(LAUNCH_TRIES):
+                try:
+                    known = set(os.listdir(self.history_dir))
+                except OSError:
+                    known = set()
+                self._log(f"TeraCopy ({label}): {command}")
+                pid = None
+                try:
+                    child = self._spawn(command)
+                    pid = getattr(child, "pid", None)
+                except OSError as exc:
+                    self._log(f"TeraCopy ({label}): could not launch: {exc}", "warn")
+                if pid is None:
+                    break
+                recently_broken = _BROKEN_AT is not None and time.monotonic() - _BROKEN_AT < BROKEN_MEMORY_SECONDS
+                seconds = REGISTER_SECONDS if (attempt == 0 and not recently_broken) else REGISTER_AGAIN_SECONDS
+                state = self._await_registration(known, label, [str(f) for f in files], str(dest),
+                                                 seconds=seconds, should_stop=should_stop)
+                if state == "registered":
+                    _BROKEN_AT = None
+                    break
+                if state == "stopped":
+                    stopped = True
+                    break
+                _BROKEN_AT = time.monotonic()
+                if not (os.path.isdir(self.history_dir) and attempt + 1 < LAUNCH_TRIES):
+                    break
+                self._log(f"TeraCopy ({label}): launching it again", "warn")
+        return {"since": since, "list_file": list_file, "pid": pid, "known": known, "stopped": stopped}
 
-    def _await_registration(self, known: set[str], label: str,
-                            seconds: float = 20.0, step: float = 0.25) -> bool:
-        """Wait (bounded by a count of polls, so a fake clock cannot hang it)
-        until a history database that was not there before appears."""
-        for _ in range(max(1, int(seconds / step))):
+    def _job_state(self, db_file: Path, mine: set[str], dest_norm: str) -> str:
+        """What one new history database says about THIS job: "mine" (it lists our files and its
+        run targets our destination), "maybe" (our files, no run row yet), "empty" (no files),
+        "other" (someone else's job) or "unreadable" (being written)."""
+        db = None
+        try:
+            db = _open_ro(db_file)
+            sources = [norm(r[0]) for r in db.execute("select Source from Files limit 500")]
+            if not sources:
+                return "empty"
+            if not any(s in mine or any(s.startswith(m + "\\") or s.startswith(m + "/") for m in mine)
+                       for s in sources):
+                return "other"
+            runs = db.execute("select target from Run").fetchall()
+            if not runs:
+                return "maybe"
+            return "mine" if norm(runs[0][0] or "") == dest_norm else "other"
+        except sqlite3.Error:
+            return "unreadable"
+        finally:
+            if db is not None:
+                _close(db)
+
+    def _await_registration(self, known: set[str], label: str, files: list[str], dest: str,
+                            seconds: float = REGISTER_SECONDS, step: float = 0.25,
+                            should_stop: Optional[Callable[[], str]] = None) -> str:
+        """Wait (bounded by a count of polls, so a fake clock cannot hang it) for the history
+        database of THIS job. -> "registered" | "stopped" | "missing"."""
+        mine = {norm(f) for f in files}
+        dest_norm = norm(dest)
+        maybe_polls = 0
+        polls = max(1, int(seconds / step))
+        for _ in range(polls):
+            if should_stop is not None:
+                try:
+                    if should_stop():
+                        return "stopped"
+                except Exception:                                    # noqa: BLE001
+                    pass
             try:
-                if any(n.endswith(".db") and n not in known for n in os.listdir(self.history_dir)):
-                    return True
+                names = [n for n in os.listdir(self.history_dir)
+                         if n.endswith(".db") and n != "main.db" and n not in known
+                         and os.path.join(self.history_dir, n) not in _CLAIMED]
             except OSError:
-                return False
+                names = []                                           # cold: no History folder yet
+            seen_maybe = None
+            for n in names:
+                got = self._job_state(Path(self.history_dir) / n, mine, dest_norm)
+                if got == "mine":
+                    _claim(os.path.join(self.history_dir, n))
+                    return "registered"
+                if got == "maybe":
+                    seen_maybe = n
+            if seen_maybe is not None:
+                maybe_polls += 1
+                if maybe_polls >= MAYBE_POLLS:                       # our files, still no run row: it is queued
+                    _claim(os.path.join(self.history_dir, seen_maybe))
+                    return "registered"
             self._sleep(step)
-        self._log(f"TeraCopy ({label}): no history record within {seconds:.0f} s of launch; "
-                  "the next launch goes ahead anyway", "warn")
-        return False
+        self._log(f"TeraCopy ({label}): no history record of this job within {seconds:.0f} s of launch",
+                  "warn")
+        return "missing"
 
     def _prune_lists(self, days: int = 14) -> None:
         cutoff = self._now() - days * 86400
@@ -684,7 +773,7 @@ class TeraCopy:
         files = [str(f) for f in files if f]
         if not files:
             return {"code": None, "status": None, "receipts": [], "list_file": None, "since": None}
-        launched = self.launch(files, dest, switch, tag)
+        launched = self.launch(files, dest, switch, tag, should_stop=should_stop)
         if max_seconds is None:
             total = 0
             for f in files:

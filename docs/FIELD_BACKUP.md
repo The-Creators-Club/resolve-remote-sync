@@ -34,6 +34,26 @@ and style come from `assets/field/` and reference nothing outside, so it works w
   the ledger, followed by a mirror pull. Until the mirror catches up, copies made here count from
   `field-local-copies.jsonl`. NAS-pool copies are not outboxed (the server's pool scan records them).
 
+## After the adversarial review (2026-11-10): what "safe to format" will not believe
+- A copy that failed TeraCopy's verify is renamed `<name>.failed` (the ledger skips it). "Already
+  there" is trusted on a quick check only when a verified record exists for that exact volume and
+  path; otherwise the file is compared in full. A TeraCopy copy its own verify did not reach is
+  recorded only after a full compare.
+- Copies are counted by physical disk (two partitions, or a folder that is a junction onto a field
+  drive, are one). A folder on a card or USB stick is never "the laptop".
+- Every original judges the card (stills, 360, HEIF, raws, video, audio) except sidecars (XML, THM,
+  LRV, ...). Untracked originals are known from this laptop's own copies only.
+- A copy on an attached drive is stat'ed (size and time) before it counts; a deleted one is dropped.
+- A copy found by name, size and time must be THIS card's: local rows keep the card serial and path,
+  other rows must end with the card-relative path (a top-level file must sit in the card's folder).
+- Two cards with one label and day: the second lands in `<day> <label> <serial>` (a `.ccsync-card`
+  marker file says whose folder it is).
+- A mapped letter is the NAS pool only with a `.ccsync-pool` marker or a UNC target (config
+  `field_pool_unc`); a letter that changes hands, or a pulled card, stops the lane.
+- `teracopy.launch` counts a launch as registered only when the new history database lists the
+  job's files and destination; an empty database or another lane's is not it; a job that never
+  registers is launched again (twice at most); a cold TeraCopy (no History folder) is waited for.
+
 ## Not verified live
 Real TeraCopy with several lanes at once (it is a single-instance app; jobs are matched by
 destination in its history database) was not exercised: tests use a fake TeraCopy.

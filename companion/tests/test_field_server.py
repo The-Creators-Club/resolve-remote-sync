@@ -237,3 +237,20 @@ def test_the_tray_item_opens_the_page_or_says_why_not(monkeypatch):
     assert opened == ["http://127.0.0.1:8898/field"] and not said
     tray.action_open_field(FakeApp(""))
     assert len(opened) == 1 and "not running" in said[0]
+
+
+def test_nothing_the_page_makes_lands_in_the_real_ccsync_home(tmp_path):
+    """The loopback token, the page's state, its local copies, the outbox and the mirror all resolve
+    under the per-test CONFIG_DIR (conftest), never under ~/.ccsync."""
+    from conftest import REAL_CCSYNC_HOME
+    from ccsync_companion import field_mode, ledger_mirror, ledger_outbox
+
+    w = World(tmp_path)
+    server = field_server.make_server(w.cfg, w.svc, port=0)
+    try:
+        for p in (loopback_guard.token_path(), field_mode.default_state_path(), field_mode.default_copies_path(),
+                  ledger_outbox.default_path(), ledger_mirror.default_path()):
+            assert REAL_CCSYNC_HOME not in Path(p).resolve().parents, p
+        assert loopback_guard.read_token()
+    finally:
+        server.server_close()

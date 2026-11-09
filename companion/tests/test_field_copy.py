@@ -82,8 +82,15 @@ class World:
                            volume_kind="ours", serial=key * 4, lane=lane or f"disk:{key}")
 
     def services(self, **over):
-        kw = dict(cfg={}, view=self.view, volumes_fn=self.volumes, teracopy_fn=None,
-                  record_fn=lambda d, e: (self.recorded.append((d, e)), len(e))[1],
+        def record(d, e):
+            """What the page's service does: note it where the verdict looks (LocalCopies)."""
+            self.recorded.append((d, e))
+            self.local.add([{"volume_id": d.volume_id, "path": x["path"], "name": x["name"], "size": x["size"],
+                             "mtime": x["mtime"], "verified": x["verified"], "card": x.get("card"),
+                             "rel": x.get("rel"), "phys": x.get("phys")} for x in e])
+            return len(e)
+
+        kw = dict(cfg={}, view=self.view, volumes_fn=self.volumes, teracopy_fn=None, record_fn=record,
                   on_lane_done=self.lanes_done.append, on_run_done=self.runs_done.append)
         kw.update(over)
         return field_copy.Services(**kw)
@@ -202,6 +209,19 @@ def test_running_the_card_again_copies_nothing_and_quick_checks_what_is_there(tm
     assert "already there, quick-checked" in lane.message
     (_, entries), = w.recorded
     assert {e["verified"] for e in entries if field_mode.is_recordable(e["rel"])} == {"quick"}
+
+
+def test_with_no_record_of_a_verified_copy_the_file_already_there_is_compared_in_full(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    w.run([w.dest("A")])
+    w.local = field_mode.LocalCopies(tmp_path / "other-local.jsonl")      # this laptop remembers nothing
+    w.view = field_mode.LedgerView(w.mirror, w.local)
+    w.recorded.clear()
+    _, run = w.run([w.dest("A")])
+    lane = lane_of(run, "vol:AAAA")
+    assert lane.state == "done" and lane.counts["there"] == 3
+    (_, entries), = w.recorded
+    assert {e["verified"] for e in entries} == {"full"}                  # not "quick": nothing vouched for them
 
 
 def test_a_different_file_at_the_destination_is_left_alone_and_said_so(tmp_path):
@@ -348,7 +368,7 @@ def test_a_drive_pulled_in_the_middle_stops_its_lane_and_keeps_what_landed(tmp_p
     a, b = lane_of(run, "vol:AAAA"), lane_of(run, "vol:BBBB")
     assert a.state == "failed" and "taken out" in a.message and "CIB_DA" in a.message
     assert a.counts["copied"] == 1
-    landed = [p for p in (tmp_path / "driveA").rglob("*") if p.is_file()]
+    landed = [p for p in (tmp_path / "driveA").rglob("*") if p.is_file() and not p.name.startswith(".ccsync")]
     assert len(landed) == 1 and landed[0].read_bytes() == w.data[
         "/".join(landed[0].relative_to(tmp_path / "driveA" / "FieldBackup" / "2026-10-20 A001").parts)]
     assert b.state == "done"                                              # the other drive is unaffected
@@ -511,10 +531,10 @@ def test_on_windows_the_lane_uses_teracopy_and_trusts_only_its_verify(tmp_path):
 
 
 @windows_only
-def test_a_teracopy_copy_it_did_not_verify_is_quick_checked_and_recorded_as_quick(tmp_path):
+def test_a_teracopy_copy_it_did_not_verify_is_recorded_only_after_a_full_compare(tmp_path):
     w = World(tmp_path, sizes={"PRIVATE/M4ROOT/CLIP/C0001.MP4": 300_000})
     _, run = w.run([w.dest("A")], teracopy_fn=lambda: (FakeTeraCopy(result=1), ""))
     a = lane_of(run, "vol:AAAA")
     assert a.state == "done"
     (_, entries), = w.recorded
-    assert {e["verified"] for e in entries if field_mode.is_recordable(e["rel"])} == {"quick"}
+    assert {e["verified"] for e in entries if field_mode.is_recordable(e["rel"])} == {"full"}

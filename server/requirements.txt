@@ -10,3 +10,4 @@ paramiko>=3.4
 requests>=2.31
 urllib3>=2.0
 pytest>=7.4
+PyYAML>=6.0   # test_sorter_deploy.py parses the rendered compose file (fails, not skips, without it)

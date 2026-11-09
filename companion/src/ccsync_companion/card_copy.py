@@ -15,10 +15,13 @@ Each copy carries a write `mode` from the sorter's plan (a missing one is
 
   copy       write the file. An existing destination is never replaced: the
              same size and byte-identical is `skipped`; anything else is a
-             `conflict` and is left alone.
+             `conflict` and is left alone. TeraCopy gets `/SkipAll` for it, and
+             each group's destinations are looked at again just before it
+             launches (a file that appeared meanwhile is a conflict).
   resume     the destination is a partial of this very file. Python: check
-             that it is the start of the card's file, append the rest, then
-             verify the whole file. TeraCopy: `/OverwriteDiffSize` rewrites it
+             that it is the start of the card's file, build `<dst>.partial`
+             from it plus the rest, verify the whole file, then swap it in for
+             the short one. TeraCopy: `/OverwriteDiffSize` rewrites it
              (run.js's resume), after the same start-of-file check on a sample.
   collision  a DIFFERENT file is at the destination: write beside it under a
              renamed name (`name (2).ext`, as TeraCopy's `/RenameCopied`),
@@ -38,8 +41,8 @@ Rules, each with its reason:
     path anyway and correctness wins), and only then renamed into place. A
     halt, a verify mismatch or an error deletes the `.partial`. The rename
     cannot clobber (Windows `rename` refuses an existing name; elsewhere a
-    hard link is made and the partial unlinked). A resume appends in place to
-    the existing partial and, on a failed verify, truncates it back.
+    hard link is made and the partial unlinked). A resume builds its own
+    `.partial` from the short file and swaps it in only once verified.
     TeraCopy writes IN PLACE with no `.partial`, as it did under the Node
     original (lib/teracopy.js); a job that stops mid-file leaves a short file
     at the final name, which the sorter's next plan sees as `partial` and
@@ -267,18 +270,20 @@ def copy_file(src: Path, dst: Path, size: int, should_stop: Callable[[], str],
 
 def resume_file(src: Path, dst: Path, size: int, have: int, should_stop: Callable[[], str],
                 on_bytes: Callable[[int], None]) -> str:
-    """Finish a partial `dst` of `have` bytes: prove it is the start of `src`,
-    append the rest, read the WHOLE file back against the source's hash.
-    -> "" on success, else why not (the partial is truncated back to `have`
-    when the bytes appended did not verify). Raises _Conflict when the partial
-    is not the start of `src` (nothing is changed), _Stopped on a halt (what
-    was appended stays: it is still a true prefix and the next resume starts
-    from it)."""
+    """Finish a partial `dst` of `have` bytes WITHOUT touching it until the
+    result is proven: build `<dst>.partial` from `dst`'s bytes (each compared with
+    the card's, so a file that is not the start of `src` is a _Conflict) plus
+    the rest of `src`, read the WHOLE file back against the source's hash, and
+    only then swap it in for the short file (checked unchanged just before).
+    -> "" on success, else why not. The `.partial` is gone on every other exit
+    and `dst` is as it was: a stop mid-way costs the appended bytes, but never
+    leaves a full-length file that nothing verified."""
+    partial = dst.with_name(dst.name + PARTIAL_SUFFIX)
+    _discard(partial)                    # a corpse from a crashed run is ours
     h = _new_hash()
-    appended = False
     try:
-        with open(src, "rb") as a, open(dst, "r+b") as b:
-            if os.fstat(b.fileno()).st_size != have:
+        with open(src, "rb") as a, open(dst, "rb") as old, open(partial, "xb") as b:
+            if os.fstat(old.fileno()).st_size != have:
                 raise _Conflict("the partial changed size while it was being checked")
             pos = 0
             while pos < have:
@@ -286,52 +291,43 @@ def resume_file(src: Path, dst: Path, size: int, have: int, should_stop: Callabl
                 if reason:
                     raise _Stopped(reason)
                 n = min(BUFFER_BYTES, have - pos)
-                ca, cb = a.read(n), b.read(n)
+                ca, cb = a.read(n), old.read(n)
                 if ca != cb or len(ca) != n:
                     raise _Conflict("the file already there is not the start of the card's file")
                 h.update(ca)
+                b.write(ca)
                 pos += n
                 on_bytes(n)
             buf = bytearray(BUFFER_BYTES)
             view = memoryview(buf)
-            b.seek(have)
             written = have
-            try:
-                while True:
-                    reason = should_stop()
-                    if reason:
-                        raise _Stopped(reason)
-                    n = a.readinto(buf)
-                    if not n:
-                        break
-                    h.update(view[:n])
-                    b.write(view[:n])
-                    appended = True
-                    written += n
-                    on_bytes(n)
-            finally:
-                b.flush()
-                os.fsync(b.fileno())
-            if written != size:
-                raise OSError(f"read {written} bytes but the source is {size}")
-        _stamp(src, dst)
-        why = verify_whole(dst, size, h.digest(), should_stop)
+            while True:
+                reason = should_stop()
+                if reason:
+                    raise _Stopped(reason)
+                n = a.readinto(buf)
+                if not n:
+                    break
+                h.update(view[:n])
+                b.write(view[:n])
+                written += n
+                on_bytes(n)
+            b.flush()
+            os.fsync(b.fileno())
+        if written != size:
+            raise OSError(f"read {written} bytes but the source is {size}")
+        _stamp(src, partial)
+        why = verify_whole(partial, size, h.digest(), should_stop)
         if why:
-            _truncate(dst, have)
+            _discard(partial)
             return f"verify failed: {why}"
+        if dst.stat().st_size != have:
+            raise _Conflict("the partial changed size while it was being resumed")
+        os.replace(partial, dst)         # the short prefix of this very file, and nothing else
         return ""
-    except OSError:
-        if appended:
-            _truncate(dst, have)
+    except BaseException:
+        _discard(partial)
         raise
-
-
-def _truncate(path: Path, size: int) -> None:
-    try:
-        with open(path, "r+b") as fh:
-            fh.truncate(size)
-    except OSError:
-        log.warning("card copy: could not truncate %s back to %d bytes", path, size)
 
 
 def renamed(dst: Path, n: int) -> Path:
@@ -741,22 +737,66 @@ class CardJob:
             if self._settle(result, w, d):
                 self.progress.done += 1
                 continue
-            if d.resume_from and not _sample_matches(w.src, d.dst, d.resume_from):
-                self._note(result, "conflicts", w, size=w.size, verified=False,
-                           why="the file already there is not the start of the card's file; "
-                               "it was left alone")
-                self.progress.bytes += w.size
-                self.progress.done += 1
+            if self._bad_resume(w, d, result):
                 continue
-            switch = (teracopy_mod.SWITCH_RENAME if w.mode == "collision"
-                      else teracopy_mod.SWITCH_OVERWRITE_DIFF)
-            groups.setdefault((str(w.dst.parent), switch), []).append((w, d))
+            groups.setdefault((str(w.dst.parent), self._switch_for(w)), []).append((w, d))
+        order = {teracopy_mod.SWITCH_SKIP: 0, teracopy_mod.SWITCH_OVERWRITE_DIFF: 1,
+                 teracopy_mod.SWITCH_RENAME: 2}     # plain copies claim their names before renames
         for (folder, switch), members in sorted(
-                groups.items(), key=lambda kv: (len(kv[0][0]), kv[0][0], kv[0][1])):
+                groups.items(), key=lambda kv: (len(kv[0][0]), kv[0][0], order.get(kv[0][1], 9))):
             reason = self._should_stop()
             if reason:
                 raise _Stopped(reason)
-            self._teracopy_group(tc, folder, switch, members, result)
+            members = self._recheck(members, result)
+            if members:
+                self._teracopy_group(tc, folder, switch, members, result)
+
+    @staticmethod
+    def _switch_for(w: "_Work") -> str:
+        if w.mode == "collision":
+            return teracopy_mod.SWITCH_RENAME
+        return teracopy_mod.SWITCH_OVERWRITE_DIFF if w.mode == "resume" else teracopy_mod.SWITCH_SKIP
+
+    def _bad_resume(self, w: "_Work", d: "_Decision", result: dict[str, Any]) -> bool:
+        if d.resume_from and not _sample_matches(w.src, d.dst, d.resume_from):
+            self._note(result, "conflicts", w, size=w.size, verified=False,
+                       why="the file already there is not the start of the card's file; "
+                           "it was left alone")
+            self.progress.bytes += w.size
+            self.progress.done += 1
+            return True
+        return False
+
+    def _recheck(self, members: list[tuple["_Work", "_Decision"]],
+                 result: dict[str, Any]) -> list[tuple["_Work", "_Decision"]]:
+        """Look at each destination again just before its group launches: a
+        file that appeared since the plan (another card's copy, say) is skipped
+        or a conflict, never overwritten. Two members that would write one name
+        (case-blind) in a plain copy: the later is a conflict."""
+        keep: list[tuple[_Work, _Decision]] = []
+        names: set[str] = set()
+        for w, _old in members:
+            reason = self._should_stop()
+            if reason:
+                raise _Stopped(reason)
+            d = self._decide(w, tc_names=True)
+            if self._settle(result, w, d):
+                self.progress.done += 1
+                continue
+            if self._bad_resume(w, d, result):
+                continue
+            if w.mode != "collision":
+                key = str(w.dst).lower()
+                if key in names:
+                    self._note(result, "conflicts", w, size=w.size, verified=False,
+                               why="another file in this job is going to the same name; "
+                                   "it was left alone")
+                    self.progress.bytes += w.size
+                    self.progress.done += 1
+                    continue
+                names.add(key)
+            keep.append((w, d))
+        return keep
 
     def _teracopy_group(self, tc: teracopy_mod.TeraCopy, folder: str, switch: str,
                         members: list[tuple["_Work", "_Decision"]],
@@ -795,7 +835,8 @@ class CardJob:
         tag = os.path.basename(folder.rstrip("\\/")) or "job"
         try:
             out = tc.copy_group([str(w.src) for w, _ in members], folder, switch, tag,
-                                on_tick=tick, expect_verify=not self._unverified_ok())
+                                on_tick=tick, expect_verify=not self._unverified_ok(),
+                                should_stop=self._should_stop)
         except (OSError, ValueError) as exc:
             self._stop_if_card_gone()
             self.progress.bytes = base + total
@@ -804,6 +845,7 @@ class CardJob:
                 self.progress.done += 1
             return
         by_src = {_key(r["source"]): r for r in out["receipts"]}
+        stopped = str(out.get("stopped") or "")
         lost = 0
         for w, d in members:
             r = by_src.get(_key(w.src))
@@ -819,6 +861,8 @@ class CardJob:
                 self._note(result, "failed", w,
                            why=f"TeraCopy reported it verified but {path.name} is "
                                f"{'missing' if have is None else str(have) + ' bytes'} at the destination")
+            elif stopped:
+                continue            # not verified when the wait ended: NOT landed
             elif r is not None and r.get("result") not in (None, teracopy_mod.RESULT_COPIED):
                 self._note(result, "failed", w,
                            why=r.get("message") or f"TeraCopy gave result {r.get('result')} for it")
@@ -832,6 +876,8 @@ class CardJob:
                                + ("" if have is None else f" ({have} of {w.size} bytes)"))
             self.progress.done += 1
         self.progress.bytes = base + total
+        if stopped:
+            raise _Stopped(stopped)
         if lost:
             self._stop_if_card_gone()
 

@@ -35,6 +35,7 @@ def _clean(monkeypatch):
         del sys.modules[name]
     while SRC in sys.path:
         sys.path.remove(SRC)
+    sys.path[:] = [p for p in sys.path if not p.replace("\\", "/").endswith("/stub")]    # _stub_checkout's
 
 
 def make_pool(tmp_path):
@@ -404,3 +405,135 @@ def test_progress_is_the_claimants_alone_and_shows_in_the_status(mounted):
     assert st["etaSeconds"] == (total - total // 2) // 1000
     assert st["done"] == 0 and st["state"] not in ("done", "error")                   # nothing was applied
     assert not app.state.sorter_engine.catalog.final_paths_for("x")
+
+
+# ------------------------------------------------------------------ wave-2: load hold, failed load, stop, public URL
+
+def _stub_checkout(tmp_path, mode):
+    """A footage_sorter whose engine loads slowly or fails, to test the mount's lifecycle."""
+    root = tmp_path / "stub"
+    pkg = root / "footage_sorter"
+    pkg.mkdir(parents=True)
+    (root / "public").mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "config.py").write_text("class Paths:\n    def __init__(self, *a): pass\n", encoding="utf-8")
+    (pkg / "web.py").write_text("def create_app(engine, trust_identity_headers=False):\n"
+                                "    async def app(scope, receive, send):\n"
+                                "        await send({'type': 'http.response.start', 'status': 200, 'headers': []})\n"
+                                "        await send({'type': 'http.response.body', 'body': b'ok'})\n"
+                                "    return app\n", encoding="utf-8")
+    (pkg / "engine.py").write_text(
+        "import threading, time\n"
+        f"MODE = {mode!r}\n"
+        "class SorterEngine:\n"
+        "    instances = []\n"
+        "    def __init__(self, paths, host, **k):\n"
+        "        self.host = host; self.clips = []; self.stopped = False; self.started = False\n"
+        "        SorterEngine.instances.append(self)\n"
+        "    def load(self):\n"
+        "        if MODE == 'fail': raise MemoryError('clips.json')\n"
+        "        time.sleep(0.6)\n"
+        "    def start(self): self.started = True\n"
+        "    def stop(self): self.stopped = True\n", encoding="utf-8")
+    return str(root)
+
+
+def _stub_settings(tmp_path, mode, **kw):
+    return make_settings(tmp_path, sorter_enabled=True, sorter_src=_stub_checkout(tmp_path, mode),
+                         sorter_data=str(tmp_path / "d"), **kw)
+
+
+def test_a_failed_load_takes_the_mount_back(tmp_path):
+    from ccsync_dashboard import mount_status
+    app = create_app(_stub_settings(tmp_path, "fail"))
+    assert app.state.sorter_holder.ready.wait(5)
+    assert app.state.sorter_mounted is False
+    status, detail = mount_status.get("sorter")
+    assert status == sorter.ABSENT and "could not load" in detail
+    with TestClient(app) as client:
+        login(client, "owen")
+        r = client.get("/sorter/")
+        assert r.status_code == 503 and "could not load" in r.json()["error"]
+
+
+def test_stop_during_the_load_starts_no_engine(tmp_path):
+    import time
+    app = create_app(_stub_settings(tmp_path, "slow"))
+    time.sleep(0.1)
+    sorter.stop_sorter(app)
+    assert app.state.sorter_holder.ready.wait(5)
+    engine_mod = sys.modules["footage_sorter.engine"]
+    assert all(not e.started for e in engine_mod.SorterEngine.instances)
+    assert app.state.sorter_engine is None and app.state.sorter_holder.app is None
+
+
+def test_held_requests_use_no_threads_and_get_a_sentence_after_the_wait(monkeypatch):
+    import asyncio
+
+    import anyio
+    import httpx
+    monkeypatch.setattr(sorter, "LOAD_WAIT_S", 1.0)
+    holder = sorter._Holder()
+    gate = sorter.SorterGate(holder, None)
+
+    async def main():
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        before = limiter.borrowed_tokens
+        transport = httpx.ASGITransport(app=gate)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            held = [asyncio.create_task(c.get(f"/sorter/api/thumb/{i}")) for i in range(60)]
+            await asyncio.sleep(0.3)
+            assert limiter.borrowed_tokens == before        # 60 held, no thread taken
+            rs = await asyncio.gather(*held)
+        return rs
+    rs = asyncio.run(main())
+    assert {r.status_code for r in rs} == {503} and "still loading" in rs[0].json()["error"]
+
+
+def test_a_held_request_is_released_the_moment_the_load_ends(monkeypatch):
+    import asyncio
+    import threading
+
+    import httpx
+    holder = sorter._Holder()
+    gate = sorter.SorterGate(holder, None)
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    def finish():
+        holder.app = app
+        holder.finish()
+
+    async def main():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gate), base_url="http://t") as c:
+            t = asyncio.create_task(c.get("/sorter/x"))
+            await asyncio.sleep(0.2)
+            threading.Timer(0.1, finish).start()
+            return await asyncio.wait_for(t, 5)
+    assert asyncio.run(main()).status_code == 200
+
+
+def test_the_dashboards_public_url_becomes_the_oauth_callback(tmp_path):
+    pool, data, projects, staged, host = make_pool(tmp_path)
+    settings = make_settings(tmp_path, sorter_enabled=True, sorter_src=SRC, sorter_data=str(data),
+                             sorter_settings=json.dumps(host), site_dashboard_url="https://dash.example.com")
+    app = create_app(settings)
+    assert app.state.sorter_status == sorter.MOUNTED, app.state.sorter_detail
+    assert app.state.sorter_holder.ready.wait(30) and app.state.sorter_holder.engine is not None
+    from footage_sorter import integrations
+    engine = app.state.sorter_holder.engine
+    assert engine.host["publicUrl"] == "https://dash.example.com"
+    assert integrations._redirect_uri(engine) == "https://dash.example.com/sorter/api/google/callback"
+    sorter.stop_sorter(app)
+
+
+def test_an_explicit_public_url_in_the_sorter_settings_wins(tmp_path):
+    app = create_app(_stub_settings(tmp_path, "slow", sorter_settings=json.dumps({"publicUrl": "https://a.example"}),
+                                    site_dashboard_url="https://b.example"))
+    holder = app.state.sorter_holder
+    assert holder.ready.wait(5)
+    engine_mod = sys.modules["footage_sorter.engine"]
+    assert engine_mod.SorterEngine.instances[-1].host["publicUrl"] == "https://a.example"
+    sorter.stop_sorter(app)

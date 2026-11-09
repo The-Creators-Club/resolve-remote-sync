@@ -66,9 +66,14 @@ RESULT_COPIED = 1        # copied, verify not (yet) done
 MODE_COPY = 1
 MODE_VERIFY = 4
 
-SWITCH_OVERWRITE_DIFF = "/OverwriteDiffSize"   # copy and resume (run.js conflictSwitch)
+SWITCH_SKIP = "/SkipAll"                       # copy: an existing file is NEVER replaced
+SWITCH_OVERWRITE_DIFF = "/OverwriteDiffSize"   # resume only (run.js conflictSwitch)
 SWITCH_RENAME = "/RenameCopied"                # collision (run.js collisionSwitch)
-DEFAULT_SWITCH = SWITCH_OVERWRITE_DIFF
+DEFAULT_SWITCH = SWITCH_SKIP
+
+# The default wait limit for one job: generous, scaled to its bytes.
+MIN_WAIT_SECONDS = 30 * 60
+ASSUMED_BYTES_PER_SECOND = 20 * 1024 * 1024
 
 STANDARD_EXES = (
     r"C:\Program Files\TeraCopy\TeraCopy.exe",
@@ -80,6 +85,12 @@ CODE_OK = 0
 CODE_UNVERIFIED = 10
 CODE_MISSING = 11
 CODE_UNCONFIRMED = 12
+CODE_STOPPED = 13        # the caller asked to stop waiting (a halt, a cancel); TeraCopy is left running
+
+
+def wait_limit_seconds(total_bytes: int) -> float:
+    """At least 30 minutes, plus the time the bytes take at 20 MB/s."""
+    return MIN_WAIT_SECONDS + max(0, int(total_bytes or 0)) / ASSUMED_BYTES_PER_SECOND
 
 
 def norm(path: Any) -> str:
@@ -490,14 +501,19 @@ class TeraCopy:
                      on_tick: Optional[Callable[[dict[str, Any], int], None]] = None,
                      sources: Optional[list[str]] = None,
                      expect_verify: bool = True,
-                     exclude: Optional[set[str]] = None) -> dict[str, Any]:
+                     exclude: Optional[set[str]] = None,
+                     should_stop: Optional[Callable[[], str]] = None,
+                     max_seconds: Optional[float] = None) -> dict[str, Any]:
         """Block until this job is genuinely finished; -> the final status (which
         may still say 'missing' when the wait fell back to watching the process).
 
-        There is no abort here, as in the original: a halt stops the NEXT job
-        from being launched (card_copy checks between jobs), and the one in
-        flight finishes. TeraCopy is one shared instance that may also be
-        running the person's own copies, so it is never killed.
+        `should_stop` is asked on every poll; a reason ends the WAIT (not the
+        job: TeraCopy is one shared instance that may also be running the
+        person's own copies, so it is never killed) and the status comes back
+        with `"stopped": <reason>`. `max_seconds` (else `timeout_minutes`, else
+        no limit) bounds the whole wait, a verify pass included. The verify
+        grace applies only while no verify pass has been SEEN: once TeraCopy is
+        verifying, the wait is for it to finish.
 
         `expect_verify=False` (verify is off and the escape is on) ends the
         wait when the copy phase does, instead of idling out the verify grace.
@@ -520,10 +536,17 @@ class TeraCopy:
                     pass                    # a UI tick must not break the wait
             if state == "done":
                 return status
+            if should_stop:
+                reason = should_stop()
+                if reason:
+                    self._log(f"TeraCopy ({tag}): stopped waiting: {reason}", "warn")
+                    return {**(status or _blank("missing")), "stopped": str(reason)}
             if state == "copied":
                 if not expect_verify:
                     return status
-                if copied_since is None:
+                if status.get("verify_seen"):
+                    copied_since = None          # verifying: wait for it, bounded by the limit
+                elif copied_since is None:
                     copied_since = self._now()
                 elif self._now() - copied_since >= self.verify_grace_seconds:
                     self._log(f"TeraCopy ({tag}): copy finished but no verify pass after "
@@ -552,9 +575,10 @@ class TeraCopy:
                 self._log(f"TeraCopy ({tag}): no job started within "
                           f"{self.start_grace_seconds:g}s.", "warn")
                 return status
-            if self.timeout_minutes > 0 and (self._now() - t0) / 60 >= self.timeout_minutes:
+            limit = float(max_seconds) if max_seconds else self.timeout_minutes * 60
+            if limit > 0 and self._now() - t0 >= limit:
                 self._log(f"TeraCopy ({tag}): still unfinished after "
-                          f"{self.timeout_minutes:g} min; giving up waiting.", "warn")
+                          f"{limit / 60:g} min; giving up waiting.", "warn")
                 return status
             if self._now() - last_report >= 60:
                 last_report = self._now()
@@ -598,7 +622,9 @@ class TeraCopy:
 
     def copy_group(self, files: list[str], dest: str, switch: str = DEFAULT_SWITCH,
                    tag: str = "", on_tick: Optional[Callable[..., None]] = None,
-                   expect_verify: bool = True) -> dict[str, Any]:
+                   expect_verify: bool = True,
+                   should_stop: Optional[Callable[[], str]] = None,
+                   max_seconds: Optional[float] = None) -> dict[str, Any]:
         """Run TeraCopy for `files` into `dest`, wait for it to genuinely
         finish, and return {code, status, receipts, list_file, since}:
 
@@ -607,6 +633,9 @@ class TeraCopy:
             10    job finished but some files were not verified
             11    a file is missing from the destination, or its size differs
             12    completion could not be confirmed
+            13    `should_stop` ended the wait; the result also has `stopped`
+                  (the reason) and only the files TeraCopy had verified count
+                  as landed (the rest say `landed: False`)
 
         Only TeraCopy's own record earns a 0. When the record cannot be read but
         every file is present at the right size the code is 12 with
@@ -616,10 +645,30 @@ class TeraCopy:
         if not files:
             return {"code": None, "status": None, "receipts": [], "list_file": None, "since": None}
         launched = self.launch(files, dest, switch, tag)
+        if max_seconds is None:
+            total = 0
+            for f in files:
+                try:
+                    total += os.stat(f).st_size
+                except OSError:
+                    pass
+            max_seconds = wait_limit_seconds(total)
         status = self.wait_for_job(dest, launched["since"], tag=tag, on_tick=on_tick,
                                    sources=files, expect_verify=expect_verify,
-                                   exclude=launched["known"])
+                                   exclude=launched["known"], should_stop=should_stop,
+                                   max_seconds=max_seconds)
         base = {"list_file": launched["list_file"], "since": launched["since"]}
+        if status and status.get("stopped"):
+            receipts = []
+            if status.get("db_path"):
+                try:
+                    receipts = harvest(status["db_path"])
+                except (sqlite3.Error, OSError):
+                    pass
+            for r in receipts:
+                r["landed"] = bool(r["verified"])
+            return {"code": CODE_STOPPED, "status": status, "receipts": receipts,
+                    "stopped": status["stopped"], **base}
         if status and status.get("state") in ("done", "copied") and status.get("db_path") \
                 and (status["state"] == "done" or not expect_verify):
             receipts: list[dict[str, Any]] = []

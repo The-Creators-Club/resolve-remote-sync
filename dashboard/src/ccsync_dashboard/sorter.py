@@ -164,9 +164,12 @@ class SorterGate:
             await _json(send, 200, {"user": user, "admin": admin, "csrf": csrf})
             return
         if self.holder.app is None:
-            import anyio
-            ready = await anyio.to_thread.run_sync(self.holder.ready.wait, LOAD_WAIT_S)
+            # Waits on an event-loop Event, never a thread: a held request must not use one of anyio's 40
+            # shared worker threads, or a page opening during the load would starve the dashboard's sync routes.
+            ready = await self.holder.wait_async(LOAD_WAIT_S)
             if not ready or self.holder.app is None:
+                if self.holder.error:      # the boot may have recorded "mounted" after the load failed: say it again
+                    mount_status.record("sorter", ABSENT, self.holder.error)
                 await _json(send, 503, {"error": self.holder.error or "the footage sorter is still loading: try again in a moment"})
                 return
         headers = [(k, v) for k, v in scope.get("headers", ()) if k.lower() not in (USER_HEADER, ADMIN_HEADER)]
@@ -187,6 +190,36 @@ class _Holder:
         self.engine: Any = None
         self.error: str | None = None
         self.ready = threading.Event()
+        self.stopped = False                      # stop_sorter ran: a load still in flight must not start anything
+        self.lock = threading.Lock()
+        self._waiters: list[tuple[Any, Any]] = []   # (loop, asyncio.Event) of the requests being held
+
+    def finish(self) -> None:
+        """The load is over (loaded or failed): release every held request. Callable from any thread."""
+        with self.lock:
+            self.ready.set()
+            waiters, self._waiters = self._waiters, []
+        for loop, ev in waiters:
+            try:
+                loop.call_soon_threadsafe(ev.set)
+            except RuntimeError:      # that loop is closed; nobody is waiting on it
+                pass
+
+    async def wait_async(self, timeout: float) -> bool:
+        import asyncio
+        with self.lock:
+            if self.ready.is_set():
+                return True
+            ev = asyncio.Event()
+            self._waiters.append((asyncio.get_running_loop(), ev))
+        try:
+            await asyncio.wait_for(ev.wait(), timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            with self.lock:
+                self._waiters = [w for w in self._waiters if w[1] is not ev]
 
 
 # ------------------------------------------------------------------ moves inside Projects
@@ -395,6 +428,11 @@ def mount_sorter(app: FastAPI, settings: Settings) -> tuple[str, str]:
         hs = host_settings(settings)
     except ValueError as e:
         return ABSENT, str(e)
+    # Where the dashboard is, for the OAuth callback Google redirects the browser to (the engine's
+    # default would be its own loopback). An explicit publicUrl in DASH_SORTER_SETTINGS wins.
+    public_url = str(getattr(settings, "site_dashboard_url", "") or "").strip().rstrip("/")
+    if public_url and not str(hs.get("publicUrl") or "").strip():
+        hs = dict(hs, publicUrl=public_url)
     for key in ("destRoot",):
         root = hs.get(key)
         if root and not Path(root).is_dir():
@@ -421,16 +459,25 @@ def mount_sorter(app: FastAPI, settings: Settings) -> tuple[str, str]:
                 inside_mover=_inside_mover(settings, hs.get("destRoot") or "") if hs.get("destRoot") else None)
             engine.load()
             _job_hooks(settings, engine)
-            engine.start()
-            holder.engine = engine
-            app.state.sorter_engine = engine
+            with holder.lock:
+                if holder.stopped:        # the app shut down while we were loading: start nothing
+                    log.info("Footage Sorter load finished after shutdown; engine not started")
+                    return
+                engine.start()
+                holder.engine = engine
+                app.state.sorter_engine = engine
             holder.app = web.create_app(engine, trust_identity_headers=True)
             log.info("Footage Sorter loaded: %d clips, data %s", len(engine.clips), data_dir)
         except Exception as e:  # noqa: BLE001 - the page says so; the dashboard carries on
             holder.error = f"the footage sorter could not load its data ({type(e).__name__}: {e})"
             log.exception("Footage Sorter failed to load")
+            # the mount was reported before the load ran: take it back, so the nav link hides
+            # and the status page says why
+            app.state.sorter_mounted = False
+            app.state.sorter_status, app.state.sorter_detail = ABSENT, holder.error
+            mount_status.record("sorter", ABSENT, holder.error)
         finally:
-            holder.ready.set()
+            holder.finish()
 
     threading.Thread(target=load, name="sorter-load", daemon=True).start()
     app.state.sorter_holder = holder
@@ -443,6 +490,10 @@ def mount_sorter(app: FastAPI, settings: Settings) -> tuple[str, str]:
 
 def stop_sorter(app: FastAPI) -> None:
     """Let the engine's threads go at app shutdown. Never raises."""
+    holder = getattr(app.state, "sorter_holder", None)
+    if holder is not None:
+        with holder.lock:         # a load in flight sees this before it starts the engine
+            holder.stopped = True
     engine = getattr(app.state, "sorter_engine", None)
     if engine is not None:
         try:

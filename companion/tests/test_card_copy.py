@@ -717,7 +717,7 @@ def test_a_resume_with_no_partial_there_is_an_ordinary_copy(tmp_path):
     assert (w.pool / "Footage/Day1/a.MP4").read_bytes() == b"12345"
 
 
-def test_a_resume_that_fails_its_verify_is_truncated_back_to_the_partial(tmp_path, monkeypatch):
+def test_a_resume_that_fails_its_verify_leaves_the_short_file_as_it_was(tmp_path, monkeypatch):
     w = World(tmp_path)
     data = os.urandom(2 * MIB)
     w.write(w.card, "a.MP4", data)
@@ -725,10 +725,10 @@ def test_a_resume_that_fails_its_verify_is_truncated_back_to_the_partial(tmp_pat
     monkeypatch.setattr(card_copy, "verify_whole", lambda *a, **k: "the copy read back differs from the source")
     _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", len(data)), "resume")]))
     assert res["result"]["failed"][0]["why"].startswith("verify failed")
-    assert part.read_bytes() == data[:MIB]
+    assert part.read_bytes() == data[:MIB] and not partials(w.pool)
 
 
-def test_a_halt_during_a_resume_keeps_the_appended_prefix(tmp_path, monkeypatch):
+def test_a_halt_during_a_resume_leaves_the_short_file_alone_and_no_full_length_file(tmp_path, monkeypatch):
     w = World(tmp_path)
     monkeypatch.setattr(card_copy, "BUFFER_BYTES", 1024)
     data = os.urandom(64 * 1024)
@@ -754,8 +754,8 @@ def test_a_halt_during_a_resume_keeps_the_appended_prefix(tmp_path, monkeypatch)
     r.note_report_reply({"commands": {"jobs": {"offered": [21]}}})
     r.tick()
     assert final(dash)["ok"] is False
-    got = part.read_bytes()
-    assert 4096 < len(got) < len(data) and got == data[:len(got)]      # still a true prefix
+    assert part.read_bytes() == data[:4096]                  # untouched: never a full-length unverified file
+    assert not partials(w.pool)
 
 
 def test_an_unknown_mode_fails_the_item_and_writes_nothing(tmp_path):
@@ -844,9 +844,10 @@ class FakeTeraCopy:
         self.result = result
         self.halt = halt
 
-    def copy_group(self, files, dest, switch, tag="", on_tick=None, expect_verify=True):
+    def copy_group(self, files, dest, switch, tag="", on_tick=None, expect_verify=True, should_stop=None):
         import shutil
         self.calls.append((list(files), dest, switch))
+        self.should_stop = should_stop
         receipts = []
         for f in files:
             target = Path(dest) / Path(f).name
@@ -894,8 +895,8 @@ def test_teracopy_copies_when_it_is_available_and_the_receipt_says_so(tmp_path, 
     assert [c["verified"] for c in result["copied"]] == [True, True]
     assert (w.pool / "Footage/Day1/a.MP4").read_bytes() == data
     calls = fake_tc["tc"].calls
-    assert [(Path(d).name, sw) for _, d, sw in calls] == [("Day1", "/OverwriteDiffSize"),
-                                                         ("Proxy", "/OverwriteDiffSize")]
+    assert [(Path(d).name, sw) for _, d, sw in calls] == [("Day1", "/SkipAll"),
+                                                         ("Proxy", "/SkipAll")]
 
 
 @windows_only
@@ -912,8 +913,10 @@ def test_one_teracopy_job_per_folder_and_switch_with_modes_mapped(tmp_path, fake
     _, res = run_job(w, job)
     calls = fake_tc["tc"].calls
     by_switch = {sw: [Path(f).name for f in files] for files, _, sw in calls}
-    assert by_switch == {"/OverwriteDiffSize": ["a.MP4", "b.MP4", "d.MP4"], "/RenameCopied": ["c.MP4"]}
-    assert len(calls) == 2
+    assert by_switch == {"/SkipAll": ["a.MP4", "b.MP4"], "/OverwriteDiffSize": ["d.MP4"],
+                         "/RenameCopied": ["c.MP4"]}
+    assert [sw for _, _, sw in calls] == ["/SkipAll", "/OverwriteDiffSize", "/RenameCopied"]   # copies first
+    assert len(calls) == 3
     got = {c["src"]: c["filename"] for c in res["result"]["copied"]}
     assert got == {"a.MP4": "a.MP4", "b.MP4": "b.MP4", "c.MP4": "c (2).MP4", "d.MP4": "d.MP4"}
     assert (w.pool / "Footage/Day1/c.MP4").read_bytes() == b"zz"        # never over the existing
@@ -990,6 +993,86 @@ def test_a_halt_between_teracopy_jobs_launches_no_more_and_posts_not_final(tmp_p
     body = dash.receipts[-1]
     assert body["final"] is False and body["copier"] == "teracopy"
     assert [c["src"] for c in body["copied"]] == ["a.MP4"]
+
+
+@windows_only
+def test_a_file_that_appears_before_its_group_launches_is_a_conflict_not_overwritten(tmp_path, fake_tc):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"aaa")
+    w.write(w.card, "b.MP4", b"bbbb")
+
+    class Racing(FakeTeraCopy):
+        def copy_group(self, files, dest, *a, **k):
+            out = super().copy_group(files, dest, *a, **k)
+            if len(self.calls) == 1:         # another machine lands its own proxy meanwhile
+                w.write(w.pool, "Footage/Day1/Proxy/b.MP4", b"OTHER")
+            return out
+
+    fake_tc["tc"] = Racing()
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 3),
+                                  copy_item("b.MP4", "Footage/Day1/Proxy/b.MP4", 4, "c2")],
+                                 folders=[pool_ref("Footage/Day1"), pool_ref("Footage/Day1/Proxy")]))
+    assert len(fake_tc["tc"].calls) == 1
+    assert [c["src"] for c in res["result"]["conflicts"]] == ["b.MP4"]
+    assert (w.pool / "Footage/Day1/Proxy/b.MP4").read_bytes() == b"OTHER"
+
+
+@windows_only
+def test_two_plain_copies_to_one_name_in_a_group_the_later_is_a_conflict(tmp_path, fake_tc):
+    w = World(tmp_path)
+    w.write(w.card, "100/DSC1.JPG", b"1" * 3)
+    w.write(w.card, "101/DSC1.JPG", b"2" * 4)
+    _, res = run_job(w, card_job([copy_item("100/DSC1.JPG", "F/DSC1.JPG", 3, "c1"),
+                                  copy_item("101/DSC1.JPG", "F/dsc1.jpg", 4, "c2")],
+                                 folders=[pool_ref("F")]))
+    assert [c["src"] for c in res["result"]["copied"]] == ["100/DSC1.JPG"]
+    assert [c["src"] for c in res["result"]["conflicts"]] == ["101/DSC1.JPG"]
+    assert [Path(f).name for f in fake_tc["tc"].calls[0][0]] == ["DSC1.JPG"]
+
+
+@windows_only
+def test_a_stop_during_the_teracopy_wait_posts_only_verified_files_and_not_final(tmp_path, fake_tc):
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"aaa")
+    w.write(w.card, "b.MP4", b"bbb")
+
+    class Stopped(FakeTeraCopy):
+        def copy_group(self, files, dest, *a, **k):
+            out = super().copy_group(files, dest, *a, **k)
+            out["receipts"][1].update(verified=False, result=1, landed=False)
+            out.update(code=13, stopped="a fleet halt stopped this job")
+            return out
+
+    fake_tc["tc"] = Stopped()
+    dash = IngestDash(card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 3),
+                                copy_item("b.MP4", "Footage/Day1/b.MP4", 3, "c2")],
+                               folders=[pool_ref("Footage/Day1")]))
+    r = runner(w, dash)
+    r.note_report_reply({"commands": {"jobs": {"offered": [21]}}})
+    r.tick()
+    body = dash.receipts[-1]
+    assert body["final"] is False
+    assert [c["src"] for c in body["copied"]] == ["a.MP4"] and body["failed"] == []
+    assert final(dash)["ok"] is False
+
+
+def test_a_resume_stopped_after_appending_leaves_no_full_length_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(card_copy, "BUFFER_BYTES", 1024)
+    data = os.urandom(8 * 1024)
+    src, dst = tmp_path / "s.bin", tmp_path / "d.bin"
+    src.write_bytes(data)
+    dst.write_bytes(data[:2048])
+    n = {"n": 0}
+
+    def stop():                      # let the prefix check and the whole append through, stop in the read-back
+        n["n"] += 1
+        return "halt" if n["n"] > 2 + 6 + 1 else ""
+
+    with pytest.raises(card_copy._Stopped):
+        card_copy.resume_file(src, dst, len(data), 2048, stop, lambda k: None)
+    assert dst.read_bytes() == data[:2048] and not partials(tmp_path)
+    assert card_copy.resume_file(src, dst, len(data), 2048, lambda: "", lambda k: None) == ""
+    assert dst.read_bytes() == data and not partials(tmp_path)
 
 
 @windows_only

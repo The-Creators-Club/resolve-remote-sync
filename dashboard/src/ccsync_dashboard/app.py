@@ -1811,6 +1811,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.sorter_mounted = app.state.sorter_status == sorter.MOUNTED
     _record_mount(app, "sorter", app.state.sorter_status, app.state.sorter_detail,
                   sorter.MOUNTED)
+    # The load thread may already have FAILED and recorded `absent` before the
+    # line above recorded `mounted` over it (a fast failure: a missing data
+    # file). The thread sets holder.error before it records, so checking it
+    # here, after our record, closes the window: either the thread's record
+    # comes after ours, or its error is visible now.
+    _holder = getattr(app.state, "sorter_holder", None)
+    if _holder is not None and getattr(_holder, "error", None):
+        app.state.sorter_mounted = False
+        app.state.sorter_status, app.state.sorter_detail = sorter.ABSENT, _holder.error
+        _record_mount(app, "sorter", sorter.ABSENT, _holder.error, sorter.MOUNTED)
     # wire-2 (2026-09-18): the SAME busy answer on every mounted sub-app.
     # `@app.exception_handler(Exception)` above is installed on the PARENT's
     # ServerErrorMiddleware, and `/broll`, `/music` and `/ytdl` are real ASGI

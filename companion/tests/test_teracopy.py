@@ -633,3 +633,68 @@ class TestDetect:
         self.ini.write_text("[Transfer]\nTestAlways=0\n")
         assert tc_mod.status_for_capabilities({"teracopy_path": self.exe}) == (True, False)
         assert tc_mod.status_for_capabilities({"teracopy_path": "Q:\\none.exe"}) == (False, False)
+
+
+# ------------------------------------------- stop, time limit, verify in progress
+def test_a_stop_ends_the_wait_on_the_next_poll_without_killing_anything(driver):
+    t, clock, logs, _ = driver(read_status_fn=lambda *a: status_of(state="running", total=2))
+    polls = {"n": 0}
+
+    def stop():
+        polls["n"] += 1
+        return "a fleet halt stopped this job" if polls["n"] >= 3 else ""
+
+    st = t.wait_for_job(DEST, 1, tag="A-CAM", should_stop=stop)
+    assert st["stopped"] == "a fleet halt stopped this job" and polls["n"] == 3
+    assert clock.t - CLOCK0 == 10                         # two sleeps, then out
+
+
+def test_a_wait_has_the_limit_it_is_given_and_a_verify_pass_is_inside_it(driver):
+    t, clock, logs, _ = driver(read_status_fn=lambda *a: status_of(
+        state="copied", copy_done=True, verify_seen=True, total=2, ok=1, bad=1))
+    st = t.wait_for_job(DEST, 1, tag="A-CAM", max_seconds=900)
+    assert st["state"] == "copied" and clock.t - CLOCK0 == 900      # not cut at the 180 s grace
+    assert any("still unfinished after 15 min" in m for m in logs)
+    assert not any("no verify pass" in m for m in logs)
+
+
+def test_a_verify_pass_that_finishes_after_the_grace_is_waited_for(driver):
+    n = {"n": 0}
+
+    def reader(*a):
+        n["n"] += 1
+        if n["n"] < 100:                                  # 500 s of verifying
+            return status_of(state="copied", copy_done=True, verify_seen=True, total=1, bad=1)
+        return status_of(state="done", copy_done=True, verify_seen=True, verify_done=True, total=1, ok=1)
+
+    t, clock, _, _ = driver(read_status_fn=reader)
+    assert t.wait_for_job(DEST, 1, max_seconds=3600)["state"] == "done"
+    assert clock.t - CLOCK0 > 180
+
+
+def test_the_default_limit_is_30_minutes_plus_20_mb_a_second():
+    assert tc_mod.wait_limit_seconds(0) == 1800
+    assert tc_mod.wait_limit_seconds(20 * 1024 * 1024 * 100) == 1800 + 100
+
+
+def test_copy_group_gives_up_at_the_scaled_default_limit(driver, tmp_path):
+    a, b = _files(tmp_path)
+    t, clock, logs, _ = driver(read_status_fn=lambda *a: status_of(state="running", total=2))
+    t.copy_group([a, b], str(tmp_path / "dest-hang"), tag="x")
+    assert 1800 <= clock.t - CLOCK0 < 1810
+
+
+def test_a_stopped_copy_group_reports_unverified_files_as_not_landed(driver, tmp_path):
+    a, b = _files(tmp_path)
+    d = hist(tmp_path, "cg-stop")
+    make_db(d / "g.db", [{"source": a, "size": 10}, {"source": b, "size": 20}],
+            [{"mode": COPY, "target": DEST, "finished": FINISHED}],
+            [{"file": 1, "result": 3, "hash": "AA"}, {"file": 2, "result": 1, "hash": "BB"}])
+    t, _, _, _ = driver(read_status_fn=lambda *x: read_status(d, DEST, since()))
+    r = t.copy_group([a, b], str(tmp_path / "dest-stop"), tag="x", should_stop=lambda: "halt")
+    assert r["code"] == tc_mod.CODE_STOPPED and r["stopped"] == "halt"
+    assert [(x["verified"], x["landed"]) for x in r["receipts"]] == [(True, True), (False, False)]
+
+
+def test_a_plain_copy_defaults_to_skipall():
+    assert tc_mod.DEFAULT_SWITCH == "/SkipAll" == tc_mod.SWITCH_SKIP

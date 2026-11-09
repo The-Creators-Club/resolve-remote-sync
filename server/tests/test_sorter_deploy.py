@@ -352,7 +352,11 @@ def test_the_settings_round_trip_through_the_rendered_yaml(studio, template):
     assert _unquote_single(scalar) == STUDIO_JSON
     assert json.loads(_unquote_single(scalar)) == json.loads(STUDIO_JSON)
 
-    yaml = pytest.importorskip("yaml")
+    try:
+        import yaml
+    except ImportError:
+        pytest.fail("PyYAML is a test dependency (dashboard dev extra, server/requirements.txt): "
+                    "without it nothing checks that TrueNAS can parse the compose file")
     parsed = yaml.safe_load(text)["services"]["dashboard"]["environment"]
     assert parsed["DASH_SORTER_SETTINGS"] == STUDIO_JSON
 

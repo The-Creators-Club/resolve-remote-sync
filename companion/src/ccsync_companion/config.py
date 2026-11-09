@@ -872,6 +872,15 @@ DEFAULTS: dict[str, Any] = {
     # is a job it never claims -- see job_paths.py.
     "jobs_vault_root": "",
     "jobs_media_root": "",
+    # The footage dataset (W:\ on creator-1; `/pool` in the dashboard): where
+    # the Footage Sorter's card ingest lands footage. Blank = no pool here, and
+    # the `pool` root is not reported as a mount.
+    "jobs_pool_root": "",
+    # Report the camera cards in this computer's readers to the Footage Sorter
+    # (POST {dashboard_url}/sorter/agent/cards) and take its `card-ingest` and
+    # `drive-copy` jobs. A dashboard with no sorter answers 404/503 and this
+    # backs off quietly. Set false to opt the machine out of both.
+    "sorter_cards_enabled": True,
     # Seconds of no keyboard or mouse before this machine will CLAIM a job.
     # proxy_gen's own default, deliberately: an editor should not have to
     # learn two meanings of "away".
@@ -1596,6 +1605,11 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # jobs_mulcam_pipeline = "E:\\\\Projects\\\\Editing\\\\Resolve\\\\MulticamPipeline"
 # jobs_vault_root = "X:\\\\"
 # jobs_media_root = ""
+# The footage dataset the Footage Sorter's card ingest writes into.
+# jobs_pool_root = "W:\\\\"
+# Report camera cards in this computer's readers to the Footage Sorter, and
+# take its card-ingest / drive-copy jobs. On by default.
+# sorter_cards_enabled = true
 # jobs_idle_seconds = 300
 # jobs_skip_while_resolve_running = true
 # jobs_poll_seconds = 20

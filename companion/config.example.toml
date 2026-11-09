@@ -867,6 +867,15 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # this machine cannot place is a job it never claims.
 # jobs_vault_root = "X:\\"
 # jobs_media_root = ""
+#
+# The footage dataset the Footage Sorter's card ingest writes into (the `pool`
+# root: W:\ on creator-1). Reported as a mount only when set and present.
+# jobs_pool_root = "W:\\"
+#
+# Report the camera cards in this computer's readers to the Footage Sorter
+# and take its card-ingest / drive-copy jobs. On by default; a dashboard with
+# no sorter makes this back off quietly.
+# sorter_cards_enabled = true
 
 # jobs_idle_seconds = 300
 # jobs_skip_while_resolve_running = true

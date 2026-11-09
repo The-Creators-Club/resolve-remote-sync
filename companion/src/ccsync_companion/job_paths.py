@@ -10,7 +10,7 @@ Timeline Cards container and a UNC path on the wire; the footage share needs
 its own mapping to be usable at all. So a path on the wire would be correct on
 exactly one machine, and silently wrong on the rest.
 
-Three roots, by name:
+Four roots, by name:
 
     tree    the canonical project tree -- config `local_root`, the one root
             every machine already has and the only one that is not new here.
@@ -18,6 +18,9 @@ Three roots, by name:
             and script docs). Blank = this machine has no vault.
     media   config `jobs_media_root` (the footage share, where it is mounted
             separately from the tree). Blank = no media root here.
+    pool    config `jobs_pool_root` (the footage dataset: the W: drive on creator-1,
+            `/pool` in the dashboard). Where the Footage Sorter's card ingest
+            lands footage. Blank = no pool here.
 
 A machine that cannot place a root does not report it as a mount, is never
 offered a job that requires it, and refuses one that arrives anyway. Absent is
@@ -36,7 +39,9 @@ log = logging.getLogger("ccsync.jobpaths")
 TREE = "tree"
 VAULT = "vault"
 MEDIA = "media"
-ROOT_KEYS = {VAULT: "jobs_vault_root", MEDIA: "jobs_media_root"}
+POOL = "pool"
+ROOT_KEYS = {VAULT: "jobs_vault_root", MEDIA: "jobs_media_root",
+             POOL: "jobs_pool_root"}
 
 
 class JobPathError(ValueError):
@@ -92,7 +97,7 @@ def roots(cfg: dict[str, Any]) -> dict[str, Path]:
 def mounts(cfg: dict[str, Any]) -> list[str]:
     """Root NAMES for the capabilities report, in a stable order."""
     have = roots(cfg)
-    return [name for name in (TREE, VAULT, MEDIA) if name in have]
+    return [name for name in (TREE, VAULT, MEDIA, POOL) if name in have]
 
 
 def resolve(cfg: dict[str, Any], root: str, rel_path: str) -> Path:

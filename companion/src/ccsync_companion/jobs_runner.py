@@ -72,7 +72,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
-from . import job_paths, jobs_media
+from . import card_copy, job_paths, jobs_media, sorter_cards
 from . import proc_tree
 
 log = logging.getLogger("ccsync.jobs")
@@ -158,6 +158,11 @@ RECENT_FILENAME = "jobs_recent.json"
 RECENT_MAX = 10
 
 HTTP_TIMEOUT_SECONDS = 20.0
+# The Footage Sorter's copy list and receipt (card-ingest / drive-copy): a card
+# is thousands of files, so these calls are larger than a heartbeat.
+SORTER_TIMEOUT_SECONDS = 60.0
+RECEIPT_TRIES = 4
+RECEIPT_RETRY_SECONDS = 3.0
 # The dashboard's lease is 300 s (db.JOB_LEASE_SECONDS). Beat every 30, so a
 # beat that cannot be DELIVERED costs a tenth of the lease and nothing else:
 # `_heartbeat` treats a transport failure as a blip and keeps working, and the
@@ -240,6 +245,7 @@ class JobRunner:
         clock: Callable[[], float] = time.monotonic,
         notify: Optional[Callable[[str], None]] = None,
         recent_path: Optional[Path] = None,
+        volumes_fn: Optional[Callable[..., list[dict[str, Any]]]] = None,
     ) -> None:
         self.cfg = cfg or {}
         self._request = request_fn
@@ -257,6 +263,9 @@ class JobRunner:
         self._runner = runner_fn or subprocess.Popen
         self._clock = clock
         self._notify = notify
+        # Where the card-ingest and drive-copy kinds look for a volume by
+        # serial: (scope, skip) -> [{serial, drive, root, ...}].
+        self._volumes_fn = volumes_fn or sorter_cards.list_volumes
 
         self.enabled = bool(self.cfg.get("jobs_enabled", True))
         self.idle_seconds = config_mod.coerce_numeric(self.cfg, "jobs_idle_seconds", 300)
@@ -668,6 +677,10 @@ class JobRunner:
         # BOTH, never one: every media recipe probes before it encodes.
         if caps.get("ffmpeg") and caps.get("ffprobe"):
             kinds.extend(jobs_media.MEDIA_KINDS)
+        # The Footage Sorter's two copy kinds (sorter_cards.enabled decides the
+        # capability): in-process, no ffmpeg, and read-only against the card.
+        if caps.get("sorter_cards"):
+            kinds.extend(card_copy.CARD_KINDS)
         # ...AND THIS MACHINE'S OWN ALLOW-LIST (phase 4), from the same
         # capabilities section the scheduler filtered on, so the two answers
         # cannot disagree. Empty is every kind. Honoured on BOTH sides
@@ -812,7 +825,8 @@ class JobRunner:
         self._note_credential_accepted()
         return parsed.get("job") or None
 
-    def _heartbeat(self, job_id: int, progress: Optional[float] = None) -> bool:
+    def _heartbeat(self, job_id: int, progress: Optional[float] = None,
+                   extra: Optional[dict[str, Any]] = None) -> bool:
         """-> keep going. A 410 is the dashboard saying the job is no longer
         ours (the lease expired and somebody else has it, or an admin ended
         it); the answer to all of those is the same one, and it is to stop.
@@ -837,6 +851,9 @@ class JobRunner:
         body: dict[str, Any] = {"machine": self.machine}
         if progress is not None:
             body["progress"] = max(0.0, min(1.0, float(progress)))
+        if extra:
+            # card copy: {done, of, bytes} beside the fraction.
+            body.update(extra)
         try:
             status, _parsed = self._call(f"/{int(job_id)}/heartbeat", body)
         except Exception:                                       # noqa: BLE001
@@ -1037,6 +1054,9 @@ class JobRunner:
         if kind in jobs_media.MEDIA_KINDS:
             self._execute_media(job)
             return
+        if kind in card_copy.CARD_KINDS:
+            self._execute_card(job)
+            return
         if kind != "whisper":
             # Claimed something this build cannot run: hand it straight back,
             # NOT retryable on this machine's account -- the dashboard's own
@@ -1203,6 +1223,158 @@ class JobRunner:
         result["files"] = [f"{out_rel}/{name}" if out_rel else name
                            for name in outcome.get("files", [])]
         self._post_result(job_id, True, result=result)
+
+    # -- the Footage Sorter's copies ---------------------------------------
+    def _execute_card(self, job: dict[str, Any]) -> None:
+        """`card-ingest` / `drive-copy`: copy, verify, report, in this process.
+
+        The copier is card_copy.CardJob (never overwrites, `.partial` then
+        verify then rename). This is only the glue the media kinds have too:
+        the heartbeat carrying {done, of, bytes}, and a halt, a cancel, a lost
+        lease or a shutdown stopping it with the `.partial` discarded.
+
+        A job that RAN is a success even when some files were skipped,
+        conflicted or failed: those are in the result, which is what the
+        sorter reads. Only a job that could not run (wrong card, root not
+        placeable) or was stopped is posted as a failure.
+        """
+        job_id = int(job["id"])
+        kind = str(job["kind"])
+        try:
+            inputs = self._fetch_copy_list(job_id, job.get("inputs") or {})
+        except card_copy.CardJobError as exc:
+            log.warning("jobs: job #%s (%s) has no copy list: %s", job_id, kind, exc)
+            self._post_result(job_id, False, str(exc), retryable=exc.retryable)
+            return
+        lease_lost = threading.Event()
+        finished = threading.Event()
+        cancelled: dict[str, bool] = {"yes": False}
+
+        def should_stop() -> str:
+            if self._cancel_requested(job_id):
+                cancelled["yes"] = True
+                return CANCELLED_ERROR
+            if lease_lost.is_set():
+                return "the lease was lost"
+            if self._halted():
+                return "a fleet halt stopped this job"
+            if self._stop.is_set():
+                return "this computer is shutting down"
+            return ""
+
+        progress = card_copy.Progress()
+
+        def beat() -> None:
+            while not finished.wait(HEARTBEAT_SECONDS):
+                try:
+                    alive = self._heartbeat(job_id, progress.fraction,
+                                            progress.snapshot())
+                except Exception:                               # noqa: BLE001
+                    log.debug("jobs: the heartbeat for job #%s raised",
+                              job_id, exc_info=True)
+                    continue
+                if not alive:
+                    lease_lost.set()
+                    return
+
+        job_obj = card_copy.CardJob(self.cfg, should_stop=should_stop,
+                                    volumes_fn=self._volumes_fn, progress=progress)
+        beater = threading.Thread(target=beat, name="ccsync-jobs-heartbeat",
+                                  daemon=True)
+        beater.start()
+        started = self._clock()
+        try:
+            result = job_obj.run(kind, inputs)
+        except (card_copy.CardJobError, job_paths.JobPathError, ValueError,
+                OSError) as exc:
+            finished.set()
+            log.warning("jobs: job #%s (%s) cannot run: %s", job_id, kind, exc)
+            self._post_result(job_id, False, str(exc),
+                              result={"seconds": round(self._clock() - started, 1)},
+                              retryable=_placement_retryable(exc)
+                              if not isinstance(exc, card_copy.CardJobError)
+                              else exc.retryable)
+            return
+        except Exception as exc:                                # noqa: BLE001
+            finished.set()
+            log.exception("jobs: job #%s (%s) raised", job_id, kind)
+            self._post_result(job_id, False, str(exc), retryable=True)
+            return
+        finally:
+            finished.set()
+        # The full receipt goes to the sorter, not through the job row (the
+        # dashboard drops job JSON over 16 KB); the result is only counts.
+        small = {k: len(result[k]) for k in
+                 ("copied", "skipped", "conflicts", "failed")}
+        small["seconds"] = round(self._clock() - started, 1)
+        delivered = self._post_receipt(job_id, result)
+        small["receipt"] = delivered
+        if job_obj.stopped:
+            log.warning("jobs: job #%s (%s) stopped: %s", job_id, kind,
+                        job_obj.stopped)
+            self._post_result(job_id, False, job_obj.stopped, result=small,
+                              retryable=not cancelled["yes"])
+            return
+        log.info("jobs: job #%s (%s) copied %d, skipped %d, %d conflicts, %d failed",
+                 job_id, kind, small["copied"], small["skipped"],
+                 small["conflicts"], small["failed"])
+        if not delivered:
+            # Copies are idempotent (same size is skipped), so running it again
+            # is safe and is the only way the sorter ever gets its receipt.
+            self._post_result(job_id, False,
+                              "the copy finished but the receipt could not be "
+                              "delivered to the dashboard", result=small,
+                              retryable=True)
+            return
+        self._post_result(job_id, True, result=small)
+
+    def _sorter_call(self, method: str, path: str, body: Optional[dict]) -> tuple[int, Any]:
+        request = self._request
+        if request is None:
+            from .broll_ingest import default_request
+            request = default_request
+        return request(method, f"{self._dashboard_url}{path}", body,
+                       self._headers(), SORTER_TIMEOUT_SECONDS)
+
+    def _fetch_copy_list(self, job_id: int, inputs: dict[str, Any]) -> dict[str, Any]:
+        """GET /sorter/agent/ingest/<id>: the copy list, which is too big to
+        ride the job row. -> inputs merged with the answer. 404/409 mean the
+        sorter no longer has (or no longer wants) this job: not retryable."""
+        try:
+            status, parsed = self._sorter_call(
+                "GET", f"/sorter/agent/ingest/{int(job_id)}", None)
+        except Exception as exc:                                # noqa: BLE001
+            raise card_copy.CardJobError(
+                f"could not fetch the copy list ({exc})", retryable=True) from exc
+        if status in (404, 409):
+            raise card_copy.CardJobError(
+                f"the sorter has no copy list for this job (HTTP {status})",
+                retryable=False)
+        if status != 200 or not isinstance(parsed, dict):
+            raise card_copy.CardJobError(
+                f"the sorter answered HTTP {status} for the copy list",
+                retryable=True)
+        return {**inputs, **parsed}
+
+    def _post_receipt(self, job_id: int, receipt: dict[str, Any]) -> bool:
+        """POST the full receipt, a few tries on a network error. -> delivered."""
+        body = {k: receipt.get(k, []) for k in
+                ("copied", "skipped", "conflicts", "failed")}
+        for attempt in range(RECEIPT_TRIES):
+            try:
+                status, _ = self._sorter_call(
+                    "POST", f"/sorter/agent/ingest/{int(job_id)}/receipt", body)
+                if status == 200:
+                    return True
+                if status in (404, 409) or status in CREDENTIAL_REFUSED_STATUSES:
+                    log.warning("jobs: the receipt for job #%s was refused "
+                                "(HTTP %s)", job_id, status)
+                    return False
+            except Exception:                                   # noqa: BLE001
+                log.debug("jobs: receipt post failed", exc_info=True)
+            if attempt + 1 < RECEIPT_TRIES:
+                self._stop.wait(RECEIPT_RETRY_SECONDS)
+        return False
 
     def _media_paths(
         self, job: dict[str, Any],

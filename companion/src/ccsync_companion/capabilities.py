@@ -17,6 +17,7 @@ anything new:
     ffprobe    the same probe on ffmpeg_tools.ffprobe_for's answer
     whisper    two configured paths, both present on disk
     mounts     job_paths.mounts()            (root NAMES, never paths)
+    sorter_cards  sorter_cards.enabled()     (card-ingest / drive-copy)
     idle_*     idle.IdleProbe.seconds_idle()
     resolve    resolve_prefs.resolve_is_running + the watcher's project name
 
@@ -49,7 +50,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
-from . import ffmpeg_tools, job_paths, jobs_media
+from . import card_copy, ffmpeg_tools, job_paths, jobs_media, sorter_cards
 
 log = logging.getLogger("ccsync.capabilities")
 
@@ -64,7 +65,8 @@ NVENC_ENCODERS = ("h264_nvenc", "hevc_nvenc")
 # The kinds a `jobs_kinds` allow-list may name. `conform` and `resolve-edit`
 # are absent and must stay absent (§4.2): every edit is a synthetic keystroke
 # into whatever Resolve has open on ONE machine.
-KNOWN_KINDS = ("whisper",) + tuple(jobs_media.MEDIA_KINDS)
+KNOWN_KINDS = (("whisper",) + tuple(jobs_media.MEDIA_KINDS)
+               + tuple(card_copy.CARD_KINDS))
 
 _lock = threading.Lock()
 _cache: Optional[tuple[float, dict[str, Any]]] = None
@@ -340,6 +342,11 @@ def _build(
         "whisper_detail": whisper_detail,
         "claude": _claude(),
         "mounts": job_paths.mounts(cfg),
+        # Can this computer read camera cards for the Footage Sorter, and run
+        # its `card-ingest` / `drive-copy` copies? Only where
+        # `sorter_cards_enabled` (default on). The cards themselves ride their
+        # own report (sorter_cards.py), not this section.
+        "sorter_cards": sorter_cards.enabled(cfg),
         "cpu_count": os.cpu_count(),
         "load": _load(),
         "companion_version": config_mod.VERSION,

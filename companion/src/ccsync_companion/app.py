@@ -35,6 +35,7 @@ from . import broll_standins
 from . import canon
 from . import capabilities as capabilities_mod
 from . import jobs_runner as jobs_runner_mod
+from . import sorter_cards as sorter_cards_mod
 from . import timeline_cards_role as cards_role_mod
 from . import config as config_mod
 from . import crash_report
@@ -2488,6 +2489,18 @@ class CompanionApp:
         except Exception:
             log.exception("failed to build the fleet job runner")
             self.job_runner = None
+
+        # The Footage Sorter's card reporter: the camera cards in this
+        # computer's readers, POSTed to the dashboard's /sorter/agent/cards.
+        # Its own thread and its own try, like the runner above, and a no-op
+        # unless `sorter_cards_enabled`.
+        self.sorter_cards: Any = None
+        try:
+            self.sorter_cards = sorter_cards_mod.SorterCards(
+                cfg, identity_token_fn=lambda: self.identity.token)
+        except Exception:
+            log.exception("failed to build the sorter card reporter")
+            self.sorter_cards = None
 
         # The Timeline Cards role (TIMELINE-CARDS-INTO-CCSYNC.md phase 2):
         # this machine's Resolve serving the cards page, through the
@@ -10162,7 +10175,7 @@ class CompanionApp:
         cfg = getattr(self, "config", {}) or {}
         roots = [cfg.get(key) for key in (
             "local_root", "remote_root", "canonical_prefix", "jobs_vault_root",
-            "jobs_media_root", "cards_vault_root")]
+            "jobs_media_root", "jobs_pool_root", "cards_vault_root")]
         try:
             roots.append(str(config_mod.resolved_local_root(cfg)))
         except Exception:
@@ -10584,6 +10597,10 @@ class CompanionApp:
             # has the capability and the idleness to take.
             if self.job_runner is not None:
                 self.job_runner.start()
+            # ...and the card reporter: it reads removable drives only, and
+            # only talks to a dashboard that has a sorter.
+            if self.sorter_cards is not None:
+                self.sorter_cards.start()
         except Exception:
             log.exception("failed to start the proxy generator")
         # ...and the Timeline Cards role, behind its OWN try: it is the only
@@ -12011,6 +12028,11 @@ class CompanionApp:
                 self.job_runner.stop()
         except Exception:
             log.exception("failed to stop the fleet job runner")
+        try:
+            if getattr(self, "sorter_cards", None) is not None:
+                self.sorter_cards.stop()
+        except Exception:
+            log.exception("failed to stop the sorter card reporter")
         # Beside it, and before the lanes: it is holding Resolve open for a
         # page somebody may be looking at, and letting go is the polite half
         # of "one Resolve client per machine".

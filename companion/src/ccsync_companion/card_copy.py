@@ -93,6 +93,56 @@ class CardJobError(Exception):
         self.retryable = bool(retryable)
 
 
+# -- the automatic backup's home check (footage-sorter docs/AUTO-BACKUP-PLAN.md) --
+SMB_PORT = 445
+HOME_TRIES = 3
+
+
+def _pool_host(cfg: dict[str, Any]) -> str:
+    """The host of the share the pool root is on: a UNC root directly, or a mapped drive's UNC. '' when unknown."""
+    root = str((cfg or {}).get(job_paths.ROOT_KEYS[job_paths.POOL]) or "").strip()
+    unc = root
+    if len(root) >= 2 and root[1] == ":" and os.name == "nt":
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(1024)
+            size = ctypes.c_ulong(len(buf))
+            if ctypes.windll.mpr.WNetGetConnectionW(root[:2], buf, ctypes.byref(size)) == 0:   # type: ignore[attr-defined]
+                unc = buf.value
+        except Exception:                                   # noqa: BLE001
+            unc = root
+    unc = unc.replace("/", "\\")
+    if unc.startswith("\\\\"):
+        return unc[2:].split("\\", 1)[0]
+    return ""
+
+
+def at_home(host: str, rtt_ms: float = 15.0, connect: Optional[Callable[[str, int, float], float]] = None) -> tuple[bool, str]:
+    """Is this computer on the NAS's home network? Three TCP connects to the SMB port; the median round trip
+    under `rtt_ms` is "the same network". From elsewhere over Tailscale it is many times that, and an address
+    that does not answer at all is not home either. -> (home, why not)."""
+    import socket
+    import time as _time
+
+    def _connect(h: str, port: int, timeout: float) -> float:
+        t = _time.perf_counter()
+        with socket.create_connection((h, port), timeout=timeout):
+            return (_time.perf_counter() - t) * 1000.0
+    probe = connect or _connect
+    times: list[float] = []
+    for _ in range(HOME_TRIES):
+        try:
+            times.append(probe(host, SMB_PORT, 0.5))
+        except OSError:
+            continue
+    if not times:
+        return False, f"the NAS's home address {host} did not answer"
+    med = sorted(times)[len(times) // 2]
+    if len(times) < 2 or med >= rtt_ms:
+        return False, f"the NAS's home address {host} answered in {med:.0f} ms, not like the same network (under {rtt_ms:g} ms)"
+    return True, ""
+
+
 class _Stopped(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -405,6 +455,8 @@ class CardJob:
         self._teracopy_fn = teracopy_fn or (lambda: teracopy_mod.detect(self.cfg))
         self._ingest_serial = ""
         self._vol_cache: dict[tuple[str, str], Path] = {}
+        # the automatic backup's home check, a seam for the suite: (host, rtt_ms) -> (home, why not)
+        self._at_home: Optional[Callable[[str, float], tuple[bool, str]]] = None
 
     # -- placing ---------------------------------------------------------
     def _find_card(self, serial: str) -> Path:
@@ -475,6 +527,15 @@ class CardJob:
         if not isinstance(copies, list):
             raise CardJobError("the job has no copies list")
         folders = inputs.get("folders") or []
+        if kind == KIND_DRIVE_COPY and inputs.get("homeOnly"):
+            # an automatic backup copies only at home (footage-sorter docs/AUTO-BACKUP-PLAN.md): over a slow link
+            # it would take all day, and a laptop away from home tries again an hour later
+            host = str(inputs.get("homeHost") or "") or _pool_host(self.cfg)
+            if not host:
+                raise CardJobError("away from home: cannot tell, no homeHost and no pool share to find the NAS by")
+            home, why = (self._at_home or at_home)(host, float(inputs.get("homeRttMs") or 15))
+            if not home:
+                raise CardJobError(f"away from home: {why}; nothing was copied")
         if kind == KIND_CARD_INGEST:
             # Find the card FIRST and fail before a folder is made if it is
             # the wrong one.

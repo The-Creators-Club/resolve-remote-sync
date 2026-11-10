@@ -549,6 +549,49 @@ def test_a_drive_that_is_not_here_fails_the_drive_copy_retryably(tmp_path):
     assert res["ok"] is False and res["retryable"] is True
 
 
+def _auto_job(w, jid, **extra):
+    return {"id": jid, "kind": "drive-copy", "inputs": {"homeOnly": True, "homeHost": "192.168.0.102", "homeRttMs": 15, **extra,
+                                                        "copies": [{"src": {"root": f"local:{w.drive_serial}", "rel": "shoot/a.mov"},
+                                                                    "dst": pool_ref("Auto backup/razer/D/shoot/a.mov"), "size": 5}],
+                                                        "folders": [pool_ref("Auto backup/razer/D/shoot")]}}
+
+
+def test_an_automatic_backup_copies_at_home(tmp_path, monkeypatch):
+    """footage-sorter docs/AUTO-BACKUP-PLAN.md: the job carries homeOnly; at home it copies like any drive copy."""
+    w = World(tmp_path)
+    w.write(w.drive, "shoot/a.mov", b"hello")
+    asked = []
+    monkeypatch.setattr(card_copy, "at_home", lambda host, rtt: (asked.append((host, rtt)), (True, ""))[1])
+    _, res = run_job(w, _auto_job(w, 41))
+    assert res["ok"] is True and asked == [("192.168.0.102", 15.0)]
+    assert (w.pool / "Auto backup/razer/D/shoot/a.mov").read_bytes() == b"hello"
+
+
+def test_an_automatic_backup_away_from_home_copies_nothing(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    w.write(w.drive, "shoot/a.mov", b"hello")
+    monkeypatch.setattr(card_copy, "at_home", lambda host, rtt: (False, "answered in 180 ms"))
+    _, res = run_job(w, _auto_job(w, 42))
+    assert res["ok"] is False and res["retryable"] is False
+    assert "away from home" in res["error"]
+    assert not (w.pool / "Auto backup").exists()
+
+
+def test_the_home_check_itself():
+    fast = lambda h, p, t: 2.0
+    slow = lambda h, p, t: 140.0
+
+    def dead(h, p, t):
+        raise OSError("timed out")
+    assert card_copy.at_home("nas", 15, connect=fast) == (True, "")
+    home, why = card_copy.at_home("nas", 15, connect=slow)
+    assert home is False and "140 ms" in why
+    home, why = card_copy.at_home("nas", 15, connect=dead)
+    assert home is False and "did not answer" in why
+    assert card_copy._pool_host({"jobs_pool_root": "\\\\192.168.0.102\\TheCreatorsPool"}) == "192.168.0.102"
+    assert card_copy._pool_host({"jobs_pool_root": ""}) == ""
+
+
 # -------------------------------------------- the copy list and the receipt
 
 def test_the_job_row_is_small_and_the_receipt_goes_to_the_sorter(tmp_path):

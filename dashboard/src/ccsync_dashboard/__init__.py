@@ -36,4 +36,4 @@
 # 0.7.78 (2026-11-08): CR-383, the unopened-projects sweep's report field
 # (`resolve_health.unopened_out_of_tree`, schema v61) and its alert,
 # `unopened_out_of_tree`. Deploy it BEFORE companion 0.9.88.
-VERSION = "0.7.78"
+VERSION = "0.7.79"

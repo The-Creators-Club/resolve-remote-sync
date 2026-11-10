@@ -46,6 +46,10 @@ and style come from `assets/field/` and reference nothing outside, so it works w
 - A copy on an attached drive is stat'ed (size and time) before it counts; a deleted one is dropped.
 - A copy found by name, size and time must be THIS card's: local rows keep the card serial and path,
   other rows must end with the card-relative path (a top-level file must sit in the card's folder).
+  EXCEPT ON THE NAS (2026-11-10, Alex: "make it find clips wherever they are"): the sorter flattens
+  a card's tree when it files clips into projects, so a NAS copy counts wherever it sits on the
+  pool, by name, size and time, unless it carries a different card's serial. Accepted price: two
+  linked recorders whose files match in name, length and time can stand in for each other there.
 - Two cards with one label and day: the second lands in `<day> <label> <serial>` (a `.ccsync-card`
   marker file says whose folder it is).
 - A mapped letter is the NAS pool only with a `.ccsync-pool` marker or a UNC target (config

@@ -480,7 +480,9 @@ class FieldService:
             card["files"], self.view.copies, self.resolver.kind,
             dest_volumes={d.id: d.volume_id for d in dests if d.volume_id},
             exclude_volumes=[f"vol:{card['serial']}"], phys_of=self._phys_of,
-            match_fn=lambda row, rel: field_mode.row_is_this_file(row, rel, card["serial"], folders))
+            match_fn=lambda row, rel: field_mode.row_is_this_file(
+                row, rel, card["serial"], folders,
+                on_nas=lambda r: self.resolver.kind(str(r.get("volume_id") or "")) == "nas"))
         mstat = self.mirror.status()
         if not mstat.get("rows") and not mstat.get("pulled_at"):
             v["notes"].append("This laptop has not heard from the ledger yet, so only copies made here count.")

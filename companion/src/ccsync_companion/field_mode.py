@@ -190,21 +190,35 @@ def write_card_marker(folder: "str | Path", serial: str, label: str = "") -> Non
         log.debug("field: could not write the card marker in %s", folder, exc_info=True)
 
 
-def row_is_this_file(row: dict[str, Any], rel: str, card_serial: str, folders: Iterable[str]) -> bool:
+def row_is_this_file(row: dict[str, Any], rel: str, card_serial: str, folders: Iterable[str],
+                     on_nas: Optional[Callable[[dict[str, Any]], bool]] = None) -> bool:
     """Is a copy found by NAME, SIZE and TIME really this card's file? Two recorders at one bitrate
     write take after take of identical length with linked start and stop, so name, size and time
     alone can be somebody else's file. A copy this machine made carries its card's serial and must
     match it. Any other copy must end with the file's card-relative path; a file at the card's top
     level (a recorder's WAV, a BMCC clip) has no path to match, so it must sit in this card's own
-    folder. A copy that is none of these is not counted: a short verdict is safe, a long one is not."""
+    folder. A copy that is none of these is not counted: a short verdict is safe, a long one is not.
+
+    EXCEPT ON THE NAS (`on_nas(row)` true; Alex, 2026-11-10: "make it find clips wherever they
+    are"). The sorter moves a card's clips out of their landing folder into project folders and
+    flattens the card's own tree as it goes, so a sorted clip never keeps its card-relative path.
+    A NAS copy therefore counts WHEREVER it sits on the pool, by name, size and time, unless it
+    carries a DIFFERENT card's serial. The price, accepted: two linked recorders whose files are
+    identical in name, length and time can stand in for each other on the NAS."""
     path = str(row.get("path") or "").replace("\\", "/").strip("/").lower()
     r = str(rel or "").replace("\\", "/").strip("/").lower()
     owner = str(row.get("card") or "").strip().upper()
+    nas = bool(on_nas and on_nas(row))
     if owner:
-        return owner == str(card_serial or "").strip().upper() and (path == r or path.endswith("/" + r))
+        if owner != str(card_serial or "").strip().upper():
+            return False
+        return nas or path == r or path.endswith("/" + r)
     if "/" in r:
-        return path == r or path.endswith("/" + r)
-    return any(path == f"{f.lower()}/{r}" or path.endswith(f"/{f.lower()}/{r}") for f in folders)
+        if path == r or path.endswith("/" + r):
+            return True
+    elif any(path == f"{f.lower()}/{r}" or path.endswith(f"/{f.lower()}/{r}") for f in folders):
+        return True
+    return nas
 
 
 # -- kinds ----------------------------------------------------------------------------------------

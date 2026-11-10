@@ -314,6 +314,30 @@ def test_what_the_ledger_already_knows_counts_with_no_network(tmp_path):
     assert v["safeToFormat"] and "at home" in v["headline"]
 
 
+def test_a_card_already_sorted_into_a_project_on_the_nas_is_at_home(tmp_path):
+    # Alex, 2026-11-10: "make it find clips wherever they are". The sorter flattens the card's tree.
+    w = World(tmp_path)
+    w.net.up = False
+    t = int(T0 * 1000)
+    leaf = "Creators_Club/Projects/2026/FF5/Bears/2026-11-09 08.54-15.06 A-CAM"
+    w.svc.mirror.apply([{"id": 1, "volume_id": NAS, "path": f"{leaf}/C0001.MP4", "name": "C0001.MP4", "size": 300_000, "mtime": t},
+                        {"id": 2, "volume_id": NAS, "path": f"{leaf}/C0002.MP4", "name": "C0002.MP4", "size": 250_000, "mtime": t + 1000},
+                        {"id": 3, "volume_id": NAS, "path": f"{leaf}/C0001M01.XML", "name": "C0001M01.XML", "size": 6, "mtime": t}])
+    v = card_of(w.svc.state())["verdict"]
+    assert v["safeToFormat"] and "at home" in v["headline"]
+
+
+def test_a_flattened_copy_on_a_drive_still_needs_its_card_path(tmp_path):
+    w = World(tmp_path)
+    w.net.up = False
+    t = int(T0 * 1000)
+    w.svc.mirror.apply([{"id": 1, "volume_id": "vol:AAAA0001", "path": "Sorted/C0001.MP4", "name": "C0001.MP4", "size": 300_000, "mtime": t},
+                        {"id": 2, "volume_id": "vol:AAAA0001", "path": "Sorted/C0002.MP4", "name": "C0002.MP4", "size": 250_000, "mtime": t + 1000}])
+    w.svc.set_kind("vol:AAAA0001", "ours")
+    v = card_of(w.svc.state(refresh=True))["verdict"]
+    assert not v["safeToFormat"] and v["single"] == 0 and v["none"] == v["tracked"]   # not matched at all
+
+
 def test_a_card_with_every_file_already_on_the_drive_elsewhere_is_not_copied_again(tmp_path):
     w = World(tmp_path)
     old = w.drives["A"] / "OldTrip"

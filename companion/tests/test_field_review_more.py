@@ -47,6 +47,25 @@ def test_a_copy_must_be_this_cards_file():
     assert not field_mode.row_is_this_file({"path": "Z1.WAV"}, "Z1.WAV", "CARD0001", folders)
 
 
+def test_on_the_nas_a_sorted_clip_counts_wherever_the_sorter_put_it():
+    # Alex, 2026-11-10: "make it find clips wherever they are". Sorting flattens the card's tree.
+    rel = "PRIVATE/M4ROOT/CLIP/C0001.MP4"
+    folders = field_mode.folder_variants("2026-11-09 A001", "CARD0001")
+    nas = lambda row: str(row.get("volume_id") or "").startswith("nas:")
+    sorted_clip = {"volume_id": "nas:thecreatorspool",
+                   "path": "Creators_Club/Projects/2026/FF5/Bears/2026-11-09 08.54-15.06 A-CAM/C0001.MP4"}
+    assert field_mode.row_is_this_file(sorted_clip, rel, "CARD0001", folders, on_nas=nas)
+    assert not field_mode.row_is_this_file(sorted_clip, rel, "CARD0001", folders)          # no on_nas: the old rule
+    on_a_drive = dict(sorted_clip, volume_id="vol:BBBB0001")
+    assert not field_mode.row_is_this_file(on_a_drive, rel, "CARD0001", folders, on_nas=nas)   # drives keep the path rule
+    # a recorder's top-level WAV, sorted into an Audio folder
+    wav = {"volume_id": "nas:thecreatorspool", "path": "Creators_Club/Projects/2026/FF5/Bears/Audio/Z1.WAV"}
+    assert field_mode.row_is_this_file(wav, "Z1.WAV", "CARD0001", folders, on_nas=nas)
+    # a NAS copy that names ANOTHER card is still not this card's, wherever it is
+    assert not field_mode.row_is_this_file(dict(sorted_clip, card="CARD0002"), rel, "CARD0001", folders, on_nas=nas)
+    assert field_mode.row_is_this_file(dict(sorted_clip, card="CARD0001"), rel, "CARD0001", folders, on_nas=nas)
+
+
 def test_the_second_cards_clip_is_not_covered_by_the_firsts_copy(tmp_path):
     w = World(tmp_path)
     w.finish(w.svc.start_copy(SERIAL, ["vol:AAAA0001", "vol:BBBB0001"]))

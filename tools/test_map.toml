@@ -349,6 +349,8 @@ tests = [
     "dashboard/tests/test_legal_drafts.py",
     "server/tests/test_secure_defaults.py",
     "tools/tests/test_gen_notices.py",
+    # found by select_suites.py --audit, 2026-11-10 (reads .gitignore)
+    "server/tests/test_sorter_deploy.py",
 ]
 
 # --- components with nothing to deploy on the dashboard -----------------------

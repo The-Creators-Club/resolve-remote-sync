@@ -336,7 +336,14 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         working-directory: server
-        run: ../dashboard/.venv/bin/python -m pytest tests -q --junitxml=../junit-server.xml
+        # PyYAML is a TEST dependency of server/ (test_sorter_deploy.py parses the rendered
+        # compose file and fails, not skips, without it). It is installed here, pinned by hash,
+        # and NOT added to dashboard/requirements.lock: that lock is the image's runtime, and a
+        # change to it turns the next dashboard release into a runtime update (RELEASE.md).
+        run: |
+          echo "pyyaml==6.0.3 --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc" > "$RUNNER_TEMP/server-test-req.txt"
+          ../dashboard/.venv/bin/python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r "$RUNNER_TEMP/server-test-req.txt"
+          ../dashboard/.venv/bin/python -m pytest tests -q --junitxml=../junit-server.xml
 
       - name: broll/web -- install
         if: ${{ !cancelled() }}

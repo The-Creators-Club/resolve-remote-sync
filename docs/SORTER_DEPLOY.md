@@ -210,6 +210,48 @@ tree's `DEPLOYED_COMMIT`), or rename the backup the deploy kept:
 touched by a deploy.
 
 
+## The first deploy (2026-11-10): what was not written above
+
+* **`site.toml` is the one on creator-1** (`E:\Projects\Editing\ccsync\site.toml`,
+  gitignored), not a file on the NAS. The studio's had no `[footage_sorter]`
+  section at all; it was added whole.
+* **Set `timezone` explicitly.** The NAS's `/etc/timezone` said a stale
+  `Etc/UTC` while `timedatectl` (and so cron) ran `Asia/Taipei`, and the deploy
+  reads `/etc/timezone` first. The `zoneinfo` check above uses the same file,
+  so it passes on the wrong zone.
+* **The first sorter deploy needs a dashboard release first.** The `/sorter`
+  mount is dashboard code; an image-mode deploy ships only `sorter-web`. It went
+  out as dashboard 0.7.79 (CI image from `main`), then this recipe with the new
+  digest.
+* **Stopping the Node sorter means retiring the "Auto Backup Utility" tray**
+  (`footage-sorter\ingest\tray\AutoBackupTray.ps1`, a Startup shortcut). It
+  starts `node server.js` and watched for cards; the companion does that now.
+  The shortcut was moved to `Startup (retired)`, not deleted.
+* **Write `roots.json` from Python**, not a shell `printf`: Git Bash ate a
+  backslash and the migration refused the file.
+* **The D1 import runs inside the container**, against the live
+  `/sorter-data`. The token goes in for the run only (owner-only) and is
+  removed straight after:
+
+  ```bash
+  install -o 3000 -g 3000 -m 600 /tmp/ltok.json /mnt/tank/apps/ccsync-dashboard/sorter-data/.ledger-token.json
+  docker exec -w /tmp -e PYTHONPATH=/sorter-app ix-ccsync-dashboard-dashboard-1 /venv/bin/python \
+    -m footage_sorter.ledger_import --from-worker https://thecreatorsclub.co/backups/api \
+    --token-file /sorter-data/.ledger-token.json --data /sorter-data            # then again with --write
+  rm /mnt/tank/apps/ccsync-dashboard/sorter-data/.ledger-token.json
+  ```
+
+  Result: 47,826 rows on 7 volumes, 8 open questions, a ledger backup.
+* **Cloudflare answers Python's default `Python-urllib` agent with 403
+  (error 1010)**, so the card tracker failed until footage-sorter `ea344ff`
+  named its client. Anything new that calls thecreatorsclub.co from the NAS
+  must send its own `User-Agent`.
+* First NAS pool scan: 77,727 files (33,022 masters, 35,523 proxies, 9,182
+  audio); the `homes/*` folders are unreadable to the container and show as
+  8 scan errors, which is expected. Clip count after migration: 35,936, the
+  Node sorter's exactly.
+
+
 ## See also
 
 * `docs/CARDS_DEPLOY.md` -- the recipe this follows, and the staged-verify-swap

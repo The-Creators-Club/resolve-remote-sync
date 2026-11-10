@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from ccsync_dashboard import api as api_mod
 from ccsync_dashboard import auth
 from ccsync_dashboard import db as dbmod
 from ccsync_dashboard import provision
@@ -243,13 +244,15 @@ def test_the_record_is_written_and_committed_before_the_rename(env, monkeypatch)
     as_user(client, "owen")
     seen: list[dict] = []
 
-    def watched(self, target):
+    def watched(src, dst):
         other = dbmod.connect(projects.parent / "moves.db")
         seen.extend(dict(r) for r in other.execute("SELECT * FROM file_moves"))
         other.close()
         raise OSError("Resolve has it open")
 
-    monkeypatch.setattr(Path, "rename", watched)
+    # The seam every platform's move goes through: on Linux the rename is libc's renameat2
+    # (RENAME_NOREPLACE), which never calls Path.rename, so patching that passed only on Windows.
+    monkeypatch.setattr(api_mod, "_rename_noreplace", watched)
     r = client.post(f"/api/v1/projects/{D_SLUG}/move",
                     json={"path": "B-roll/A001_0512.braw", "to_slug": A_SLUG})
     assert r.status_code == 503 and "could not move it" in r.json()["detail"]

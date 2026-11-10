@@ -16,6 +16,13 @@ Three workflows, all in `.github/workflows/`:
 
 ## `ci.yml`
 
+> **The `linux` job is OFF since 2026-11-10** (`if: false` on the job). Alex: "linux is slowing us down,
+> let's stop doing linux for now". Its dashboard suite failed a different pair of tests on each run under
+> parallel execution (`test_smoke_boot` /music "no such column: bytes", `test_cards_edit`'s socket relay,
+> `test_cli_tools`), which held every companion release at the `publish_latest` gate. While it is off,
+> nothing in CI runs the dashboard suite, the CRLF gate or the container licence check: run
+> `tools\run_all_tests.ps1` locally before a dashboard release. Delete the `if:` to turn it back on.
+
 Three jobs, one per runner OS. Every step inside a job carries
 `if: ${{ !cancelled() }}`, so a failing suite does not hide the ones after it —
 the same behaviour `tools\run_all_tests.ps1` has locally, and for the same

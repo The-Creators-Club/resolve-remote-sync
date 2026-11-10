@@ -257,6 +257,11 @@ jobs:
   # filesystem (the CRLF gate) and the licence gate.
   # ---------------------------------------------------------------------------
   linux:
+    # OFF since 2026-11-10 (Alex: "linux is slowing us down, let's stop doing linux for now"): its dashboard
+    # suite failed a different pair of tests on each run under parallel execution (test_smoke_boot /music,
+    # test_cards_edit's socket relay, test_cli_tools), which held every companion release at the
+    # publish_latest gate. A skipped job leaves the run green. Delete this `if:` to turn it back on.
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

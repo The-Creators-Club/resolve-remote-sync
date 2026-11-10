@@ -265,6 +265,68 @@ def test_a_volume_that_is_not_a_card_is_not_reported(tmp_path):
     assert dash.posts[0][1]["cards"] == []
 
 
+def test_a_cfexpress_card_in_a_fixed_reader_is_a_card(tmp_path):
+    """2026-11-10: a Blackmagic CFexpress Type B card (H: on creator-1) was
+    never seen, because its reader presents it as a FIXED disk. The tray
+    watched Removable and Fixed (Config.psd1 WatchDriveTypes)."""
+    vol = {**a_volume(tmp_path, "cfx", serial="AB12CD34"), "drive": "H:", "label": "G011", "removable": False}
+    touch(Path(vol["root"]), "G011_10201714_C001.braw")
+    touch(Path(vol["root"]), "._G011_10201714_C001.braw")
+    touch(Path(vol["root"]), "Proxy/G011_10201714_C001.mp4")
+    scopes = []
+    loop, dash, _ = make_loop(tmp_path, lambda: [vol])
+    inner = loop._volumes
+    loop._volumes = lambda scope, skip=(): (scopes.append(scope), inner(scope, skip))[1]
+    loop.tick()
+    assert scopes == ["local"]
+    cards = dash.posts[0][1]["cards"]
+    assert [(c["serial"], c["kind"], c["drive"]) for c in cards] == [("AB12CD34", "bmcc", "H:")]
+
+
+def test_a_fixed_disk_is_a_card_only_with_a_cameras_layout(tmp_path):
+    """A data disk full of footage is not a card: a fixed volume gets no `generic`."""
+    data = {**a_volume(tmp_path, "data", serial="00000001"), "removable": False}
+    touch(Path(data["root"]), "Projects/Show/clip.mov")
+    sony = {**a_volume(tmp_path, "sonyfixed", serial="00000002"), "removable": False}
+    touch(Path(sony["root"]), "PRIVATE/M4ROOT/CLIP/C0001.MP4")
+    system = {**a_volume(tmp_path, "c", serial="00000003"), "removable": False, "system": True}
+    touch(Path(system["root"]), "PRIVATE/M4ROOT/CLIP/C0001.MP4")
+    stick = a_volume(tmp_path, "stick", serial="00000004")          # removable: generic still counts
+    touch(Path(stick["root"]), "Projects/clip.mov")
+    loop, dash, _ = make_loop(tmp_path, lambda: [data, sony, system, stick])
+    loop.tick()
+    assert sorted((c["serial"], c["kind"]) for c in dash.posts[0][1]["cards"]) == [("00000002", "sony"), ("00000004", "generic")]
+
+
+def test_a_slow_card_is_looked_at_again_before_it_is_written_off(tmp_path):
+    """The tray's SlowMountRetries: a card whose files are not readable on the
+    first look must not be missed for RELIST_SECONDS."""
+    vol = a_volume(tmp_path)
+    loop, dash, clock = make_loop(tmp_path, lambda: [vol])
+    loop.tick()                                       # mounted, nothing readable yet
+    assert dash.posts[0][1]["cards"] == []
+    clock.now += sorter_cards.SCAN_SECONDS
+    touch(Path(vol["root"]), "PRIVATE/M4ROOT/CLIP/a.MP4")
+    assert loop.tick() == 200                         # seen on the next tick, not 5 minutes later
+    assert [c["kind"] for c in dash.posts[-1][1]["cards"]] == ["sony"]
+
+
+def test_a_volume_that_stays_not_a_card_stops_being_read(tmp_path):
+    vol = a_volume(tmp_path)
+    touch(Path(vol["root"]), "notes.txt")
+    calls = []
+    real = sorter_cards.describe
+    loop, dash, clock = make_loop(tmp_path, lambda: [vol])
+    sorter_cards.describe = lambda v, t: (calls.append(1), real(v, t))[1]
+    try:
+        for _ in range(sorter_cards.SLOW_MOUNT_RETRIES + 4):
+            loop.tick()
+            clock.now += sorter_cards.SCAN_SECONDS
+    finally:
+        sorter_cards.describe = real
+    assert len(calls) == sorter_cards.SLOW_MOUNT_RETRIES
+
+
 @pytest.mark.parametrize("status", [404, 503])
 def test_a_site_with_no_sorter_is_backed_off_quietly(tmp_path, status):
     vol = a_volume(tmp_path)

@@ -6,9 +6,13 @@ is in a reader on this PC; only this process can read it, and only the sorter
 (inside the dashboard) knows where its footage should go. So this module does
 three things and nothing else:
 
-  * FINDS removable volumes (Windows: removable drive letters; macOS: mounted
-    volumes on removable or external media) and, for a `drive-copy`, any local
-    volume by its serial;
+  * FINDS the local volumes, removable AND fixed (CFexpress Type B and
+    Blackmagic SSD readers present their cards as fixed disks: the tray's
+    WatchDriveTypes = Removable, Fixed), never the system disk; a fixed volume
+    counts only with a camera's layout on it (no `generic`). A volume that
+    looks like nothing yet is looked at again for SLOW_MOUNT_RETRIES ticks
+    (the tray's SlowMountRetries). For a `drive-copy`, any local volume by
+    its serial;
   * CLASSIFIES each one with the Node ingest's predicates, ported from
     footage-sorter `lib/ingest/detect.js` (same order of precedence, same
     defaults), and LISTS it into the protocol's `files` / `texts` / `wav`
@@ -87,6 +91,11 @@ XML_BYTES = 4096
 SCAN_SECONDS = 10.0        # how often the loop looks at the readers
 RESEND_SECONDS = 300.0     # protocol: every 5 minutes while any card is present
 RELIST_SECONDS = 300.0     # a card is re-read at most this often when nothing moved
+# A volume that is not (yet) a card is looked at again on each of this many
+# ticks before its "not a card" is believed for RELIST_SECONDS: a card that
+# mounts before its files are readable must not be missed for five minutes.
+# The tray's SlowMountRetries (footage-sorter ingest/tray/Config.psd1).
+SLOW_MOUNT_RETRIES = 6
 NO_SORTER_BACKOFF_SECONDS = 600.0
 REFUSED_BACKOFF_SECONDS = 300.0
 POST_TIMEOUT_SECONDS = 60.0
@@ -322,7 +331,8 @@ def _has_media(root: Path, depth: int = GENERIC_DEPTH) -> bool:
     return False
 
 
-def classify(root: "str | Path", defaults: Optional[dict[str, Any]] = None) -> Optional[str]:
+def classify(root: "str | Path", defaults: Optional[dict[str, Any]] = None,
+             generic: bool = True) -> Optional[str]:
     """What kind of card is the volume at `root`? -> a name in KINDS, or None
     when it is not a card.
 
@@ -332,6 +342,10 @@ def classify(root: "str | Path", defaults: Optional[dict[str, Any]] = None) -> O
     .braw files in the root (Blackmagic, named `bmcc` in the protocol); then
     loose WAVs named like a Wireless PRO or field recorder. An empty Sony card
     is still a Sony card -- an insertion somebody should hear about.
+
+    `generic=False` (a FIXED volume: see SorterCards.current_cards) answers
+    only for a camera's own layout, never "it holds media": an internal disk
+    full of footage is not a card, and is not walked four folders deep.
     """
     d = {**DEFAULTS, **(defaults or {})}
     base = Path(root)
@@ -365,6 +379,8 @@ def classify(root: "str | Path", defaults: Optional[dict[str, Any]] = None) -> O
            for n in root_files):
         return "audio"
 
+    if not generic:
+        return None
     return "generic" if _has_media(base) else None
 
 
@@ -423,9 +439,18 @@ def list_card(root: "str | Path") -> dict[str, Any]:
     return {"files": files, "texts": texts, "wav": wav}
 
 
+def is_fixed(vol: dict[str, Any]) -> bool:
+    """Windows calls this volume a fixed disk. CFexpress Type B and Blackmagic
+    SSD readers present their cards as FIXED, not removable (2026-11-10: a
+    CFexpress B card from a Blackmagic camera, H: on creator-1, was never
+    seen). A volume that does not say is a removable one, as before."""
+    return vol.get("removable", True) is False
+
+
 def describe(vol: dict[str, Any], detected_at: str) -> Optional[dict[str, Any]]:
-    """A volume -> the protocol's card object, or None when it is not a card."""
-    kind = classify(vol["root"])
+    """A volume -> the protocol's card object, or None when it is not a card.
+    A fixed volume is a card only when it carries a camera's layout."""
+    kind = classify(vol["root"], generic=not is_fixed(vol))
     if kind is None:
         return None
     listing = list_card(vol["root"])
@@ -536,19 +561,26 @@ class SorterCards:
         reused."""
         now = self._clock()
         busy = busy_roots()
-        vols = self._volumes("removable", busy)
+        # "local": removable AND fixed volumes. The tray watched both
+        # (WatchDriveTypes = Removable, Fixed) because CFexpress / Blackmagic
+        # readers present cards as fixed; the content check gates (describe).
+        vols = self._volumes("local", busy)
         present: dict[str, dict[str, Any]] = {}
         for vol in vols:
+            if vol.get("system"):
+                continue                       # the disk Windows lives on is never a card
             serial = vol["serial"]
             note_drive(serial, vol["root"])
             sig = (vol["root"], vol.get("capacity"), vol.get("free"))
             seen = self._seen.get(serial)
-            fresh = (seen is not None and seen["sig"] == sig
+            settled = seen is not None and (seen["card"] is not None or seen["misses"] >= SLOW_MOUNT_RETRIES)
+            fresh = (seen is not None and seen["sig"] == sig and settled
                      and now - seen["at"] < RELIST_SECONDS)
             if not fresh:
                 first = self._first_seen.setdefault(serial, _now_iso())
                 card = describe(vol, first)
-                seen = {"sig": sig, "at": now, "card": card}
+                misses = 0 if card is not None else (seen["misses"] + 1 if seen is not None and seen["sig"] == sig else 1)
+                seen = {"sig": sig, "at": now, "card": card, "misses": misses}
                 self._seen[serial] = seen
             present[serial] = seen
         for serial, seen in list(self._seen.items()):

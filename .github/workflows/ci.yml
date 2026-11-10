@@ -425,7 +425,13 @@ jobs:
       # `rclone_binary` uses in companion/tests/conftest.py.
       - name: install ffmpeg (broll/indexer needs a real ffmpeg/ffprobe)
         if: ${{ !cancelled() }}
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+        # 2026-11-10: a stalled Ubuntu mirror hung this step for 20 minutes and the job hit its
+        # 30-minute limit with every later suite skipped. Network timeouts + retries, and a cap
+        # on the step itself, so a bad mirror fails fast and loud instead.
+        timeout-minutes: 8
+        run: |
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $apt_opts update && sudo apt-get $apt_opts install -y --no-install-recommends ffmpeg
 
       - name: broll/indexer -- pytest
         if: ${{ !cancelled() }}

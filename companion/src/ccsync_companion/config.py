@@ -164,7 +164,7 @@ log = logging.getLogger("ccsync.config")
 # exist only here, outside the tree, with a tray reminder every 30 minutes and
 # `sync_guard.resolve_health.unopened_out_of_tree` on the report. Needs
 # dashboard 0.7.78 to store and alert on it; deploy the dashboard first.
-VERSION = "0.9.89"
+VERSION = "0.9.90"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy

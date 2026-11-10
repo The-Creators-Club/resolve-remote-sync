@@ -222,7 +222,7 @@ So these remain local-only, on the base rig:
 
 ## The release workflows
 
-Both are `workflow_dispatch` only, with `run_tests` / `allow_dirty` inputs, and
+Both run on every push to `main` and on `workflow_dispatch` (with `run_tests` / `allow_dirty` inputs), and
 both upload the artefact for a human to publish from a machine on the tailnet.
 
 **They build; they do not test (2026-11-10).** `run_tests` is OFF by default:
@@ -235,8 +235,9 @@ does NOT lift it; only an explicit `--allow-untested` does. A build whose own
 suites were run (`run_tests`) and FAILED carries no gate, so CI can never vouch
 for it. Measured before the change: 46 of a 48-minute release-windows run was
 the companion (12.5 min) and dashboard (32.7 min) suites; the build itself is
-about a minute. Dispatch the release workflows right after the push, alongside
-CI: the build is publishable the moment CI goes green.
+about a minute (a whole release-windows run is ~3 min, release-macos ~2). They
+start on the push, beside CI, so the build is publishable the moment CI goes
+green.
 
 ### `release-windows.yml`
 

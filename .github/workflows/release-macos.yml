@@ -28,6 +28,11 @@
 name: release-macos
 
 on:
+  # 2026-11-10: also on every push to main. The build no longer runs the suites (ci.yml
+  # does, alongside), so it takes minutes, and a build is waiting when CI goes green.
+  # On a push there are no inputs: run_tests is empty, i.e. tests_gate=ci.
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       run_tests:

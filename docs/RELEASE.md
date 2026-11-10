@@ -188,9 +188,11 @@ dashboard\.venv\Scripts\python.exe tools\publish_latest.py --kind onboard --plat
 every OS, for the same commit; the release workflows stamp `tests_gate: "ci"`
 and `publish_latest` accepts such a build only when ci.yml is green on exactly
 that commit (`--allow-red-ci` does not lift this; `--allow-untested` does).
-Push, dispatch both release workflows straight away, and publish when CI goes
-green: about 27 minutes from push, where it used to be CI plus a 48-minute
-Windows build. `docs/CI.md`, "The release workflows", has the detail.
+Both release workflows also start on every push to `main` (about 3 and 2
+minutes now), so: push, and publish when CI goes green. With the suites run in
+parallel (pytest-xdist, `-n auto`) CI itself is ~5 min on Windows and macOS and
+the Linux job is bounded by its dashboard suite (~7 min); it used to be CI plus
+a 48-minute Windows build. `docs/CI.md`, "The release workflows", has the detail.
 `publish_latest` takes the newest green `release-windows` / `release-macos`
 run **on `main`**, downloads its artefact, re-verifies the sha256 against the
 manifest, refuses a dirty tree, refuses a commit that is not an ancestor of

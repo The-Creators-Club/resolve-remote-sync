@@ -96,16 +96,22 @@ def test_sizes_arrive_from_the_walker_not_from_the_request(tmp_path):
     (root / "Clips" / "c.bin").write_bytes(b"x" * 500)
     rows = [{"slug": "ep-size", "root": str(root)}]
     cards_catalog.sizes(s, rows)
-    end = time.monotonic() + 5
-    got = {}
+    # The walker is a background thread: under a parallel run on a busy machine it can take
+    # more than the 5 s this used to allow, and the file lands just after the in-memory answer
+    # (2026-11-10, -n auto). Wait for BOTH; a healthy run is done in milliseconds.
+    sizes_file = tmp_path / "cards" / cards_catalog.SIZES_FILE
+    end = time.monotonic() + 30
+    got, on_disk = {}, {}
     while time.monotonic() < end:
         got = cards_catalog.sizes(s, rows)
-        if "bytes" in got.get("ep-size", {}):
+        try:
+            on_disk = json.loads(sizes_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            on_disk = {}
+        if "bytes" in got.get("ep-size", {}) and "bytes" in on_disk.get("ep-size", {}):
             break
         time.sleep(0.02)
     assert got["ep-size"]["bytes"] == 500
-    on_disk = json.loads((tmp_path / "cards" / cards_catalog.SIZES_FILE)
-                         .read_text(encoding="utf-8"))
     assert on_disk["ep-size"]["bytes"] == 500
 
 

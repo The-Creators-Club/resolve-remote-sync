@@ -908,7 +908,9 @@ def test_a_credential_that_cannot_renew_is_not_a_sign_in(settings):
     '{"claudeAiOauth": {"accessToken": "a", "expiresAt": "0"}}',
     '{"something": "else"}',
     'not json at all',
-])
+], ids=["expired-with-refresh", "live-no-refresh", "no-expiry", "string-expiry", "unknown-shape", "not-json"])
+# Fixed ids: the live case's text holds the clock, and parallel workers (pytest-xdist) refuse
+# to run when each one collects a differently-named test.
 def test_only_a_provably_dead_credential_is_refused(settings, text):
     write_credential(settings, text=text)
     assert cli_tools.signin_status(settings, cli_tools.CLAUDE_CODE)["state"] == "signed_in"

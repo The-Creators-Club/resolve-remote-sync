@@ -196,6 +196,7 @@ oidc = [
 
 dev = [
     "pytest>=7.4",
+    "pytest-xdist>=3.6",   # -n auto: the suite in ~3 min instead of ~20
     "httpx>=0.27",
     # server/tests/test_sorter_deploy.py parses the rendered compose file; it fails, not skips, without it
     "PyYAML>=6.0",

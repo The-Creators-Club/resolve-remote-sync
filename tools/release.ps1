@@ -708,11 +708,16 @@ else {
             if ($DryRun) {
                 $requires = if ($ffmpegOnPath) { "CCSYNC_REQUIRE_RCLONE=1, CCSYNC_REQUIRE_FFMPEG=1" }
                             else { "CCSYNC_REQUIRE_RCLONE=1 (no ffmpeg on PATH)" }
-                Write-Step "[dry-run] would run: $py -m pytest -q   (in $($s.Dir), $requires)"
+                Write-Step "[dry-run] would run: $py -m pytest -q [-n auto when xdist is installed]   (in $($s.Dir), $requires)"
                 continue
             }
             Write-Step "running $($s.Name) tests..."
-            $code = Invoke-Native -Exe $py -ArgList @("-m", "pytest", "-q") -WorkingDir $s.Dir
+            # -n auto (pytest-xdist, in both test locks since 2026-11-10): ~1 + ~3 minutes on the
+            # rig instead of ~10 + ~20. A venv that predates the lock runs serially, as before.
+            $pyArgs = @("-m", "pytest", "-q")
+            & $py -c "import xdist" 2>$null
+            if ($LASTEXITCODE -eq 0) { $pyArgs += @("-n", "auto") }
+            $code = Invoke-Native -Exe $py -ArgList $pyArgs -WorkingDir $s.Dir
             if ($code -ne 0) {
                 Write-Host ""
                 Write-Fail "$($s.Name) tests exited $code -- NOT building. Fix the tests, or re-run with -SkipTests if you know why."

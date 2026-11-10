@@ -182,7 +182,7 @@ jobs:
       - name: companion -- pytest
         if: ${{ !cancelled() }}
         working-directory: companion
-        run: .venv/Scripts/python -m pytest tests -q --junitxml=../junit-companion.xml
+        run: .venv/Scripts/python -m pytest tests -q -n auto --junitxml=../junit-companion.xml
 
       # --platform win32: the Windows half of the companion target's split
       # licence check (see the linux job's licence-gate comment and
@@ -327,7 +327,7 @@ jobs:
         # It is also what deploy/run.sh does in production.
         env:
           PYTHONPATH: src
-        run: .venv/bin/python -m pytest tests -q --junitxml=../junit-dashboard.xml
+        run: .venv/bin/python -m pytest tests -q -n auto --junitxml=../junit-dashboard.xml
 
       # THROUGH BASH, and reusing the dashboard venv exactly as CLAUDE.md says:
       # server/ has no venv of its own. This is the suite `ship` already gates
@@ -336,14 +336,9 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         working-directory: server
-        # PyYAML is a TEST dependency of server/ (test_sorter_deploy.py parses the rendered
-        # compose file and fails, not skips, without it). It is installed here, pinned by hash,
-        # and NOT added to dashboard/requirements.lock: that lock is the image's runtime, and a
-        # change to it turns the next dashboard release into a runtime update (RELEASE.md).
-        run: |
-          echo "pyyaml==6.0.3 --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc" > "$RUNNER_TEMP/server-test-req.txt"
-          ../dashboard/.venv/bin/python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r "$RUNNER_TEMP/server-test-req.txt"
-          ../dashboard/.venv/bin/python -m pytest tests -q --junitxml=../junit-server.xml
+        # PyYAML (test_sorter_deploy.py) comes from dashboard/requirements.lock, the TEST
+        # lock; the image's runtime lock is dashboard/deploy/requirements.lock.
+        run: ../dashboard/.venv/bin/python -m pytest tests -q --junitxml=../junit-server.xml
 
       - name: broll/web -- install
         if: ${{ !cancelled() }}
@@ -613,7 +608,7 @@ jobs:
       - name: companion -- pytest
         if: ${{ !cancelled() }}
         working-directory: companion
-        run: .venv/bin/python -m pytest tests -q --junitxml=../junit-companion-macos.xml
+        run: .venv/bin/python -m pytest tests -q -n auto --junitxml=../junit-companion-macos.xml
 
       # --platform darwin: the macOS half of companion's split licence check
       # (see the linux job's licence-gate comment). colorama's `sys_platform

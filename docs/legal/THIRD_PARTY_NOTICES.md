@@ -53,12 +53,13 @@ collects, and the deployed container installs
 
 ### companion
 
-editor tray app; the frozen build ships a SUBSET of this (see build.spec). Lock: `companion/requirements.lock`, 22 package(s).
+editor tray app; the frozen build ships a SUBSET of this (see build.spec). Lock: `companion/requirements.lock`, 24 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
 | `asn1crypto` | 1.5.1 | MIT License | https://github.com/wbond/asn1crypto |
 | `colorama` | 0.4.6 | BSD License | https://github.com/tartley/colorama |
+| `execnet` | 2.1.2 | MIT | https://execnet.readthedocs.io/en/latest/ |
 | `flatbuffers` | 25.12.19 | Apache Software License | https://google.github.io/flatbuffers/ |
 | `iniconfig` | 2.3.0 | MIT | https://github.com/pytest-dev/iniconfig |
 | `numpy` | 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | https://numpy.org |
@@ -73,6 +74,7 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Lock:
 | `pyobjc-core` | 12.2.2 | MIT | - |
 | `pyobjc-framework-cocoa` | 12.2.2 | MIT | - |
 | `pytest` | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ |
+| `pytest-xdist` | 3.8.0 | MIT | https://github.com/pytest-dev/pytest-xdist |
 | `python-dateutil` | 2.9.0.post0 | Apache Software License; BSD License | https://github.com/dateutil/dateutil |
 | `scramp` | 1.4.17 | MIT No Attribution License (MIT-0) | https://codeberg.org/tlocke/scramp |
 | `six` | 1.17.0 | MIT License | https://github.com/benjaminp/six |
@@ -82,7 +84,7 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Lock:
 
 ### dashboard
 
-FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Lock: `dashboard/requirements.lock`, 58 package(s).
+FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Lock: `dashboard/requirements.lock`, 61 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -101,6 +103,7 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 | `cryptography` | 50.0.0 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
 | `distro` | 1.9.0 | Apache Software License | https://github.com/python-distro/distro |
 | `docstring-parser` | 0.18.0 | MIT License | https://github.com/rr-/docstring_parser |
+| `execnet` | 2.1.2 | MIT | https://execnet.readthedocs.io/en/latest/ |
 | `fastapi` | 0.141.1 | MIT | https://github.com/fastapi/fastapi |
 | `flatbuffers` | 25.12.19 | Apache Software License | https://google.github.io/flatbuffers/ |
 | `h11` | 0.16.0 | MIT License | https://github.com/python-hyper/h11 |
@@ -130,7 +133,9 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 | `pypinyin` | 0.55.0 | MIT License | https://github.com/mozillazg/python-pinyin |
 | `pyspnego` | 0.12.1 | MIT | https://github.com/jborean93/pyspnego |
 | `pytest` | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ |
+| `pytest-xdist` | 3.8.0 | MIT | https://github.com/pytest-dev/pytest-xdist |
 | `python-multipart` | 0.0.32 | Apache-2.0 | https://github.com/Kludex/python-multipart |
+| `pyyaml` | 6.0.3 | MIT License | https://pyyaml.org/ |
 | `rapidfuzz` | 3.14.5 | MIT | https://github.com/rapidfuzz/RapidFuzz |
 | `requests` | 2.34.2 | Apache Software License | https://github.com/psf/requests |
 | `smbprotocol` | 1.17.0 | MIT | https://github.com/jborean93/smbprotocol |
@@ -286,7 +291,7 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 
 ## All pip dependencies (merged)
 
-76 distinct (package, version) pair(s) across every scanned venv.
+78 distinct (package, version) pair(s) across every scanned venv.
 
 | Package | Version | Licence | Components | Licence text on disk |
 |---|---|---|---|---|
@@ -306,6 +311,7 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `cryptography` | 50.0.0 | Apache-2.0 OR BSD-3-Clause | dashboard, dashboard-container | yes |
 | `distro` | 1.9.0 | Apache Software License | dashboard, dashboard-container | yes |
 | `docstring-parser` | 0.18.0 | MIT License | dashboard, dashboard-container | yes |
+| `execnet` | 2.1.2 | MIT | companion, dashboard | yes |
 | `fastapi` | 0.141.1 | MIT | dashboard, music/web, broll/web, dashboard-container | yes |
 | `flatbuffers` | 25.12.19 | Apache Software License | companion, dashboard, music/web, dashboard-container | no |
 | `h11` | 0.16.0 | MIT License | dashboard, music/web, broll/web, dashboard-container | yes |
@@ -342,10 +348,11 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `pypinyin` | 0.55.0 | MIT License | dashboard, dashboard-container | yes |
 | `pyspnego` | 0.12.1 | MIT | dashboard, dashboard-container | yes |
 | `pytest` | 9.1.1 | MIT | companion, dashboard, music/web, broll/web | yes |
+| `pytest-xdist` | 3.8.0 | MIT | companion, dashboard | yes |
 | `python-dateutil` | 2.9.0.post0 | Apache Software License; BSD License | companion | yes |
 | `python-dotenv` | 1.2.3 | BSD-3-Clause | music/web, broll/web | yes |
 | `python-multipart` | 0.0.32 | Apache-2.0 | dashboard, music/web, dashboard-container | yes |
-| `pyyaml` | 6.0.3 | MIT License | music/web, broll/web | yes |
+| `pyyaml` | 6.0.3 | MIT License | dashboard, music/web, broll/web | yes |
 | `rapidfuzz` | 3.14.5 | MIT | dashboard, broll/web, dashboard-container | yes |
 | `requests` | 2.34.2 | Apache Software License | dashboard, dashboard-container | yes |
 | `scramp` | 1.4.17 | MIT No Attribution License (MIT-0) | companion | yes |

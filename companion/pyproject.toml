@@ -99,7 +99,7 @@ tray = [
     "Pillow>=10",
     "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
 ]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pytest-xdist>=3.6"]
 
 [project.scripts]
 ccsync-companion = "ccsync_companion.app:run"

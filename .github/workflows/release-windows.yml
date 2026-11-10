@@ -38,8 +38,8 @@ name: release-windows
 on:
   workflow_dispatch:
     inputs:
-      skip_tests:
-        description: "Emergency valve: skip the companion suite (the release script runs it by default, CCSYNC_REQUIRE_RCLONE=1). Use when a suite-only failure must not block getting a build shipped -- the exe itself is unaffected either way."
+      run_tests:
+        description: "Also run the companion, dashboard and onboarding suites in this build (~45 min). Off by default since 2026-11-10: ci.yml runs them on every OS for the same commit, and the publish tools accept this build (tests_gate=ci) only once ci.yml is green on it."
         type: boolean
         default: false
       allow_dirty:
@@ -220,7 +220,7 @@ jobs:
           CCSYNC_SIGN_TIMESTAMP_URL: ${{ secrets.CCSYNC_SIGN_TIMESTAMP_URL }}
         run: |
           $args = @()
-          if ("${{ inputs.skip_tests }}" -eq "true")  { $args += "-SkipTests" }
+          if ("${{ inputs.run_tests }}" -ne "true")   { $args += @("-SkipTests", "-TestsGate", "ci") }
           if ("${{ inputs.allow_dirty }}" -eq "true") { $args += "-AllowDirty" }
           pwsh -NoProfile -ExecutionPolicy Bypass -File tools/release.ps1 @args
 
@@ -278,8 +278,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             "onboard.exe SIGNING FAILED -- the installer artefact is unsigned" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           }
+          # Skipped (the default): tests_gate=ci, accepted only on a commit
+          # ci.yml passed. Run and FAILED: no gate, so CI can never vouch for
+          # a build whose own suite failed.
           $testsRun = $false
-          if ("${{ inputs.skip_tests }}" -ne "true") {
+          $testsGate = "ci"
+          if ("${{ inputs.run_tests }}" -eq "true") {
+            $testsGate = ""
             Push-Location onboarding
             try {
               & ../companion/.venv/Scripts/python.exe -m pytest tests -q
@@ -313,6 +318,7 @@ jobs:
             # built from. publish_feed.py refuses a manifest that says false
             # (OPS-1), and it must never say true on trust.
             tests_run     = $testsRun
+            tests_gate    = $testsGate
             signed_binary = $signed
             built_by      = "github-actions/release-windows"
             built_with    = ".github/workflows/release-windows.yml"

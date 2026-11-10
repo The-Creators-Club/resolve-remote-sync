@@ -153,10 +153,15 @@ def apply_manifest(args: argparse.Namespace, manifest: dict, manifest_dir: Path)
             "nobody can reproduce it. Re-run with --allow-dirty only for a deliberate hotfix.",
             EXIT_USAGE)
     if manifest.get("tests_run") is False and not args.allow_untested:
-        raise PublishError(
-            "manifest says tests_run=false -- publishing an untested build to the fleet "
-            "is the failure OPS-1 exists to prevent. --allow-untested overrides.",
-            EXIT_USAGE)
+        # 2026-11-10: a CI-built release skips its own suites (tests_gate="ci") and is
+        # acceptable only on a commit ci.yml passed -- publish_latest.tests_vouched_by_ci.
+        import publish_latest  # noqa: PLC0415  (in-repo, stdlib only)
+        why = publish_latest.tests_vouched_by_ci(manifest)
+        if why:
+            raise PublishError(
+                f"manifest says tests_run=false and {why} -- publishing an untested build to "
+                "the fleet is the failure OPS-1 exists to prevent. --allow-untested overrides.",
+                EXIT_USAGE)
     if not args.version:
         args.version = str(manifest.get("version") or "")
     if not args.platform:

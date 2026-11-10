@@ -187,6 +187,34 @@ def test_manifest_refuses_dirty_or_untested_unless_overridden(key, tmp_path, art
     assert pf.main(common + ["--allow-untested"]) == pf.EXIT_OK
 
 
+def test_a_ci_built_release_without_its_own_tests_needs_green_ci_on_its_commit(key, tmp_path, artifact, monkeypatch):
+    """2026-11-10 (release speed): the release workflows skip the suites and stamp
+    tests_gate="ci". That is accepted ONLY when ci.yml passed on exactly that commit; a
+    gate-less untested build, a dirty one, an unresolvable commit or a red CI is refused."""
+    import publish_latest as pl
+    sha = "a" * 40
+    green: set[str] = set()
+    monkeypatch.setattr(pl, "ci_green_for", lambda s: s in green)
+    monkeypatch.setattr(pl, "full_commit", lambda s: sha if s and sha.startswith(s.lower()) else "")
+    man = artifact.parent / "ccsync-release.json"
+    base = {"version": "0.8.0", "platform": "windows", "artifact": artifact.name, "signed_binary": False,
+            "git_dirty": False, "tests_run": False, "tests_gate": "ci", "git_commit": sha[:7]}
+    common = ["--manifest", str(man), "--feed-dir", str(tmp_path / "feed"), "--base-url", BASE_URL]
+
+    man.write_text(json.dumps(base), encoding="utf-8")
+    assert pf.main(common) == pf.EXIT_CONDEMNED                        # CI not green (yet)
+    assert pf.main(common + ["--allow-red-ci"]) == pf.EXIT_CONDEMNED   # red CI does not lift it
+    green.add(sha)
+    assert pf.main(common) == pf.EXIT_OK                               # green on that commit
+
+    for bad in ({"tests_gate": ""}, {"tests_gate": "laptop"}, {"git_commit": "b" * 7},
+                {"git_commit": ""}):
+        man.write_text(json.dumps({**base, **bad}), encoding="utf-8")
+        assert pf.main(common) == pf.EXIT_CONDEMNED, bad
+    assert pl.tests_vouched_by_ci({**base, "git_dirty": True})        # dirty: never vouched
+    assert pl.tests_vouched_by_ci({**base, "tests_run": True}) == ""  # a tested build needs no vouching
+
+
 def test_dry_run_writes_nothing(key, artifact, tmp_path):
     feed_dir = tmp_path / "feed"
     rc = pf.main(["--artifact", str(artifact), "--platform", "windows", "--version", "0.8.0",

@@ -222,8 +222,21 @@ So these remain local-only, on the base rig:
 
 ## The release workflows
 
-Both are `workflow_dispatch` only, with `skip_tests` / `allow_dirty` inputs, and
+Both are `workflow_dispatch` only, with `run_tests` / `allow_dirty` inputs, and
 both upload the artefact for a human to publish from a machine on the tailnet.
+
+**They build; they do not test (2026-11-10).** `run_tests` is OFF by default:
+the build skips the suites and stamps the manifest `tests_run: false`,
+`tests_gate: "ci"`. ci.yml runs every suite on all three OSes for the same
+commit, and the publish tools (`publish_latest.py`, `publish_feed.py`,
+`publish_package.py`, all through `publish_latest.tests_vouched_by_ci`) accept
+such a build only when ci.yml succeeded on exactly that commit. `--allow-red-ci`
+does NOT lift it; only an explicit `--allow-untested` does. A build whose own
+suites were run (`run_tests`) and FAILED carries no gate, so CI can never vouch
+for it. Measured before the change: 46 of a 48-minute release-windows run was
+the companion (12.5 min) and dashboard (32.7 min) suites; the build itself is
+about a minute. Dispatch the release workflows right after the push, alongside
+CI: the build is publishable the moment CI goes green.
 
 ### `release-windows.yml`
 
@@ -262,11 +275,8 @@ Searched: PATH, companion/.tools/rclone, ~/.local/ccsync/bin/rclone".
 It runs `tools/release_macos.sh` without `--publish`, then best-effort
 `tools/build_onboard_macos.sh`, and uploads both `dist/` trees.
 
-`skip_tests` stays as the emergency valve for the ~20 non-rclone macOS
-failures (tray ctypes, `WindowsPath`, BPG, ports, proxy history,
-`resolve_bridge`) tracked separately — a suite-only failure should not by
-itself block getting an artefact to a Mac editor when the exe/app build
-succeeded regardless.
+The suites are ci.yml's job here too (see above); `run_tests` re-runs them in
+the build when you want the belt and the braces.
 
 ### Signing secrets
 

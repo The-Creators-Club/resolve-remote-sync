@@ -331,6 +331,11 @@ if (Test-Path -LiteralPath $ExeBuilt) {
             Write-Drift "the exe in dist/ is NOT the one ccsync-release.json describes (rebuilt without tools/release.ps1?)"
             $builtVersion = ""
         }
+        elseif ("$($builtManifest.tests_run)" -eq "False" -and "$($builtManifest.tests_gate)" -eq "ci") {
+            # 2026-11-10: CI's release builds leave the suites to ci.yml (tests_gate=ci); the
+            # publish tools require ci.yml green on this commit, so this is not drift.
+            Write-Row "manifest tests" "left to ci.yml (tests_gate=ci) for $($builtManifest.git_commit)"
+        }
         elseif ("$($builtManifest.tests_run)" -eq "False") {
             Write-Drift "this artifact was built with -SkipTests"
         }

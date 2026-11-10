@@ -284,6 +284,48 @@ def ci_green_for(sha: str) -> bool:
     return any(str(r.get("headSha") or "") == sha for r in runs)
 
 
+def full_commit(sha: str) -> str:
+    """The full 40-hex commit for `sha` (manifests record `rev-parse --short`), or "" when
+    this checkout cannot resolve it. ci_green_for compares headSha exactly, so a short sha
+    must be expanded first; one git cannot resolve is never treated as a match."""
+    sha = str(sha or "").strip().lower()
+    if len(sha) == 40:
+        return sha
+    if not sha:
+        return ""
+    rc, out, _err = run(["git", "-C", str(REPO_ROOT), "rev-parse", "--verify", f"{sha}^{{commit}}"])
+    full = (out or "").strip().lower()
+    return full if rc == 0 and len(full) == 40 and full.startswith(sha) else ""
+
+
+TESTS_GATE_CI = "ci"
+
+
+def tests_vouched_by_ci(manifest: dict) -> str:
+    """"" when a build that skipped its own tests may be published anyway, else why not.
+
+    2026-11-10 (release speed): the release workflows build WITHOUT re-running the suites
+    (46 of a 48-minute Windows release was tests ci.yml had already run on the same commit)
+    and stamp the manifest tests_run=false, tests_gate="ci". Such a build is acceptable
+    ONLY when ci.yml -- the full gate, every OS -- succeeded on exactly the commit it was
+    built from. This is deliberately NOT lifted by --allow-red-ci: an untested build on a
+    red tree needs an explicit --allow-untested as well. Anything that cannot be asked
+    fails closed."""
+    if manifest.get("tests_run") is not False:
+        return ""
+    if str(manifest.get("tests_gate") or "") != TESTS_GATE_CI:
+        return "it skipped its tests and names no gate that ran them instead"
+    if manifest.get("git_dirty"):
+        return "it skipped its tests and was built from a dirty tree, so no CI run can vouch for it"
+    sha = full_commit(str(manifest.get("git_commit") or ""))
+    if not sha:
+        return "it skipped its tests and its git commit cannot be resolved here, so no CI run can be matched"
+    if not ci_green_for(sha):
+        return (f"it skipped its tests (tests_gate=ci) and {CI_WORKFLOW} has no successful run on "
+                f"{sha[:7]} (or GitHub could not be asked)")
+    return ""
+
+
 def remote_head_sha() -> str:
     """The sha `origin` says refs/heads/<RELEASE_BRANCH> is at RIGHT NOW, or "".
 
@@ -575,8 +617,14 @@ def main() -> int:
             if meta.get("git_dirty"):
                 fail(f"{kind}/{plat} v{version} was built from a DIRTY tree -- "
                      "a +dirty build must not reach the fleet")
-            if not meta.get("tests_run"):
-                step("WARNING: this build was made with tests skipped")
+            if meta.get("tests_run") is False:
+                why = tests_vouched_by_ci(meta)
+                if why:
+                    fail(f"{kind}/{plat} v{version}: refusing to publish: {why}. The release "
+                         "workflows leave the suites to ci.yml; wait for it to go green on this "
+                         "commit (tools/publish_feed.py --allow-untested is the deliberate override)")
+                step(f"tests: skipped in the build, vouched for by a green {CI_WORKFLOW} run on "
+                     f"{str(meta.get('git_commit') or '')[:7]} (tests_gate=ci)")
 
             # SYS-7 / SYS-2: a companion that needs a dashboard newer than the
             # newest dashboard bundle the channel carries is a build every

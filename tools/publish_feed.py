@@ -973,10 +973,15 @@ def _apply_manifest(args: argparse.Namespace, manifest: dict, manifest_dir: Path
             "nobody can reproduce it. --allow-dirty overrides for a deliberate hotfix.",
             EXIT_CONDEMNED)
     if manifest.get("tests_run") is False and not args.allow_untested:
-        raise PublishFeedError(
-            "manifest says tests_run=false -- publishing an untested build to the feed "
-            "is the failure OPS-1 exists to prevent. --allow-untested overrides.",
-            EXIT_CONDEMNED)
+        # 2026-11-10: a CI-built release skips its own suites (tests_gate="ci") and is
+        # acceptable only on a commit ci.yml passed -- publish_latest.tests_vouched_by_ci.
+        import publish_latest  # noqa: PLC0415  (in-repo, stdlib only)
+        why = publish_latest.tests_vouched_by_ci(manifest)
+        if why:
+            raise PublishFeedError(
+                f"manifest says tests_run=false and {why} -- publishing an untested build to "
+                "the feed is the failure OPS-1 exists to prevent. --allow-untested overrides.",
+                EXIT_CONDEMNED)
     if not args.version:
         args.version = str(manifest.get("version") or "")
     if not args.platform:
@@ -1063,11 +1068,8 @@ def _ci_gate_impl(args: argparse.Namespace) -> str:
     # the gate refused every companion/onboard publish. Expand to the full
     # commit first; a sha git cannot resolve is a refusal, never a pass.
     if len(sha) < 40:
-        rc, out, _err = publish_latest.run(
-            ["git", "-C", str(publish_latest.REPO_ROOT), "rev-parse", "--verify",
-             f"{sha}^{{commit}}"])
-        full = (out or "").strip()
-        if rc != 0 or len(full) != 40 or not full.startswith(sha.lower()):
+        full = publish_latest.full_commit(sha)
+        if not full:
             return (f"commit {sha[:7]} is not a commit this checkout can resolve, so no CI "
                     "run can be matched to it. Pass --allow-red-ci for a deliberate hotfix.")
         sha = full

@@ -183,6 +183,14 @@ dashboard\.venv\Scripts\python.exe tools\publish_latest.py --kind onboard --plat
 ```
 
 **CI builds; this rig signs; `ship.cmd` is for the studio's own dashboard.**
+
+**The CI release builds do not run the tests (2026-11-10).** ci.yml does, on
+every OS, for the same commit; the release workflows stamp `tests_gate: "ci"`
+and `publish_latest` accepts such a build only when ci.yml is green on exactly
+that commit (`--allow-red-ci` does not lift this; `--allow-untested` does).
+Push, dispatch both release workflows straight away, and publish when CI goes
+green: about 27 minutes from push, where it used to be CI plus a 48-minute
+Windows build. `docs/CI.md`, "The release workflows", has the detail.
 `publish_latest` takes the newest green `release-windows` / `release-macos`
 run **on `main`**, downloads its artefact, re-verifies the sha256 against the
 manifest, refuses a dirty tree, refuses a commit that is not an ancestor of
@@ -269,6 +277,9 @@ in `companion/pyproject.toml`. Publishing a version the dashboard already has
 is a **409** — a rebuild without a bump cannot reach the fleet.
 
 ### 2. Build
+
+On the rig the suites still run by default. CI's release workflows pass
+`-SkipTests -TestsGate ci` instead (see "The command actually used" above).
 
 ```powershell
 .\tools\release.ps1

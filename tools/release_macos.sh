@@ -35,6 +35,7 @@ set -u
 
 INSPECT_ONLY=0
 SKIP_TESTS=0
+TESTS_GATE=""
 ALLOW_DIRTY=0
 DRY_RUN=0
 PUBLISH=0
@@ -52,6 +53,8 @@ usage() {
     echo ""
     echo "  --skip-tests      do not run the companion suite (recorded in the"
     echo "                    manifest as tests_run=false)"
+    echo "  --tests-gate ci   with --skip-tests: the suites are ci.yml's job; the"
+    echo "                    publish tools then require ci.yml green on this commit"
     echo "  --allow-dirty     acknowledge a dirty tree: shrink the banner to one"
     echo "                    line. The manifest is stamped +dirty either way."
     echo "  --dry-run         print every step, change nothing, build nothing"
@@ -66,6 +69,7 @@ usage() {
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-tests)     SKIP_TESTS=1; shift ;;
+        --tests-gate)     TESTS_GATE="$2"; shift 2 ;;
         --allow-dirty)    ALLOW_DIRTY=1; shift ;;
         --dry-run)        DRY_RUN=1; shift ;;
         --publish)        PUBLISH=1; shift ;;
@@ -76,6 +80,7 @@ while [ $# -gt 0 ]; do
         *) echo "Unknown argument: $1"; usage ;;
     esac
 done
+case "$TESTS_GATE" in ""|ci) ;; *) echo "--tests-gate takes only 'ci'" >&2; exit 1 ;; esac
 
 step() { echo "[release] $1"; }
 skip() { echo "[release] SKIP: $1"; }
@@ -746,6 +751,7 @@ BAKED_PUBKEY_IDS="$(sed -n 's/^[[:space:]]*"\([A-Za-z0-9+/=]\{40,\}\)",[[:space:
     done | paste -sd, - 2>/dev/null || true)"
 TESTS_RUN=true
 [ "$SKIP_TESTS" = 1 ] && TESTS_RUN=false
+[ "$SKIP_TESTS" = 1 ] || TESTS_GATE=""
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 BUILT_BY="$(id -un 2>/dev/null || echo unknown)@$(hostname -s 2>/dev/null || echo unknown)"
 
@@ -768,6 +774,7 @@ write_manifest() {
     "git_describe":  "$(json_escape "$GIT_DESCRIBE")",
     "git_dirty":  $GIT_DIRTY,
     "tests_run":  $TESTS_RUN,
+    "tests_gate":  "$(json_escape "$TESTS_GATE")",
     "requires_dashboard":  "$(json_escape "$REQUIRES_DASHBOARD")",
     "baked_pubkey_ids":  "$(json_escape "$BAKED_PUBKEY_IDS")",
     "signed_binary":  $SIGNED_BINARY,

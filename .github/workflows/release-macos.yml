@@ -30,8 +30,8 @@ name: release-macos
 on:
   workflow_dispatch:
     inputs:
-      skip_tests:
-        description: "Emergency valve: skip the companion suite (the release script runs it by default, CCSYNC_REQUIRE_RCLONE=1). Use when a suite-only failure (e.g. a test fix mid-flight) must not block getting a build to Mac editors -- the exe/app itself is unaffected either way."
+      run_tests:
+        description: "Also run the companion and onboarding suites in this build. Off by default since 2026-11-10: ci.yml runs them on every OS for the same commit, and the publish tools accept this build (tests_gate=ci) only once ci.yml is green on it."
         type: boolean
         default: false
       allow_dirty:
@@ -150,7 +150,7 @@ jobs:
         run: |
           set -eu
           args=""
-          if [ "${{ inputs.skip_tests }}" = "true" ]; then args="$args --skip-tests"; fi
+          if [ "${{ inputs.run_tests }}" != "true" ]; then args="$args --skip-tests --tests-gate ci"; fi
           if [ "${{ inputs.allow_dirty }}" = "true" ]; then args="$args --allow-dirty"; fi
           ./tools/release_macos.sh $args
 
@@ -185,11 +185,14 @@ jobs:
           size="$(wc -c < "$zip" | tr -d ' ')"
           dirty=false
           if [ -n "$(git status --porcelain)" ]; then dirty=true; fi
-          # tests_run is the ONBOARDING suite, run here, against the tree this
-          # wizard was built from -- publish_feed.py refuses a manifest that
-          # says false (OPS-1), and it must never say true on trust.
+          # tests_run is the ONBOARDING suite, run here only with run_tests.
+          # Skipped (the default): tests_gate=ci, and the publish tools accept
+          # it only on a commit ci.yml passed. Run and FAILED: no gate at all,
+          # so CI can never vouch for a build whose own suite failed.
           tests=false
-          if [ "${{ inputs.skip_tests }}" != "true" ]; then
+          gate=ci
+          if [ "${{ inputs.run_tests }}" = "true" ]; then
+            gate=""
             if (cd onboarding && ../companion/.venv/bin/python -m pytest tests -q); then
               tests=true
             else
@@ -198,11 +201,11 @@ jobs:
           fi
           # printf, not a heredoc: a heredoc terminator cannot be indented
           # inside a YAML block scalar.
-          printf '{"version":"%s","platform":"macos","artifact":"%s","sha256":"%s","size_bytes":%s,"built_at":"%s","git_commit":"%s","git_dirty":%s,"tests_run":%s,"signed_binary":false,"built_by":"github-actions/release-macos","built_with":".github/workflows/release-macos.yml"}\n' \
+          printf '{"version":"%s","platform":"macos","artifact":"%s","sha256":"%s","size_bytes":%s,"built_at":"%s","git_commit":"%s","git_dirty":%s,"tests_run":%s,"tests_gate":"%s","signed_binary":false,"built_by":"github-actions/release-macos","built_with":".github/workflows/release-macos.yml"}\n' \
             "$version" "$(basename "$zip")" "$sha" "$size" \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(git rev-parse HEAD)" "$dirty" "$tests" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(git rev-parse HEAD)" "$dirty" "$tests" "$gate" \
             > onboarding/dist/ccsync-onboard.json
-          echo "wizard manifest written: $version, sha256 $sha, tests_run=$tests"
+          echo "wizard manifest written: $version, sha256 $sha, tests_run=$tests, tests_gate=$gate"
 
       - name: upload the build
         if: ${{ !cancelled() }}

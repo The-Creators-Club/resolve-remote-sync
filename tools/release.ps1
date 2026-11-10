@@ -58,6 +58,13 @@
 .PARAMETER SkipTests
     Skip both test suites. Recorded in the manifest as tests_run=false.
 
+.PARAMETER TestsGate
+    With -SkipTests: who vouches for the tests instead. The only value is
+    "ci": the release workflows build without testing and leave the suites to
+    ci.yml, and the publish tools accept tests_run=false ONLY when ci.yml is
+    green on this exact commit (tools/publish_latest.py tests_vouched_by_ci).
+    Recorded in the manifest as tests_gate. A build on the rig leaves it out.
+
 .PARAMETER AllowDirty
     Acknowledge a dirty working tree: the multi-line warning banner is
     reduced to one line. The manifest is stamped "+dirty" either way.
@@ -83,6 +90,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipTests,
+    [ValidateSet("", "ci")]
+    [string]$TestsGate = "",
     [switch]$AllowDirty,
     [switch]$DryRun,
     [string]$DashboardUrl = ""
@@ -885,6 +894,8 @@ $manifest = [ordered]@{
     git_describe   = "$GitDescribe".Trim()
     git_dirty      = $IsDirty
     tests_run      = (-not $SkipTests)
+    # "ci" only with -SkipTests: the suites are ci.yml's job for this commit (see -TestsGate).
+    tests_gate     = $(if ($SkipTests) { $TestsGate } else { "" })
     # Provenance the publish tools consume (resilience sweep 2026-08-28):
     # baked_pubkey_ids -> the REL-7 rotation refusal, requires_dashboard ->
     # REL-4's ordering rule, arch -> REL-16's discriminator. All three are

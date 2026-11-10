@@ -199,10 +199,20 @@ def _mac_volumes(scope: str, skip: set[str]) -> list[dict[str, Any]]:
         return out
     for entry in entries:
         root = str(entry)
-        if root in skip or entry.is_symlink() or not entry.is_dir():
+        probe = root
+        if root in skip or not entry.is_dir():
             continue
+        if entry.is_symlink():
+            # `/Volumes/Macintosh HD` is a link to `/`: the startup disk. A card scan never wants
+            # it, but "local"/"all" must list it, or a Mac's own drive (and every laptop folder on
+            # it) has no volume. Its serial is the APFS Data volume's: the sealed system volume's
+            # UUID changes with every macOS update, the Data volume's does not.
+            if scope == "removable" or os.path.realpath(root) != "/" or "/" in skip:
+                continue
+            root = "/"
+            probe = "/System/Volumes/Data" if os.path.isdir("/System/Volumes/Data") else "/"
         try:
-            raw = subprocess.run(["diskutil", "info", "-plist", root],
+            raw = subprocess.run(["diskutil", "info", "-plist", probe],
                                  capture_output=True, timeout=10).stdout
             info = plistlib.loads(raw)
         except Exception:                                     # noqa: BLE001

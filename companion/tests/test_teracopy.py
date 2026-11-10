@@ -13,6 +13,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+import sys
+
 import pytest
 
 from ccsync_companion import teracopy as tc_mod
@@ -22,6 +24,9 @@ from ccsync_companion.teracopy import (
 # A Windows FILETIME, as TeraCopy really stores Files.Created/Modified/Accessed
 # (past 2**53: the Node original had to name its columns to avoid a throw; here
 # the fixtures carry it so a regression to `select *` is at least exercised).
+# Launching TeraCopy is Windows-only (it is a Windows program; a Mac copies with the Python copier).
+WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="TeraCopy runs on Windows only")
+
 FILETIME = 134304963240000000
 
 # The real schema, copied from %APPDATA%\TeraCopy\History\*.db.
@@ -415,6 +420,7 @@ def test_a_tick_that_raises_does_not_break_the_wait(driver):
 
 
 # ---------------------------------------------------------------------- launch
+@WINDOWS_ONLY
 def test_launch_writes_the_list_and_builds_the_exact_command(driver, tmp_path, exe):
     t, clock, _, calls = driver(list_dir=str(tmp_path / "data" / "lists"))
     dest = str(tmp_path / "W" / "Temp Transfer" / "2026-08-05 BMCC")
@@ -431,6 +437,7 @@ def test_launch_writes_the_list_and_builds_the_exact_command(driver, tmp_path, e
     assert calls == [f'"{exe}" Copy *"{res["list_file"]}" "{dest}" /OverwriteDiffSize /Close']
 
 
+@WINDOWS_ONLY
 def test_two_jobs_with_one_tag_in_one_second_get_two_list_files(driver, tmp_path):
     t, _, _, _ = driver()
     a = t.launch(["H:\\a.MP4"], str(tmp_path / "d"), tag="Interview")
@@ -440,6 +447,7 @@ def test_two_jobs_with_one_tag_in_one_second_get_two_list_files(driver, tmp_path
     assert Path(b["list_file"]).read_bytes() == b"N:\\b.MP4\r\n"
 
 
+@WINDOWS_ONLY
 def test_launch_snapshots_the_history_so_the_job_can_exclude_its_predecessors(driver, tmp_path):
     d = hist(tmp_path, "snap")
     make_db(d / "old.db", [{"source": "L:\\a.MP4", "size": 1}])
@@ -506,6 +514,7 @@ def test_nothing_to_copy_launches_nothing(driver, tmp_path):
     assert r["code"] is None and r["list_file"] is None and calls == []
 
 
+@WINDOWS_ONLY
 def test_a_verified_job_is_code_0_and_reads_its_own_record(driver, tmp_path):
     a, b = _files(tmp_path)
     d = hist(tmp_path, "cg-done")
@@ -526,6 +535,7 @@ def test_a_verified_job_is_code_0_and_reads_its_own_record(driver, tmp_path):
     assert any("2/2 file(s) copied and verified." in m for m in logs)
 
 
+@WINDOWS_ONLY
 def test_a_finished_job_with_an_unverified_file_is_code_10(driver, tmp_path):
     a, b = _files(tmp_path)
     d = hist(tmp_path, "cg-unver")
@@ -537,6 +547,7 @@ def test_a_finished_job_with_an_unverified_file_is_code_10(driver, tmp_path):
     assert any("finished with 1 of 2 file(s) not verified." in m for m in logs)
 
 
+@WINDOWS_ONLY
 def test_no_record_but_every_file_present_is_code_12_unconfirmed(driver, tmp_path):
     a, b = _files(tmp_path)
     dest = tmp_path / "dest-fallback"
@@ -551,6 +562,7 @@ def test_no_record_but_every_file_present_is_code_12_unconfirmed(driver, tmp_pat
     assert any("UNCONFIRMED" in m for m in logs)
 
 
+@WINDOWS_ONLY
 def test_a_file_missing_from_the_destination_is_code_11(driver, tmp_path):
     a, b = _files(tmp_path)
     dest = tmp_path / "dest-missing"
@@ -563,6 +575,7 @@ def test_a_file_missing_from_the_destination_is_code_11(driver, tmp_path):
     assert any("1 file(s) missing and 0 with a different size" in m for m in logs)
 
 
+@WINDOWS_ONLY
 def test_verify_off_and_allowed_reports_the_copy_as_unverified(driver, tmp_path):
     a, b = _files(tmp_path)
     d = hist(tmp_path, "cg-noverify")
@@ -693,6 +706,7 @@ def test_the_default_limit_is_30_minutes_plus_20_mb_a_second():
     assert tc_mod.wait_limit_seconds(20 * 1024 * 1024 * 100) == 1800 + 100
 
 
+@WINDOWS_ONLY
 def test_copy_group_gives_up_at_the_scaled_default_limit(driver, tmp_path):
     a, b = _files(tmp_path)
     t, clock, logs, _ = driver(read_status_fn=lambda *a: status_of(state="running", total=2))
@@ -700,6 +714,7 @@ def test_copy_group_gives_up_at_the_scaled_default_limit(driver, tmp_path):
     assert 1800 <= clock.t - CLOCK0 < 1810
 
 
+@WINDOWS_ONLY
 def test_a_stopped_copy_group_reports_unverified_files_as_not_landed(driver, tmp_path):
     a, b = _files(tmp_path)
     d = hist(tmp_path, "cg-stop")
@@ -716,6 +731,7 @@ def test_a_plain_copy_defaults_to_skipall():
     assert tc_mod.DEFAULT_SWITCH == "/SkipAll" == tc_mod.SWITCH_SKIP
 
 
+@WINDOWS_ONLY
 def test_launches_from_several_threads_go_to_teracopy_one_at_a_time(tmp_path):
     """Field mode launches lanes off one card at the same moment. TeraCopy's
     single instance loses all but one of several stubs handed over at once

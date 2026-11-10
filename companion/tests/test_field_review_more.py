@@ -3,6 +3,7 @@ smaller engine cases. Temp folders only."""
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -216,6 +217,7 @@ def test_the_service_notices_a_letter_that_changed_hands(tmp_path):
 
 
 # ---------------------------------------------------------------------- the pool is the pool
+@pytest.mark.skipif(sys.platform != "win32", reason="mapped drive letters are Windows-only")
 def test_a_mapped_letter_is_the_pool_only_if_it_says_so(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "name", "nt")
     local = lambda letter: ""                                                      # noqa: E731

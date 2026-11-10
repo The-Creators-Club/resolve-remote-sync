@@ -96,6 +96,7 @@ STATIC_REL = ("editor", "dist")
 STABLE_SECONDS = 60.0
 # Consecutive quick exits before the state is `failed` rather than `backoff`.
 CRASHLOOP_AFTER = 5
+CONFIRM_ALIVE_SECONDS = 0.5   # the child must outlive a lost bind race before it counts as running
 BACKOFF_FIRST = 1.0
 BACKOFF_CAP = 60.0
 BACKOFF_CAP_FAILED = 300.0
@@ -375,7 +376,15 @@ class Editor:
                      proc.pid, port)
             while not self._stop.is_set() and proc.poll() is None:
                 if self.state == S_STARTING:
-                    if _port_open(port):
+                    # "Something answers on the port" is not "OUR child answers": _free_port
+                    # releases the port before the child binds it, and another process can take
+                    # it in between. Our child then fails to bind and exits within milliseconds,
+                    # while the stranger keeps answering -- and every request would be relayed to
+                    # it with our secret (2026-11-10, two dashboards' editors under parallel
+                    # tests). So the port must answer AND our child must still be alive a moment
+                    # later before this counts as running.
+                    if _port_open(port) and not self._stop.wait(CONFIRM_ALIVE_SECONDS) \
+                            and proc.poll() is None and _port_open(port):
                         self._set(S_RUNNING, f"serving on 127.0.0.1:{port}")
                         log.info("the new Timeline Cards editor is answering")
                     elif time.monotonic() - began > self.start_deadline:

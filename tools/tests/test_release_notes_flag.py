@@ -55,9 +55,12 @@ def _sign(argv):
 
 
 def _base_argv(artifact, version="0.9.67"):
+    # A fixed --published-at: it is signed, and two signings a moment apart straddled a
+    # second on CI (2026-11-10), so the records and their signatures differed.
     return ["--artifact", str(artifact), "--kind", "companion",
             "--platform", "windows", "--version", version,
-            "--min-version", "0.0.0", "--allow-no-floor"]
+            "--min-version", "0.0.0", "--allow-no-floor",
+            "--published-at", "2026-11-10T00:00:00Z"]
 
 
 def test_notes_ride_the_query_and_not_the_signature(key, artifact):

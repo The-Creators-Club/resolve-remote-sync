@@ -129,7 +129,17 @@ async def app(scope, receive, send):
     await inner(scope, receive, send)
 
 
-uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning", ws="websockets")
+# Bind like node does, not like uvicorn does: uvicorn sets SO_REUSEADDR, which on Windows lets a
+# second process bind a port that is already taken, so two stand-ins under parallel test workers
+# could share one port and answer each other's dashboards (2026-11-10). Exclusive bind: a lost
+# race is an exit, as it is for the real editor.
+import socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+sock.bind(("127.0.0.1", PORT))
+config = uvicorn.Config(app, log_level="warning", ws="websockets")
+uvicorn.Server(config).run(sockets=[sock])
 '''
 
 

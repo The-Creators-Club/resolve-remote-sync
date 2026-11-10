@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from ccsync_dashboard import auth, db, ui_home
+from ccsync_dashboard import auth, db, notices, ui_home
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
@@ -49,7 +49,12 @@ def _cookie(client, user):
 
 
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
+    # The collector's background notice checks clear every open notice of a kind they find
+    # nothing wrong with -- including the "probe" this fixture files. Under parallel runs on
+    # a busy CI runner the check won the race and the probe vanished (2026-11-10). This file
+    # tests the home windows, not the checks, so they do not run here.
+    monkeypatch.setattr(notices, "run_checks", lambda *a, **k: None)
     projects = tmp_path / "Projects"
     (projects / "2026" / "FF5" / "Elections" / "Interviews").mkdir(parents=True)
     settings = Settings(db_path=str(tmp_path / "home.db"), session_secret=SECRET,

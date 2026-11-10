@@ -141,7 +141,10 @@ def test_copy_runs_to_the_end_and_the_state_follows_it(served):
     status, got, _ = call(served, "POST", "/field/api/copy", {"serial": SERIAL, "dests": ["vol:AAAA0001", "vol:LLLL0001"]},
                           headers=own(served))
     assert status == 200 and got["ok"] and len(got["run"]["lanes"]) == 2
-    for _ in range(300):
+    # A deadline, not a count of 300 polls (~15 s): under a parallel run on a busy machine the
+    # copy can take longer (2026-11-10, -n auto). A healthy run leaves the loop at once.
+    end = time.monotonic() + 60
+    while time.monotonic() < end:
         st = call(served, "GET", "/field/api/state")[1]
         if st["runs"] and not st["runs"][0]["running"]:
             break

@@ -423,6 +423,22 @@ its stub dir using `os.pathsep` (`;`), and a bash inheriting that Windows-style
 PATH resolves `chown` to MSYS's real one (`chown: invalid user: 'root:root'`).
 `tools\ship.cmd` handles this itself by invoking pytest through Git's bash.
 
+### Fast runs, and where a new test goes (2026-11-10)
+
+- **Run the two big suites in parallel**: `-n auto` (pytest-xdist is in both test locks).
+  The companion is ~1 min instead of ~10; the dashboard takes `-n auto --dist loadfile`
+  (~2.5 min instead of ~19). `--dist loadfile` keeps each test file on one worker, which
+  some files with a live child process per module need. CI and `tools/release.ps1` do this.
+- **A test must pass in parallel.** No fixed ports, no shared paths under `~/.ccsync`, no
+  clock in a parametrize id, no "N polls" waits (use a deadline of tens of seconds, which
+  a healthy run never reaches), no fixture that a background loop can undo.
+- **A new regression test goes in the test file of the module it exercises**, not in a new
+  `test_bug_hunt_<date>.py` / `test_<wave>_review.py` / `test_cr<N>.py`. Name the bug in
+  the test's docstring instead. The ~110 such files that exist stay where they are; fold
+  one into its module's file when you are already editing both.
+- **The release builds do not run the suites** (`tests_gate: ci`); `ci.yml` does, and the
+  publish tools require it green on the exact commit (docs/CI.md, "The release workflows").
+
 ## Building & shipping (existing commands — don't invent wrappers)
 
 **There are two pathways, and which one applies depends on who is running it:

@@ -327,7 +327,11 @@ jobs:
         # It is also what deploy/run.sh does in production.
         env:
           PYTHONPATH: src
-        run: .venv/bin/python -m pytest tests -q -n auto --junitxml=../junit-dashboard.xml
+        # --dist loadfile: each test FILE stays on one worker, in order. Several files share one live
+        # child per module (test_cards_edit's stand-in editor); split across workers, the relay
+        # test failed now and then on the 4-core Linux runner (2026-11-10, CancelledError, not
+        # root-caused; never seen serially or with loadfile). Files still spread across workers.
+        run: .venv/bin/python -m pytest tests -q -n auto --dist loadfile --junitxml=../junit-dashboard.xml
 
       # THROUGH BASH, and reusing the dashboard venv exactly as CLAUDE.md says:
       # server/ has no venv of its own. This is the suite `ship` already gates

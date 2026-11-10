@@ -716,7 +716,7 @@ else {
             # rig instead of ~10 + ~20. A venv that predates the lock runs serially, as before.
             $pyArgs = @("-m", "pytest", "-q")
             & $py -c "import xdist" 2>$null
-            if ($LASTEXITCODE -eq 0) { $pyArgs += @("-n", "auto") }
+            if ($LASTEXITCODE -eq 0) { $pyArgs += @("-n", "auto", "--dist", "loadfile") }   # loadfile: see ci.yml's dashboard step
             $code = Invoke-Native -Exe $py -ArgList $pyArgs -WorkingDir $s.Dir
             if ($code -ne 0) {
                 Write-Host ""

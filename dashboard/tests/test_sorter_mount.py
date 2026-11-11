@@ -108,6 +108,35 @@ def test_login_is_required(mounted):
     assert page.status_code == 303 and "/login" in page.headers["location"]
 
 
+def test_a_folder_link_opens_without_a_session_and_nothing_else_of_the_sorter_does(mounted):
+    """/sorter/share/ is the one sorter prefix login_gate opens (footage-sorter downloads.py): the token in the
+    path is the credential. Everything else under /sorter still needs a session, and a stranger's identity
+    headers are stripped, so the link cannot be used to act as an admin."""
+    client, _app, _p, staged = mounted
+    login(client, "owen")
+    csrf = client.get("/sorter/api/whoami").json()["csrf"]
+    made = client.post("/sorter/api/shares", json={"root": str(staged.parent), "rel": staged.name},
+                       headers={"X-CSRF-Token": csrf})
+    assert made.status_code == 200, made.text
+    link = "/sorter/" + made.json()["share"]["path"]
+    client.cookies.clear()                                     # from here on: nobody
+    assert client.get(link).status_code == 200
+    listing = client.get(link + "list")
+    assert listing.status_code == 200 and [f["rel"] for f in listing.json()["files"]] == ["fx3_0001.MP4"]
+    got = client.get(link + "file/fx3_0001.MP4")
+    assert got.status_code == 200 and got.content == b"v" * 1000
+    assert client.get("/sorter/share/assets/share.js").status_code == 200
+    assert client.get("/sorter/share/" + "x" * 22 + "/list").status_code == 404
+    # the rest of the sorter is still behind the login, with or without forged identity headers
+    forged = {"X-Sorter-User": "owen", "X-Sorter-Admin": "1"}
+    assert client.get("/sorter/api/shares", headers=forged).status_code == 401
+    assert client.post("/sorter/api/download/plan", json={"clipIds": ["c1"]}, headers=forged).status_code in (401, 403)
+    assert client.get("/sorter/api/download/file/c1/0", headers=forged).status_code == 401
+    assert client.get("/sorter/", follow_redirects=False).status_code == 303
+    # and a forged admin header on the open prefix reaches nothing an admin could do
+    assert client.post(link + "list", json={}, headers=forged).status_code in (401, 403, 405)
+
+
 def test_bare_prefix_redirects_to_the_slash(mounted):
     client, *_ = mounted
     login(client, "owen")

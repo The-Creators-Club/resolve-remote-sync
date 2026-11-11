@@ -580,3 +580,38 @@ The companion validates, answers with a balloon, and deletes the file
   computer you may pick for, and remove.
 
 Versions: dashboard 0.7.77 (carries CR-379 too, the exact-name auto-map), companion 0.9.87.
+
+---
+
+## 13. Counting, and pictures in the picker (2026-11-11)
+
+The first real use (a new project, `2026/Fifi Huang`, 43 BRAW files, picked for
+Ruskin's PC) found three things. All three are dashboard code.
+
+- **"0 originals" meant "not counted yet".** The NAS inventory walk reached a
+  project by rotation: 8 projects per pass, a pass every 15 minutes, 17
+  projects, the new one last. For up to three passes the project page said
+  "the server has 0 originals", MEDIA PRESENCE read "originals 43/0" beside the
+  base rig, and the picker (which lists `nas_media`) said "The server has no
+  originals here yet". Now:
+  - a project with no `nas_inventory_state` row is walked FIRST and outside the
+    per-pass budget, and the end of every collector cycle brings the inventory
+    pass forward when one exists (`collector._nudge_first_walks`,
+    `db.never_walked_project_ids`), so a new project is counted within about a
+    minute of existing;
+  - every project's directory signature is checked on every pass, and
+    `inventory_projects_per_cycle` bounds only the per-file walks. A changed
+    project (proxies just generated, footage just uploaded) is seen on the
+    next pass, not two passes later;
+  - until the first walk, MEDIA PRESENCE says "counting" and the picker says
+    "still counting", never a zero.
+- **The picker had no pictures.** Each file row now shows a thumbnail and plays
+  the clip's proxy in a new tab when clicked, when the Footage Sorter is
+  mounted. The picture is the sorter's (`/sorter/api/path/thumb?dest=<path
+  under the Projects root>`, footage-sorter `downloads.py`), made from
+  `Proxy/<stem>` beside the file. **A BRAW with no proxy has no picture**:
+  ffmpeg cannot decode it, so the row says "no proxy yet" until Resolve has
+  made one. The visual way to choose stays the Resolve menu of section 12.1.
+- **Not changed:** `health.presence_status` still compares a computer's count
+  against the zero rollup of an uncounted project, so its LED can read wrong
+  for the minute before the first walk.

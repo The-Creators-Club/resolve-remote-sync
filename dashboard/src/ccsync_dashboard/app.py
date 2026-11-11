@@ -1426,6 +1426,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # which is why it must stay exactly `/broll/share/` and why the
             # viewer's every asset URL is document-relative under it.
             or path.startswith("/broll/share/")
+            # a FOLDER LINK from the Footage Sorter (footage-sorter
+            # downloads.py, 2026-11-11): somebody outside the fleet opening
+            # the link an admin sent them to download a folder of footage.
+            # The same posture as the client folder above: the 128-bit token
+            # in the path is the credential, re-checked by the sorter on
+            # every request (unknown, switched off and run out are one 404),
+            # nothing under it writes, and no file outside the linked folder
+            # is reachable (real-path containment per request). Everything
+            # the page loads is under this prefix, so it is the one sorter
+            # prefix an operator may publish past the tailnet; /sorter/api/
+            # and the page itself stay session-gated, and SorterGate stamps
+            # no identity on a request that has no session.
+            or path.startswith("/sorter/share/")
             # the ytdl local-download client config: unauthenticated-read BY
             # DESIGN (docs/YTDL_LOCAL_DOWNLOAD.md §4) -- the companion's
             # yt-dlp sidecar manager reads it before it holds anything to

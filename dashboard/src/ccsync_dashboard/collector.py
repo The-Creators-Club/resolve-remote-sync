@@ -175,6 +175,8 @@ class Collector:
         self._my_id = ""
         self._incomplete: dict[tuple[str, str], int] = {}  # (slug, device ID) -> needItems
         self._inventory_cursor = 0   # round-robin over projects for the NAS walk
+        self._inventory_first_only = False          # the next pass was brought forward for new projects only
+        self._first_walk_tried: dict[int, float] = {}   # project id -> monotonic time its first walk was asked for
         # Device IDs already warned about in _run_enforce (username-shaped
         # name, no matching editor account -- see B16). Warn-once, not every
         # cycle forever.
@@ -492,6 +494,7 @@ class Collector:
                                folder_devices=folder_devices)
         except Exception:  # noqa: BLE001
             log.exception("the self-diagnosis pass failed; continuing")
+        self._nudge_first_walks(conn, kinds)
         return results
 
     def _refresh_shared_folders(self, conn) -> None:
@@ -1822,6 +1825,30 @@ class Collector:
             note = f"{note}; {partial}" if note else partial
         return note
 
+    def _nudge_first_walks(self, conn, kinds: list[str]) -> None:
+        """Bring the inventory pass forward for a project nobody has counted.
+
+        Called at the end of every cycle, so it covers every way a project
+        comes to exist (the setup page, an adopted folder, a folder Syncthing
+        already had) without each of them having to remember to ask. One
+        indexed read when there is nothing to do. A project is only asked
+        for once per regular interval: its first pass always leaves a row
+        (see _run_inventory), and if something ever stops that, the cost is
+        one early pass, not one per tick."""
+        if "inventory" in kinds or not self.settings.projects_dir:
+            return
+        try:
+            waiting = db.never_walked_project_ids(conn)
+        except Exception:  # noqa: BLE001 - a convenience: the regular pass still comes
+            log.debug("could not ask for never-walked projects", exc_info=True)
+            return
+        horizon = time.monotonic() - self.settings.interval_inventory
+        fresh = [pid for pid in waiting if self._first_walk_tried.get(pid, -1e18) < horizon]
+        if fresh:
+            self._first_walk_tried.update((pid, time.monotonic()) for pid in fresh)
+            self._inventory_first_only = True
+            self.nudge(("inventory",))
+
     def _run_inventory(self, conn) -> str | None:
         """Walk the NAS Projects tree for a bounded slice of projects each
         cycle, recording originals + proxies.
@@ -1840,6 +1867,10 @@ class Collector:
         ZFS/NFS tree inside an open SQLite write transaction is what made
         editors' POST /api/v1/report 500 with "database is locked".
         """
+        # A pass brought forward for a new project (_nudge_first_walks) walks
+        # that project and nothing else: the fleet's signatures were checked
+        # on the regular beat and are checked again on the next one.
+        first_only, self._inventory_first_only = self._inventory_first_only, False
         projects_dir = Path(self.settings.projects_dir)
         if not projects_dir.is_dir():
             raise RuntimeError(f"DASH_PROJECTS_DIR does not exist: {projects_dir}")
@@ -1863,11 +1894,39 @@ class Collector:
         ).fetchall()
         if not active:
             return
+        # WHO IS LOOKED AT, AND HOW MANY ARE WALKED (2026-11-11). The owner made
+        # a project of a folder holding 43 camera files and the page said "the
+        # server has 0 originals" for as long as the rotation took to reach it:
+        # 8 projects every 15 minutes, 17 projects, the new one last, so up to
+        # three cycles, and the originals picker (which lists this inventory)
+        # was empty for all of it. Two changes:
+        #   * a project that has NEVER been walked goes first, always, outside
+        #     the budget (run_cycle also brings this pass forward for one, so
+        #     a new project is counted within a minute, see
+        #     _nudge_first_walks). It leaves that state on its first pass
+        #     whatever the outcome: a walk writes its row, and so does
+        #     db.record_inventory_error.
+        #   * every other project has its cheap directory signature checked
+        #     EVERY cycle, and `inventory_projects_per_cycle` now bounds what
+        #     it was always meant to bound, the expensive per-file walks. A
+        #     changed project used to wait for the rotation to come round
+        #     (two cycles here) before anyone looked at it at all. The cursor
+        #     survives for the case the bound exists for: when more projects
+        #     changed than one cycle may walk, the next cycle starts at the
+        #     first one left over, so none is starved.
         n = len(active)
-        window = self.settings.inventory_projects_per_cycle
+        budget = max(1, int(self.settings.inventory_projects_per_cycle))
+        unwalked = db.never_walked_project_ids(conn)
         start = self._inventory_cursor % n
-        self._inventory_cursor = (start + window) % n
-        selected = [active[(start + i) % n] for i in range(min(window, n))]
+        rotation = [active[(start + i) % n] for i in range(n)]
+        if first_only:
+            selected = [r for r in active if r["id"] in unwalked]
+        else:
+            selected = ([r for r in active if r["id"] in unwalked]
+                        + [r for r in rotation if r["id"] not in unwalked])
+        self._first_walk_tried.update((r["id"], time.monotonic()) for r in selected
+                                      if r["id"] in unwalked)
+        deferred_at: int | None = None
 
         now = self.now_fn()
         prefix = self.settings.syncthing_data_prefix.rstrip("/")
@@ -1884,6 +1943,14 @@ class Collector:
             sig, n_dirs = self._dir_signature(proj_dir)
             if sig == db.nas_inventory_sig(conn, pid):
                 continue  # unchanged since last walk -- skip the file scan
+            if pid not in unwalked:
+                if budget <= 0:
+                    # changed, but this cycle has walked its share: first in
+                    # line next time
+                    if deferred_at is None:
+                        deferred_at = next(i for i, r in enumerate(active) if r["id"] == pid)
+                    continue
+                budget -= 1
             rows = self._walk_media_files(proj_dir)
             # A project dir with NO media and no .stfolder is Syncthing's own
             # answer to "is this really the folder": the marker is the first
@@ -1897,6 +1964,8 @@ class Collector:
                 continue
             walked.append((pid, str(row["slug"]), rel, rows, sig, n_dirs))
 
+        if deferred_at is not None:
+            self._inventory_cursor = deferred_at
         # -- phase 2: one short write burst ---------------------------------
         for pid, message in errors:
             db.record_inventory_error(conn, pid, message, now)

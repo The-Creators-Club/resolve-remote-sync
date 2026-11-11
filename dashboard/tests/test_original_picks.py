@@ -471,3 +471,51 @@ def test_the_project_page_carries_the_window(ruskin):
     r = client.get(f"/project/{SLUG}")
     assert r.status_code == 200
     assert f'hx-get="/partials/project/{SLUG}/originals"' in r.text
+
+
+# ---- not counted yet is not zero, and a picture per file (2026-11-11) ----
+
+def _counted(conn, slug=SLUG):
+    """The inventory has walked the project (what collector._run_inventory leaves behind)."""
+    conn.execute("INSERT OR REPLACE INTO nas_inventory_state (project_id, tree_sig, n_dirs, walked_at)"
+                 " VALUES (?, 'sig', 1, ?)", (project_id(conn, slug), dbmod.utcnow_iso()))
+    conn.commit()
+
+
+def test_an_uncounted_project_says_counting_not_no_originals(env):
+    client, conn = env
+    report(client, "ruskin", "RUSKIN-PC")
+    tick(client, "ruskin", "RUSKIN-PC", slug="p2")
+    r = client.get("/partials/project/p2/originals?target=ruskin::RUSKIN-PC", headers=HX)
+    assert r.status_code == 200
+    assert "still counting this project" in r.text and "no originals here yet" not in r.text
+    _counted(conn, "p2")
+    r = client.get("/partials/project/p2/originals?target=ruskin::RUSKIN-PC", headers=HX)
+    assert "no originals here yet" in r.text and "still counting" not in r.text
+
+
+def test_media_presence_says_counting_until_the_first_walk(ruskin):
+    client, conn = ruskin
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_editor_media_project(
+        conn, editor="ruskin", machine="RUSKIN-PC", slug=SLUG, mode="editor",
+        n_originals=43, bytes_originals=1000, n_proxies=0, bytes_proxies=0, truncated=False, now=now)
+    conn.commit()
+    html = client.get(f"/partials/project/{SLUG}/bins", headers=HX).text
+    assert "counting this project" in html and "server count pending" in html
+    assert "originals 43/0" not in html and "the server has <b>0</b>" not in html
+    _counted(conn)
+    html = client.get(f"/partials/project/{SLUG}/bins", headers=HX).text
+    assert "the server has <b>" in html and "originals 43/" in html and "counting this project" not in html
+
+
+def test_the_picker_shows_a_picture_per_file_when_the_sorter_is_mounted(ruskin):
+    client, conn = ruskin
+    plain = originals_window(client, target="ruskin::RUSKIN-PC", dir="Footage_Lusty")
+    assert "A001.braw" in plain and "/sorter/api/path/thumb" not in plain      # no sorter here: the plain list
+    client.app.state.sorter_mounted = True
+    html = originals_window(client, target="ruskin::RUSKIN-PC", dir="Footage_Lusty")
+    # the file's place under the Projects root (the sorter's destination), URL-encoded
+    assert "/sorter/api/path/thumb?s=s&amp;dest=2026/Beyond%20Nights/Footage_Lusty/A001.braw" in html
+    assert "/sorter/api/path/stream?dest=2026/Beyond%20Nights/Footage_Lusty/A001.braw" in html
+    assert html.count("<img ") == 2                                             # the two originals, not the proxy

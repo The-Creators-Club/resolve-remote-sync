@@ -3065,9 +3065,17 @@ def _originals_progress(conn, slug: str, picks: list[dict], withheld: dict) -> d
 
 
 def _originals_browse(conn, project_id: int | None, rel_dir: str,
-                      picked: set[str]) -> dict:
+                      picked: set[str], *, project_rel: str = "",
+                      thumbs: bool = False) -> dict:
     """One folder of the project's originals as the last NAS walk saw them:
-    its subfolders (file count and size under each) and its own files."""
+    its subfolders (file count and size under each) and its own files.
+
+    `counted` (2026-11-11): False while the inventory has never walked the
+    project, so an empty list can say "still counting" instead of "no
+    originals". `thumbs`: the Footage Sorter is mounted, so each file can show
+    the picture it makes from the clip's proxy; `dest` is the file's place
+    under the Projects root, which is the sorter's destination root (the same
+    assumption sorter._inside_mover is built on)."""
     prefix = f"{rel_dir}/" if rel_dir else ""
     folders: dict[str, dict] = {}
     files: list[dict] = []
@@ -3086,13 +3094,17 @@ def _originals_browse(conn, project_id: int | None, rel_dir: str,
                 entry["count"] += 1
                 entry["bytes"] += int(r["size"] or 0)
             else:
-                files.append({"name": rest, "rel": rel, "bytes": int(r["size"] or 0)})
+                files.append({"name": rest, "rel": rel, "bytes": int(r["size"] or 0),
+                              "dest": f"{project_rel}/{rel}" if project_rel else rel})
     for entry in folders.values():
         entry["picked"] = entry["rel"] in picked
     for entry in files:
         entry["picked"] = entry["rel"] in picked
     parent = rel_dir.rpartition("/")[0] if rel_dir else None
-    return {"dir": rel_dir, "parent": parent,
+    counted = (project_id is not None
+               and db.fetch_nas_media_summary(conn, project_id)["walked_at"] is not None)
+    return {"dir": rel_dir, "parent": parent, "counted": counted,
+            "thumbs": bool(thumbs and project_rel),
             "folders": sorted(folders.values(), key=lambda e: e["name"].lower()),
             "files": files[:ORIGINALS_BROWSE_FILES_MAX],
             "more_files": max(0, len(files) - ORIGINALS_BROWSE_FILES_MAX)}
@@ -3107,10 +3119,18 @@ def _project_originals_answer(request, conn, slug: str, *, target: str = "",
     if user is None:
         raise HTTPException(status_code=401, detail="sign in first")
     project = conn.execute(
-        "SELECT id, label FROM projects WHERE slug=? AND active=1", (slug,)).fetchone()
+        "SELECT id, label, path FROM projects WHERE slug=? AND active=1", (slug,)).fetchone()
     if project is None:
         raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
     project_id = int(project["id"])
+    # The project's place under the Projects root, by the collector's own rule
+    # (its _project_rel): the Syncthing folder path is authoritative and the
+    # label only a fallback, because a hand-made folder's label need not be
+    # its path.
+    st_prefix = settings.syncthing_data_prefix.rstrip("/")
+    st_path = str(project["path"] or "").replace("\\", "/").rstrip("/")
+    project_rel = (st_path[len(st_prefix) + 1:] if st_prefix and st_path.startswith(st_prefix + "/")
+                   else str(project["label"] or "")).strip("/")
     picks = db.original_picks(conn, slug=slug)
     withheld = db.withheld_map(conn)
     progress = _originals_progress(conn, slug, picks, withheld)
@@ -3164,8 +3184,10 @@ def _project_originals_answer(request, conn, slug: str, *, target: str = "",
         else:
             picked = {p["rel_key"] for p in picks
                       if (p["editor_username"], p["machine"]) == pair}
-            browse = _originals_browse(conn, project_id,
-                                       db.media_rel_key(browse_dir or "").strip("/"), picked)
+            browse = _originals_browse(
+                conn, project_id, db.media_rel_key(browse_dir or "").strip("/"), picked,
+                project_rel=project_rel,
+                thumbs=bool(getattr(request.app.state, "sorter_mounted", False)))
     return _render(request, "partials/project_originals.html", {
         "slug": slug, "label": project["label"], "picks": rows,
         "candidates": candidates, "chosen": chosen, "browse": browse,

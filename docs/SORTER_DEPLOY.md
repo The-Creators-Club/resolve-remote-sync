@@ -184,6 +184,38 @@ A "health check FAILED" line seconds before the container goes healthy is the
 same premature false alarm CARDS_DEPLOY.md describes: check `docker ps` first.
 
 
+## Folder links (`/sorter/share/`) and reaching people outside the tailnet
+
+Added 2026-11-11 (footage-sorter `docs/DOWNLOADS-AND-SHARE-LINKS.md`). An admin
+makes a link for a folder on the sorter page; whoever holds it downloads the
+folder's files with no account.
+
+* **The dashboard opens exactly `/sorter/share/` to requests with no session**
+  (`app.py` `login_gate`, beside `/broll/share/`). The token in the path is the
+  credential and the sorter re-checks it on every request. `/sorter/` itself and
+  `/sorter/api/` stay behind the sign-in, and `SorterGate` stamps no identity
+  on a request that has none. This is DASHBOARD code: it needs a dashboard
+  release, not a sorter deploy. Until it is live, a link opens only for someone
+  who is signed in.
+* **Publishing it past the tailnet is a separate, deliberate step**, the same
+  one `docs/CLIENT_FOLDERS.md` section 3 describes for `/broll/share`, on the
+  same Funnel port:
+
+  ```bash
+  sudo docker exec tailscale tailscale funnel --bg --yes --https=8443 --set-path /sorter/share http://<tailnet-ip>:8480/sorter/share
+  sudo docker exec tailscale tailscale serve status     # expect /sorter/share beside /broll/share under :8443 (Funnel on)
+  curl -sSI https://<nas>.<tailnet>.ts.net:8443/sorter/share/assets/share.js | head -1   # 200
+  curl -sSI https://<nas>.<tailnet>.ts.net:8443/sorter/ | head -1                        # 404: NOT published
+  ```
+
+  Then tell the sorter its public address, so the Share dialog shows a "For
+  anyone" link: set `"sharePublicBase": "https://<nas>.<tailnet>.ts.net:8443"`
+  in `<host-root>/sorter-data/settings.json` (owned `3000:3000`; keep it so)
+  and restart. Only an `https://` value is used.
+* **Funnel is relayed and bandwidth-limited** (CLIENT_FOLDERS.md 3.3). A link
+  to a folder of camera originals for someone outside the tailnet will be slow
+  over it. People on the tailnet use the `:9443` address at full speed.
+
 ## Verify
 
 1. **The right commit is live:** `cat

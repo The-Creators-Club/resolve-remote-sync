@@ -11373,6 +11373,20 @@ def nas_inventory_sig(conn: sqlite3.Connection, project_id: int) -> str | None:
     return row["tree_sig"] if row else None
 
 
+def never_walked_project_ids(conn: sqlite3.Connection) -> set[int]:
+    """The active projects the inventory has never looked at: no
+    nas_inventory_state row at all.
+
+    2026-11-11. Such a project is not "holding 0 originals", it is not counted
+    yet, and the two are different sentences on the project page. The
+    collector walks these first and at once (collector._run_inventory). Every
+    outcome of a first pass writes the row (replace_nas_media on a walk,
+    record_inventory_error on a refusal), so a project is in this set once."""
+    return {int(r[0]) for r in conn.execute(
+        "SELECT p.id FROM projects p LEFT JOIN nas_inventory_state s ON s.project_id = p.id"
+        " WHERE p.active = 1 AND s.project_id IS NULL")}
+
+
 def record_inventory_error(conn: sqlite3.Connection, project_id: int, error: str, now: str) -> None:
     """Record why this project could not be inventoried, and FORCE the next
     cycle to walk it again.

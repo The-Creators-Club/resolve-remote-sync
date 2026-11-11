@@ -71,10 +71,11 @@
 {% endif %}
 {% if browse.folders or browse.files %}
 <div class="scroll-x"><table class="tbl stack-sm">
-  <thead><tr><th>name</th><th>files</th><th>size</th><th></th></tr></thead>
+  <thead><tr>{% if browse.thumbs %}<th></th>{% endif %}<th>name</th><th>files</th><th>size</th><th></th></tr></thead>
   <tbody>
   {% for f in browse.folders %}
     <tr>
+      {% if browse.thumbs %}<td></td>{% endif %}
       <td data-label="name"><button class="key quiet sm" type="button" title="Open this folder."
             hx-get="/partials/project/{{ slug }}/originals?target={{ chosen.value | urlencode }}&dir={{ f.rel | urlencode }}"
             hx-target="#project-originals" hx-swap="innerHTML"><span class="t">{{ f.name }}/</span></button></td>
@@ -97,6 +98,10 @@
   {% endfor %}
   {% for f in browse.files %}
     <tr>
+      {# The picture is the Footage Sorter's, made from the clip's proxy (a BRAW
+         has none of its own that ffmpeg can read). No proxy yet = a 404, and
+         the image takes itself away. Clicking it plays the proxy in a new tab. #}
+      {% if browse.thumbs %}<td data-label="" class="orig-pic"><a href="/sorter/api/path/stream?dest={{ f.dest | urlencode }}" target="_blank" rel="noopener" title="Play this clip's proxy in a new tab."><img src="/sorter/api/path/thumb?s=s&amp;dest={{ f.dest | urlencode }}" width="96" height="54" loading="lazy" alt="" style="display:block;object-fit:cover" onerror="this.closest('a').replaceWith(document.createTextNode('no proxy yet'))"></a></td>{% endif %}
       <td data-label="name" class="num">{{ f.name }}</td>
       <td data-label="files" class="num">1</td>
       <td data-label="size" class="num">{{ f.bytes | human_bytes }}</td>
@@ -116,6 +121,8 @@
   </tbody>
 </table></div>
 {% if browse.more_files %}<div class="dim">and {{ browse.more_files }} more files here. Bring the folder to get them all.</div>{% endif %}
+{% elif not browse.counted %}
+<div class="allclear">The server is still counting this project's files. They appear here within a minute or two: press Browse originals again.</div>
 {% else %}
 <div class="allclear">The server has no originals here yet.</div>
 {% endif %}

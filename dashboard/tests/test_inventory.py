@@ -213,3 +213,121 @@ def test_an_empty_projects_tree_reads_as_unmounted_not_empty(conn, tmp_path, col
     note = collector._run_inventory(conn)
     assert note and "unmounted" in note
     assert dbmod.fetch_nas_media_summary(conn, pid)["n_originals"] == 2
+
+
+# ---- a new project is counted at once; every project is looked at every cycle (2026-11-11) ----
+# The owner made a project of a folder holding 43 camera files and the page said
+# "the server has 0 originals" until the rotation reached it, up to 45 minutes.
+
+def _project(conn, projects, n, files=1):
+    rel = f"2026/P{n}"
+    d = projects / rel
+    (d / ".stfolder").mkdir(parents=True)
+    for i in range(files):
+        (d / f"clip{i}.mov").write_bytes(b"x" * 10)
+    return dbmod.upsert_project(conn, f"2026-p{n}", rel, f"/data/Projects/{rel}", dbmod.utcnow_iso())
+
+
+def _walk_spy(monkeypatch):
+    calls = []
+    orig = Collector._walk_media_files
+    monkeypatch.setattr(Collector, "_walk_media_files",
+                        staticmethod(lambda p: calls.append(p.name) or orig(p)))
+    return calls
+
+
+@pytest.fixture
+def small_budget(fake, tmp_path):
+    settings = Settings(syncthing_url=fake.url, syncthing_api_key="k",
+                        projects_dir=str(tmp_path / "projects"), inventory_projects_per_cycle=2)
+    from ccsync_dashboard.syncthing_client import SyncthingClient
+    return Collector(settings, client=SyncthingClient(fake.url, "k", timeout=5))
+
+
+def test_never_walked_projects_are_the_ones_with_no_inventory_row(conn, tmp_path, small_budget):
+    projects = tmp_path / "projects"
+    ids = [_project(conn, projects, n) for n in range(3)]
+    conn.commit()
+    assert dbmod.never_walked_project_ids(conn) == set(ids)
+    small_budget.run_cycle(conn, ["inventory"])
+    assert dbmod.never_walked_project_ids(conn) == set()
+    assert dbmod.fetch_nas_media_summary(conn, ids[0])["walked_at"] is not None
+
+
+def test_a_new_project_is_walked_first_and_outside_the_budget(conn, tmp_path, small_budget, monkeypatch):
+    projects = tmp_path / "projects"
+    for n in range(5):
+        _project(conn, projects, n)
+    conn.commit()
+    calls = _walk_spy(monkeypatch)
+    small_budget.run_cycle(conn, ["inventory"])
+    assert sorted(calls) == ["P0", "P1", "P2", "P3", "P4"]      # five first walks in ONE pass, budget 2 or not
+    calls.clear()
+    new = _project(conn, projects, 9, files=3)
+    conn.commit()
+    small_budget.run_cycle(conn, ["inventory"])
+    assert calls == ["P9"]
+    assert dbmod.fetch_nas_media_summary(conn, new)["n_originals"] == 3
+
+
+def test_every_project_is_checked_each_cycle_and_the_budget_bounds_the_walks(conn, tmp_path, small_budget, monkeypatch):
+    projects = tmp_path / "projects"
+    for n in range(5):
+        _project(conn, projects, n)
+    conn.commit()
+    small_budget.run_cycle(conn, ["inventory"])
+    calls = _walk_spy(monkeypatch)
+    small_budget.run_cycle(conn, ["inventory"])
+    assert calls == []                                            # nothing changed: nothing walked
+    (projects / "2026" / "P4" / "Proxy").mkdir()                  # the LAST project changes
+    (projects / "2026" / "P4" / "Proxy" / "clip0.mov").write_bytes(b"p")
+    small_budget.run_cycle(conn, ["inventory"])
+    assert calls == ["P4"]                                        # seen on the very next cycle, wherever the cursor was
+    calls.clear()
+    for n in range(4):                                            # four change at once: two per cycle, none starved
+        (projects / "2026" / f"P{n}" / "New").mkdir()
+    small_budget.run_cycle(conn, ["inventory"])
+    first = list(calls)
+    small_budget.run_cycle(conn, ["inventory"])
+    assert len(first) == 2 and sorted(calls) == ["P0", "P1", "P2", "P3"]
+    calls.clear()
+    small_budget.run_cycle(conn, ["inventory"])
+    assert calls == []
+
+
+def test_a_cycle_that_finds_an_uncounted_project_brings_the_inventory_forward(conn, tmp_path, small_budget, monkeypatch):
+    projects = tmp_path / "projects"
+    for n in range(2):
+        _project(conn, projects, n)
+    conn.commit()
+    small_budget.run_cycle(conn, ["inventory"])
+    assert small_budget._nudge_kinds == set()                     # nothing waiting: nothing asked for
+    (projects / "2026" / "P0" / "New").mkdir()                    # an old project changes too
+    _project(conn, projects, 7)
+    conn.commit()
+    small_budget.run_cycle(conn, ["connections"])
+    assert "inventory" in small_budget._nudge_kinds and small_budget._inventory_first_only
+    small_budget._nudge_kinds.clear()
+    calls = _walk_spy(monkeypatch)
+    small_budget.run_cycle(conn, ["inventory"])
+    assert calls == ["P7"]                                        # the early pass is for the new project alone
+    small_budget.run_cycle(conn, ["connections"])
+    assert small_budget._nudge_kinds == set()                     # counted: not asked for again
+    small_budget.run_cycle(conn, ["inventory"])
+    assert calls == ["P7", "P0"]                                  # the regular pass picks up the change
+
+
+def test_an_uncounted_project_that_cannot_be_read_is_asked_for_once_not_every_tick(conn, tmp_path, small_budget):
+    projects = tmp_path / "projects"
+    _project(conn, projects, 0)
+    gone = dbmod.upsert_project(conn, "2026-gone", "2026/Gone", "/data/Projects/2026/Gone", dbmod.utcnow_iso())
+    conn.commit()
+    small_budget.run_cycle(conn, ["connections"])
+    assert "inventory" in small_budget._nudge_kinds
+    small_budget._nudge_kinds.clear()
+    small_budget.run_cycle(conn, ["inventory"])
+    # the missing folder got its error row, so it is no longer "never walked" and nothing loops on it
+    assert gone not in dbmod.never_walked_project_ids(conn)
+    assert "missing" in dbmod.fetch_nas_media_summary(conn, gone)["last_error"]
+    small_budget.run_cycle(conn, ["connections"])
+    assert small_budget._nudge_kinds == set()

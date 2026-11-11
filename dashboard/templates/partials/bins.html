@@ -4,14 +4,24 @@
    cc/project.html. Each computer and each bin is a <details data-key>, so
    the shell's keeper holds what was open across the 5 s beat. #}
 {% set nas = presence.nas %}
+{# NOT COUNTED YET IS NOT ZERO (2026-11-11): a project the inventory has never
+   walked has no row, and fetch_nas_media_summary answers that with zeros and
+   walked_at None. Printing the zeros told the owner his 43 camera files were
+   not on the server, and "originals 43/0" beside his own computer. #}
+{% set counted = nas.walked_at is not none %}
+{% if counted %}
 <div class="hint pres-head">the server has <b>{{ nas.n_originals }}</b> original{{ "s" if nas.n_originals != 1 }} and <b>{{ nas.n_proxies }}</b> proxy file{{ "s" if nas.n_proxies != 1 }}</div>
+{% else %}
+<div class="hint pres-head"><span class="tag warn"><span class="w">counting</span></span> the server is counting this project's files. A new project is counted within a minute or two.</div>
+{% endif %}
 {% if presence.editors %}
   {% for e in presence.editors %}
   {% set et = {'red': 'err', 'amber': 'warn', 'green': ''}.get(e.status, 'off') %}
   <details class="fold sub-win" data-key="mp:{{ e.editor }}:{{ e.machine }}">
     <summary><span class="caret" aria-hidden="true">&#9656;</span> <span class="led {{ et }}"><span class="vh">{{ e.status }}</span></span> <b>{{ e.editor }}</b> <span class="dim">{{ e.machine }}, {{ e.mode }}</span>
       {% if e.proxy_only %}<span class="tag ok"><span class="w">proxy only</span></span>{% endif %}
-      <span>originals {{ e.have.n_originals }}/{{ nas.n_originals }}, proxies {{ e.have.n_proxies }}/{{ nas.n_proxies }}</span>
+      {% if counted %}<span>originals {{ e.have.n_originals }}/{{ nas.n_originals }}, proxies {{ e.have.n_proxies }}/{{ nas.n_proxies }}</span>
+      {% else %}<span>holds {{ e.have.n_originals }} original{{ "s" if e.have.n_originals != 1 }} and {{ e.have.n_proxies }} prox{{ "ies" if e.have.n_proxies != 1 else "y" }}, server count pending</span>{% endif %}
       {% if e.offline %}<span class="tag warn"><span class="w">{{ e.offline }} offline in Resolve</span></span>{% endif %}</summary>
     {% if e.bins %}
       {% for b in e.bins %}

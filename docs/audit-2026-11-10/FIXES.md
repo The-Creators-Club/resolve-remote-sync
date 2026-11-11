@@ -291,3 +291,11 @@ Not proven: in a browser against the live page.
 Tests: `tests/py/test_watch.py`, 14 (a copied file appears after it has stood still and nothing else is touched; a growing file is held back; a removed file and a removed folder go; a new folder is found and scanned whole; a proxy joins its clip; an absent root drops nothing; a restart sees what changed while it was down; one folder scanned alone equals what the full scan makes of it). The sorter's Python suite: 769 passed, 5 skipped. Node page tests and the dashboard's sorter-mount tests pass.
 
 Not proven: on the NAS (the look was timed there, the watch itself has not run there), and with a real copy over the network, where the test of "has stood still" meets a real copier for the first time.
+
+### Committed and deployed, 2026-11-11 14:45 local
+
+On the owner's word ("commit everything and deploy"): ccsync `6c7b512` (the audit pass, CR-384; not pushed, no version bumped, nothing of the dashboard or companion released), Footage Sorter `2c187b2` on `sorter-dashboard-module`. The sorter was deployed with `--sorter-commit 2c187b2`, Cards left on `3f2344a`, on the image already running; the dashboard answered v0.7.79 healthy after one probe. The other session's `83c8ed9` (a thumbnail and preview for a file by its place under the destination) is an ancestor of `2c187b2` and went live with it.
+
+With no `watch.json` on the NAS yet, the first look of the folder watch starts one full scan there, which makes the map.
+
+Still to do from this day: the controller's View button as a plain toggle between the lane and the transcript (today it walks cards, lane, transcript, so going back to the transcript from the lane takes two presses); a release for the dashboard and companion changes in `6c7b512`; the remaining audit findings.

@@ -183,37 +183,46 @@ def scan_local_manifest(
         proxies: Optional[list] = [] if include_files else None
         truncated = False
 
+        # THE RELATIVE PATH IS WORKED OUT ONCE PER FOLDER, AS STRINGS (audit
+        # comp-core-1, 2026-11-11). This loop used to build a pathlib.Path for
+        # every video file and call relative_to on it (which builds and
+        # compares several more), then .parts and .as_posix(): 85% of the
+        # walk's CPU, 3.6 s per 50,000 files every five minutes on every
+        # machine, on a thread that holds the GIL against the tray and the
+        # lanes. os.walk hands back `dirpath` as project_dir plus the folders
+        # below it, so the parts below the project are that suffix split on
+        # the separator; the strings that come out ("a/b/clip.mov", the bytes
+        # on disk, never normalised) are the ones pathlib produced.
+        base = str(project_dir)
         for dirpath, _dirnames, filenames in os.walk(project_dir):
+            below = dirpath[len(base):].strip(os.sep) if dirpath.startswith(base) else None
+            if below is None:
+                continue                  # not under the project: what relative_to refused
+            dir_parts = tuple(p for p in below.split(os.sep) if p) if below else ()
+            dir_posix = "/".join(dir_parts)
             for filename in filenames:
                 if SYNC_CONFLICT_MARKER in filename:
                     conflict_count += 1
                     if len(conflict_paths) < MAX_CONFLICT_PATHS:
-                        full = os.path.join(dirpath, filename)
-                        try:
-                            shown = Path(full).relative_to(project_dir).as_posix()
-                        except ValueError:
-                            shown = filename
+                        shown = f"{dir_posix}/{filename}" if dir_posix else filename
                         conflict_paths.append(f"{project_rel}/{shown}")
                 ext = os.path.splitext(filename)[1].lower()
                 if ext not in rclone_lane.VIDEO_EXTS:
                     continue
                 file_path = os.path.join(dirpath, filename)
                 try:
-                    rel = Path(file_path).relative_to(project_dir)
-                except ValueError:
-                    continue
-                try:
                     size = size_fn(file_path)
                 except OSError:
                     continue
 
-                is_proxy = _is_proxy_path(rel.parts)
+                rel_posix = f"{dir_posix}/{filename}" if dir_posix else filename
+                is_proxy = _is_proxy_path(dir_parts + (filename,))
                 if is_proxy:
                     n_proxies += 1
                     bytes_proxies += size
                     if proxies is not None:
                         if len(proxies) < MAX_PER_FILE_ENTRIES:
-                            proxies.append([rel.as_posix(), size])
+                            proxies.append([rel_posix, size])
                         else:
                             truncated = True
                 else:
@@ -221,7 +230,7 @@ def scan_local_manifest(
                     bytes_originals += size
                     if originals is not None:
                         if len(originals) < MAX_PER_FILE_ENTRIES:
-                            originals.append([rel.as_posix(), size])
+                            originals.append([rel_posix, size])
                         else:
                             truncated = True
 

@@ -1209,3 +1209,64 @@ def test_a_copy_posts_progress_while_it_runs_and_a_refused_post_does_not_fail_it
     posts = [c for c in dash.sorter_calls if c[1].endswith("/ingest/21/progress")]
     assert posts and posts[0][0] == "POST" and posts[0][2]["bytesTotal"] == 3
     assert posts[0][2]["copier"] == "python" and posts[0][3]["X-CCSync-Token"] == "tok"
+
+
+# ------------------------------------------------------- the 2026-11-11 audit (comp-field-10/-5)
+@pytest.mark.parametrize("size", [0, 1, 4095, 4096, 4097, 3 * MIB + 7])
+def test_the_read_back_comes_off_the_drive_and_handles_every_length(tmp_path, monkeypatch, size):
+    """comp-field-10: the verify re-read the file through the operating system's cache seconds
+    after writing it, so it compared memory with memory. The uncached read has rules of its own
+    (whole sectors, an aligned buffer, never ask past the end), hence every awkward length."""
+    monkeypatch.setattr(card_copy, "BUFFER_BYTES", MIB)
+    data = os.urandom(size)
+    f = tmp_path / "copy.bin"
+    f.write_bytes(data)
+    h = card_copy._new_hash()
+    h.update(data)
+    opened = []
+    real = card_copy._open_past_the_cache
+    monkeypatch.setattr(card_copy, "_open_past_the_cache", lambda p: (opened.append(p), real(p))[1])
+    assert card_copy.verify_whole(f, size, h.digest(), lambda: "") == ""
+    assert opened == [f]
+    if size:
+        flipped = bytearray(data)
+        flipped[size - 1] ^= 0xFF
+        f.write_bytes(bytes(flipped))
+        assert "differs" in card_copy.verify_whole(f, size, h.digest(), lambda: "")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="FILE_FLAG_NO_BUFFERING is the Windows half")
+def test_on_windows_the_read_back_really_is_unbuffered(tmp_path):
+    f = tmp_path / "copy.bin"
+    f.write_bytes(os.urandom(10_000))
+    fh = card_copy._open_past_the_cache(f)
+    assert fh is not None
+    with fh:
+        with pytest.raises(OSError):
+            fh.read(100)                # not a whole sector: only an unbuffered handle refuses this
+    assert card_copy._hash_past_the_cache(f, 10_000, lambda: "") is not None
+
+
+def test_a_system_with_no_uncached_read_verifies_the_old_way(tmp_path, monkeypatch):
+    data = os.urandom(5000)
+    f = tmp_path / "copy.bin"
+    f.write_bytes(data)
+    h = card_copy._new_hash()
+    h.update(data)
+    monkeypatch.setattr(card_copy, "_open_past_the_cache", lambda p: None)
+    assert card_copy.verify_whole(f, 5000, h.digest(), lambda: "") == ""
+
+    class Dies:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def readinto(self, buf):
+            raise OSError(87, "The parameter is incorrect")
+
+    monkeypatch.setattr(card_copy, "_open_past_the_cache", lambda p: Dies())
+    assert card_copy.verify_whole(f, 5000, h.digest(), lambda: "") == ""
+    f.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+    assert "differs" in card_copy.verify_whole(f, 5000, h.digest(), lambda: "")

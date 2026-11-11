@@ -592,6 +592,9 @@ COLLECTOR_STALE_SECONDS = 180.0
 SYNCTHING_FREE_KINDS = ("prune", "invariants", "alerts")
 
 MISSING_FILES_CAP = 500
+# How stale an UNCHANGED missing-files list's `refreshed_at` may get before it is
+# bumped (db.replace_missing_files). Far below the prune's MISSING_FILES_MAX_AGE_DAYS.
+MISSING_REFRESH_BUMP_S = 600
 MISSING_FILES_MAX_AGE_DAYS = 7
 HISTORY_MAX_AGE_DAYS = 30
 HISTORY_THIN_AFTER_HOURS = 48
@@ -3465,6 +3468,40 @@ def replace_missing_files(
     truncated: bool,
     now: str,
 ) -> None:
+    """Store one (project, device) pair's missing-files list.
+
+    AN UNCHANGED LIST IS NOT REWRITTEN (audit dash-collector-3, 2026-11-11).
+    The collector calls this for every incomplete pair every minute, and it
+    used to DELETE and re-INSERT up to 500 rows each time whether or not one
+    of them differed: about 1.6 GB of WAL a day at ten incomplete pairs, for
+    lists that mostly change when a file finishes. Now the stored rows are
+    compared first. When they are the same, the only write is a bump of
+    `refreshed_at`, and only once the stored stamp is MISSING_REFRESH_BUMP_S
+    old: the page's "refreshed N ago" and the age-based prune both read that
+    stamp, so it must keep moving, but not sixty times an hour."""
+    wanted = [(str(name), size, int(truncated)) for name, size in files[:MISSING_FILES_CAP]]
+    try:
+        held = conn.execute(
+            "SELECT name, size, truncated, refreshed_at FROM missing_files"
+            " WHERE project_id=? AND device_id=?", (project_id, device_id)).fetchall()
+    except sqlite3.Error:
+        held = None
+    def _in_order(rows: list) -> list:
+        return sorted(rows, key=lambda t: (t[0], -1 if t[1] is None else t[1]))
+
+    stored = None if held is None else [
+        (str(r["name"]), r["size"], int(r["truncated"] or 0)) for r in held]
+    if stored and len(stored) == len(wanted) and _in_order(stored) == _in_order(wanted):
+        try:
+            oldest = min(str(r["refreshed_at"] or "") for r in held)
+            age = (parse_iso(now) - parse_iso(oldest)).total_seconds()
+        except (ValueError, TypeError):
+            age = MISSING_REFRESH_BUMP_S
+        if age >= MISSING_REFRESH_BUMP_S:
+            conn.execute(
+                "UPDATE missing_files SET refreshed_at=? WHERE project_id=? AND device_id=?",
+                (now, project_id, device_id))
+        return
     conn.execute(
         "DELETE FROM missing_files WHERE project_id=? AND device_id=?", (project_id, device_id)
     )
@@ -3897,7 +3934,28 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     "triage_reply_refused": {"severity": "warn", "what":
         "a reply to the server check email was not acted on because it failed a check",
         "href": "/admin/alerts"},
+    # Audit dash-collector-2 (2026-11-11). Written by `notices.run_checks` for a
+    # check that RAISED this cycle (subject = the check's name) and closed by
+    # the same pass the first cycle it runs clean. Until now a check that began
+    # raising was a line in the container log and nothing else, while the panel
+    # went on showing its kinds as OK on the strength of a stamp from the last
+    # time it had worked.
+    "notice_check_failed": {"severity": "error", "what":
+        "one of the server's own checks is failing, so what it watches is not being watched",
+        "href": "/admin/health"},
 }
+
+# How old a kind's "some pass evaluated this" stamp may be before the WHAT THE
+# SERVER CHECKS panel stops calling it OK (audit dash-collector-2, 2026-11-11).
+# The panel used to test only that a stamp EXISTED, and the stamps live in the
+# database across restarts: a kind evaluated once, ever, was OK for the life
+# of the installation, whether or not anything still ran it. That is the
+# product's own rule broken ("an unverified check is NOT CHECKED, never OK").
+# One bound for every kind, and a generous one, because the slowest honest
+# writers are daily (the release-feed poll, the triage run): a per-cycle check
+# that starts RAISING is reported at once by `notice_check_failed`, so this
+# only has to catch a writer that has silently stopped being called.
+NOTICE_CHECK_MAX_AGE_S = 36 * 3600
 
 
 def notice_kinds() -> list[dict[str, str]]:
@@ -3994,6 +4052,32 @@ def notice_check_times(conn: sqlite3.Connection) -> dict[str, str]:
     [ NOT CHECKED ] rather than a false [ OK ]."""
     seen = meta_get_json(conn, NOTICE_CHECKS_META)
     return {str(k): str(v) for k, v in seen.items()} if isinstance(seen, dict) else {}
+
+
+def notice_checks_fresh(
+    conn: sqlite3.Connection, now: str | None = None,
+    max_age_s: float = NOTICE_CHECK_MAX_AGE_S,
+) -> tuple[set[str], dict[str, str]]:
+    """(the kinds evaluated recently enough to be called OK, {kind: when} for
+    the ones whose stamp is older than `max_age_s`). A stamp that cannot be
+    read as a time is stale: evidence nobody can date is not evidence."""
+    try:
+        at = parse_iso(now or utcnow_iso())
+    except ValueError:
+        at = parse_iso(utcnow_iso())
+    fresh: set[str] = set()
+    stale: dict[str, str] = {}
+    for kind, stamp in notice_check_times(conn).items():
+        try:
+            age = (at - parse_iso(stamp)).total_seconds()
+        except (ValueError, TypeError):
+            stale[kind] = stamp
+            continue
+        if age <= max_age_s:
+            fresh.add(kind)
+        else:
+            stale[kind] = stamp
+    return fresh, stale
 
 
 def notice(

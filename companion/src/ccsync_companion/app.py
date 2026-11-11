@@ -6072,6 +6072,16 @@ class CompanionApp:
                 # selection rather than hide the warning.
                 if not ticked:
                     ticked = None
+            # The size-mismatch and orphan reports are per project too since
+            # 2026-11-11 (audit comp-sync-3) and need the same pruning: their
+            # scans only run for ticked projects, so an unticked project's
+            # entry would otherwise keep its alarm up for ever.
+            forget = getattr(lane, "forget_scan_reports", None)
+            if forget is not None:
+                try:
+                    forget(ticked)
+                except Exception:
+                    log.debug("forget_scan_reports() failed", exc_info=True)
             return getter(ticked)
         except Exception:
             log.exception("future_dated_report() failed")
@@ -8066,9 +8076,28 @@ class CompanionApp:
     def _ingestors(self) -> list[Any]:
         return [i for i in (self.broll_ingestor, self.music_ingestor) if i is not None]
 
+    # How long one walk of the ingest staging folders is believed. The tray
+    # rebuilds sync_guard() every 2 s and the reporter every report, and this
+    # section of it walked and stat'ed every finished or held staging batch of
+    # both ingest kinds, on the sync drive, each time (audit comp-app-1,
+    # 2026-11-11). The number it yields moves when a batch ends or is pruned;
+    # the button that prunes clears the memo (clear_finished_ingest_staging).
+    INGEST_STAGING_TTL_SECONDS = 30.0
+
     def ingest_staging_report(self) -> dict[str, Any]:
         """`sync_guard.ingest_staging`: bytes/batches/oldest across both
-        ingest kinds. {} when neither is wired. Never raises."""
+        ingest kinds. {} when neither is wired. Never raises. Memoised for
+        INGEST_STAGING_TTL_SECONDS (see above); the space REFUSAL does its own
+        exact walk at the moment it refuses and does not read this."""
+        held = getattr(self, "_ingest_staging_memo", None)
+        now = time.monotonic()
+        if held is not None and now - held[0] < self.INGEST_STAGING_TTL_SECONDS:
+            return dict(held[1])
+        report = self._ingest_staging_walk()
+        self._ingest_staging_memo = (now, dict(report))
+        return report
+
+    def _ingest_staging_walk(self) -> dict[str, Any]:
         total, batches = 0, 0
         oldest: Optional[str] = None
         for ingestor in self._ingestors():
@@ -8093,6 +8122,7 @@ class CompanionApp:
         disk with a dot-folder no editor has any UI to see, and then blamed
         the editor for it. Only FINISHED batches -- the running one is never
         touched."""
+        self._ingest_staging_memo = None     # what the tray shows next is read fresh
         removed, freed, held_unrun = 0, 0, 0
         for ingestor in self._ingestors():
             try:

@@ -34,7 +34,13 @@ def env(tmp_path):
             ("B-roll/Proxy/b.mov", "proxy", ".mov", 10, 4),
         ], "sig", 2, now)
         conn.commit()
-        yield client, conn, now
+        try:
+            yield client, conn, now
+        finally:
+            # BEFORE the app shuts down (2026-11-11, audit tests-ci-7): a test that ends with
+            # a write still open on this second connection made the lifespan's own shutdown
+            # write wait out SQLite's whole 10 s busy timeout, in the teardown of that test.
+            conn.close()
 
 
 def hdr(editor="editor2"):

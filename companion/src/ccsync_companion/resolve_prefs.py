@@ -140,8 +140,49 @@ def config_dir() -> Optional[Path]:
     return None
 
 
+def windows_process_names() -> Optional[set[str]]:
+    """The lower-cased image name of every running process, from ONE Toolhelp
+    snapshot taken in this process, or None when Windows will not give one
+    (and always None off Windows). No subprocess.
+
+    Audit lens-longrun-companion-1 (2026-11-11). "Is Resolve running" was a
+    `tasklist` SPAWN (about 200 ms and a full process enumeration in a child,
+    behind a console host) behind nine doors: the watcher, the job runner's
+    gate and its claim, the capabilities block on every report, the proxy
+    generator, the LUT link, the b-roll ingest before EVERY extracted frame.
+    230-545 spawns an hour on an idle machine and 800-1,100 while syncing,
+    beside Resolve, for an answer that changes a few times a day. The same
+    snapshot script_server.py has taken for the CR-68 probe since 2026-08-21
+    answers it in about 8 ms, so it is asked fresh every time and nothing is
+    cached: no caller can be handed a stale "not running".
+    """
+    if platform.system() != "Windows":
+        return None
+    try:
+        from . import script_server
+        procs = script_server._windows_processes()
+    except Exception:
+        return None
+    if not procs:
+        return None                       # an empty snapshot is a failed one, not an empty machine
+    return {str(name).lower() for name, _parent in procs.values()}
+
+
+def process_state(image_name: str) -> Optional[bool]:
+    """Is a process with this image name ("TeraCopy.exe") running? True /
+    False from the in-process snapshot on Windows, None when it cannot be
+    told (the caller keeps whatever it did before for "cannot tell")."""
+    names = windows_process_names()
+    if names is None:
+        return None
+    return str(image_name or "").lower() in names
+
+
 def resolve_process_state() -> Optional[bool]:
     """True = seen, False = definitely absent, None = could not tell.
+
+    Windows asks the in-process snapshot first (windows_process_names) and
+    only falls back to spawning `tasklist` when that cannot answer.
 
     The honest three-valued answer behind resolve_is_running()'s two-valued
     one. Most callers want the fail-closed collapse below; anything that
@@ -155,6 +196,9 @@ def resolve_process_state() -> Optional[bool]:
     system = platform.system()
     try:
         if system == "Windows":
+            names = windows_process_names()
+            if names is not None:
+                return "resolve.exe" in names
             out = subprocess.run(
                 ["tasklist", "/FI", "IMAGENAME eq Resolve.exe", "/NH"],
                 capture_output=True, text=True, timeout=20,

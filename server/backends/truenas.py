@@ -145,6 +145,18 @@ class TrueNASBackend:
         )
         return (dry_run or rc == 0), err
 
+    def container_image(self) -> str:
+        """`.Config.Image` of the running dashboard container, or ""."""
+        try:
+            rc, out, _err = self.calls.ssh_guarded(
+                'echo "$SUDO_PW" | sudo -S -p "" docker inspect '
+                "--format '{{.Config.Image}}' "
+                f'{common.shell_quote(self.dashboard_container)}',
+                False, 60)
+        except Exception:  # noqa: BLE001 - "could not tell" is an answer here
+            return ""
+        return (out or "").strip().splitlines()[-1].strip() if rc == 0 and (out or "").strip() else ""
+
     def container_exec(self, container: str, argv: str,
                        dry_run: bool) -> tuple[int, str, str]:
         """`docker exec <container> <argv>` as root over SSH."""

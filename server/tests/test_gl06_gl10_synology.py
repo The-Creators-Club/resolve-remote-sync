@@ -94,3 +94,40 @@ def test_truenas_identity_match_and_unreadable_pass(monkeypatch):
     monkeypatch.setattr(ida, "run_ssh", lambda cmd, dry_run=False, timeout=120: (0, "", ""))
     assert ida.truenas_identity_mismatch(3000, 3001) == ""
     assert ida.truenas_identity_mismatch(1, 2, dry_run=True) == ""
+
+
+# ---------------------------------------------------------------------------
+# ops-server-2 (audit 2026-11-10): a check that cannot run is a failed check
+# ---------------------------------------------------------------------------
+
+
+def test_a_check_that_raises_is_one_failed_check_and_the_rest_still_run(monkeypatch, capsys):
+    """With the NAS unreachable the run ended in a traceback after the first
+    check and exited 1, which by the script's contract (exit code = number of
+    failed checks) read as "one check failed" while five never ran."""
+    monkeypatch.setattr(check_health, "RESULTS", [])
+
+    def unreachable(dry_run):
+        raise ConnectionError("Unable to connect to port 22 on 192.0.2.1")
+
+    def fine(dry_run):
+        check_health.report(True, "the next check ran")
+
+    check_health.run_check("project tree", unreachable, False)
+    check_health.run_check("dashboard", fine, False)
+    out = capsys.readouterr().out
+    assert check_health.RESULTS[0][0] is False
+    assert "project tree: the check could not run (ConnectionError: Unable to connect" in check_health.RESULTS[0][1]
+    assert check_health.RESULTS[1] == (True, "the next check ran")
+    assert "FAIL: project tree" in out and "PASS: the next check ran" in out
+
+
+def test_a_missing_environment_is_still_cli_s_to_report(monkeypatch):
+    monkeypatch.setattr(check_health, "RESULTS", [])
+
+    def no_env(dry_run):
+        raise common.EnvError("TRUENAS_PW is not set")
+
+    with pytest.raises(common.EnvError):
+        check_health.run_check("postgres", no_env, False)
+    assert check_health.RESULTS == []

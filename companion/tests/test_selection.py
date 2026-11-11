@@ -876,3 +876,33 @@ def test_an_unreadable_cache_says_cannot_tell_not_fresh(tmp_path):
     client = SelectionClient(_cfg(), tmp_path, http_get=lambda *a: {"selection": []})
     assert client.fetched_at() is None
     assert client.plan_age_seconds() is None
+
+
+def test_an_answer_that_differs_only_by_its_timestamp_is_not_a_change(tmp_path):
+    """Audit dash-api-1 (2026-11-11): the dashboard stamps every reply with `generated_at`, so the
+    write-on-change guard never matched and selection.json was rewritten on every fetch, every
+    30 s, on every machine."""
+    n = {"i": 0}
+    plan = {"selection": list(_SAMPLE), "project_roots": {"Show": "2026/FF5/Nuclear"}}
+
+    def fake_get(url, headers, timeout):
+        n["i"] += 1
+        return {"editor": "owen", "generated_at": f"2026-11-11T00:00:{n['i']:02d}Z", **plan}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    cache = tmp_path / "selection.json"
+    client._write_cache(fake_get("", {}, 0), "owen")
+    first = cache.read_bytes()
+    for _ in range(5):
+        client._write_cache(fake_get("", {}, 0), "owen")
+    assert cache.read_bytes() == first                      # five more answers, no rewrite
+
+    plan["selection"] = list(_SAMPLE[:1])                   # a real change still lands at once
+    client._write_cache(fake_get("", {}, 0), "owen")
+    cached = json.loads(cache.read_text(encoding="utf-8"))
+    assert cached["response"]["selection"] == _SAMPLE[:1]
+    assert cached["response"]["generated_at"].endswith(":07Z")
+
+    before = cache.read_bytes()                             # and so does a different person
+    client._write_cache(fake_get("", {}, 0), "ruskin")
+    assert cache.read_bytes() != before

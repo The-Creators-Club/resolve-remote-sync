@@ -94,14 +94,38 @@ ORIGINAL_EXTS = frozenset(
     {"." + e for e in (set(ledger_scan.MASTER_EXTS) | set(ledger_scan.AUDIO_EXTS))}
     | {e for e in sorter_cards.MEDIA_EXTS}
     | {".hif", ".heif", ".360", ".insp", ".gpr", ".pef", ".srw", ".x3f", ".3fr", ".iiq", ".mpg", ".mpeg",
-       ".wmv", ".3gp", ".mka", ".ogg", ".opus", ".wma", ".aax"})
+       ".wmv", ".3gp", ".mka", ".ogg", ".opus", ".wma", ".aax",
+       # audit comp-field-2 (2026-11-11): originals no list here named. Nikon N-RAW video, ARRIRAW
+       # (plain and HDE), Phantom, older Canon/Epson/Leica raws, HDV, JVC/Panasonic .MOD, DVD video
+       ".nev", ".ari", ".arx", ".cine", ".crw", ".erf", ".rwl", ".m2t", ".mod", ".vob", ".tod",
+       ".crm", ".rdc", ".mlv", ".dv", ".bwf", ".caf", ".amr", ".w64", ".rf64"})
 _NOT_ORIGINAL_NAME = re.compile(r"(^\._)|(\.tmp\.[^./\\]+$)|(\.(part|partial|interrupted|failed)$)", re.IGNORECASE)
 
+# What a camera or recorder writes BESIDE its clips: indexes, thumbnails, low-res twins, logs,
+# settings and firmware. Never an original, whatever its size (a GoPro .LRV runs to hundreds of MB).
+SIDECAR_EXTS = frozenset({
+    ".xml", ".thm", ".lrv", ".lrf", ".bim", ".ppn", ".smi", ".srt", ".cpi", ".mpl", ".bdm", ".tdt",
+    ".tid", ".idx", ".ind", ".bin", ".dat", ".bnp", ".inp", ".int", ".ctg", ".log", ".txt", ".sav",
+    ".rmd", ".rtn", ".sidecar", ".db", ".ini", ".inf", ".tmp", ".json", ".plist", ".cfg", ".set",
+    ".dsc", ".mrk", ".fw", ".upd"})
+# A file whose extension NOTHING here knows, and which is this big or bigger, is treated as an
+# original. The verdict used to wait only for extensions on a list (audit comp-field-2,
+# 2026-11-11): a card of Nikon N-RAW alone read "Nothing on this card needs backing up". Naming
+# every camera format is a race that is always lost by one, so an unknown file now makes the card
+# NOT safe until it has its copies. The floor is there because cameras also write small
+# bookkeeping files under names nobody has listed, and those must not hold a card "unsafe" for
+# ever: no camera original of any kind is under a megabyte.
+UNKNOWN_ORIGINAL_BYTES = 1 << 20
 
-def is_judged(rel: str) -> bool:
+
+def is_judged(rel: str, size: Any = None) -> bool:
     """Does the card's "safe to format" verdict wait for this file? Every original (video, audio,
     stills, 360, raws), but never a sidecar (XML, THM, LRV, ...), a proxy, a thumbnail, or a
-    temp or half-written file. Never narrower than is_tracked."""
+    temp or half-written file. Never narrower than is_tracked.
+
+    FAIL CLOSED ON THE UNKNOWN: a file that is none of those and whose extension is on no list
+    counts as an original when it is UNKNOWN_ORIGINAL_BYTES or more. `size` is the file's size in
+    bytes; a caller that cannot give one gets the list-only answer for such a file."""
     text = str(rel or "").replace("\\", "/")
     name = text.rsplit("/", 1)[-1]
     if is_tracked(text):
@@ -109,7 +133,15 @@ def is_judged(rel: str) -> bool:
     if _NOT_ORIGINAL_NAME.search(name) or is_proxy_path(text) or name.lower() in sorter_cards.SKIP_FILE_NAMES:
         return False
     i = name.rfind(".")
-    return i > 0 and name[i:].lower() in ORIGINAL_EXTS
+    ext = name[i:].lower() if i > 0 else ""
+    if ext in ORIGINAL_EXTS:
+        return True
+    if ext in SIDECAR_EXTS:
+        return False
+    try:
+        return size is not None and int(size) >= UNKNOWN_ORIGINAL_BYTES
+    except (TypeError, ValueError):
+        return False
 
 
 def tracked_files(files: Iterable[Any]) -> list[list[Any]]:
@@ -285,16 +317,20 @@ def file_verdict(copies: list[dict[str, Any]], kind_of: Callable[[str], str],
     expected to be excluded by the caller, and a card never counts anyway):
     {safe, home, onLaptop, laptopOnly, counted, volumes}.
 
-    TWO COPIES ON ONE PHYSICAL DISK ARE ONE COPY: volumes are counted by their physical key (a
-    row's own `phys`, else `phys_of(volume id)`, else the volume itself), so two partitions of one
-    disk, or a folder that is a junction onto a field drive, never make two."""
+    TWO COPIES ON ONE PHYSICAL DISK ARE ONE COPY: volumes are counted by their physical key
+    (`phys_of(volume id)` when the volume is attached and can say, else the row's own `phys`, else
+    the volume itself), so two partitions of one disk, or a folder that is a junction onto a field
+    drive, never make two. What the machine says NOW wins over what a row was stamped with when it
+    was written (audit comp-field-8, 2026-11-11): Windows hands disk numbers out again as drives
+    come and go, so two partitions of one disk recorded on different days can carry different
+    stamps, and the stamp alone would count them twice."""
     vols: dict[str, str] = {}
     phys: dict[str, str] = {}
     for c in copies:
         vid = str(c.get("volume_id") or "")
         if vid and vid not in vols:
             vols[vid] = kind_of(vid)
-            phys[vid] = str(c.get("phys") or (phys_of(vid) if phys_of else "") or vid)
+            phys[vid] = str((phys_of(vid) if phys_of else "") or c.get("phys") or vid)
     counted = {phys[v] for v, k in vols.items() if k in COUNTS}
     home = any(k == "nas" for k in vols.values())
     on_laptop = any(k == "laptop" for k in vols.values())
@@ -308,10 +344,16 @@ def card_verdict(files: list[list[Any]], copies_of: Callable[[str, int, Any], li
                  kind_of: Callable[[str], str], dest_volumes: Optional[dict[str, str]] = None,
                  exclude_volumes: Iterable[str] = (), sample: int = 40,
                  phys_of: Optional[Callable[[str], str]] = None,
-                 match_fn: Optional[Callable[[dict[str, Any], str], bool]] = None) -> dict[str, Any]:
+                 match_fn: Optional[Callable[[dict[str, Any], str], bool]] = None,
+                 unreadable: Iterable[str] = ()) -> dict[str, Any]:
     """The card's verdict from the ledger's copies of its judged files (every original: see
     is_judged). `match_fn(row, rel)` decides whether a copy found by name, size and time is really
     THIS card's file (see row_is_this_file); `phys_of` maps a volume to its physical disk.
+
+    `unreadable`: the card folders the listing could NOT read (sorter_cards.list_card). While
+    there is one the card is never safe to format and never "nothing to back up", whatever the
+    files that did list say: nobody knows what is in a folder that would not open (audit
+    comp-field-1, 2026-11-11). `unreadable` in the answer carries a sample of them.
 
     `copies_of(name, size, mtime)` is the lookup (mirror + this machine's own); `dest_volumes`
     is {destination id: volume id} so the answer can say how much each destination already holds.
@@ -327,10 +369,11 @@ def card_verdict(files: list[list[Any]], copies_of: Callable[[str, int, Any], li
     out: dict[str, Any] = {"tracked": 0, "bytes": 0, "safe": 0, "home": 0, "single": 0, "none": 0,
                            "laptopOnly": 0, "uncounted": 0, "safeToFormat": False, "state": "empty",
                            "headline": "", "flags": [], "perDest": {d: {"have": 0, "of": 0} for d in dests},
-                           "atRisk": [], "notes": []}
+                           "atRisk": [], "notes": [], "unreadable": []}
+    blind = sorted({str(u or "").replace("\\", "/").strip("/") for u in unreadable or ()})
     uncounted_labels: set[str] = set()
     for rel, size, mtime, *_rest in files:
-        if not is_judged(rel):
+        if not is_judged(rel, size):
             continue
         size, name = int(size), str(rel).rsplit("/", 1)[-1]
         rows = [c for c in copies_of(name, size, mtime) if c.get("volume_id") not in skip
@@ -361,6 +404,22 @@ def card_verdict(files: list[list[Any]], copies_of: Callable[[str, int, Any], li
         if len(out["atRisk"]) < sample:
             out["atRisk"].append({"path": rel, "size": size, "copies": n, "counted": v["counted"]})
     t = out["tracked"]
+    if blind:
+        # before every other answer, the empty one included: a card whose only folder would not
+        # read lists no files at all, and "nothing to back up" is what a person formats on
+        where = ", ".join((b or "the card's top folder") for b in blind[:3])
+        more = "" if len(blind) <= 3 else f" and {len(blind) - 3} more"
+        out["state"], out["unreadable"] = "unsafe", blind[:sample]
+        out["flags"].append("unreadable")
+        out["headline"] = (f"Not safe to format: {len(blind)} folder{'s' if len(blind) != 1 else ''} on "
+                           f"this card could not be read ({where}{more}), so nobody knows what is in "
+                           f"{'them' if len(blind) != 1 else 'it'}.")
+        short = t - out["safe"]
+        if short:
+            out["notes"].append(f"Of the {t} files that could be read, {short} are also short of copies.")
+        out["notes"].append("Take the card out, put it back and look again. If the folder still will "
+                            "not read, try another reader before anything is formatted.")
+        return out
     if t == 0:
         out["headline"] = "Nothing on this card needs backing up (no footage, audio or photos on it)."
         return out
@@ -531,10 +590,26 @@ class FieldStore:
     def __init__(self, path: Optional["str | Path"] = None) -> None:
         self.path = Path(path) if path else default_state_path()
         self._lock = threading.RLock()
+        self._seen: Optional[tuple[tuple[int, int], str]] = None
 
     def _load(self) -> dict[str, Any]:
+        """The file as a dict. Parsed afresh on every call (a caller may change what it is
+        handed), but READ only when the file's size or time moved: a card verdict asks for the
+        kinds several times per file, and 12,000 opens of one small file was 0.7 s of a
+        2,000-file verdict (audit comp-field-4, 2026-11-11). A hand edit or another process
+        still shows at once, because the stat is taken every time."""
         try:
-            doc = json.loads(self.path.read_text(encoding="utf-8-sig"))
+            st = os.stat(self.path)
+            key = (st.st_mtime_ns, st.st_size)
+            with self._lock:
+                held = self._seen
+            if held is not None and held[0] == key:
+                text = held[1]
+            else:
+                text = self.path.read_text(encoding="utf-8-sig")
+                with self._lock:
+                    self._seen = (key, text)
+            doc = json.loads(text)
         except (OSError, ValueError):
             return {}
         return doc if isinstance(doc, dict) else {}
@@ -544,6 +619,10 @@ class FieldStore:
             _atomic_write(self.path, json.dumps(doc, indent=1, sort_keys=True))
         except OSError:
             log.warning("field: could not save %s", self.path, exc_info=True)
+        finally:
+            # two saves inside one timestamp tick of the same length must not read as "unchanged"
+            with self._lock:
+                self._seen = None
 
     def get(self, key: str, default: Any) -> Any:
         with self._lock:
@@ -606,18 +685,39 @@ class LocalCopies:
     One JSON line per copy: {volume_id, label, kind, path, name, size, mtime, verified, at, card,
     rel, phys} (the card it came from and where on it, and the physical disk it went to).
     Appended durably as each lane finishes; loaded once; an entry is dropped when the mirror
-    returns a live row for the same volume, or after LOCAL_COPY_DAYS."""
+    returns a live row for the same volume, or after LOCAL_COPY_DAYS.
+
+    Held by (volume, path) and looked up by (name, size): a verdict asks once per file on the
+    card, and a list scanned per file was a second of every 2,000-file verdict (audit
+    comp-field-4, 2026-11-11). The file on disk is unchanged in shape."""
 
     def __init__(self, path: Optional["str | Path"] = None,
                  clock: Callable[[], float] = time.time) -> None:
         self.path = Path(path) if path else default_copies_path()
         self._clock = clock
         self._lock = threading.RLock()
-        self._rows: Optional[list[dict[str, Any]]] = None
+        # (volume_id, path) -> row, oldest first (a dict keeps the order rows were written in)
+        self._rows: Optional[dict[tuple[str, str], dict[str, Any]]] = None
+        self._by_name: dict[tuple[str, int], dict[tuple[str, str], dict[str, Any]]] = {}
 
-    def _all(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _key(row: dict[str, Any]) -> tuple[str, str]:
+        return (str(row["volume_id"]), str(row["path"]))
+
+    def _index(self, row: dict[str, Any]) -> None:
+        self._by_name.setdefault((str(row["name"]).lower(), row["size"]), {})[self._key(row)] = row
+
+    def _unindex(self, row: dict[str, Any]) -> None:
+        name_key = (str(row["name"]).lower(), row["size"])
+        bucket = self._by_name.get(name_key)
+        if bucket is not None:
+            bucket.pop(self._key(row), None)
+            if not bucket:
+                self._by_name.pop(name_key, None)
+
+    def _load(self) -> dict[tuple[str, str], dict[str, Any]]:
         if self._rows is None:
-            rows: list[dict[str, Any]] = []
+            rows: dict[tuple[str, str], dict[str, Any]] = {}
             cutoff = self._clock() - LOCAL_COPY_DAYS * 86400
             try:
                 with open(self.path, "r", encoding="utf-8") as fh:
@@ -626,18 +726,33 @@ class LocalCopies:
                             row = json.loads(line)
                         except ValueError:
                             continue
-                        if isinstance(row, dict) and row.get("volume_id") and row.get("name"):
-                            if _iso_to_epoch(row.get("at")) >= cutoff or not row.get("at"):
-                                rows.append(row)
+                        if not (isinstance(row, dict) and row.get("volume_id") and row.get("name")
+                                and row.get("path")):
+                            continue
+                        try:
+                            row["size"] = int(row["size"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        if _iso_to_epoch(row.get("at")) >= cutoff or not row.get("at"):
+                            key = self._key(row)
+                            rows.pop(key, None)                   # a later line for one place wins
+                            rows[key] = row
             except OSError:
                 pass
-            self._rows = rows[-MAX_LOCAL_COPIES:]
+            for key in list(rows)[:max(0, len(rows) - MAX_LOCAL_COPIES)]:
+                del rows[key]
+            self._rows, self._by_name = rows, {}
+            for row in rows.values():
+                self._index(row)
         return self._rows
+
+    def _all(self) -> list[dict[str, Any]]:
+        return list(self._load().values())
 
     def add(self, copies: Iterable[dict[str, Any]]) -> int:
         added = 0
         with self._lock:
-            rows = self._all()
+            rows = self._load()
             lines = []
             for c in copies:
                 try:
@@ -653,9 +768,12 @@ class LocalCopies:
                                microsecond=0).isoformat().replace("+00:00", "Z"))}
                 except (KeyError, TypeError, ValueError):
                     continue
-                rows[:] = [r for r in rows if not (r["volume_id"] == row["volume_id"]
-                                                   and r["path"] == row["path"])]
-                rows.append(row)
+                key = self._key(row)
+                old = rows.pop(key, None)
+                if old is not None:
+                    self._unindex(old)
+                rows[key] = row
+                self._index(row)
                 lines.append(json.dumps(row, separators=(",", ":")))
                 added += 1
             if lines:
@@ -670,34 +788,42 @@ class LocalCopies:
         return added
 
     def matching(self, name: str, size: int, mtime: Any = None) -> list[dict[str, Any]]:
-        lc = str(name).lower()
         with self._lock:
-            hits = [r for r in self._all() if r["name"].lower() == lc and r["size"] == int(size)]
+            self._load()
+            hits = list(self._by_name.get((str(name).lower(), int(size)), {}).values())
         out = []
         for r in hits:
-            if mtime is not None and r.get("mtime") is not None \
-                    and abs(int(r["mtime"]) - float(mtime)) > TIME_SLACK_MS:
+            if (mtime is not None and r.get("mtime") is not None
+                    and abs(int(r["mtime"]) - float(mtime)) > TIME_SLACK_MS):
                 continue
             out.append(dict(r))
         return out
 
     def forget(self, rows: Iterable[dict[str, Any]]) -> None:
-        """Drop entries the mirror now covers."""
-        gone = {(r["volume_id"], r["path"]) for r in rows}
+        """Drop entries the mirror now covers. ONE rewrite of the file per call, however many rows:
+        hand it everything at once (LedgerView.settle does)."""
+        gone = {(str(r["volume_id"]), str(r["path"])) for r in rows}
         if not gone:
             return
         with self._lock:
-            keep = [r for r in self._all() if (r["volume_id"], r["path"]) not in gone]
-            self._rows = keep
+            held = self._load()
+            dropped = False
+            for key in gone:
+                old = held.pop(key, None)
+                if old is not None:
+                    self._unindex(old)
+                    dropped = True
+            if not dropped:
+                return
             try:
-                _atomic_write(self.path, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in keep)
-                              if keep else "")
+                _atomic_write(self.path, "".join(json.dumps(r, separators=(",", ":")) + "\n"
+                                                 for r in held.values()))
             except OSError:
                 log.debug("field: could not rewrite %s", self.path, exc_info=True)
 
     def __len__(self) -> int:
         with self._lock:
-            return len(self._all())
+            return len(self._load())
 
 
 class LedgerView:
@@ -714,6 +840,8 @@ class LedgerView:
         self.mirror = mirror
         self.local = local
         self.root_of = root_of
+        self._covered: dict[tuple[str, str], dict[str, Any]] = {}
+        self._covered_lock = threading.Lock()
 
     def _present(self, row: dict[str, Any]) -> bool:
         if self.root_of is None:
@@ -744,11 +872,32 @@ class LedgerView:
         mine = self.local.matching(name, size, mtime)
         covered = [m for m in mine if (m["volume_id"], str(m["path"]).lower()) in seen]
         if covered:                                               # the mirror has this very copy now
-            self.local.forget(covered)
+            # NOTED here, dropped in settle(). Dropping it on the spot rewrote and fsynced the
+            # whole local-copies file once per FILE of the card: 28 s for a 2,000-file card inside
+            # the page's poll, with more polls queuing behind it (audit comp-field-3, 2026-11-11).
+            # Until it is settled the row is simply answered by the mirror instead, as below.
+            with self._covered_lock:
+                for m in covered:
+                    self._covered[(str(m["volume_id"]), str(m["path"]))] = m
         for m in mine:
             if (m["volume_id"], str(m["path"]).lower()) not in seen:
                 rows.append(dict(m, source="local"))
         return rows
+
+    def settle(self) -> int:
+        """Drop from the local file every copy the lookups since the last call found the mirror
+        now holds, in ONE rewrite. Called at the end of a verdict; cheap when there is nothing.
+        -> how many were dropped. Never raises."""
+        with self._covered_lock:
+            rows, self._covered = list(self._covered.values()), {}
+        if not rows:
+            return 0
+        try:
+            self.local.forget(rows)
+        except Exception:                                         # noqa: BLE001
+            log.debug("field: could not drop the copies the mirror now holds", exc_info=True)
+            return 0
+        return len(rows)
 
     def copies(self, name: str, size: int, mtime: Any = None) -> list[dict[str, Any]]:
         return [r for r in self._raw(name, size, mtime) if self._present(r)]

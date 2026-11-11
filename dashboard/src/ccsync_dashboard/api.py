@@ -4324,18 +4324,16 @@ _UNREGISTERED_CACHE_LOCK = threading.Lock()
 _UNREGISTERED_TTL_S = 60.0
 
 
-def _auto_map_has_rival(settings, resolve_project: str, match: str,
-                        labels: Iterable[str]) -> bool:
-    """True when an unregistered folder looks as much like `resolve_project`
-    as the registered `match` (db.unregistered_rivals), or when the tree
-    cannot be read: a sticky mapping is permanent and a prompt is cheap, so
-    doubt means ask. No projects_dir configured means there is no tree to
-    consult (a dev/test dashboard) and the old behaviour stands."""
+def _unregistered_folders(settings, labels: Iterable[str]) -> list[str] | None:
+    """The unregistered folders under the Projects tree, from the 60 s cache
+    or a fresh walk: [] when no tree is configured, None when it could not be
+    read (cached too, so an unreadable tree is not walked again by every
+    report). THE WALK: call this where no database write lock is held."""
     from . import provision
 
     projects_dir = str(getattr(settings, "projects_dir", "") or "")
     if not projects_dir:
-        return False
+        return []
     depth = max([str(label).count("/") + 1 for label in labels] + [3])
     depth = min(depth, 8)
     key = (projects_dir, depth)
@@ -4343,22 +4341,69 @@ def _auto_map_has_rival(settings, resolve_project: str, match: str,
     with _UNREGISTERED_CACHE_LOCK:
         hit = _UNREGISTERED_CACHE.get(key)
     if hit is not None and now - hit[0] < _UNREGISTERED_TTL_S:
-        folders = hit[1]
-    else:
-        try:
-            folders = provision.scan_unregistered_dirs(Path(projects_dir), max_depth=depth)
-        except OSError as exc:
-            log.warning("report: not auto-mapping %r to %r - the tree could not be "
-                        "read to look for a closer folder (%s)", resolve_project, match, exc)
-            return True
-        with _UNREGISTERED_CACHE_LOCK:
-            _UNREGISTERED_CACHE[key] = (now, folders)
+        return hit[1]
+    try:
+        folders: list[str] | None = provision.scan_unregistered_dirs(
+            Path(projects_dir), max_depth=depth)
+    except OSError as exc:
+        log.warning("report: the Projects tree could not be read to look for an "
+                    "unregistered folder (%s); no Resolve project is auto-mapped "
+                    "until it can", exc)
+        folders = None
+    with _UNREGISTERED_CACHE_LOCK:
+        _UNREGISTERED_CACHE[key] = (now, folders)
+    return folders
+
+
+def _auto_map_has_rival(settings, resolve_project: str, match: str,
+                        labels: Iterable[str]) -> bool:
+    """True when an unregistered folder looks as much like `resolve_project`
+    as the registered `match` (db.unregistered_rivals), or when the tree
+    cannot be read: a sticky mapping is permanent and a prompt is cheap, so
+    doubt means ask. No projects_dir configured means there is no tree to
+    consult (a dev/test dashboard) and the old behaviour stands."""
+    folders = _unregistered_folders(settings, labels)
+    if folders is None:
+        log.warning("report: not auto-mapping %r to %r - the tree could not be "
+                    "read to look for a closer folder", resolve_project, match)
+        return True
+    if not folders:
+        return False
     rivals = db.unregistered_rivals(resolve_project, match, folders)
     if rivals:
         log.info("report: not auto-mapping %r to %r - unregistered folder(s) %s match "
                  "as well, so the editor is asked (CR-379)",
                  resolve_project, match, ", ".join(rivals[:5]))
     return bool(rivals)
+
+
+def _prewarm_rival_walk(settings, conn, resolve_project_raw: str) -> None:
+    """Do the CR-379 tree walk BEFORE the report takes the database write lock.
+
+    Audit dash-api-2 (2026-11-11). The auto-map block in api_report runs after
+    `holds.begin` (BEGIN IMMEDIATE), and on a cache miss its rival check
+    os.walks the Projects tree, up to eight levels deep, on the NAS's pool,
+    with the one write lock in the process held: every other report and
+    every click waited behind a directory listing. While a rival exists the
+    mapping is never written, so that walk came round again every 60 s for as
+    long as that Resolve project stayed open. This asks the same questions
+    the block asks (reads only) and, when the walk is going to be needed,
+    does it here; the block then finds the cache warm. Never raises: a
+    failure here only means the block does what it always did."""
+    try:
+        name = (resolve_project_raw or "").strip()
+        if not name or is_ignored_resolve_project(name):
+            return
+        if conn.execute("SELECT 1 FROM project_roots WHERE resolve_project = ?",
+                        (name,)).fetchone() is not None:
+            return
+        labels = [r["label"] for r in conn.execute(
+            "SELECT label FROM projects WHERE active=1")]
+        if db.match_project_label_confident(name, labels) is None:
+            return
+        _unregistered_folders(settings, labels)
+    except Exception:  # noqa: BLE001 - see the docstring
+        log.debug("report: could not look for rival folders ahead of the write", exc_info=True)
 
 
 def _projects_dir_or_error(settings) -> Path:
@@ -10977,6 +11022,9 @@ def api_report(
     report_via = netclass.request_report_via(settings, request)
     # The first write of the report: its lock hold is timed from here, once
     # the lock is held (CR-351, _WriteHolds).
+    # dash-api-2: the one directory walk this route can need, done while no
+    # write lock is held (see _prewarm_rival_walk).
+    _prewarm_rival_walk(settings, conn, payload.resolve_project or "")
     holds = _WriteHolds()
     holds.begin(conn, "fleet state")
     # This machine IS reporting and IS being accepted: clear yesterday's

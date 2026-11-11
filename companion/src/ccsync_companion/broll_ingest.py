@@ -921,7 +921,15 @@ class BrollIngestor:
         try:
             with self._save_lock:
                 self.state_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+                # COMPACT, not indent=2 (audit 2026-11-10 comp-media-2): this
+                # runs about twelve times per clip and writes the WHOLE batch
+                # each time, so a 400-clip card was some 4,800 saves. Indented,
+                # json falls back to its pure-Python encoder: measured 6.2 to
+                # 6.8 times slower and 31% more bytes than this, all of it
+                # under the GIL beside the ffmpeg workers. Nothing reads the
+                # file but _load, which is json.loads.
+                tmp.write_text(json.dumps(snapshot, separators=(",", ":")),
+                               encoding="utf-8")
                 os.replace(str(tmp), str(self.state_path))
         except Exception:
             self.log.warning("could not write %s", self.state_path,

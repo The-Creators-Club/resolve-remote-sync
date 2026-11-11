@@ -232,6 +232,7 @@ def test_resolve_is_running_fails_closed(monkeypatch):
     def boom(*args, **kwargs):
         raise OSError("no tasklist here")
 
+    monkeypatch.setattr(rp, "windows_process_names", lambda: None)   # the snapshot cannot answer
     monkeypatch.setattr(rp.subprocess, "run", boom)
     assert rp.resolve_is_running() is True
 
@@ -245,8 +246,50 @@ def test_an_inconclusive_probe_is_None_not_True(monkeypatch):
     def boom(*args, **kwargs):
         raise OSError("no tasklist here")
 
+    monkeypatch.setattr(rp, "windows_process_names", lambda: None)   # the snapshot cannot answer
     monkeypatch.setattr(rp.subprocess, "run", boom)
     assert rp.resolve_process_state() is None
+
+
+def test_on_windows_the_answer_comes_from_one_snapshot_and_no_child_process(monkeypatch):
+    """Audit lens-longrun-companion-1 (2026-11-11): "is Resolve running" was a `tasklist` spawn
+    behind nine doors, 230-545 an hour on an idle machine and before every frame of a b-roll
+    ingest."""
+    spawned = []
+    monkeypatch.setattr(rp.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(rp.subprocess, "run", lambda *a, **k: spawned.append(a) or (_ for _ in ()).throw(
+        AssertionError("spawned a process")))
+    monkeypatch.setattr(rp, "windows_process_names", lambda: {"explorer.exe", "resolve.exe"})
+    assert rp.resolve_process_state() is True and rp.resolve_is_running() is True
+    monkeypatch.setattr(rp, "windows_process_names", lambda: {"explorer.exe"})
+    assert rp.resolve_process_state() is False and rp.resolve_is_running() is False
+    assert rp.process_state("TeraCopy.exe") is False and rp.process_state("EXPLORER.EXE") is True
+    assert spawned == []
+
+
+def test_a_snapshot_that_cannot_be_taken_falls_back_to_the_spawn(monkeypatch):
+    import types
+
+    monkeypatch.setattr(rp.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(rp, "windows_process_names", lambda: None)
+    monkeypatch.setattr(rp.subprocess, "run", lambda *a, **k: types.SimpleNamespace(
+        stdout="Resolve.exe   1234 Console  1  2,000,000 K", returncode=0))
+    assert rp.resolve_process_state() is True
+    assert rp.process_state("TeraCopy.exe") is None        # cannot tell: the caller keeps its own answer
+
+
+def test_an_empty_snapshot_is_a_failed_one_not_an_empty_machine(monkeypatch):
+    from ccsync_companion import script_server
+
+    monkeypatch.setattr(rp.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(script_server, "_windows_processes", lambda: {})
+    assert rp.windows_process_names() is None
+    monkeypatch.setattr(script_server, "_windows_processes",
+                        lambda: {4: ("system", 0), 900: ("Resolve.exe", 4)})
+    assert rp.windows_process_names() == {"system", "resolve.exe"}
+    monkeypatch.setattr(script_server, "_windows_processes",
+                        lambda: (_ for _ in ()).throw(OSError("no toolhelp")))
+    assert rp.windows_process_names() is None
 
 
 def test_an_unsupported_platform_is_inconclusive_too(monkeypatch):

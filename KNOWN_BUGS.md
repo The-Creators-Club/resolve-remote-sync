@@ -34374,3 +34374,50 @@ chip say it too. Tests: `dashboard/tests/test_cr383_unopened_out_of_tree.py`;
 **Deploy order: the dashboard first.** A 0.7.77 dashboard drops the new
 key inside `resolve_health` and names it as an ignored section on every
 0.9.88 report.
+
+## CR-384 - the 2026-11-10 whole-product audit: its highs and a first set of mediums - FIXED in repo 2026-11-11 (companion, dashboard, server, ytdl, indexer, tools; Timeline Cards and Footage Sorter in their own trees; nothing built, shipped or deployed)
+
+The audit is `docs/AUDIT_2026-11-10.md` (303 findings, 14 high). What was
+fixed, finding by finding, with what each fix could not be proven against, is
+`docs/audit-2026-11-10/FIXES.md`; this entry is the pointer and the short
+list.
+
+**Data safety (field backup).** A card folder that would not read vanished
+from the listing and the card then read "Safe to format" (comp-field-1); the
+verdict waited only for file types on a list, so a card of Nikon N-RAW read
+"nothing to back up" (comp-field-2); cards in fixed readers could be reported
+but not copied (comp-field-5); the copier's "read back" verify read the file
+cache, not the drive (comp-field-10); a drive that was unplugged lost its
+copies from the count (comp-field-7, -8).
+
+**The one dashboard process.** A media request the browser had abandoned kept
+streaming the rest of the file on `/cards` and `/cards/edit` (dash-mounts-1);
+the Footage Sorter ledger left a SQLite connection open per short-lived
+thread (lens-sql-1); the waveform maker held a whole decoded clip in memory
+per clip with no cap (cards-library-1, comp-jobs-1); the checks panel showed
+OK for a check that had stopped running (dash-collector-2); the report held
+the write lock across a walk of the Projects tree (dash-api-2).
+
+**Release and deploy.** A customer dashboard release is refused unless the
+CI job that runs the dashboard suites actually RAN on that commit; a skipped
+job leaves the run green, and that job has been off since 2026-11-10
+(deploy-release-2). `--mode image` no longer deletes and re-creates the app
+when the image named is the one already running (deploy-nas-1; in code, not
+yet run against the NAS).
+
+**Also.** The app-only Cards auto-download ran in every browser because a
+function was declared twice (cards-page-b-1); a live stream could hold the
+fleet's one server-side YouTube worker for ever (web-ytdl-1); stills for the
+local b-roll model are cut at the width it was tuned on (idx-1); "is Resolve
+running" no longer spawns `tasklist` (lens-longrun-companion-1); CR-381's
+clean-project skip survived an untick or a mode flip (comp-sync-2).
+
+**Reported by the owner during the pass.** A card closed in the Source panel
+on `/sorter` could not be brought back while it stayed in its reader. It is
+now listed as closed under its computer's Cards, with a "Show again" button
+(`POST /sorter/api/ingest/restore`).
+
+Not fixed, and listed in `FIXES.md`: most mediums and every low, the two
+highs in the rebuilt editor (another session's worktree), and the signature
+that the Timeline Cards Windows app's update still needs (cards-storydeck-1
+is only half done: an update with no checksum is refused now).

@@ -647,7 +647,7 @@ function mk() {
 }
 const $ = s => nodes[s] || (nodes[s] = mk());
 global.document = {getElementById: () => null, querySelector: s => $(s),
-                   querySelectorAll: () => [],
+                   querySelectorAll: () => [], hidden: false, addEventListener() {},
                    documentElement: {style: {setProperty() {}}}};
 global.fetch = async url => ({ok: false, status: 401, json: async () => ({})});
 const EXAMPLES = ['a'];

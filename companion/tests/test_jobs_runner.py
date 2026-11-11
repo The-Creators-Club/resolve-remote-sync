@@ -208,6 +208,30 @@ def test_a_malformed_offer_block_is_ignored(tmp_path):
     assert r.status()["offered"] == []
 
 
+def test_a_claim_that_cannot_reach_the_dashboard_is_not_now_and_drops_the_offer(tmp_path, caplog):
+    """Audit comp-jobs-3 (2026-11-11): the transport error escaped the tick, so the offer was
+    never cleared and a laptop off the tailnet made a claim attempt and wrote a traceback every
+    20 s, with the gate saying "ready" throughout."""
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash)
+
+    def down(method, url, body, headers, timeout):
+        dash.claims += 1
+        raise OSError("no route to host")
+
+    r._request = down
+    r.note_report_reply({"commands": {"jobs": {"offered": [5]}}})
+    with caplog.at_level("INFO"):
+        assert r.tick() is None                                # no exception out of the tick
+    assert dash.claims == 1 and r.status()["offered"] == []
+    assert r.status()["state"] == runner_mod.STATE_NOTHING_OFFERED
+    assert "Traceback" not in caplog.text and "could not reach the dashboard to claim" in caplog.text
+    assert r.tick() is None and dash.claims == 1               # and it does not hammer: nothing is on offer
+    r._request = dash.request                                   # back online: the next reply re-offers
+    r.note_report_reply({"commands": {"jobs": {"offered": [5]}}})
+    assert r.status()["offered"] == [5]
+
+
 # -------------------------------------------------------------- the work
 
 def test_it_runs_the_pipeline_and_reports_the_files(tmp_path):

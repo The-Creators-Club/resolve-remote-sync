@@ -320,6 +320,11 @@ def _real_run(monkeypatch, capsys, cmds, extra_argv=("--music-data", "none")):
     monkeypatch.setattr(ida, "install_tree", lambda *a, **k: True)
     monkeypatch.setattr(ida, "provision_ffmpeg", lambda *a, **k: None)
     monkeypatch.setattr(ida, "provision_ytdl_binaries", lambda *a, **k: None)
+    # ...and the TrueNAS version note, which was the one call here that did open a socket: it
+    # asks the real API client for the NAS's version, at the manifest's host, with the "pw"
+    # above (audit tests-ci-2, 2026-11-11; 30 s per process on CI). conftest.py now refuses any
+    # connection that leaves this machine, so the next unstubbed call fails at once and says so.
+    monkeypatch.setattr(ida, "print_truenas_version_note", lambda *a, **k: "", raising=False)
     monkeypatch.setattr(sys, "argv", ["install_dashboard_app.py", *extra_argv])
     rc = ida.main()
     captured = capsys.readouterr()
@@ -901,3 +906,54 @@ def test_the_repo_version_is_the_one_the_probe_demands():
     ccsync_dashboard (it has no fastapi)."""
     version = ida.repo_dashboard_version()
     assert version and version[0].isdigit()
+
+
+# ---------------------------------------------------------------------------
+# deploy-nas-3 (audit 2026-11-10): in image mode the version to expect after a
+# restart is the one that was serving before it, not the repo's
+# ---------------------------------------------------------------------------
+
+
+def test_image_mode_expects_the_version_that_was_serving_before_the_restart(monkeypatch):
+    """The gate asked for the repo's VERSION in both modes. An image-mode
+    deploy ships no dashboard code, so with the repo ahead of what is live
+    every Cards deploy polled its whole budget and exited 1."""
+    monkeypatch.setattr(ida, "repo_dashboard_version", lambda: "0.7.80")
+    assert ida.expected_after_restart(True, "0.7.79") == "0.7.79"
+    # nothing read going in (the dashboard was down): any version that answers will do
+    assert ida.expected_after_restart(True, "") == ""
+    # bind mode pushed this checkout's code, so the repo's version is still the test
+    assert ida.expected_after_restart(False, "0.7.79") == "0.7.80"
+
+
+def test_the_gate_passes_on_the_live_version_when_the_repo_is_ahead(monkeypatch, capsys):
+    monkeypatch.setattr(ida, "backend", lambda: _FakeBackend())
+    monkeypatch.setattr(ida, "repo_dashboard_version", lambda: "0.7.80")
+    asked = []
+
+    def probe(port, expected, dry_run, budget=None):
+        asked.append(expected)
+        live = "0.7.79"
+        ok = (not expected) or expected == live
+        return ok, ({"version": live, "ok": True} if ok else {"version": live}), "v0.7.79 after 1 probe(s)"
+    monkeypatch.setattr(ida, "probe_dashboard_health", probe)
+
+    class _Args:
+        dry_run = False
+        rollback_on_unhealthy = False
+
+    before = ida.version_serving_now(8480, False)
+    assert before == "0.7.79"
+    rc = ida.verify_dashboard_after_restart(8480, "/mnt/pool/ccsync", _Args(),
+                                            ida.expected_after_restart(True, before))
+    assert rc == 0
+    assert asked == ["", "0.7.79"]
+    assert "SERVING" in capsys.readouterr().out
+    # ...and with no expectation passed it is the repo's, as it always was
+    assert ida.verify_dashboard_after_restart(8480, "/mnt/pool/ccsync", _Args()) == 1
+
+
+def test_version_serving_now_never_probes_in_a_dry_run(monkeypatch):
+    monkeypatch.setattr(ida, "probe_dashboard_health",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("a dry run must not probe")))
+    assert ida.version_serving_now(8480, True) == ""

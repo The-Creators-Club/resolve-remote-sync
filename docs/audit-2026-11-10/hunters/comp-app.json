@@ -1,0 +1,62 @@
+[
+  {
+    "id": "comp-app-1",
+    "title": "The tray rebuilds sync_guard() every 2 s, and that walks every retained ingest staging folder on the sync drive",
+    "category": "perf",
+    "severity": "medium",
+    "confidence": "CONFIRMED",
+    "where": "companion/src/ccsync_companion/app.py:7749 (sync_guard -> ingest_staging_report app.py:8069) -> broll_ingest.py:3834-3839 (_dir_bytes broll_ingest.py:692); callers tray.py:3075 (_tray_snapshot, every 2.0 s) and reporter.py:1020",
+    "what": "sync_guard() is the report section but the tray also calls it whole every 2 s. Its ingest_staging section recursively walks and stats every finished or held staging batch of both ingest kinds on every call. The staging root is inside local_root (<local_root>/Assets/B-roll Archive/.ingest and the music mount), batches are kept 7 days and held drops are never pruned. disk_snapshot() beside it is memoised for exactly the SYNC-2 reason; this walk is not.",
+    "cost": "43,200 tray calls/day plus 1,440-17,280 reporter calls/day, for 7 days after each drop (for ever for a held one). Three 100-clip drops = 1,500 files = 17 ms per call measured on local NVMe warm (~0.9% of a core on the tray thread plus ~0.35% on the reporter, beside Resolve); estimated 0.3-1 s per call over USB cold cache or SMB (base rig music staging has no override). If the drive goes ROOT_NOT_ANSWERING the walk blocks and both the tray refresh thread and the reporter thread park inside sync_guard(), so the machine stops reporting exactly when root_state=not_answering is what the dashboard needs (PLAUSIBLE, read not reproduced).",
+    "evidence": "Read the chain app.py:7749/8069 -> broll_ingest.staging_report/_dir_bytes, broll_server.ingest_staging_root (broll_server.py:1649-1669), tray refresh loop (tray.py:5165, 5221-5258); no TTL and no root-state check. Probe: _dir_bytes over a synthetic 3-batch/1,500-file staging tree = 17.3 ms per call.",
+    "ledger": "new (related: bug-comp-broll-4 held staging keeps the walk alive past retention)",
+    "fix": "Memoise ingest_staging_report() like disk_snapshot() (TTL = dashboard_report_interval, floor 30 s), invalidate it from clear_finished_ingest_staging() and batch end/prune, and return the last value without touching disk while _root_state is not present; or keep a running byte count per staging entry in the ingestor. The space refusal (_space_refusal) keeps its exact walk at refusal time.",
+    "effort": "S",
+    "risk": "low"
+  },
+  {
+    "id": "comp-app-2",
+    "title": "Two net use (+ subst) probes per media-tree tick when one is enough",
+    "category": "idle",
+    "severity": "low",
+    "confidence": "CONFIRMED",
+    "where": "companion/src/ccsync_companion/app.py:5210 then 5217 (_media_tree_loop); uncached p_mapping_mode() at app.py:5047; probe app.py:5383/5435 -> drive_swap.py:309-340",
+    "what": "With Resolve open, each 120 s tick runs _classify_pool_once, whose p_mapping_mode() memo (10 s) expired a tick ago, so it spawns net use P: (and subst on subst-mapped rigs); seconds later _refresh_p_mapping_mode() spawns the identical probe again unconditionally.",
+    "cost": "720 ticks/day x 2 probes x 1-2 spawns = 1,440-2,880 spawns/day per Windows editor machine where 720-1,440 suffice; measured 13.4 ms (net use) + 12.6 ms (subst) per spawn, so ~19-38 s/day of spawn wall time, half redundant.",
+    "evidence": "Loop order app.py:5208-5217 and the uncached call at app.py:5047; spawn timing probe.",
+    "ledger": "related to COMP-CORE-6 (2026-08-14), contract kept",
+    "fix": "Call _refresh_p_mapping_mode() at the top of the tick before _refresh_media_tree_once(), or use p_mapping_mode_cached() in _classify_pool_once. Swaps must still invalidate the cache and the classification must still refuse while P: points at the server.",
+    "effort": "S",
+    "risk": "low"
+  },
+  {
+    "id": "comp-app-3",
+    "title": "Seven workers share one try in start(); one raising silently skips the rest under the wrong name",
+    "category": "resilience",
+    "severity": "low",
+    "confidence": "CONFIRMED",
+    "where": "companion/src/ccsync_companion/app.py:10620-10646",
+    "what": "proxy_generator, broll_ingestor, music_ingestor, job_runner and (since 2026-11-09) sorter_cards, sorter_volumes and ledger_outbox are started inside one try whose except logs 'failed to start the proxy generator', against the rule stated 25 lines below that each starter gets its own try.",
+    "cost": "Any exception from an earlier starter (RuntimeError can't start new thread near the handle limit beside Resolve, a raising enabled property, a half-built object) leaves every later worker down for the life of the process with a log line naming the wrong component; none of them is supervised by LaneWatchdog. Trigger likelihood is low (PLAUSIBLE).",
+    "evidence": "app.py:10620-10646 read; sorter starters added in f8102a4 / 06f033b.",
+    "ledger": "new",
+    "fix": "Move these seven into the existing (name, starter) tuple loop at app.py:10671 so each has its own try and its own name in the log. No happy-path change.",
+    "effort": "S",
+    "risk": "low"
+  },
+  {
+    "id": "comp-app-4",
+    "title": "sync_guard() is 282 lines of 26 hand-written try blocks rebuilt in full by two threads; a table would allow per-section cadence",
+    "category": "streamline",
+    "severity": "low",
+    "confidence": "CONFIRMED",
+    "where": "companion/src/ccsync_companion/app.py:7704-7985 (readers tray.py:3075, reporter.py:1020; blocked_report writes _blocked_since from both threads, app.py:8174-8179)",
+    "what": "Every section is the same call/swallow/emit shape written out 26 times, citing 29 distinct bug ids. Being a monolith, every consumer pays for every section at its own rate: the tray rebuilds the whole report section every 2 s for a handful of keys, and an expensive section (comp-app-1) cannot get a slower cadence without another hand-written memo.",
+    "cost": "43,200 full rebuilds/day from the tray (two eula_accepted.json reads per tray tick counting the snapshot's own, two stall-file reads, stand-in ledger stats, the staging walk) for data the reporter already builds every 5-60 s; ~280 lines touched by every new report key.",
+    "evidence": "AST/grep pass over app.py: __init__ 921 lines / 42 ids, sync_guard 282 / 29, _build_lanes 218 / 20.",
+    "ledger": "new",
+    "fix": "Express sections as a table of (key, getter, emit_when, ttl_seconds) with one isolating loop (about 150 lines saved, 'never raises' becomes structural), give walking/file-reading sections a TTL, and let the tray reuse the last built guard when it is younger than its tick. Keep the always-present sections always present and blocked computed last.",
+    "effort": "M",
+    "risk": "low"
+  }
+]

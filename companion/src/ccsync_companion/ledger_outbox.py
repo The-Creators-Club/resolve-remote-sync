@@ -226,9 +226,28 @@ def _valid(copy: dict[str, Any]) -> bool:
         return False
 
 
+# path -> ((mtime_ns, size), count). The field page asks how many are waiting on every poll (every
+# 1 to 4 s) and the flusher every minute; parsing the whole file each time was a quarter of a
+# second per poll at 80,000 queued copies (audit comp-field-6, 2026-11-11). Every writer here
+# replaces or appends to the file, so its size or time moves with every change.
+_pending_seen: dict[str, tuple[tuple[int, int], int]] = {}
+
+
 def pending(path: Optional[Path | str] = None) -> int:
+    target = _p(path)
     with _lock:
-        return len(_read(_p(path)))
+        try:
+            st = os.stat(target)
+        except OSError:
+            _pending_seen.pop(str(target), None)
+            return 0
+        key = (st.st_mtime_ns, st.st_size)
+        held = _pending_seen.get(str(target))
+        if held is not None and held[0] == key:
+            return held[1]
+        count = len(_read(target))
+        _pending_seen[str(target)] = (key, count)
+        return count
 
 
 def peek(path: Optional[Path | str] = None, limit: int = 100) -> list[dict[str, Any]]:
@@ -238,6 +257,7 @@ def peek(path: Optional[Path | str] = None, limit: int = 100) -> list[dict[str, 
 
 
 SendFn = Callable[[list[dict[str, Any]]], tuple[int, Any]]
+DROP_EVERY = 20               # delivered batches between rewrites of the file during one flush
 
 
 def flush(send: Optional[SendFn] = None, path: Optional[Path | str] = None,
@@ -258,34 +278,56 @@ def flush(send: Optional[SendFn] = None, path: Optional[Path | str] = None,
         if send is None:
             out["remaining"] = pending(target)
             return out
+    # THE FILE IS READ ONCE PER PASS AND REWRITTEN ONCE PER DROP_EVERY BATCHES, not once per
+    # batch (audit comp-field-6, 2026-11-11). Each 500-copy batch used to cost two full parses, a
+    # re-serialisation of every line and a full rewrite with fsync, so a week's backlog from the
+    # field (40,000 copies) took 21 s of CPU and disk and the 200,000 cap about eight minutes and
+    # 11 GB of writes. Nothing is dropped before its 200, as before; what changes is that a batch
+    # the dashboard HAS accepted may still be in the file if this process dies before the next
+    # drop, and is then sent again. The ledger answers that with `duplicates`: delivery was
+    # always at-least-once (a 200 lost on the way back did the same).
     try:
-        while True:
+        stop = False
+        while not stop:
             with _lock:
                 items = _read(target)
             if not items:
                 break
-            chunk = items[:max(1, int(batch))]
-            try:
-                status, parsed = send([i["copy"] for i in chunk])
-            except Exception as exc:                              # noqa: BLE001
-                log.debug("ledger outbox: could not reach the dashboard (%s)", exc)
-                break
-            out["status"] = int(status)
-            if status == 200:
-                out["sent"] += len(chunk)
-                if isinstance(parsed, dict):
-                    out["accepted"] += int(parsed.get("accepted") or 0)
-                    out["duplicates"] += int(parsed.get("duplicates") or 0)
-                _drop(target, chunk)
-                continue
-            if status not in SET_ASIDE_STATUSES:
-                # 3xx (a stale token is answered with a redirect to /login), 401/403, 404/503, 408, 429,
-                # 5xx, and anything this code has not seen: not a verdict on the copies. Stop, keep them.
-                break
-            log.warning("ledger outbox: the dashboard refused %d copies (HTTP %s); set aside in %s",
-                        len(chunk), status, REJECTED_FILENAME)
-            _set_aside(target, chunk)
-            out["rejected"] += len(chunk)
+            size = max(1, int(batch))
+            delivered: list[dict[str, Any]] = []
+            for start in range(0, len(items), size):
+                chunk = items[start:start + size]
+                try:
+                    status, parsed = send([i["copy"] for i in chunk])
+                except Exception as exc:                              # noqa: BLE001
+                    log.debug("ledger outbox: could not reach the dashboard (%s)", exc)
+                    stop = True
+                    break
+                out["status"] = int(status)
+                if status == 200:
+                    out["sent"] += len(chunk)
+                    if isinstance(parsed, dict):
+                        out["accepted"] += int(parsed.get("accepted") or 0)
+                        out["duplicates"] += int(parsed.get("duplicates") or 0)
+                    delivered.extend(chunk)
+                    if len(delivered) >= DROP_EVERY * size:
+                        _drop(target, delivered)
+                        delivered = []
+                    continue
+                if status not in SET_ASIDE_STATUSES:
+                    # 3xx (a stale token is answered with a redirect to /login), 401/403, 404/503, 408, 429,
+                    # 5xx, and anything this code has not seen: not a verdict on the copies. Stop, keep them.
+                    stop = True
+                    break
+                log.warning("ledger outbox: the dashboard refused %d copies (HTTP %s); set aside in %s",
+                            len(chunk), status, REJECTED_FILENAME)
+                # with what was delivered so far, so the two files never both hold a line for long
+                _set_aside(target, chunk, also_drop=delivered)
+                delivered = []
+                out["rejected"] += len(chunk)
+            if delivered:
+                _drop(target, delivered)
+            # anything a copy lane queued while this pass was out is picked up by the next read
     except Exception:                                             # noqa: BLE001
         log.warning("ledger outbox: flush failed", exc_info=True)
     out["remaining"] = pending(target)
@@ -324,13 +366,14 @@ def _drop(target: Path, sent: list[dict[str, Any]]) -> None:
         _write_all(target, keep)
 
 
-def _set_aside(target: Path, bad: list[dict[str, Any]]) -> None:
+def _set_aside(target: Path, bad: list[dict[str, Any]],
+               also_drop: Optional[list[dict[str, Any]]] = None) -> None:
     with _lock:
         side = target.with_name(REJECTED_FILENAME)
         with open(side, "a", encoding="utf-8", newline="\n") as fh:
             for item in bad:
                 fh.write(json.dumps(item, separators=(",", ":")) + "\n")
-        _drop(target, bad)
+        _drop(target, bad + list(also_drop or ()))
 
 
 def make_sender(cfg: dict[str, Any], identity_token_fn: Optional[Callable[[], Optional[str]]] = None,

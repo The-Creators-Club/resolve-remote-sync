@@ -2152,3 +2152,58 @@ def test_the_phase_note_names_the_thing_to_check(error, expected):
     assert note.startswith('4 clips in a row')
     assert '—' not in note
     assert 'RETRY' in note
+
+
+# -- audit web-ytdl-1 (2026-11-11): a clip that is stopped on purpose ---------------------------
+
+def test_four_live_streams_are_four_refused_clips_and_never_the_identical_failure_breaker(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """A live stream records until it ends, on the one worker the whole fleet shares. Refusing
+    it is not "the same wall N times": the other clips of the job must still be fetched."""
+    ids = ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc', 'ddddddddddd', 'eeeeeeeeeee']
+    asked = []
+
+    def download(url, outdir, quality='best', **_kw):
+        asked.append(url)
+        if 'eeeeeeeeeee' in url:
+            path = project_root / job['term_dir'] / 'Test Channel - ok [eeeeeeeeeee].mp4'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'a finished video')
+            return {'title': 't', 'channel': 'c', 'thumbnail': None, 'filepath': str(path), 'sidecar': None}
+        raise worker.downloader.ClipStopped(worker.downloader.LIVE_REFUSAL)
+
+    monkeypatch.setattr(worker.downloader, 'download', download)
+    monkeypatch.setattr(worker, 'MAX_IDENTICAL_FAILURES', 3)
+    _download(con, job, fake_claude, fake_youtube, ids)
+
+    assert len(asked) == 5, 'the phase was stopped early'
+    fresh = db.get_job(con, job['id'])
+    assert (fresh['dl_done'], fresh['dl_failed']) == (1, 4)
+    row = db.get_video(con, job['id'], 'aaaaaaaaaaa')
+    assert row['dl_state'] == 'failed' and 'live stream' in row['dl_error']
+    assert fresh['phase'] != 'failed'
+
+
+def test_cancel_reaches_a_download_that_is_running_and_the_clip_goes_back_to_waiting(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """The cancel flag was read only between clips, so a long download could not be stopped."""
+    seen = {}
+
+    def download(url, outdir, quality='best', should_stop=None, **_kw):
+        seen['handed'] = should_stop is not None
+        db.request_cancel(con, job['id'])          # the editor presses CANCEL mid-download
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            why = should_stop()
+            if why:
+                raise worker.downloader.ClipStopped(why)
+            time.sleep(0.05)
+        raise AssertionError('the stop was never asked for')
+
+    monkeypatch.setattr(worker.downloader, 'download', download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa', 'bbbbbbbbbbb'])
+
+    assert seen == {'handed': True}
+    assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['dl_state'] == 'pending'
+    assert db.get_video(con, job['id'], 'bbbbbbbbbbb')['dl_state'] == 'pending'
+    assert db.get_job(con, job['id'])['dl_failed'] == 0

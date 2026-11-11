@@ -800,7 +800,10 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
             # poll and a media stream at once, and a phone on the sofa is a
             # second pair. Ten is not a queue, it is a stall with no error
             # message.
-            return engine, WSGIMiddleware(wsgi, workers=24)
+            # DisconnectAware: a media stream stops when its browser has
+            # gone, instead of reading the rest of the file into nothing on
+            # one of these 24 workers (audit dash-mounts-1, 2026-11-11).
+            return engine, cards_wsgi.DisconnectAware(WSGIMiddleware(wsgi, workers=24))
         except Exception:
             # bug-hunt-2026-09-03 dash-release-jobs-1, in its new home. The
             # engine is STARTED by the line above, and a wrap that raises

@@ -1,0 +1,62 @@
+[
+ {
+  "id": "lens-longrun-companion-1",
+  "title": "One cached 'is Resolve running' probe instead of a tasklist spawn behind nine doors",
+  "category": "idle",
+  "severity": "medium",
+  "confidence": "CONFIRMED",
+  "where": "companion/src/ccsync_companion/resolve_prefs.py:143-171; callers capabilities.py:495-520, jobs_runner.py:614/682/736/758/817, broll_ingest.py:1004/1114, proxy_gen.py:705-723/925, resolve_bridge.py:640-662, app.py:4926/4993/12587, luts.py:474, resolve_prefs.py:367/462/519/572",
+  "what": "Every Windows 'is Resolve up' question spawns tasklist (macOS pgrep). Three modules grew private TTL caches around it, the rest call it raw; capabilities caches everything except this field. script_server already reads the process table in-process every 3 s.",
+  "cost": "Per Windows editor ~230-545 tasklist spawns/hour idle Resolve closed, ~110-245 Resolve open, ~800-1,100 while syncing (report every 5 s), +~29 per ingested clip; 202 ms wall each = 45-110 s spawn wall time per idle hour beside Resolve; 5,000-11,000 spawns/hour across 20 machines.",
+  "evidence": "Grep of all callers (one spawn site, nine paths). Probe: tasklist median 202 ms vs script_server._windows_processes()+is_resolve_name median 8.5 ms over 499 processes; a cache hit is a lock + monotonic read.",
+  "ledger": "consolidates comp-jobs-2, comp-media-1, comp-resolve-7; the reporter/capabilities door (60/h idle, 720/h syncing) is new",
+  "fix": "Windows branch of resolve_process_state() -> Toolhelp32 snapshot (reuse script_server._windows_processes, match Resolve.exe so BPG still counts) behind ONE module-level 5 s TTL cache of the three-valued answer; same cache for pgrep on macOS. Keep fail-closed collapse, positive-sighting-only for the scripting warning, and let prefs writes ask fresh=True.",
+  "effort": "S",
+  "risk": "low"
+ },
+ {
+  "id": "lens-longrun-companion-2",
+  "title": "On a Mac, both sorter loops spawn diskutil for every mounted volume every 10 seconds",
+  "category": "idle",
+  "severity": "medium",
+  "confidence": "CONFIRMED",
+  "where": "companion/src/ccsync_companion/sorter_cards.py:194-244 (_mac_volumes), called from sorter_cards.py current_cards (scope local) and sorter_volumes.py current_volumes (scope all); SCAN_SECONDS 10 in both; both default on",
+  "what": "Two default-on loops enumerate the same volumes independently; on macOS each enumeration spawns one 'diskutil info -plist' per /Volumes entry, startup disk included, before any freshness check (RELIST_SECONDS applies after list_volumes).",
+  "cost": "2 loops x 360 ticks/h x 2-4 volumes = 1,440-2,880 diskutil spawns/hour, 35k-70k/day per Mac for weeks, ~50-150 ms each (estimated), on laptops on battery, whether or not the studio uses the sorter.",
+  "evidence": "Code read of both loops and _mac_volumes; comp-field covered the Windows ctypes path only.",
+  "ledger": "new (related: comp-app OUT OF TERRITORY note on default-on sorter scans; comp-field-9 Windows relist)",
+  "fix": "One shared enumerator with a ~10 s cache read by both loops; on macOS cache each diskutil answer keyed on (mount path, st_dev) and re-run only for a new or changed mount; capacity/free from shutil.disk_usage. Keep the Data-volume serial rule and the busy-volume reuse.",
+  "effort": "S",
+  "risk": "low"
+ },
+ {
+  "id": "lens-longrun-companion-3",
+  "title": "The proxy geometry-verdict cache keeps every proxy path it ever saw, with no field eviction",
+  "category": "leak",
+  "severity": "low",
+  "confidence": "PLAUSIBLE",
+  "where": "companion/src/ccsync_companion/proxy_relink.py:379, :408-416, :419-422; same shape :643/:686/:714-718 (_REFUSALS)",
+  "what": "Geometry verdicts are keyed by proxy path and validated by fingerprint on read, but only a tests-only function ever clears the dict; it grows with every distinct proxy examined for the life of the process.",
+  "cost": "~250-400 bytes/entry (estimated): a few MB today over weeks; 500k proxies at commercial scale (500 projects x 5k files on a base rig) ~100-200 MB in the tray process.",
+  "evidence": "Code read: one writer, one clear reachable only from tests, no size check.",
+  "ledger": "new",
+  "fix": "OrderedDict LRU capped ~20,000 (a miss only re-probes, so verdicts cannot change); cap _REFUSALS generously or evict on project close so a refused proxy in play stays refused.",
+  "effort": "S",
+  "risk": "low"
+ },
+ {
+  "id": "lens-longrun-companion-4",
+  "title": "Two upload-queue threads poll every second forever, and the originals inbox lists its folder every 2 s, though all have a wake path",
+  "category": "idle",
+  "severity": "low",
+  "confidence": "CONFIRMED",
+  "where": "companion/src/ccsync_companion/broll_upload.py:448-460 (instances broll_ingest.py:2888, music_ingest.py:607); originals_requests.py:351-358 (POLL_SECONDS 2.0)",
+  "what": "After the first upload the UploadQueue worker wakes every second to find an empty queue, though every enqueue/resume/stop sets _wake. The originals inbox iterdir()s a local folder every 2 s for a request dropped a few times a week.",
+  "cost": "120 wakeups/min plus 1,800 directory listings/hour per machine for weeks, about a third of the ~360 idle wakeups/min in the census; small CPU, but no deep idle on laptops.",
+  "evidence": "Code read; every queue state change calls self._wake.set().",
+  "ledger": "new (comp-ui-5 covers the pulse thread)",
+  "fix": "Idle branch waits on _wake with no or a 60 s timeout; originals inbox every 10-15 s or woken via the 8899 loopback. Keep the explicit 5 s NAS-unreachable retry and stop() waking the thread.",
+  "effort": "S",
+  "risk": "low"
+ }
+]

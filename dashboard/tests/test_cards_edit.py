@@ -25,6 +25,7 @@ The properties defended, each a way this goes wrong live:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -556,3 +557,106 @@ def test_no_em_dash_in_what_an_editor_reads():
         None)
     assert "—" not in page.body.decode()
     assert "—" not in inspect.getsource(cards_landing._editor_links).split('"""')[0]
+
+
+# -- audit dash-mounts-1 (2026-11-11): the proxy stops pulling when the browser has gone --------
+
+def _run_passthrough(chunks, method, receive):
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def go():
+        await asyncio.wait_for(
+            cards_edit.Passthrough(chunks, 206, [])({"type": "http", "method": method}, receive, send), 10)
+
+    asyncio.run(go())
+    return sent
+
+
+def test_a_get_whose_browser_leaves_closes_the_upstream_at_once():
+    state = {"closed": False, "made": 0}
+
+    async def media():
+        try:
+            while True:
+                state["made"] += 1
+                yield b"x" * 65536
+                await asyncio.sleep(0)
+        finally:
+            state["closed"] = True
+
+    calls = {"n": 0}
+
+    async def receive():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await asyncio.sleep(0.05)
+        return {"type": "http.disconnect"}
+
+    sent = _run_passthrough(media(), "GET", receive)
+    assert state["closed"] and state["made"] < 100000
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[-1].get("more_body") is True          # cut short: no clean end was claimed
+
+
+def test_a_long_poll_nobody_is_waiting_for_is_let_go():
+    """The read timeout to the editor is None; an answer that never came held its upstream
+    connection for ever once the browser had left."""
+    state = {"closed": False}
+
+    async def never():
+        try:
+            await asyncio.Event().wait()
+            yield b""
+        finally:
+            state["closed"] = True
+
+    async def receive():
+        await asyncio.sleep(0.05)
+        return {"type": "http.disconnect"}
+
+    sent = _run_passthrough(never(), "GET", receive)
+    assert state["closed"] and [m["type"] for m in sent] == ["http.response.start"]
+
+
+def test_a_get_that_is_read_to_the_end_is_whole_and_other_methods_never_listen():
+    async def three():
+        for part in (b"a", b"b", b"c"):
+            yield part
+
+    async def quiet():
+        await asyncio.Event().wait()
+
+    sent = _run_passthrough(three(), "GET", quiet)
+    assert [m.get("body") for m in sent[1:]] == [b"a", b"b", b"c", b""] and sent[-1]["more_body"] is False
+
+    async def must_not_be_read():
+        raise AssertionError("a POST's receive belongs to the body gate's replay")
+
+    sent = _run_passthrough(three(), "POST", must_not_be_read)
+    assert [m.get("body") for m in sent[1:]] == [b"a", b"b", b"c", b""]
+
+
+def test_the_editor_is_the_first_thing_the_dashboard_stops(tmp_path, monkeypatch):
+    """Audit lens-longrun-dashboard-1 (2026-11-11): the child's SIGTERM is what flushes every open
+    cut list, and it was stopped LAST, behind about twenty seconds of joins, in a container that
+    `docker stop` kills after ten."""
+    from ccsync_dashboard import cards, sorter
+
+    order = []
+
+    async def editor_shutdown(app):
+        order.append("editor")
+
+    monkeypatch.setattr(cards_edit, "shutdown", editor_shutdown)
+    real_engine, real_sorter = cards.stop_engine, sorter.stop_sorter
+    monkeypatch.setattr(cards, "stop_engine", lambda app: (order.append("engine"), real_engine(app))[1])
+    monkeypatch.setattr(sorter, "stop_sorter", lambda app: (order.append("sorter"), real_sorter(app))[1])
+    app = create_app(Settings(db_path=str(tmp_path / "d.db"), session_secret="s", report_token="t",
+                              admin_users=frozenset({"owen"})))
+    with TestClient(app):
+        assert order == []
+    assert order[0] == "editor" and set(order) == {"editor", "engine", "sorter"}, order

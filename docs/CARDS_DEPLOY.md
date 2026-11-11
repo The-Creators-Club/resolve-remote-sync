@@ -205,11 +205,28 @@ What each flag is for:
 
 | flag | why |
 |---|---|
-| `--mode image` | this site is image mode; the flag implies `--recreate` (the mode is baked in at create time) -- that is expected, nothing under `<host-root>` is deleted |
-| `--container-image <live digest>` | pins the image that is ALREADY live, so only Cards changes (step 2) |
+| `--mode image` | this site is image mode. Since 2026-11-11 the flag implies `--recreate` ONLY when the image named beside it is not the one the running container already has; with the live digest it prints `NOT re-creating the app` and the run is a restart. Nothing under `<host-root>` is deleted either way |
+| `--container-image <live digest>` | pins the image that is ALREADY live, so only Cards changes (step 2). **A digest that is not the live one still re-creates the app WITH that image**, which is how a stale digest rolls the dashboard back: read it off the NAS (step 2), never out of `site.toml` |
 | `--cards-commit <sha>` | the commit to ship; default `main` (also `CARDS_COMMIT`) |
 | `--music-data none` | the default `auto` pushes any of the ~1.4 GB of music data the NAS lacks -- not part of a Cards deploy |
 | `--yes` | only matters for the recreate's confirmation |
+
+**What changed on 2026-11-11 (audit deploy-nas-1), and what has not been proven yet.** Passing
+`--mode image` used to delete the TrueNAS app and create it again on every run of this
+recipe, whatever the image. It now asks the running container which image it has
+(`mode_flag_needs_recreate` in `install_dashboard_app.py`) and only restarts it when that is
+the image on the command line. A dry run connects to nothing, so `--dry-run` still prints
+`implying --recreate`; the real run prints one of two lines near the top, and that line is
+what to read: `NOT re-creating the app` (the routine case) or `implying --recreate` (the
+digest is not the live one: stop and check it before answering the confirmation). **This
+path has been tested against a fake NAS only. The first real run should be watched: it must
+end in `restarted container`, not `deleted app for re-create`.**
+
+A run with NEITHER `--mode` nor `--container-image` never re-creates on this site either
+(`site.toml` says `mode = "image"`, and without the flag the script takes the restart path,
+which keeps the container's current image whatever `[stack] image` says). That is the
+shorter recipe, and needs no digest; it is not the documented one only because it has not
+been run here yet.
 
 Not used: `--no-ffmpeg` (the ffmpeg step is idempotent and skips when it is
 provisioned), `--rollback-on-unhealthy` (image mode has no app tree to roll
@@ -239,9 +256,12 @@ FAILED: /api/v1/health did not answer from inside the container on port 8480.
 ```
 
 The **FAILED** line (and exit code 1) came seconds before the container went
-healthy -- on 2026-10-04 and again on 2026-10-29. Exit 1 is also printed
-whenever the repo's dashboard VERSION is ahead of the pinned image. **Do not
-roll back on it**: check `sudo docker ps` (wanted:
+healthy -- on 2026-10-04 and again on 2026-10-29. Until 2026-11-11 exit 1
+was also printed whenever the repo's dashboard VERSION was ahead of what was
+live (the gate asked for the repo's version, which an image-mode deploy never
+ships); the gate now reads the version that is serving BEFORE the restart and
+expects that one back (audit deploy-nas-3), so that cause is gone. **Do not
+roll back on a FAILED line alone**: check `sudo docker ps` (wanted:
 `ix-ccsync-dashboard-dashboard-1 ... (healthy)`) and the Verify section first.
 
 ### Mechanics: what the deploy does with `--cards-commit`

@@ -36,7 +36,7 @@
   {% for k in notice_kinds %}
     <li>{% if k.kind in open_kinds %}<span class="tag solid {{ 'err' if k.severity == 'error' else 'warn' }}" title="This check found something. It is in the list above."><span class="w">found</span></span>
       {% elif k.kind in checked_kinds %}<span class="tag ok" title="This check ran and found nothing wrong."><span class="w">ok</span></span>
-      {% else %}<span class="tag mute" title="Registered, but nothing in this build has ever run it, so it is neither OK nor a problem."><span class="w">not checked</span></span>{% endif %} <span>{{ k.what }}</span></li>
+      {% elif stale_kinds is defined and k.kind in stale_kinds %}<span class="tag mute" title="This check last ran on {{ stale_kinds[k.kind][:10] }} and has not run since, so it is neither OK nor a problem."><span class="w">not checked</span></span>{% else %}<span class="tag mute" title="Registered, but nothing in this build has ever run it, so it is neither OK nor a problem."><span class="w">not checked</span></span>{% endif %} <span>{{ k.what }}</span></li>
   {% endfor %}
   </ul>
 </details>

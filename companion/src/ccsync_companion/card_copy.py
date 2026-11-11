@@ -191,28 +191,122 @@ def _new_hash() -> Any:
     return hashlib.blake2b(digest_size=32)
 
 
+def _open_past_the_cache(path: Path) -> Any:
+    """Open `path` for a read that comes from the DRIVE, not from the operating system's file
+    cache. -> a raw binary file object (read it with `readinto` into a page-aligned buffer, in
+    whole multiples of 4096 bytes, and never ask past the end), or None when this system offers
+    no such read, in which case the caller reads the ordinary way.
+
+    WHY (audit comp-field-10, 2026-11-11): the verify reads the copy back seconds after writing
+    it. Those pages are still in the file cache, so an ordinary read hashed what was just sent
+    from memory and could not see a write the drive or its USB bridge got wrong: the receipt said
+    `verified: true` for a copy nobody had read off the disk. fsync says the write was issued,
+    not that what comes back matches.
+
+    Windows: FILE_FLAG_NO_BUFFERING (the cache manager is not used for this handle). macOS:
+    F_NOCACHE on the descriptor. Elsewhere: the pages are dropped first (posix_fadvise DONTNEED)."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            import msvcrt
+            from ctypes import wintypes
+
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.CreateFileW.restype = wintypes.HANDLE
+            k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+            k32.CloseHandle.argtypes = [wintypes.HANDLE]
+            full = os.path.abspath(str(path))
+            if not full.startswith("\\\\?\\"):                   # long paths, and UNC shares
+                full = ("\\\\?\\UNC\\" + full[2:]) if full.startswith("\\\\") else ("\\\\?\\" + full)
+            # GENERIC_READ; share read|write|delete; OPEN_EXISTING; NO_BUFFERING | SEQUENTIAL_SCAN
+            handle = k32.CreateFileW(full, 0x80000000, 0x7, None, 3, 0x20000000 | 0x08000000, None)
+            if handle in (None, wintypes.HANDLE(-1).value, -1):
+                return None
+            try:
+                fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+            except OSError:
+                k32.CloseHandle(handle)
+                return None
+            return os.fdopen(fd, "rb", buffering=0)
+        fh = open(path, "rb", buffering=0)
+        try:
+            import fcntl
+            if hasattr(fcntl, "F_NOCACHE"):
+                fcntl.fcntl(fh.fileno(), fcntl.F_NOCACHE, 1)
+            elif hasattr(os, "posix_fadvise"):
+                os.posix_fadvise(fh.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+        except (ImportError, OSError):
+            pass
+        return fh
+    except Exception:                                           # noqa: BLE001
+        log.debug("card copy: no uncached read for %s; verifying through the cache", path, exc_info=True)
+        return None
+
+
+def _hash_past_the_cache(path: Path, size: int, should_stop: Callable[[], str]) -> Optional[Any]:
+    """The hash of `path` read off the drive (see _open_past_the_cache), or None when that read
+    is not to be had or gave up partway, so the caller falls back to an ordinary one. Raises
+    _Stopped. An uncached read must be asked in sector multiples from a sector-aligned buffer,
+    and must not be asked again once the end has been reached (the position is then no longer
+    aligned and Windows refuses), which is why this stops at `size` instead of at an empty read."""
+    import mmap
+
+    fh = _open_past_the_cache(path)
+    if fh is None:
+        return None
+    h = _new_hash()
+    done = 0
+    try:
+        with fh, mmap.mmap(-1, BUFFER_BYTES) as buf:           # anonymous maps are page-aligned
+            view = memoryview(buf)
+            try:
+                while done < size:
+                    reason = should_stop()
+                    if reason:
+                        raise _Stopped(reason)
+                    n = fh.readinto(buf)
+                    if not n:
+                        break
+                    n = min(int(n), size - done)
+                    h.update(view[:n])
+                    done += n
+            finally:
+                view.release()
+    except OSError:
+        log.debug("card copy: the uncached read of %s failed; verifying through the cache", path,
+                  exc_info=True)
+        return None
+    return h if done == size else None
+
+
 def verify_whole(path: Path, size: int, digest: bytes, should_stop: Callable[[], str]) -> str:
     """Read `path` back IN FULL and compare with `digest`, the hash taken of the
-    source while it was copied. -> "" when it matches, else the reason."""
+    source while it was copied. -> "" when it matches, else the reason. The read
+    is taken past the file cache wherever the system allows it (see
+    _open_past_the_cache); where it does not, it is an ordinary read, as it
+    always was."""
     try:
         got = path.stat().st_size
     except OSError as exc:
         return f"the copy cannot be read back ({exc})"
     if got != size:
         return f"the copy is {got} bytes and the source {size}"
-    h = _new_hash()
-    try:
-        with open(path, "rb") as fh:
-            while True:
-                reason = should_stop()
-                if reason:
-                    raise _Stopped(reason)
-                chunk = fh.read(BUFFER_BYTES)
-                if not chunk:
-                    break
-                h.update(chunk)
-    except OSError as exc:
-        return f"the copy could not be verified ({exc})"
+    h = _hash_past_the_cache(path, size, should_stop)
+    if h is None:
+        h = _new_hash()
+        try:
+            with open(path, "rb") as fh:
+                while True:
+                    reason = should_stop()
+                    if reason:
+                        raise _Stopped(reason)
+                    chunk = fh.read(BUFFER_BYTES)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+        except OSError as exc:
+            return f"the copy could not be verified ({exc})"
     if h.digest() != digest:
         return "the copy read back differs from the source"
     return ""
@@ -276,6 +370,20 @@ def _stamp(src: Path, dst: Path) -> None:
         pass
 
 
+def _write_past_the_cache(fh: Any) -> None:
+    """macOS only: keep what is written to `fh` out of the file cache. There F_NOCACHE on the
+    reading side does not stop a read being answered from pages the WRITE left behind, so the
+    read-back is only a read of the drive when the write never cached them (audit comp-field-10,
+    2026-11-11). Windows needs nothing here (its uncached read never consults the cache). Never
+    raises: a system that refuses just verifies as before."""
+    try:
+        import fcntl
+        if hasattr(fcntl, "F_NOCACHE"):
+            fcntl.fcntl(fh.fileno(), fcntl.F_NOCACHE, 1)
+    except (ImportError, OSError, ValueError):
+        pass
+
+
 def copy_file(src: Path, dst: Path, size: int, should_stop: Callable[[], str],
               on_bytes: Callable[[int], None]) -> str:
     """Copy `src` to `<dst>.partial`, fsync, read it all back against the hash
@@ -291,6 +399,7 @@ def copy_file(src: Path, dst: Path, size: int, should_stop: Callable[[], str],
         buf = bytearray(BUFFER_BYTES)
         view = memoryview(buf)
         with open(src, "rb") as a, open(partial, "xb") as b:
+            _write_past_the_cache(b)
             while True:
                 reason = should_stop()
                 if reason:
@@ -463,7 +572,12 @@ class CardJob:
         want = str(serial or "").strip().upper()
         if not want:
             raise CardJobError("the job named no card serial")
-        vols = self._volumes("removable", set())
+        # "local": removable AND fixed. sorter_cards has reported cards in FIXED readers
+        # (CFexpress Type B, Blackmagic SSD) since companion 0.9.90, and the job the sorter then
+        # sends names such a card; looking among removable volumes only failed every one of
+        # those jobs with "not in a card reader on this computer" (audit comp-field-5,
+        # 2026-11-11). The disk the system lives on is never a card, whatever a job says.
+        vols = [v for v in self._volumes("local", set()) if not v.get("system")]
         for vol in vols:
             if str(vol["serial"]).upper() == want:
                 sorter_cards.note_drive(want, vol["root"])
@@ -584,7 +698,7 @@ class CardJob:
         if not self._ingest_serial:
             return False
         try:
-            vols = self._volumes("removable", set())
+            vols = self._volumes("local", set())                # fixed readers too: see _find_card
         except Exception:                                       # noqa: BLE001
             return False
         return not any(str(v["serial"]).upper() == self._ingest_serial.upper() for v in vols)

@@ -107,7 +107,7 @@ def test_the_listing_has_the_protocols_shape(tmp_path):
     touch(tmp_path, "PRIVATE/M4ROOT/CLIP/fx3_0001M01.XML", xml.encode())
     touch(tmp_path, "ZOOM0001.WAV", wav_bytes(2.5))
     listing = sorter_cards.list_card(tmp_path)
-    assert set(listing) == {"files", "texts", "wav"}
+    assert set(listing) == {"files", "texts", "wav", "unreadable"} and listing["unreadable"] == []
     by_rel = {f[0]: f for f in listing["files"]}
     rel, size, mtime = by_rel["PRIVATE/M4ROOT/CLIP/fx3_0001.MP4"]
     assert size == 1000
@@ -194,9 +194,11 @@ def a_volume(tmp_path, name="card1", serial="1038701C", free=100):
 def _clean_registry():
     sorter_cards._busy.clear()
     sorter_cards._known_drives.clear()
+    sorter_cards._dest_busy.clear()
     yield
     sorter_cards._busy.clear()
     sorter_cards._known_drives.clear()
+    sorter_cards._dest_busy.clear()
 
 
 def test_it_posts_the_full_set_with_the_fleet_credentials(tmp_path):
@@ -415,3 +417,78 @@ def test_capabilities_report_the_card_ability_only_where_enabled(tmp_path, monke
     off = capabilities.build({"sorter_cards_enabled": False}, use_cache=False)
     assert on["sorter_cards"] is True and off["sorter_cards"] is False
     assert {"card-ingest", "drive-copy"} <= set(capabilities.KNOWN_KINDS)
+
+
+# ------------------------------------------- a listing that could not read everything
+def _unreadable(monkeypatch, *names):
+    """os.scandir raises for any folder whose name is in `names` (a flaky reader, FAT damage)."""
+    import os as _os
+    real = _os.scandir
+
+    def scandir(path):
+        if Path(path).name in names:
+            raise OSError(5, "Input/output error")
+        return real(path)
+
+    monkeypatch.setattr(sorter_cards.os, "scandir", scandir)
+
+
+def test_a_folder_that_will_not_read_is_named_not_dropped(tmp_path, monkeypatch):
+    """Audit comp-field-1 (2026-11-11): a DJI card whose DCIM/101MEDIA threw a read error was
+    listed as the files of 100MEDIA alone, with nothing to say the listing was partial, and the
+    field page then called the card safe to format."""
+    for n in range(3):
+        touch(tmp_path, f"DCIM/100MEDIA/DJI_000{n}.MP4")
+        touch(tmp_path, f"DCIM/101MEDIA/DJI_010{n}.MP4")
+    _unreadable(monkeypatch, "101MEDIA")
+    listing = sorter_cards.list_card(tmp_path)
+    assert [f[0] for f in listing["files"]] == [f"DCIM/100MEDIA/DJI_000{n}.MP4" for n in range(3)]
+    assert listing["unreadable"] == ["DCIM/101MEDIA"]
+
+
+def test_a_card_whose_top_folder_will_not_read_says_so(tmp_path, monkeypatch):
+    touch(tmp_path, "A001.braw")
+    _unreadable(monkeypatch, tmp_path.name)
+    listing = sorter_cards.list_card(tmp_path)
+    assert listing["files"] == [] and listing["unreadable"] == [""]
+
+
+def test_a_skipped_folder_that_will_not_read_does_not_make_the_card_partial(tmp_path, monkeypatch):
+    """System Volume Information refuses everybody; it is skipped by name before it is opened."""
+    touch(tmp_path, "A001.braw")
+    touch(tmp_path, "System Volume Information/x")
+    _unreadable(monkeypatch, "System Volume Information")
+    assert sorter_cards.list_card(tmp_path)["unreadable"] == []
+
+
+def test_the_card_report_says_partial_only_when_it_is(tmp_path, monkeypatch):
+    """The body posted to the sorter is unchanged for a card that read in full."""
+    touch(tmp_path, "DCIM/100MEDIA/DJI_0001.MP4")
+    touch(tmp_path, "DCIM/101MEDIA/DJI_0101.MP4")
+    vol = {"serial": "S1", "label": "", "drive": "L:", "root": str(tmp_path), "capacity": 1, "free": 1}
+    assert "unreadable" not in sorter_cards.describe(vol, "2026-11-11T00:00:00Z")
+    _unreadable(monkeypatch, "101MEDIA")
+    assert sorter_cards.describe(vol, "2026-11-11T00:00:00Z")["unreadable"] == ["DCIM/101MEDIA"]
+
+
+def test_a_drive_being_written_to_is_not_listed_again_while_the_copy_runs(tmp_path, monkeypatch):
+    """Audit comp-field-9 (2026-11-11): a field drive that already holds a backup lists as a
+    `generic` card, and its free space moves with every file a copy writes, so it was walked in
+    full on every tick for as long as the copy ran."""
+    vol = a_volume(tmp_path, "fielddrive", serial="D0000001")
+    touch(Path(vol["root"]), "FieldBackup/2026-11-10 A001/A001.WAV", wav_bytes(0.1))
+    walks = []
+    real = sorter_cards.list_card
+    monkeypatch.setattr(sorter_cards, "list_card", lambda root: (walks.append(root), real(root))[1])
+    loop, dash, clock = make_loop(tmp_path, lambda: [vol])
+    loop.tick()
+    assert len(walks) == 1
+    with sorter_cards.dest_busy(vol["root"]):
+        for _ in range(5):
+            vol["free"] -= 10                       # the copy is writing
+            clock.now += 10
+            loop.tick()
+        assert len(walks) == 1
+    clock.now += 10
+    loop.tick()                                     # the copy is over: read once, as it now is
+    assert len(walks) == 2 and sorter_cards.dest_busy_roots() == set()

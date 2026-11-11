@@ -320,3 +320,44 @@ def test_watch_epoch_is_none_without_a_live_observer(tmp_path):
     lane._observer = _Obs(False)
     assert lane.watch_epoch() is None
     lane._observer = None
+
+
+# -- audit comp-sync-2 (2026-11-11): what makes a clean check stale ---------------
+
+
+def test_a_flip_to_upload_only_runs_lane_a_in_full_again():
+    """Full -> upload-only widens lane A's filter from video to every file, so the earlier
+    "found nothing" says nothing about what is now in scope. It used to SKIP for up to two hours."""
+    seq, lane, clock = _build()
+    _turn(seq)
+    clock.advance(360)
+    _turn(seq)
+    assert _runs(lane) == [False]                       # clean, skipped
+    flipped = dict(_item(SLUG, REL, 0), sync_mode="upload_only")
+    seq._update_known_selection([flipped])
+    clock.advance(360)
+    _turn(seq)
+    assert _runs(lane) == [False, False]                # looked at again, in full
+
+
+def test_an_untick_and_a_retick_forget_the_clean_check():
+    """While unticked the watcher cannot map a write to the project, so nothing records it."""
+    seq, lane, clock = _build()
+    _turn(seq)
+    seq._update_known_selection([])                     # unticked
+    seq.notify_change(SUB)                              # written to meanwhile: no slug, no change time
+    seq._update_known_selection([_item(SLUG, REL, 0)])  # ticked again
+    clock.advance(360)
+    _turn(seq)
+    assert _runs(lane) == [False, False]
+    assert SLUG not in seq._lane_a_changed_at or seq._lane_a_changed_at[SLUG] <= clock()
+
+
+def test_an_unchanged_selection_keeps_the_skip():
+    seq, lane, clock = _build()
+    _turn(seq)
+    for _ in range(3):                                  # the 30 s selection refresh, nothing different
+        seq._update_known_selection([_item(SLUG, REL, 0)])
+        clock.advance(360)
+        _turn(seq)
+    assert _runs(lane) == [False]

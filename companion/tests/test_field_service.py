@@ -20,9 +20,11 @@ NAS = "nas:thecreatorspool"
 def _clean_registry():
     sorter_cards._busy.clear()
     sorter_cards._known_drives.clear()
+    sorter_cards._dest_busy.clear()
     yield
     sorter_cards._busy.clear()
     sorter_cards._known_drives.clear()
+    sorter_cards._dest_busy.clear()
 
 
 class Net:
@@ -478,3 +480,111 @@ def test_checking_a_thousand_file_card_against_the_mirror_is_quick_enough(tmp_pa
     st = w.svc.state(refresh=True)
     assert card_of(st)["files"] == 1003
     assert time.monotonic() - t0 < 20
+
+
+# ------------------------------------------------------- the 2026-11-11 audit (comp-field-*)
+def _cfexpress(w, tmp_path):
+    cfx = tmp_path / "cfx"
+    cfx.mkdir()
+    (cfx / "G011_10201714_C001.braw").write_bytes(os.urandom(4000))
+    w.extra.append({"serial": "CFX00001", "label": "G011", "drive": "H:", "root": str(cfx), "removable": False,
+                    "capacity": 512 * 10 ** 9, "free": 10 ** 9, "fs": "exFAT", "drive_type": "fixed", "system": False})
+    return cfx
+
+
+def test_a_card_in_a_fixed_reader_is_a_card_here_too_and_never_a_destination(tmp_path):
+    """comp-field-5: companion 0.9.90 reported CFexpress B cards (a FIXED disk to Windows) to the
+    sorter, but this page still dropped every fixed volume from its cards and offered the card
+    under "Copy to", where another card's footage could be written onto it."""
+    w = World(tmp_path)
+    _cfexpress(w, tmp_path)
+    st = w.svc.state(refresh=True)
+    assert {(c["serial"], c["kind"]) for c in st["cards"]} == {(SERIAL, "sony"), ("CFX00001", "bmcc")}
+    assert "vol:CFX00001" not in {d["id"] for d in st["destinations"]}
+    w.svc.store.set_kind("vol:LLLL0001", "ours")
+    # and it can be backed up: the run finds the card although no REMOVABLE volume has its serial
+    run = w.finish(w.svc.start_copy("CFX00001", ["vol:AAAA0001", "vol:LLLL0001"]))
+    assert [l.state for l in run.lanes] == ["done", "done"], [l.message for l in run.lanes]
+    assert card_of(w.svc.state(refresh=True), "CFX00001")["verdict"]["safeToFormat"] is True
+
+
+def test_a_fixed_disk_that_merely_holds_footage_is_still_a_drive(tmp_path):
+    w = World(tmp_path)
+    (w.drives["L"] / "Projects" / "Show").mkdir(parents=True)
+    (w.drives["L"] / "Projects" / "Show" / "clip.mov").write_bytes(b"x" * 10)
+    st = w.svc.state(refresh=True)
+    assert [c["serial"] for c in st["cards"]] == [SERIAL]
+    assert "vol:LLLL0001" in {d["id"] for d in st["destinations"]}
+
+
+def test_a_card_with_a_folder_that_will_not_read_is_not_safe_whatever_was_copied(tmp_path):
+    """comp-field-1, end to end: both readable clips have two copies that count, the page still
+    refuses, and says which folder it could not see."""
+    w = World(tmp_path)
+    real = sorter_cards.list_card
+    w.svc._list_card = lambda root: {**real(root), "unreadable": ["PRIVATE/M4ROOT/CLIP2"]}
+    w.svc.store.set_kind("vol:LLLL0001", "ours")
+    w.finish(w.svc.start_copy(SERIAL, ["vol:AAAA0001", "vol:LLLL0001"]))
+    v = card_of(w.svc.state(refresh=True))["verdict"]
+    assert (v["state"], v["safeToFormat"], v["safe"], v["tracked"]) == ("unsafe", False, 2, 2)
+    assert "PRIVATE/M4ROOT/CLIP2" in v["headline"]
+
+
+def test_which_disk_a_drive_is_on_is_asked_again_on_every_look(tmp_path):
+    """comp-field-8: the answer was kept by drive letter for the life of the process."""
+    w = World(tmp_path)
+    disks = {str(w.drives["A"]): "disk:3", str(w.drives["L"]): "disk:1"}
+    w.svc = w.build(physical_fn=lambda root: disks.get(str(root), ""))
+    w.svc.state(refresh=True)
+    assert w.svc._phys_of("vol:AAAA0001") == "disk:3"
+    disks[str(w.drives["A"])] = "disk:1"            # the letter now holds a partition of disk 1
+    w.svc.state(refresh=True)
+    assert w.svc._phys_of("vol:AAAA0001") == "disk:1" == w.svc._phys_of("vol:LLLL0001")
+
+
+def test_a_drive_that_is_away_is_not_looked_for_at_its_old_letter(tmp_path):
+    """comp-field-7: the letter of an unplugged drive was remembered, so its copies were stat'ed
+    there, not found, and dropped, though "a copy on a drive that is away is believed"."""
+    w = World(tmp_path)
+    w.svc.store.set_kind("vol:LLLL0001", "ours")
+    w.finish(w.svc.start_copy(SERIAL, ["vol:AAAA0001", "vol:LLLL0001"]))
+    assert card_of(w.svc.state(refresh=True))["verdict"]["safeToFormat"] is True
+    gone = w.drives["A"]
+    w.vols_real = w.vols
+    w.svc._volumes = lambda scope="removable", skip=None: [
+        v for v in w.vols_real(scope, skip) if v["serial"] != "AAAA0001"]
+    import shutil
+    shutil.rmtree(gone)                              # nothing is at that path any more
+    st = w.svc.state(refresh=True)
+    assert w.svc._root_of("vol:AAAA0001") is None
+    assert card_of(st)["verdict"]["safeToFormat"] is True
+
+
+def test_polls_that_arrive_during_a_verdict_wait_for_it_instead_of_starting_their_own(tmp_path):
+    """comp-field-3: the verdict was cached only when finished, so every poll during a slow one
+    started another."""
+    import threading
+    w = World(tmp_path)
+    st = w.svc.state()
+    card = next(c for c in w.svc._cards.values() if c["card"])["card"]
+    w.svc.invalidate()
+    calls, gate = [], threading.Event()
+    real = field_mode.card_verdict
+
+    def slow(*a, **k):
+        calls.append(1)
+        gate.wait(5)
+        return real(*a, **k)
+
+    field_mode.card_verdict, held = slow, field_mode.card_verdict
+    try:
+        dests = w.svc.destinations()
+        threads = [threading.Thread(target=w.svc.card_verdict, args=(card, dests)) for _ in range(4)]
+        for t in threads:
+            t.start()
+        gate.set()
+        for t in threads:
+            t.join(10)
+    finally:
+        field_mode.card_verdict = held
+    assert len(calls) == 1 and st["ok"]

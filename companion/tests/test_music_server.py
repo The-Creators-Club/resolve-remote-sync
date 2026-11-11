@@ -1390,3 +1390,63 @@ def test_at_the_download_cap_the_music_route_says_wait_not_error(tmp_path):
     assert body["retry_after"] == broll_fetch.BUSY_RETRY_AFTER_SECONDS
     assert "error" not in body
     assert "already downloading" in body["message"]
+
+
+# ---------------------------------------------------------------------------
+# No worker child when Resolve's script server is not there (audit comp-media-3
+# = web-music-1, 2026-11-11)
+# ---------------------------------------------------------------------------
+
+def _script_server(monkeypatch, verdict):
+    from ccsync_companion import script_server
+    monkeypatch.setattr(script_server, "state", lambda: (verdict, "test"))
+    monkeypatch.setattr(music_server.resolve_bridge, "describe_disconnection",
+                        lambda: "DaVinci Resolve is not running")
+    return script_server
+
+
+def test_with_resolve_shut_the_status_costs_no_child_process(monkeypatch):
+    """An open /music tab asks every 30 s; each ask used to launch the frozen companion again
+    as a worker (a ~100 MB extraction to %TEMP%) to learn that nothing listens on 1144."""
+    ss = _script_server(monkeypatch, "absent")
+    spawned = []
+    monkeypatch.setattr(music_server.subprocess, "run",
+                        lambda *a, **k: spawned.append(a) or (_ for _ in ()).throw(AssertionError("spawned")))
+    for verdict in (ss.ABSENT, ss.STARTING):
+        monkeypatch.setattr(ss, "state", lambda v=verdict: (v, "test"))
+        answer = music_server.call("status")
+        assert answer["ok"] is False
+        assert answer["error"].startswith("could not reach DaVinci Resolve (DaVinci Resolve is not running)")
+    assert spawned == []
+    music_server.reset_probe_cache()
+    assert music_server.build_status_response()[1]["ok"] is False and spawned == []
+
+
+def test_with_resolve_up_or_unknowable_the_child_is_started_as_before(monkeypatch):
+    ss = _script_server(monkeypatch, "ready")
+    started = []
+
+    class _Proc:
+        returncode = 0
+        stdout = b'{"ok": true, "project": "P"}'
+        stderr = b""
+
+    monkeypatch.setattr(music_server.subprocess, "run", lambda argv, **k: started.append(argv) or _Proc())
+    for verdict in (ss.READY, ss.UNKNOWN):
+        monkeypatch.setattr(ss, "state", lambda v=verdict: (v, "test"))
+        assert music_server.call("status") == {"ok": True, "project": "P"}
+    assert len(started) == 2
+    # and a probe that itself fails is "nobody can tell": the child is started
+    monkeypatch.setattr(ss, "state", lambda: (_ for _ in ()).throw(OSError("no table")))
+    assert music_server.call("status")["ok"] is True and len(started) == 3
+
+
+def test_a_caller_that_brings_its_own_runner_is_never_short_circuited(monkeypatch):
+    _script_server(monkeypatch, "absent")
+
+    class _Proc:
+        returncode = 0
+        stdout = b'{"ok": true}'
+        stderr = b""
+
+    assert music_server.call("status", runner=lambda *a, **k: _Proc()) == {"ok": True}

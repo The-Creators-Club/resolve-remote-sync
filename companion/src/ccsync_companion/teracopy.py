@@ -367,7 +367,18 @@ def _no_window() -> int:
 
 
 def default_is_running() -> bool:
-    """`tasklist /FI "IMAGENAME eq TeraCopy.exe" /NH`: a process filter, not a shell."""
+    """Is TeraCopy.exe running? The in-process snapshot first (audit
+    comp-field-11, 2026-11-11: the wait loop asks every 5 s per lane for the
+    whole copy, and each ask was a `tasklist` spawn), then, when that cannot
+    answer, `tasklist /FI "IMAGENAME eq TeraCopy.exe" /NH`: a process filter,
+    not a shell."""
+    try:
+        from . import resolve_prefs
+        seen = resolve_prefs.process_state("TeraCopy.exe")
+        if seen is not None:
+            return seen
+    except Exception:                                           # noqa: BLE001
+        pass
     try:
         out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq TeraCopy.exe", "/NH"],
                              capture_output=True, text=True, timeout=15,

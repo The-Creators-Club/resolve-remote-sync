@@ -21,10 +21,23 @@ returned: not missing, not deleted. The server's row id is the key, so a row
 that changed (went missing, was moved) replaces the old one, and the same pull
 twice changes nothing.
 
-THE CURSOR is the server's opaque string, stored with the set of volume ids it
-was taken for: asking for a different set starts over from nothing, because a
-cursor for one set says nothing about another. A pull that fails halfway keeps
-every page already applied and the cursor of the last applied page.
+THE CURSOR is the server's string ("seq:id", one sequence for the whole ledger),
+stored with the set of volume ids it was taken for. A pull that fails halfway
+keeps every page already applied and the cursor of the last applied page.
+
+THE SET IS REMEMBERED, NOT JUST "WHAT IS PLUGGED IN NOW" (audit comp-field-7,
+2026-11-11). A pull asks for the volumes attached now AND the ones it pulled
+before and has seen within KEEP_DAYS, so a field drive that went into the bag
+keeps its rows (and keeps hearing when one goes missing), which is what "a copy
+on a drive that is away is believed" needs. Until then the set was the volumes
+attached at that moment: every card in or out started the pull over from
+nothing, the NAS's whole ledger included, and deleted the rows of whichever
+drive had just been unplugged, so a card copied to two field drives dropped to
+"one copy" the moment one of them was put away. A volume that is NEW to the set
+is caught up on its own from the start (the cursor says nothing about its
+history), and then the one cursor carries on for all of them. A volume not seen
+for KEEP_DAYS, or one the caller says is not worth keeping (a camera card), is
+dropped and its rows with it: nothing would ever tell this mirror they changed.
 
 A row is read tolerantly (the sorter's field names are `volume_id`, `name_lc`,
 `missing_since`..., and a camelCase spelling is accepted), and the whole row is
@@ -51,6 +64,8 @@ AGENT_PATH = "/sorter/agent/ledger/mirror"
 TIME_SLACK_MS = 3000
 MAX_PAGES = 400
 TIMEOUT_SECONDS = 60.0
+KEEP_DAYS = 60                # an away volume's rows are kept, and kept fresh, this long
+MAX_REMEMBERED = 150          # the server reads at most 200 volume ids per request
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS copies (
@@ -167,18 +182,37 @@ class LedgerMirror:
         self._identity = identity_token_fn
         self._clock = clock
         self._lock = threading.Lock()
+        self._ready = False
+        self._held = threading.local()
 
     # -- storage -----------------------------------------------------------
     def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # The schema (and the WAL pragma, which is a property of the FILE) is run once per
+        # process, and again whenever the file is not there: it used to run on every connect,
+        # and a card verdict connects once per file on the card (audit comp-field-4, 2026-11-11).
+        fresh = not self._ready or not self.path.exists()
+        if fresh:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.path), timeout=10.0)
         conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.DatabaseError:
-            pass
-        conn.executescript(SCHEMA)
+        if fresh:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.DatabaseError:
+                pass
+            try:
+                conn.executescript(SCHEMA)
+            except sqlite3.DatabaseError:
+                conn.close()
+                raise
+            self._ready = True
         return conn
+
+    def reading(self) -> "_Reading":
+        """`with mirror.reading():` keeps ONE connection open for this thread's `where` calls
+        inside the block, instead of one per call. For a caller about to ask a few thousand
+        times (a card verdict). Nesting is fine; other threads are not affected."""
+        return _Reading(self)
 
     def _meta(self, conn: sqlite3.Connection, key: str, default: str = "") -> str:
         row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -222,71 +256,67 @@ class LedgerMirror:
                 "X-CCSync-Token": str(self.cfg.get("dashboard_token", "") or "").strip(),
                 "X-CCSync-Identity": identity}
 
-    def pull(self, volumes: Iterable[str]) -> dict[str, Any]:
-        """Fetch what changed for these volume ids (plus whatever the server adds, the NAS) since
-        the last pull. -> {ok, status, rows, pages, cursor, error}. Never raises; an unreachable
-        dashboard is `ok: False` and leaves the mirror as it was."""
-        out: dict[str, Any] = {"ok": False, "status": None, "rows": 0, "pages": 0, "cursor": "", "error": ""}
-        url = str(self.cfg.get("dashboard_url", "") or "").strip().rstrip("/")
-        token = str(self.cfg.get("dashboard_token", "") or "").strip()
-        if not url or not token:
-            out["error"] = "no dashboard is configured"
-            return out
-        ids = sorted({str(v).strip() for v in volumes or () if str(v).strip()})
-        want = ",".join(ids)
-        request = self._request
-        if request is None:
-            from .broll_ingest import default_request
-            request = default_request
+    def _plan(self, attached: list[str], keep: Optional[Callable[[str], bool]]) -> dict[str, Any]:
+        """Which volumes this pull asks for, and from where. Reads the meta, writes nothing."""
+        now = self._clock()
+        conn = self._connect()
         try:
-            conn = self._connect()
+            held = [v for v in self._meta(conn, "volumes").split(",") if v]
+            cursor = self._meta(conn, "cursor")
             try:
-                same = self._meta(conn, "volumes") == want
-                cursor = self._meta(conn, "cursor") if same else ""
-            finally:
-                conn.close()
-        except sqlite3.DatabaseError as exc:
-            out["error"] = f"the mirror file cannot be read ({exc})"
-            return out
+                seen = json.loads(self._meta(conn, "volume_seen", "{}"))
+            except ValueError:
+                seen = {}
+        finally:
+            conn.close()
+        if not isinstance(seen, dict):
+            seen = {}
+        here = set(attached)
+        cutoff = now - KEEP_DAYS * 86400
+
+        def wanted(vid: str) -> bool:
+            try:
+                last = float(seen.get(vid, now))      # a mirror from before 2026-11-11 has no stamps
+            except (TypeError, ValueError):
+                last = now
+            if last < cutoff:
+                return False
+            if keep is None:
+                return True
+            try:
+                return bool(keep(vid))
+            except Exception:                                     # noqa: BLE001
+                return True
+
+        away = [v for v in held if v not in here and wanted(v)]
+        away.sort(key=lambda v: -float(seen.get(v, now) or 0))
+        ids = sorted(here | set(away[:max(0, MAX_REMEMBERED - len(here))]))
+        stamps = {v: (now if v in here else float(seen.get(v, now) or now)) for v in ids}
+        return {"ids": ids, "held": held, "cursor": cursor, "seen": stamps,
+                # with no cursor the main pull starts from nothing and covers them all
+                "new": [v for v in ids if v not in set(held)] if cursor else []}
+
+    def _fetch(self, request: Callable[..., tuple[int, Any]], url: str, want: str, cursor: str,
+               out: dict[str, Any], on_page: Callable[[dict[str, Any], str], None]) -> Optional[str]:
+        """Page through one volume set from `cursor`. -> the last cursor, or None when the
+        dashboard could not be asked (out["error"] says why; pages already applied stay)."""
         for _page in range(MAX_PAGES):
             q = f"{url}{AGENT_PATH}?volumes={quote(want, safe=',:')}&since={quote(cursor, safe='')}"
             try:
                 status, parsed = request("GET", q, None, self._headers(), TIMEOUT_SECONDS)
             except Exception as exc:                              # noqa: BLE001
                 out["error"] = f"could not reach the dashboard ({exc})"
-                return out
+                return None
             out["status"] = int(status)
             if status != 200 or not isinstance(parsed, dict):
                 out["error"] = f"the dashboard answered HTTP {status}"
-                return out
+                return None
             rows = _page_rows(parsed)
-            if not same:
-                # The set of volumes changed. Rows of a volume no longer pulled would stay "live" for
-                # ever (nothing will ever tell this mirror they went missing), and a field page would
-                # keep saying "already on the drive that went home". Dropped only now that the
-                # dashboard has answered, so a pull that cannot reach it leaves the mirror as it was.
-                self._forget_other_volumes(ids)
-                same = True
-            infos = parsed.get("volumes")
             new_cursor = str(parsed.get("cursor") if parsed.get("cursor") is not None else cursor)
             self.apply(rows)
             out["rows"] += len(rows)
             out["pages"] += 1
-            with self._lock:
-                conn = self._connect()
-                try:
-                    with conn:
-                        self._set_meta(conn, "volumes", want)
-                        self._set_meta(conn, "cursor", new_cursor)
-                        self._set_meta(conn, "pulled_at", str(int(self._clock())))
-                        if isinstance(infos, list) and infos:
-                            known = self._volume_info(conn)
-                            for v in infos:
-                                if isinstance(v, dict) and v.get("id"):
-                                    known[str(v["id"])] = {"label": v.get("label"), "kind": v.get("kind")}
-                            self._set_meta(conn, "volume_info", json.dumps(known))
-                finally:
-                    conn.close()
+            on_page(parsed, new_cursor)
             moved = new_cursor != cursor
             cursor = new_cursor
             more = parsed.get("more")
@@ -295,7 +325,86 @@ class LedgerMirror:
             if more is None and rows and moved:
                 continue                                   # an answer with no `more`: until a page comes back empty
             break
-        out["ok"], out["cursor"] = True, cursor
+        return cursor
+
+    def _note_volumes(self, conn: sqlite3.Connection, parsed: dict[str, Any]) -> None:
+        infos = parsed.get("volumes")
+        if isinstance(infos, list) and infos:
+            known = self._volume_info(conn)
+            for v in infos:
+                if isinstance(v, dict) and v.get("id"):
+                    known[str(v["id"])] = {"label": v.get("label"), "kind": v.get("kind")}
+            self._set_meta(conn, "volume_info", json.dumps(known))
+
+    def pull(self, volumes: Iterable[str],
+             keep: Optional[Callable[[str], bool]] = None) -> dict[str, Any]:
+        """Fetch what changed since the last pull for these volume ids (the ones attached now),
+        for the ones pulled before that are away (see the module's note on the remembered set),
+        and for whatever the server adds. `keep(volume id)` False drops an AWAY volume from the
+        set (a camera card: its copies never count). -> {ok, status, rows, pages, cursor, error}.
+        Never raises; an unreachable dashboard is `ok: False` and leaves the mirror as it was."""
+        out: dict[str, Any] = {"ok": False, "status": None, "rows": 0, "pages": 0, "cursor": "", "error": ""}
+        url = str(self.cfg.get("dashboard_url", "") or "").strip().rstrip("/")
+        token = str(self.cfg.get("dashboard_token", "") or "").strip()
+        if not url or not token:
+            out["error"] = "no dashboard is configured"
+            return out
+        attached = sorted({str(v).strip() for v in volumes or () if str(v).strip()})
+        request = self._request
+        if request is None:
+            from .broll_ingest import default_request
+            request = default_request
+        try:
+            plan = self._plan(attached, keep)
+        except sqlite3.DatabaseError as exc:
+            out["error"] = f"the mirror file cannot be read ({exc})"
+            return out
+        ids, cursor = plan["ids"], plan["cursor"]
+        want = ",".join(ids)
+        state = {"forgot": set(plan["held"]) <= set(ids)}
+
+        def forget_dropped() -> None:
+            # Rows of a volume no longer pulled would stay "live" for ever (nothing will ever tell
+            # this mirror they went missing). Dropped only once the dashboard has answered, so a
+            # pull that cannot reach it leaves the mirror as it was.
+            if not state["forgot"]:
+                self._forget_other_volumes(ids)
+                state["forgot"] = True
+
+        def caught_up(parsed: dict[str, Any], _cursor: str) -> None:
+            forget_dropped()
+            with self._lock:
+                conn = self._connect()
+                try:
+                    with conn:
+                        self._note_volumes(conn, parsed)
+                finally:
+                    conn.close()
+
+        if plan["new"]:
+            # their history first, from the start, on their own: the shared cursor is only moved
+            # by the pull of the whole set below, so a catch-up that dies is simply done again
+            if self._fetch(request, url, ",".join(plan["new"]), "", out, caught_up) is None:
+                return out
+
+        def stored(parsed: dict[str, Any], new_cursor: str) -> None:
+            forget_dropped()
+            with self._lock:
+                conn = self._connect()
+                try:
+                    with conn:
+                        self._set_meta(conn, "volumes", want)
+                        self._set_meta(conn, "volume_seen", json.dumps(plan["seen"]))
+                        self._set_meta(conn, "cursor", new_cursor)
+                        self._set_meta(conn, "pulled_at", str(int(self._clock())))
+                        self._note_volumes(conn, parsed)
+                finally:
+                    conn.close()
+
+        last = self._fetch(request, url, want, cursor, out, stored)
+        if last is None:
+            return out
+        out["ok"], out["cursor"] = True, last
         return out
 
     def _forget_other_volumes(self, keep: list[str]) -> None:
@@ -337,8 +446,9 @@ class LedgerMirror:
     def where(self, name: str, size: int, mtime: Optional[float] = None) -> list[dict[str, Any]]:
         """Live copies of this file: [{id, volume_id, path, name, size, mtime, role, verified, at}].
         No network. `mtime` is epoch milliseconds, or None to match on name and size alone."""
+        held = getattr(self._held, "conn", None)
         try:
-            conn = self._connect()
+            conn = held if held is not None else self._connect()
         except sqlite3.DatabaseError:
             return []
         try:
@@ -346,8 +456,13 @@ class LedgerMirror:
                 "SELECT id, volume_id, path, name, size, mtime, role, verified, at FROM copies"
                 " WHERE name_lc=? AND size=? AND missing_since IS NULL AND deleted_at IS NULL ORDER BY id",
                 (str(name).lower(), int(size))).fetchall()
+        except sqlite3.DatabaseError:
+            if held is None:
+                raise
+            return []                       # inside reading(): a broken mirror is an empty one
         finally:
-            conn.close()
+            if held is None:
+                conn.close()
         out = []
         for r in rows:
             if mtime is not None and r["mtime"] is not None and abs(int(r["mtime"]) - float(mtime)) > TIME_SLACK_MS:
@@ -377,3 +492,29 @@ class LedgerMirror:
         finally:
             conn.close()
 
+
+class _Reading:
+    """See LedgerMirror.reading. The connection lives in a thread-local, so two threads inside
+    two blocks never share one (a sqlite3 connection must stay on the thread that opened it)."""
+
+    def __init__(self, mirror: LedgerMirror) -> None:
+        self._mirror = mirror
+        self._mine: Optional[sqlite3.Connection] = None
+
+    def __enter__(self) -> "_Reading":
+        held = self._mirror._held
+        if getattr(held, "conn", None) is None:
+            try:
+                self._mine = held.conn = self._mirror._connect()
+            except sqlite3.DatabaseError:
+                self._mine = None             # where() falls back to a connection per call
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        if self._mine is not None:
+            self._mirror._held.conn = None
+            try:
+                self._mine.close()
+            except sqlite3.Error:
+                pass
+            self._mine = None

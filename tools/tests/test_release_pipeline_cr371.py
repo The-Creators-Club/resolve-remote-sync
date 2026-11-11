@@ -328,6 +328,13 @@ class ReleaseFake:
                 return 0, json.dumps([{"databaseId": 5, "headSha": SHA, "displayTitle": "t",
                                        "createdAt": "now"}]), ""
             return 0, "[]", ""
+        if cmd[:3] == ["gh", "run", "view"]:
+            # the jobs of the ci.yml run (audit deploy-release-2, 2026-11-11): `linux_job` is
+            # the conclusion of the job that runs the dashboard suites
+            return 0, json.dumps({"jobs": [
+                {"name": "windows", "conclusion": "success"},
+                {"name": "linux", "conclusion": getattr(self, "linux_job", "success")},
+                {"name": "macos", "conclusion": "success"}]}), ""
         if cmd[:3] == ["gh", "run", "download"]:
             dest = Path(cmd[cmd.index("--dir") + 1])
             dest.mkdir(parents=True, exist_ok=True)
@@ -769,3 +776,111 @@ def test_bundle_channel_refusal_names_a_recalled_version(tmp_path):
                                            "version": "1.2.3"}]}
     assert "RECALL" in rc.bundle_channel_refusal(bundle, chan, "1.2.3")
     assert rc.bundle_channel_refusal(bundle, chan, "1.2.4") == ""
+
+
+# ------------------------------------- audit deploy-release-2 / tests-ci-6 (2026-11-11)
+# A SKIPPED job leaves a ci.yml run green, and the linux job (the dashboard, server, tools and
+# web-app suites, the CRLF, licence and notices gates) has been `if: false` since 2026-11-10.
+
+
+class JobsFake:
+    """gh, answering the run list and the run's jobs. `jobs` is {name: conclusion}."""
+
+    def __init__(self, monkeypatch, jobs, *, view_rc=0, view_out=None):
+        self.jobs, self.view_rc, self.view_out = jobs, view_rc, view_out
+        self.calls: list[list[str]] = []
+        monkeypatch.setattr(pl, "run", self)
+
+    def __call__(self, cmd, **kw):
+        cmd = [str(c) for c in cmd]
+        self.calls.append(cmd)
+        if cmd[:3] == ["gh", "run", "list"]:
+            return 0, json.dumps([{"databaseId": 77, "headSha": SHA}]), ""
+        if cmd[:3] == ["gh", "run", "view"]:
+            if self.view_out is not None:
+                return self.view_rc, self.view_out, ""
+            return self.view_rc, json.dumps({"jobs": [{"name": n, "conclusion": c}
+                                                      for n, c in self.jobs.items()]}), ""
+        return 0, "", ""
+
+
+class TestCiJobsRan:
+    def test_a_job_that_ran_green_is_not_missing(self, monkeypatch):
+        f = JobsFake(monkeypatch, {"windows": "success", "linux": "success", "macos": "success"})
+        assert pl.ci_jobs_not_run(SHA, ("linux",)) == []
+        assert f.calls[1][:4] == ["gh", "run", "view", "77"]
+
+    def test_a_skipped_job_is_missing_although_the_run_is_green(self, monkeypatch):
+        JobsFake(monkeypatch, {"windows": "success", "linux": "skipped", "macos": "success"})
+        assert pl.ci_jobs_not_run(SHA, ("linux",)) == ["linux"]
+        assert pl.ci_jobs_not_run(SHA, ("windows", "macos")) == []
+
+    def test_a_job_that_is_not_in_the_run_at_all_is_missing(self, monkeypatch):
+        JobsFake(monkeypatch, {"windows": "success", "macos": "success"})
+        assert pl.ci_jobs_not_run(SHA, ("linux",)) == ["linux"]
+
+    def test_every_leg_of_a_matrix_job_has_to_be_green(self, monkeypatch):
+        JobsFake(monkeypatch, {"linux (3.12)": "success", "linux (3.13)": "skipped"})
+        assert pl.ci_jobs_not_run(SHA, ("linux",)) == ["linux"]
+        JobsFake(monkeypatch, {"linux (3.12)": "success", "linux (3.13)": "success",
+                               "linux-extra": "skipped"})
+        assert pl.ci_jobs_not_run(SHA, ("linux",)) == []
+
+    def test_not_being_able_to_ask_is_none_never_an_empty_list(self, monkeypatch):
+        JobsFake(monkeypatch, {}, view_rc=1)
+        assert pl.ci_jobs_not_run(SHA, ("linux",)) is None
+        JobsFake(monkeypatch, {}, view_out="not json")
+        assert pl.ci_jobs_not_run(SHA, ("linux",)) is None
+        JobsFake(monkeypatch, {})                                   # an answer with no jobs in it
+        assert pl.ci_jobs_not_run(SHA, ("linux",)) is None
+        assert pl.ci_jobs_not_run("", ("linux",)) is None
+
+
+class TestCustomerReleaseNeedsItsSuite:
+    def _verify(self, monkeypatch, unrun, **kw):
+        monkeypatch.setattr(pl, "commit_is_on_main", lambda sha, tip="": True)
+        monkeypatch.setattr(pl, "ci_green_for", lambda sha: True)
+        monkeypatch.setattr(pl, "ci_jobs_not_run", lambda sha, needed: unrun)
+        monkeypatch.setattr(pl, "newest_published", lambda *a, **k: "")
+        monkeypatch.setattr(pl, "latest_green_run", lambda wf, sha: {"databaseId": 1, "headSha": sha})
+        monkeypatch.setattr(rc, "dashboard_version_at", lambda sha: "0.7.80")
+        return rc.verify(SHA, SHA, {}, **kw)
+
+    def test_a_dashboard_is_refused_while_its_job_is_skipped(self, monkeypatch):
+        with pytest.raises(rc.ReleaseError) as err:
+            self._verify(monkeypatch, ["linux"])
+        text = str(err.value)
+        assert "did not run to success" in text and "--allow-unrun-ci-jobs" in text
+        assert "if: false" in text
+
+    def test_it_is_refused_when_the_jobs_cannot_be_read(self, monkeypatch):
+        with pytest.raises(rc.ReleaseError, match="could not be read"):
+            self._verify(monkeypatch, None)
+
+    def test_it_goes_through_when_the_job_ran(self, monkeypatch):
+        version, runs = self._verify(monkeypatch, [])
+        assert version == "0.7.80" and set(runs) == set(rc.REQUIRED_RUNS)
+
+    def test_the_override_is_explicit_and_says_what_it_skips(self, monkeypatch, capsys):
+        version, _runs = self._verify(monkeypatch, ["linux"], allow_unrun_ci_jobs=True)
+        assert version == "0.7.80"
+        assert "No automated suite has run this dashboard" in capsys.readouterr().out
+
+
+class TestCustomerReleaseEndToEndWithTheLinuxJobOff:
+    def test_nothing_is_tagged_or_published_while_the_job_is_skipped(self, monkeypatch, tmp_path, capsys):
+        f = ReleaseFake(monkeypatch, tmp_path)
+        f.linux_job = "skipped"
+        assert _main("--poll", "0") != 0
+        assert f.mutations() == []
+        captured = capsys.readouterr()
+        assert "did not run to success" in captured.out + captured.err
+
+    def test_the_named_override_releases_and_says_so(self, monkeypatch, tmp_path, capsys):
+        f = ReleaseFake(monkeypatch, tmp_path)
+        f.linux_job = "skipped"
+        assert _main("--poll", "0", "--allow-unrun-ci-jobs") == 0
+        out = capsys.readouterr().out
+        assert "No automated suite has run this dashboard" in out
+        assert "was not required to have run" in out
+        assert f.mutations()

@@ -246,6 +246,20 @@ about a minute (a whole release-windows run is ~3 min, release-macos ~2). They
 start on the push, beside CI, so the build is publishable the moment CI goes
 green.
 
+**A green run is not every job having run (2026-11-11, audit deploy-release-2).** The
+`linux` job has been `if: false` since 2026-11-10 (its dashboard suite failed a
+different pair of tests on each parallel run and held every companion release), and a
+skipped job leaves the run green. That job is the only place the dashboard, server,
+tools and web-app suites run, with the CRLF, licence and notices gates, and
+`release-dashboard.yml` runs no test at all. So `tools/release_customers.py` now asks
+per JOB (`publish_latest.ci_jobs_not_run`): a customer dashboard release is refused
+unless the `linux` job ran to success on that exact commit, and not being able to read
+the jobs is a refusal too. `--allow-unrun-ci-jobs` is the named override; it prints that
+no automated suite has run the dashboard being released. The companion and onboard
+publish paths are unchanged: the `windows` and `macos` jobs that vouch for them still
+run. To release a dashboard to customers the ordinary way, delete the `if: false` under
+`linux:` in `ci.yml` and get the job green on the commit.
+
 ### `release-windows.yml`
 
 Runs `tools/release.ps1` — version parity, both suites, PyInstaller,

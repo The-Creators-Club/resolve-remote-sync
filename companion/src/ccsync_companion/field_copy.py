@@ -436,7 +436,9 @@ class FieldCopier:
             if i:
                 lane.stage = "waiting for the other copy on this physical drive"
             try:
-                self._run_lane(run, card, lane)
+                # the drive being written is not re-listed as a card while this lane writes it
+                with sorter_cards.dest_busy(lane.dest.volume_root or ""):
+                    self._run_lane(run, card, lane)
             except Exception as exc:                              # noqa: BLE001
                 log.exception("field: lane %s failed", lane.dest.id)
                 lane.state, lane.message = "failed", f"The copy could not run: {exc}"
@@ -450,8 +452,11 @@ class FieldCopier:
     # -- one lane -------------------------------------------------------------------------------
     def _card_present(self, serial: str) -> bool:
         try:
+            # "local", not "removable": a CFexpress B or Blackmagic SSD card is a FIXED disk to
+            # Windows, and asking only the removable ones made every such card "pulled out" the
+            # moment its copy started (audit comp-field-5, 2026-11-11)
             return any(str(v.get("serial", "")).upper() == str(serial).upper()
-                       for v in self.s.volumes_fn("removable", set()))
+                       for v in self.s.volumes_fn("local", set()))
         except Exception:                                         # noqa: BLE001
             return True                                           # cannot tell: the copier's own errors decide
 
@@ -726,7 +731,8 @@ class FieldCopier:
                 "phys": dest.lane}
 
     def _record(self, lane: Lane, entries: list[dict[str, Any]]) -> None:
-        keep = [e for e in entries if field_mode.is_judged(e["rel"]) or field_mode.is_recordable(e["rel"])]
+        keep = [e for e in entries
+                if field_mode.is_judged(e["rel"], e.get("size")) or field_mode.is_recordable(e["rel"])]
         if not keep or not lane.dest.volume_id:
             return
         if not self.s.same_drive_fn(lane.dest):               # the letter now holds another drive

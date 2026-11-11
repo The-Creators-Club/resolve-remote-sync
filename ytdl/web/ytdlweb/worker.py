@@ -1346,7 +1346,7 @@ def _both_blocked(path, exc):
     return _account_flagged(exc)
 
 
-def _download_video(job_id, vid, url, outdir, quality, hook, status):
+def _download_video(job_id, vid, url, outdir, quality, hook, status, should_stop=None):
     """downloader.download(), with ONE lower rung tried on a truncated stream.
 
     -> (summary, note). `note` is None on the ordinary path and the downgrade
@@ -1371,7 +1371,11 @@ def _download_video(job_id, vid, url, outdir, quality, hook, status):
                 ffmpeg_location=config.FFMPEG_DIR or None,
                 cookies_file=(config.COOKIES_FILE or None
                               if path == ytdl_evidence.PATH_COOKIES else None),
-                on_status=status)
+                on_status=status, should_stop=should_stop)
+        except downloader.ClipStopped:
+            # ended on purpose (a live stream refused, the ceiling, a cancel):
+            # says nothing about whether this PATH works, so it is not evidence
+            raise
         except Exception as exc:  # noqa: BLE001 - recorded, then re-raised
             ytdl_evidence.record(path, False, exc, vid)
             raise
@@ -1949,6 +1953,18 @@ def _phase_download(c, job):
             cur['status'] = msg
             _set_progress(_job, _vid, cur)
 
+        def stop_asked(_job=job_id, _seen={'at': 0.0}):
+            # [ CANCEL ] reaches a download that is RUNNING, not only the gap
+            # between two clips (audit web-ytdl-1, 2026-11-11). Asked from
+            # yt-dlp's progress hook, which fires several times a second on
+            # THIS thread, so the flag is re-read from the database at most
+            # every two seconds and with this thread's own connection.
+            now = time.monotonic()
+            if now - _seen['at'] < 2.0:
+                return ''
+            _seen['at'] = now
+            return 'cancelled' if _cancelled(c, _job) else ''
+
         # YT-6 (2026-08-28): retry the delete a previous conversion of this
         # clip could not do, before `before` is taken and before the bytes
         # arrive. Resolve has usually let go of the file by now.
@@ -1958,7 +1974,26 @@ def _phase_download(c, job):
             # `note` is the quality downgrade, when the clip only landed
             # because the rung below the editor's choice was tried.
             res, note = _download_video(job_id, vid, v['url'], outdir,
-                                        job['quality'], hook, status)
+                                        job['quality'], hook, status,
+                                        should_stop=stop_asked)
+        except downloader.ClipStopped as exc:
+            # ENDED ON PURPOSE (audit web-ytdl-1, 2026-11-11), so none of the
+            # machinery below applies: it is not a bot check, and five live
+            # results in one search are five clips refused, not "the same wall
+            # five times" for the identical-failure breaker to stop the job on.
+            if _cancelled(c, job_id):
+                # the editor pressed CANCEL while this clip was downloading:
+                # the clip was not at fault, so it goes back to waiting, as
+                # every clip the loop had not reached already is
+                log.info('job %s: cancelled during %s', job_id, vid)
+                _disown_output(outdir, vid, before)
+                _clear_partials(outdir, vid)
+                db.set_video(c, job_id, vid, dl_state='pending', dl_error=None)
+                _clear_progress(job_id)
+                return
+            log.info('job %s: %s was stopped (%s)', job_id, vid, exc)
+            _record_failure(c, job_id, vid, outdir, before, exc)
+            continue
         except Exception as exc:  # noqa: BLE001 - one dead video, not one dead job
             # exc_info since CR-33: the clip row shows the editor `str(exc)`,
             # which for that bug was "[Errno 13] Permission denied:

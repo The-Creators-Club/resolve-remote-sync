@@ -72,6 +72,10 @@ TRASH_DIR_NAME = ".ccsync-trash"
 # --max-delete-size spreads one large cleanup across many runs, and each run
 # used to toast (see _notify_trash). Warnings still log every run.
 TRASH_NOTIFY_COOLDOWN_SECONDS = 1800.0
+# The tree-wide local scans that ride the per-project orphan cadence (the
+# .ccsync-trash walk, the stray-project scan) run at most this often: every
+# project's orphan scan falls in the same pass, minutes apart at most.
+TREE_SCAN_MIN_SECONDS = 900.0
 TRASH_EXCLUDE_RULE = f"- /{TRASH_DIR_NAME}/**"
 
 # In-progress sidecars that live INSIDE a Proxy/ dir and must never be pulled
@@ -3353,8 +3357,16 @@ class RcloneLane(LaneAdapter):
         # bug-comp-rclone-2 (2026-09-25): how many of this pass's trashed
         # files those keys cover, handed to the breaker on EVERY pass.
         self._server_relocated_count = 0
-        # Last orphan-.partial scan (P8/P15/C-7): REPORTED, never deleted.
-        self._orphans: Optional[dict] = None
+        # Orphan-.partial scans (P8/P15/C-7): REPORTED, never deleted. One
+        # entry per subpath scanned (audit comp-sync-3, 2026-11-11): the scan
+        # runs per project and every project's turn falls in the same pass,
+        # so one slot only ever described the LAST project scanned.
+        self._orphans_by_sub: dict[str, dict] = {}
+        # The two tree-wide local scans that ride the orphan cadence
+        # (.ccsync-trash, stray project folders) once ran per PROJECT in that
+        # pass: N walks of one tree, back to back. When each last ran.
+        self._trash_scan: Optional[tuple[float, Optional[dict]]] = None
+        self._stray_scan_at: Optional[float] = None
         # subpath -> marker slug, for the project_slug on each transfer row.
         # POSITIVE results only: a project dir whose marker hasn't synced down
         # yet (lane C delivers it) must not be remembered as "no slug" for the
@@ -3426,7 +3438,17 @@ class RcloneLane(LaneAdapter):
         # Lane A only: same-name-different-size files `copy --ignore-existing`
         # will never upload (see scan_size_mismatches). Refreshed on the
         # orphan-scan cadence, reported and surfaced -- never acted on.
-        self._size_mismatches: Optional[dict] = None
+        # One entry per subpath (audit comp-sync-3, 2026-11-11), read through
+        # the `_size_mismatches` property as one total: a single slot was
+        # overwritten by each project's scan in turn, so a project with
+        # stranded re-exports showed for the minutes until the next project's
+        # zero replaced it, and the alarm never stayed up.
+        self._size_mismatches_by_sub: dict[str, dict] = {}
+        # Lane B only: the subpaths whose LAST download pass completed and
+        # found nothing. Their next pass re-checks on the narrow pool (see
+        # _down_tuning). In memory only: a restart forgets it, so the first
+        # round after one runs at full width, the safe end.
+        self._down_quiet: set[str] = set()
         # GL-12: files lane A would carry but whose mtime is in the future.
         self._future_dated_by_sub: dict[str, dict] = {}
         # UX-3: project dirs this lane has actually run against, so a source
@@ -3847,9 +3869,31 @@ class RcloneLane(LaneAdapter):
             self.rclone_path, self.local_root, self.remote, self.remote_root,
             filter_file, self.transfers, subpath=subpath, stats_interval=stats_interval,
             backup_dir=backup_dir, max_duration_seconds=max_duration_seconds,
-            tuning=self.tuning, min_age_seconds=self.min_age_seconds,
+            tuning=self._down_tuning(subpath), min_age_seconds=self.min_age_seconds,
             via=self.via or VIA_REMOTE,
         )
+
+    @staticmethod
+    def _quiet_key(subpath: Optional[str]) -> str:
+        return str(subpath or "").replace("\\", "/").strip("/")
+
+    def _down_tuning(self, subpath: Optional[str]) -> RcloneTuning:
+        """Lane B's tuning for this run: the narrow re-check pool
+        (RcloneTuning.for_verify, the knobs lane A's re-checks have used
+        since 2026-11-05) when this subpath's last pass completed and found
+        NOTHING, the normal pool otherwise.
+
+        Audit comp-sync-1 (2026-11-11): CR-381 stopped lane A opening a full
+        SSH pool for projects with nothing to do and left lane B doing it for
+        every project on every pass, about 1,000-1,600 SSH logins an hour
+        from one idle editor. Nothing else about the run changes: the same
+        `sync`, filter, --max-delete, --min-age, --backup-dir and breaker
+        accounting. A re-check that does find proxies downloads them on
+        fewer streams for that one pass; it then reports "moved", so the
+        pass after it is back at full width."""
+        if self._quiet_key(subpath) in self._down_quiet:
+            return self.tuning.for_verify()
+        return self.tuning
 
     # -- LaneAdapter ---------------------------------------------------
     def start(self) -> None:
@@ -4182,7 +4226,7 @@ class RcloneLane(LaneAdapter):
             self.rclone_path, self.remote, self.remote_root, subpath,
             skip=self._inflight_partial_test(subpath),
         )
-        trash = scan_trash_dir(self.local_root)
+        trash = self._trash_scan_once()
         report = {
             "subpath": subpath,
             "partials": partials,
@@ -4197,18 +4241,64 @@ class RcloneLane(LaneAdapter):
                 self.name, partials["count"], partials["bytes"] / 1e9, subpath or "the remote root",
             )
         with self._lock:
-            self._orphans = report
+            self._orphans_by_sub[subpath or ""] = report
         self._refresh_size_mismatches(subpath)
         self._refresh_future_dated(subpath)
         # SYNC-10 (sweep 2026-08-28): local-only, so it costs no NAS listing
         # at all -- but it belongs on this cadence because it is the same kind
         # of answer (a leftover nobody is going to delete) and a per-pass tree
-        # walk would not be free.
-        try:
-            self._refresh_stray_projects()
-        except Exception:
-            log.exception("%s: stray project scan failed", self.name)
+        # walk would not be free. Tree-wide, so once per scan pass and not
+        # once per project in it (comp-sync-3).
+        now = time.monotonic()
+        with self._lock:
+            due = (self._stray_scan_at is None
+                   or now - self._stray_scan_at >= TREE_SCAN_MIN_SECONDS)
+            if due:
+                self._stray_scan_at = now
+        if due:
+            try:
+                self._refresh_stray_projects()
+            except Exception:
+                log.exception("%s: stray project scan failed", self.name)
         return report
+
+    def _trash_scan_once(self) -> Optional[dict]:
+        """scan_trash_dir for the whole tree, at most once per
+        TREE_SCAN_MIN_SECONDS: every project's orphan scan lands in the same
+        pass and each used to walk the same .ccsync-trash (up to 50,000 stats)
+        again (audit comp-sync-3, 2026-11-11). A failed scan (None) is not
+        kept, so the next project asks again."""
+        now = time.monotonic()
+        with self._lock:
+            held = self._trash_scan
+        if held is not None and now - held[0] < TREE_SCAN_MIN_SECONDS:
+            return held[1]
+        trash = scan_trash_dir(self.local_root)
+        if trash is not None:
+            with self._lock:
+                self._trash_scan = (now, trash)
+        return trash
+
+    def _local_dir_gone(self, subpath: str) -> bool:
+        if not subpath:
+            return False
+        try:
+            return not (Path(self.local_root) / Path(*subpath.replace("\\", "/").split("/"))).is_dir()
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def forget_scan_reports(self, keep: Optional[Iterable[str]]) -> None:
+        """Drop the per-project size-mismatch and orphan entries of every
+        subpath not in `keep` (the subpaths still ticked here). The scans only
+        run for ticked projects, so nothing else would ever clear an unticked
+        project's entry and its alarm would stay up for ever. None = keep all."""
+        if keep is None:
+            return
+        want = {unicodedata.normalize("NFC", str(k)) for k in keep}
+        with self._lock:
+            for table in (self._size_mismatches_by_sub, self._orphans_by_sub):
+                for key in [k for k in table if k and unicodedata.normalize("NFC", k) not in want]:
+                    table.pop(key, None)
 
     def _inflight_partial_test(
         self, subpath: Optional[str]
@@ -4266,14 +4356,50 @@ class RcloneLane(LaneAdapter):
                 (report.get("samples") or ["?"])[0],
             )
         with self._lock:
-            self._size_mismatches = report
+            self._size_mismatches_by_sub[subpath or ""] = report
         return report
 
-    def size_mismatch_report(self) -> Optional[dict]:
-        """Last "same name, different size" scan, or None. See
-        _refresh_size_mismatches."""
+    @property
+    def _size_mismatches(self) -> Optional[dict]:
+        """Every project's last scan as ONE report, in the shape one scan
+        always had: {count, samples, subpath, checked_at}. `count` is the sum;
+        `subpath` names the project when exactly one has mismatches and is
+        None (the whole tree) otherwise, which is the honest label for a sum.
+        A scan of nothing-wrong still answers (count 0): that zero is what
+        clears the dashboard's alarm. None before the first scan. Never read
+        this while holding self._lock (it is not re-entrant)."""
         with self._lock:
-            return dict(self._size_mismatches) if self._size_mismatches else None
+            for key in [k for k in self._size_mismatches_by_sub if self._local_dir_gone(k)]:
+                self._size_mismatches_by_sub.pop(key, None)
+            parts = [dict(r) for r in self._size_mismatches_by_sub.values()]
+        if not parts:
+            return None
+        hit = [r for r in parts if r.get("count")]
+        if len(parts) == 1 or len(hit) == 1:
+            only = dict(hit[0] if hit else parts[0])
+            only["checked_at"] = max(str(r.get("checked_at") or "") for r in parts) or only.get("checked_at")
+            return only
+        samples: list[str] = []
+        for r in hit:
+            sub = str(r.get("subpath") or "").strip("/")
+            samples += [f"{sub}/{name}" if sub else str(name) for name in (r.get("samples") or [])]
+        return {"count": sum(int(r.get("count") or 0) for r in hit), "samples": samples[:20],
+                "subpath": None,
+                "checked_at": max(str(r.get("checked_at") or "") for r in parts)}
+
+    @_size_mismatches.setter
+    def _size_mismatches(self, report: Optional[dict]) -> None:
+        with self._lock:
+            if report is None:
+                self._size_mismatches_by_sub.clear()
+            else:
+                self._size_mismatches_by_sub[str(report.get("subpath") or "")] = dict(report)
+
+    def size_mismatch_report(self) -> Optional[dict]:
+        """The "same name, different size" scans as one report, or None
+        before the first. See _refresh_size_mismatches and _size_mismatches."""
+        report = self._size_mismatches
+        return dict(report) if report else None
 
     def size_mismatch_samples(self, limit: int = 20) -> list[dict]:
         """The files behind the "your newer version will NOT upload" count:
@@ -4291,26 +4417,30 @@ class RcloneLane(LaneAdapter):
         names only and asking the NAS for sizes would be a second listing
         per pass for a line that already tells the editor what to do. Never
         raises."""
-        report = self.size_mismatch_report()
-        if not report:
-            return []
-        subpath = str(report.get("subpath") or "")
-        local_sub = _local_subpath(subpath) if subpath else ""
-        base = Path(self.local_root) / local_sub if local_sub else Path(self.local_root)
+        with self._lock:
+            reports = [dict(r) for r in self._size_mismatches_by_sub.values() if r.get("count")]
+        several = len(reports) > 1
         out: list[dict] = []
-        for name in (report.get("samples") or [])[:max(0, int(limit))]:
-            rel = str(name).strip()
-            if not rel:
-                continue
-            local_size: Optional[int] = None
-            try:
-                # The path is compared nowhere and opened nowhere -- it is
-                # stat'ed and shown, so the bytes the scan reported are used
-                # exactly as they came (CR-90's rule).
-                local_size = (base / Path(*rel.replace("\\", "/").split("/"))).stat().st_size
-            except OSError:
-                local_size = None
-            out.append({"path": rel, "local_size": local_size, "server_size": None})
+        for report in reports:
+            subpath = str(report.get("subpath") or "")
+            local_sub = _local_subpath(subpath) if subpath else ""
+            base = Path(self.local_root) / local_sub if local_sub else Path(self.local_root)
+            for name in report.get("samples") or []:
+                if len(out) >= max(0, int(limit)):
+                    return out
+                rel = str(name).strip()
+                if not rel:
+                    continue
+                local_size: Optional[int] = None
+                try:
+                    # The path is compared nowhere and opened nowhere -- it is
+                    # stat'ed and shown, so the bytes the scan reported are used
+                    # exactly as they came (CR-90's rule).
+                    local_size = (base / Path(*rel.replace("\\", "/").split("/"))).stat().st_size
+                except OSError:
+                    local_size = None
+                shown = f"{subpath.strip('/')}/{rel}" if several and subpath else rel
+                out.append({"path": shown, "local_size": local_size, "server_size": None})
         return out
 
     def pending_uploads(self, subpath: Optional[str] = None,
@@ -4462,8 +4592,47 @@ class RcloneLane(LaneAdapter):
 
         Public so the reporter payload (owned elsewhere) and the tray can
         surface it without re-listing the NAS."""
+        return self._orphans
+
+    @property
+    def _orphans(self) -> Optional[dict]:
+        """Every project's last orphan scan as one report, in the shape one
+        scan had: {subpath, partials: {count, bytes, ...}, trash, checked_at}.
+        The partials are SUMMED over the projects scanned; the trash is the
+        tree's (one walk). Never read while holding self._lock. An entry
+        leaves when its project is unticked (forget_scan_reports), NOT when
+        its local folder is missing: the leftovers it counts are on the NAS."""
         with self._lock:
-            return dict(self._orphans) if self._orphans else None
+            parts = [dict(r) for r in self._orphans_by_sub.values()]
+            trash = self._trash_scan[1] if self._trash_scan is not None else None
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return parts[0]
+        newest = max(parts, key=lambda r: str(r.get("checked_at") or ""))
+        with_partials = [r["partials"] for r in parts if isinstance(r.get("partials"), dict)]
+        partials: Optional[dict] = None
+        if with_partials:
+            partials = {"count": sum(int(x.get("count") or 0) for x in with_partials),
+                        "bytes": sum(int(x.get("bytes") or 0) for x in with_partials)}
+            samples: list[Any] = []
+            for x in with_partials:
+                samples += list(x.get("samples") or [])
+            if samples:
+                partials["samples"] = samples[:20]
+        hit = [r for r in parts if (r.get("partials") or {}).get("count")]
+        return {"subpath": hit[0].get("subpath") if len(hit) == 1 else None,
+                "partials": partials,
+                "trash": trash if trash is not None else newest.get("trash"),
+                "checked_at": newest.get("checked_at")}
+
+    @_orphans.setter
+    def _orphans(self, report: Optional[dict]) -> None:
+        with self._lock:
+            if report is None:
+                self._orphans_by_sub.clear()
+            else:
+                self._orphans_by_sub[str(report.get("subpath") or "")] = dict(report)
 
     # -- project directories (UX-3 / SYNC-10, sweep 2026-08-28) -----------
     def _read_project_dirs(self) -> dict[str, dict]:
@@ -5134,6 +5303,14 @@ class RcloneLane(LaneAdapter):
         # A tripped breaker is not "found nothing", whatever the counts say:
         # the lane is parked, and a parked lane knows nothing about the tree.
         self._note_run_outcome(subpath, None if tripped else run_outcome)
+        if self.direction == DIRECTION_DOWN:
+            # Only a pass that COMPLETED and found nothing earns the narrow
+            # pool next time; a failure, a stall kill, a trip, or a pass that
+            # moved anything puts the next one back at full width.
+            if not tripped and run_outcome == RUN_OUTCOME_NOTHING:
+                self._down_quiet.add(self._quiet_key(subpath))
+            else:
+                self._down_quiet.discard(self._quiet_key(subpath))
         if pass_completed:
             # live-1: OUTSIDE the lock -- _note_stall_recovered takes it.
             self._note_stall_recovered()

@@ -321,6 +321,16 @@ def frame_path(frames_dir: str | Path, index: int) -> Path:
     return Path(frames_dir) / f"frame_{index:04d}.jpg"
 
 
+# The width a still is cut at: the indexer's FRAME_MAX_WIDTH / FRAME_SCALE
+# (broll/indexer/broll_index/ffmpeg_tools.py, which has the reasoning: audit
+# idx-1, 2026-11-11). The local model was tuned on 960x540 stills; cut from a
+# 1080p proxy at native size they are about twice the image tokens, and an
+# eight- or nine-frame window passes the model's context. The two argvs are
+# pinned equal by test_extract_frame_argv_matches_the_indexers.
+FRAME_MAX_WIDTH = 960
+FRAME_SCALE = f"scale='min({FRAME_MAX_WIDTH},iw)':-2"
+
+
 def extract_frame_cmd(ffmpeg_path: str, src: str | Path, timestamp: float,
                       dest: str | Path, duration_s: Optional[float] = None,
                       safety_margin: float = FRAME_SAFETY_MARGIN) -> list[str]:
@@ -336,7 +346,8 @@ def extract_frame_cmd(ffmpeg_path: str, src: str | Path, timestamp: float,
     return [
         ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
         "-ss", f"{effective:.3f}", "-i", str(src),
-        "-frames:v", "1", "-q:v", "3", "-pix_fmt", "yuvj420p",
+        "-frames:v", "1", "-vf", FRAME_SCALE,
+        "-q:v", "3", "-pix_fmt", "yuvj420p",
         str(dest),
     ]
 

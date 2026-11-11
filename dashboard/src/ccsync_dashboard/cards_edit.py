@@ -706,9 +706,17 @@ class Passthrough(Response):
     ASGI server that does not speak spec 2.4 it starts a `listen_for_disconnect`
     task that reads `receive()` -- and behind `body_size_gate`, which replays a
     buffered POST body as a `receive` that ALWAYS answers `http.request`, that
-    task dies with "Unexpected message received" in BaseHTTPMiddleware. This
-    never reads `receive` at all: a browser that goes away is noticed by the
-    next `send` failing, which ends the generator and closes the upstream.
+    task dies with "Unexpected message received" in BaseHTTPMiddleware.
+
+    A BROWSER THAT GOES AWAY IS NOT NOTICED BY `send` (audit dash-mounts-1,
+    2026-11-11; this docstring used to say it was). Behind uvicorn a send
+    after the disconnect returns silently, so a seek in the editor's video
+    kept pulling the rest of the file out of the Node child into nothing, and
+    an answer that never ends (the read timeout is None) held its upstream
+    connection for ever. So for a GET, and only a GET (no body, so no replayed
+    `receive` to trip over), this does listen: the next chunk is raced
+    against `http.disconnect`, and when the browser has gone the upstream is
+    closed at once. Every other method streams exactly as before.
     """
 
     def __init__(self, chunks: Any, status: int, raw_headers: list[tuple[bytes, bytes]]) -> None:
@@ -719,11 +727,56 @@ class Passthrough(Response):
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         await send({"type": "http.response.start", "status": self.status_code,
                     "headers": self.raw_headers})
-        if self._chunks is not None:
+        if self._chunks is None:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+        if scope.get("method") != "GET":
             async for chunk in self._chunks:
                 await send({"type": "http.response.body", "body": chunk,
                             "more_body": True})
-        await send({"type": "http.response.body", "body": b"", "more_body": False})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+
+        from .cards_wsgi import watch_for_disconnect
+
+        gone = asyncio.Event()
+        listener = asyncio.ensure_future(watch_for_disconnect(receive, gone.set))
+        left = asyncio.ensure_future(gone.wait())
+        chunks = self._chunks.__aiter__()
+        finished = False
+        try:
+            while True:
+                pull = asyncio.ensure_future(chunks.__anext__())
+                await asyncio.wait({pull, left}, return_when=asyncio.FIRST_COMPLETED)
+                if not pull.done():
+                    # the browser has gone and the editor is still thinking
+                    # (a long poll) or still reading (a media range)
+                    pull.cancel()
+                    try:
+                        await pull
+                    except (asyncio.CancelledError, StopAsyncIteration, Exception):  # noqa: BLE001
+                        pass
+                    break
+                try:
+                    chunk = pull.result()
+                except StopAsyncIteration:
+                    finished = True
+                    break
+                if gone.is_set():
+                    break
+                await send({"type": "http.response.body", "body": chunk,
+                            "more_body": True})
+            if finished:
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+        finally:
+            listener.cancel()
+            left.cancel()
+            closer = getattr(self._chunks, "aclose", None)
+            if closer is not None:
+                try:
+                    await closer()          # runs stream()'s `finally`: the upstream is closed now
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 def _rest(scope: dict) -> str:

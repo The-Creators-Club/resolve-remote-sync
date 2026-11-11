@@ -715,3 +715,69 @@ def test_the_synology_compose_file_carries_the_vendor_key_and_flag(monkeypatch, 
     text = ida.render_compose_yaml(ida.compose_variables(),
                                    template=ida.compose_template_for(mode))
     assert 'DASH_RELEASE_PUBKEYS: ""' in text and 'DASH_VENDOR_CUSTOMER: ""' in text
+
+
+# -- audit deploy-nas-1 (2026-11-11): the flag re-creates only when something would change --------
+
+def test_the_mode_flag_recreates_only_when_the_mode_or_the_image_would_change():
+    """The Cards and Sorter recipes pass `--mode image --container-image <the live digest>` on
+    every run. That deleted the app and created it again each time, which is why the live digest
+    had to be read off the NAS by hand first and how a stale one rolled the dashboard back."""
+    live = "ghcr.io/the-creators-club/ccsync@sha256:" + "a" * 64
+    assert ida.mode_flag_needs_recreate(live, live)[0] is False                   # the routine deploy
+    assert ida.mode_flag_needs_recreate(live, f"  {live}\n")[0] is False
+    new = "ghcr.io/the-creators-club/ccsync@sha256:" + "b" * 64
+    assert ida.mode_flag_needs_recreate(new, live)[0] is True                     # a new image
+    assert ida.mode_flag_needs_recreate(live, "python:3.12.7-slim")[0] is True    # bind -> image
+    assert ida.mode_flag_needs_recreate("python:3.12.7-slim", live)[0] is True    # image -> bind
+    # could not tell (no container yet, a dry run, SSH failed): what the flag always did
+    assert ida.mode_flag_needs_recreate(live, "")[0] is True
+    assert ida.mode_flag_needs_recreate(live, None)[0] is True
+
+
+class _LiveBackend:
+    """backend() with a running container whose image is `image`; any other use fails the test."""
+
+    def __init__(self, image):
+        self._image = image
+        self.asked = 0
+
+    def container_image(self):
+        self.asked += 1
+        return self._image
+
+
+def _flag(monkeypatch, capsys, live_image, wanted, *, dry_run=False, recreate=False, mode="image"):
+    import argparse
+
+    live = _LiveBackend(live_image)
+    monkeypatch.setattr(ida, "backend", lambda: live)
+    args = argparse.Namespace(mode=mode, recreate=recreate, dry_run=dry_run)
+    ida.apply_mode_flag(args, mode or "image", wanted)
+    return args.recreate, live.asked, capsys.readouterr().out
+
+
+def test_a_routine_deploy_with_the_mode_flag_restarts_instead_of_recreating(monkeypatch, capsys):
+    image = "ghcr.io/the-creators-club/ccsync@sha256:" + "c" * 64
+    recreate, asked, out = _flag(monkeypatch, capsys, image, image)
+    assert recreate is False and asked == 1
+    assert "NOT re-creating the app" in out and "implying --recreate" not in out
+
+
+def test_a_new_image_with_the_mode_flag_still_recreates(monkeypatch, capsys):
+    image = "ghcr.io/the-creators-club/ccsync@sha256:" + "c" * 64
+    recreate, _asked, out = _flag(monkeypatch, capsys, "ghcr.io/the-creators-club/ccsync@sha256:" + "d" * 64, image)
+    assert recreate is True and "implying --recreate" in out
+
+
+def test_a_dry_run_never_asks_the_nas_and_reports_the_recreate(monkeypatch, capsys):
+    image = "ghcr.io/the-creators-club/ccsync@sha256:" + "c" * 64
+    recreate, asked, out = _flag(monkeypatch, capsys, image, image, dry_run=True)
+    assert recreate is True and asked == 0
+    assert "A real run asks the running container first" in out
+
+
+def test_without_the_flag_or_with_recreate_already_asked_for_nothing_is_decided_here(monkeypatch, capsys):
+    image = "ghcr.io/the-creators-club/ccsync@sha256:" + "c" * 64
+    assert _flag(monkeypatch, capsys, image, image, mode=None) == (False, 0, "")
+    assert _flag(monkeypatch, capsys, image, image, recreate=True) == (True, 0, "")

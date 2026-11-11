@@ -163,6 +163,10 @@ def call(
     `runner` defaults to subprocess.run and exists so tests can drive the
     argv/timeout/decoding contract without a Resolve.
     """
+    if runner is None:
+        gone = resolve_unreachable()
+        if gone is not None:
+            return gone
     req = dict(kw)
     req["action"] = action
     argv = worker_command(json.dumps(req, ensure_ascii=False))
@@ -203,6 +207,38 @@ def call(
         return json.loads(out)
     except json.JSONDecodeError:
         return {"ok": False, "error": out[:400]}
+
+
+def resolve_unreachable() -> Optional[dict]:
+    """The answer a worker child would come back with when Resolve's script
+    server is not there to connect to, WITHOUT starting the child; or None
+    when a child should be started (the server is up, or nobody can tell).
+
+    Audit comp-media-3 = web-music-1 (2026-11-11). Every `call` re-enters
+    the frozen companion as a worker: a onefile extraction of about 100 MB to
+    %TEMP%, an interpreter boot, then `resolve_bridge.connect()`, which looks
+    at the kernel's TCP table (script_server.state, CR-68) and gives up at
+    once when nothing is listening on 1144. An open /music tab asks for the
+    status every 30 s for as long as it is open, so with Resolve SHUT that
+    was a hundred megabytes written and deleted every half minute to learn
+    what one look at the TCP table says. The look is taken here, in the
+    parent: no connection is made, so the one-caller rule for scriptapp()
+    is untouched. ABSENT and STARTING are the two states in which the child
+    could not have connected either; UNKNOWN (the table cannot be read)
+    starts the child as before. The sentence is the worker's own
+    (music_worker.connect), so the page shows what it always showed."""
+    try:
+        from . import script_server
+        verdict, _why = script_server.state()
+        if verdict not in (script_server.ABSENT, script_server.STARTING):
+            return None
+        reason = resolve_bridge.describe_disconnection()
+    except Exception:  # noqa: BLE001 - any doubt starts the child, as before
+        return None
+    return {"ok": False,
+            "error": "could not reach DaVinci Resolve (%s). Is it running, with "
+                     "Preferences > System > General > External scripting = Local?"
+                     % reason}
 
 
 # -- the status probes ------------------------------------------------------

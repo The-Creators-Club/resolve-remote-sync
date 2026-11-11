@@ -818,3 +818,34 @@ def test_the_retired_key_ledger_counts_up_and_back_down(tmp_path):
 def test_version_tuple_handles_two_digit_minors():
     assert dbmod.version_tuple("0.10.0") > dbmod.version_tuple("0.9.9")
     assert dbmod.version_tuple("nonsense") == ()
+
+
+def test_an_unchanged_missing_files_list_is_not_rewritten(conn):
+    """Audit dash-collector-3 (2026-11-11): every incomplete (project, device) pair had its whole
+    list deleted and re-inserted every minute, changed or not (about 1.6 GB of WAL a day at ten
+    pairs)."""
+    pid = dbmod.upsert_project(conn, "p-missing", "2026/Missing", "/x", T0)
+    did = dbmod.upsert_device(conn, "DEV-MISSING", "editor-pc", False, T0)
+    files = [("a.mov", 10), ("b.mov", None), ("c.mov", 30)]
+    dbmod.replace_missing_files(conn, pid, did, files, False, T0)
+    conn.commit()
+    before = conn.total_changes
+
+    a_minute_on = (dbmod.parse_iso(T0) + dt.timedelta(seconds=60)).isoformat()
+    dbmod.replace_missing_files(conn, pid, did, list(reversed(files)), False, a_minute_on)
+    assert conn.total_changes == before                       # the same list, in any order: no write
+    rows = conn.execute("SELECT refreshed_at FROM missing_files WHERE project_id=?", (pid,)).fetchall()
+    assert {r["refreshed_at"] for r in rows} == {T0}
+
+    later = (dbmod.parse_iso(T0) + dt.timedelta(seconds=dbmod.MISSING_REFRESH_BUMP_S + 1)).isoformat()
+    dbmod.replace_missing_files(conn, pid, did, files, False, later)
+    rows = conn.execute("SELECT refreshed_at FROM missing_files WHERE project_id=?", (pid,)).fetchall()
+    assert {r["refreshed_at"] for r in rows} == {later}        # the stamp still moves, ten minutes apart
+
+    # any real difference is a rewrite at once: a file done, a size, the truncated flag
+    for changed, trunc in (([("a.mov", 10), ("c.mov", 30)], False), ([("a.mov", 11), ("c.mov", 30)], False),
+                           ([("a.mov", 11), ("c.mov", 30)], True)):
+        dbmod.replace_missing_files(conn, pid, did, changed, trunc, later)
+        got = sorted((r["name"], r["size"], r["truncated"]) for r in conn.execute(
+            "SELECT name, size, truncated FROM missing_files WHERE project_id=?", (pid,)))
+        assert got == sorted((n, s, int(trunc)) for n, s in changed)

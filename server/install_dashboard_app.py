@@ -13,7 +13,9 @@ TWO SHAPES, ONE SCRIPT (2026-08-18, docs/DOCKER.md):
 
 Everything else -- host dirs, the tree-side mounts, ffmpeg/deno, the ~1.4 GB
 of music DATA, the secrets, the snapshot -- is identical in both. Passing
---mode implies --recreate, because the mode is baked in at create time.
+--mode implies --recreate, because the mode is baked in at create time,
+UNLESS the running container already has the image that mode gives it: then
+nothing would change, and the run is the routine redeploy (a restart).
 MIGRATION AND ROLLBACK ARE ONE COMMAND EACH and neither deletes anything: the
 host code trees are left in place on purpose, and are what `--mode bind`
 re-ships. `[stack] mode` in site.toml is the persistent setting; `[stack]
@@ -2540,14 +2542,42 @@ def roll_back_app_tree(root: str, old_dir: str, dry_run: bool) -> bool:
     return True
 
 
-def verify_dashboard_after_restart(port: int, root: str, args) -> int:
+def version_serving_now(port: int, dry_run: bool) -> str:
+    """The version the dashboard answers with right now, '' when it does not answer in a few seconds."""
+    if dry_run:
+        return ""
+    ok, health, _detail = probe_dashboard_health(port, "", False, budget=HEALTH_PROBE_INTERVAL)
+    return str(health.get("version") or "") if ok else ""
+
+
+def expected_after_restart(image_mode: bool, live_before: str) -> str:
+    """Which version the dashboard must answer with once it is back.
+
+    Audit 2026-11-10 deploy-nas-3. The gate asked for the REPO's VERSION in
+    both modes. In image mode this script ships no dashboard code: what comes
+    back is the image's, or the over-the-air bundle's, whatever the checkout
+    says. So whenever the repo was ahead of what is live (the ordinary state
+    between a dashboard commit and its release) every Cards or Sorter deploy
+    polled the whole budget, thirty SSH handshakes, and printed FAILED with a
+    rollback line for an app tree this mode never touched; CARDS_DEPLOY.md
+    told the operator to ignore that exit 1. The code did not change, so the
+    version must not either: expect the one that was serving before the
+    restart. With none read (the dashboard was down going in), any version
+    that answers is a dashboard that came back.
+    """
+    return live_before if image_mode else repo_dashboard_version()
+
+
+def verify_dashboard_after_restart(port: int, root: str, args, expected: str | None = None) -> int:
     """0 when the dashboard is serving this checkout's code, 1 when it is not.
 
     THE point of OPS-1: this return value is what stops tools/ship.cmd going
     on to publish companions to the whole fleet against a dashboard that is
-    down. Called after EVERY restart, in both stack modes.
+    down. Called after EVERY restart, in both stack modes. `expected`: the
+    version to require (expected_after_restart); None is the repo's.
     """
-    expected = repo_dashboard_version()
+    if expected is None:
+        expected = repo_dashboard_version()
     ok, health, detail = probe_dashboard_health(port, expected, args.dry_run)
     if ok:
         if args.dry_run:
@@ -5920,6 +5950,74 @@ def fail_after_app_swap(dry_run: bool) -> int:
     return 1
 
 
+# Step 1's recursive ownership pass over data/ and venv/ (see the call): long
+# enough for a busy pool, short enough that a hung NAS still ends the run.
+HOST_DIRS_TIMEOUT_S = 900
+
+
+def mode_flag_needs_recreate(wanted_image: str, live_image: str) -> tuple[bool, str]:
+    """Does passing `--mode` have to delete and re-create the app? -> (yes, why).
+
+    The mode is baked in at create time, and so is the image, so a run that
+    changes either must re-create. But the Cards and Sorter deploy recipes pass
+    `--mode image --container-image <the live digest>` on EVERY run, to a site
+    that has lived in image mode for months: that used to delete the TrueNAS
+    app and create it again each time, which is the only reason the live
+    digest had to be read off the NAS by hand first, and the only way a stale
+    one rolled the dashboard back (audit deploy-nas-1, 2026-11-11). The comment
+    at the flag already said a site that lives in image mode "should not delete
+    and re-create its app every time"; the code only honoured that for the
+    manifest, not for the flag.
+
+    So the question is asked of the RUNNING CONTAINER, which is the truth
+    about which mode a site is in (a site migrated by flag still has a manifest
+    that says the other one): `wanted_image` is the image this run's mode would
+    give the app (the vendor image in image mode, the Python base in bind
+    mode), `live_image` what the container was created from. The same string
+    is the same mode and the same image: nothing compose-level would change,
+    so it is a routine redeploy. Anything else re-creates, and "could not
+    tell" (no container yet, a dry run, an SSH failure) is anything else: the
+    flag then does what it has always done.
+    """
+    wanted, live = (wanted_image or "").strip(), (live_image or "").strip()
+    if not live:
+        return True, "the running app's image could not be read"
+    if live == wanted:
+        return False, f"the app already runs {live}"
+    return True, f"the app runs {live} and this run gives it {wanted}"
+
+
+def apply_mode_flag(args, mode: str, wanted_image: str) -> None:
+    """Turn `--mode` into `--recreate` when, and only when, it has to be one.
+
+    A mode is baked in at CREATE time like every other compose-level setting,
+    so switching without re-creating changes nothing and says it did. Implied
+    only for the FLAG: a manifest that already says `image` is not a
+    migration, and a routine redeploy of a site that lives in image mode
+    should not delete and re-create its app every time. Since 2026-11-11
+    neither does the flag, when the running container already has the image
+    this mode gives it (mode_flag_needs_recreate). A dry run connects to
+    nothing, so it cannot ask and reports the re-create.
+    """
+    if not args.mode or args.recreate:
+        return
+    live_image = "" if args.dry_run else backend().container_image()
+    needed, why = mode_flag_needs_recreate(wanted_image, live_image)
+    if needed:
+        args.recreate = True
+        print(f"--mode {mode}: implying --recreate ({why}; the mode and the "
+              f"image are baked in at create time, and a restart would keep "
+              f"the old ones). Nothing under <host-root> is deleted either way."
+              + (" A real run asks the running container first and only "
+                 "restarts it when its image is already this one."
+                 if args.dry_run else ""))
+    else:
+        print(f"--mode {mode}: NOT re-creating the app ({why}, so nothing "
+              f"compose-level would change). This is a routine redeploy: the "
+              f"code and data steps run and the container is restarted. Pass "
+              f"--recreate as well to force a re-create.")
+
+
 def app_installed(dry_run: bool) -> bool | None:
     """Is APP_NAME installed? None means the question could not be answered.
 
@@ -5967,8 +6065,10 @@ def main():
                          f"(the vendor image carries them; no code is shipped). "
                          f"Defaults to [stack] mode in the site manifest, else "
                          f"'{DEFAULT_STACK_MODE}'. PASSING THIS FLAG IMPLIES "
-                         f"--recreate: the mode is a compose-level setting, and a "
-                         f"plain restart would keep the old one. Both directions "
+                         f"--recreate, unless the running app already has the "
+                         f"image that mode gives it: the mode is a compose-level "
+                         f"setting, and a plain restart would keep the old one. "
+                         f"Both directions "
                          f"are non-destructive -- the host code trees are left in "
                          f"place and ARE the rollback (docs/DOCKER.md).")
     ap.add_argument("--container-image", default="",
@@ -6119,16 +6219,6 @@ def main():
     image_mode = mode == "image"
     ccsync_image = resolve_container_image(args.container_image)
     push_code = not image_mode
-    if args.mode:
-        # A mode is baked in at CREATE time like every other compose-level
-        # setting, so switching without re-creating changes nothing and says it
-        # did. Implied only for the FLAG: a manifest that already says `image`
-        # is not a migration, and a routine redeploy of a site that lives in
-        # image mode should not delete and re-create its app every time.
-        args.recreate = True
-        print(f"--mode {mode}: implying --recreate (the mode is baked in at "
-              f"create time; a restart would keep the old one). Nothing under "
-              f"<host-root> is deleted either way.")
     # Which addresses this dashboard publishes on is the platform's answer
     # (LAN + tailnet on TrueNAS; loopback plus `tailscale serve` on DSM, whose
     # userspace-mode tailscaled has no interface to bind). Resolved here so a
@@ -6608,6 +6698,11 @@ def main():
             print(f"REFUSING to deploy: {mismatch}", file=sys.stderr)
             return 1
 
+    # --mode implies --recreate only when something compose-level would change
+    # (audit deploy-nas-1, 2026-11-11). Decided HERE, after the pre-flight
+    # refusals and before the confirmation and the snapshot that both read it.
+    apply_mode_flag(args, mode, ccsync_image if image_mode else args.image)
+
     # Step 0: a point-in-time to come back to. Everything from here down is
     # privileged and destructive by design -- `mv app app.old.<ts>`, a
     # recursive chown, `rm -rf` of a staging tree, and on --recreate a DELETE
@@ -6662,6 +6757,13 @@ def main():
     # that could not create its venv or open /data.
     private_owner = f"{app_uid}:{APP_PRIVATE_GID}"
     tree_owner = f"{app_uid}:{app_gid}"
+    # THIS STEP WALKS TWO TREES (`chown -R` over data/ and venv/, some 23,000
+    # entries here) and ran under run_ssh's default two minutes. On 2026-11-11,
+    # with the NAS busy (load 6 to 8), venv/ alone took 68 s to WALK and the
+    # step timed out twice: the deploy died in a paramiko traceback before it
+    # had changed anything, and each attempt left its chown running on the NAS
+    # behind it, slowing the next. A slow walk is not a failure, so it gets
+    # the time a busy pool needs.
     rc, _, err = run_ssh(
         backend().root_cmd(build_synology_host_dirs(
             root, app_uid, truenas_user)) if synology else
@@ -6755,6 +6857,7 @@ def main():
             f"chmod 770 {shell_quote(root + '/sorter-data')}"
         ),
         dry_run=args.dry_run,
+        timeout=HOST_DIRS_TIMEOUT_S,
     )
     if rc != 0:
         print(f"FAILED to create host dirs: {err}", file=sys.stderr)
@@ -7188,6 +7291,8 @@ def main():
         return fail_after_app_swap(args.dry_run)
     if installed:
         container = backend().dashboard_container
+        # read BEFORE the restart: in image mode it is what must come back (deploy-nas-3)
+        live_before = version_serving_now(args.port, args.dry_run) if image_mode else ""
         restarted, err = restart_dashboard_container(args.dry_run)
         if restarted:
             print(f"restarted container: {container}")
@@ -7198,9 +7303,10 @@ def main():
                 # and the code did not change" is precisely the OPS-4 class of
                 # failure this file keeps getting bitten by.
                 print("NOTE: image mode -- a restart keeps the container's "
-                      "CURRENT image. The newly pulled one is picked up by "
-                      "--recreate (or `--mode image`, which implies it), or by "
-                      "the NAS UI's own update click. Nothing under "
+                      "CURRENT image. A new one is picked up by --recreate (or "
+                      "by `--mode image --container-image <new>`, which implies "
+                      "it whenever the image differs from the running one), or "
+                      "by the NAS UI's own update click. Nothing under "
                       "<host-root> is deleted by either.")
             else:
                 print("NOTE: only the CODE was updated. Compose-level changes -- bind "
@@ -7224,7 +7330,8 @@ def main():
         # the whole fleet.
         health_rc = 0
         if restarted:
-            health_rc = verify_dashboard_after_restart(args.port, root, args)
+            health_rc = verify_dashboard_after_restart(
+                args.port, root, args, expected_after_restart(image_mode, live_before))
         elif not args.dry_run:
             # The restart itself failed. The note above says what to click;
             # this is still not a successful deploy, and ship must not go on.

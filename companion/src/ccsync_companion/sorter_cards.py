@@ -131,6 +131,44 @@ def busy_serials() -> set[str]:
         return set(_busy)
 
 
+# Volumes a copy is WRITING to right now (root -> how many copies). Their free space moves with
+# every file, which is the loop's "something changed, read it again" signal; a field drive that
+# already holds a backup lists as a `generic` card, so it was walked in full, every .xml and WAV
+# header read, and the whole listing posted, every tick for as long as the copy ran, competing
+# with the copy for the same disk (audit comp-field-9, 2026-11-11). While a root is in here the
+# listing it already had is reused; the tick after the copy ends reads it once.
+_dest_busy: dict[str, int] = {}
+
+
+def _root_key(root: str) -> str:
+    return os.path.normcase(os.path.normpath(str(root or ""))).rstrip("\\/")
+
+
+@contextmanager
+def dest_busy(root: str) -> Iterator[None]:
+    """Mark a volume as being written to by a copy, so its listing is not re-read meanwhile."""
+    key = _root_key(root)
+    if key:
+        with _busy_lock:
+            _dest_busy[key] = _dest_busy.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        if key:
+            with _busy_lock:
+                left = _dest_busy.get(key, 0) - 1
+                if left > 0:
+                    _dest_busy[key] = left
+                else:
+                    _dest_busy.pop(key, None)
+
+
+def dest_busy_roots() -> set[str]:
+    """The roots being written to, as _root_key spells them (compare through _root_key)."""
+    with _busy_lock:
+        return set(_dest_busy)
+
+
 def note_drive(serial: str, root: str) -> None:
     with _busy_lock:
         _known_drives[str(serial or "").upper()] = str(root)
@@ -392,6 +430,15 @@ def list_card(root: "str | Path") -> dict[str, Any]:
     4096 bytes of every .xml; `wav`: each WAV's header duration in seconds,
     keyed by rel path. The skips are scan.py's, so what the sorter groups is
     what the Node scanner would have seen.
+
+    `unreadable`: the folders (and single entries) that could NOT be read,
+    as rel paths ("" is the card's own top folder). A listing with anything
+    in it is PARTIAL: whatever sits in those folders is absent from `files`,
+    so nobody may call the card backed up on the strength of it. Until
+    2026-11-11 (audit comp-field-1) such a folder was logged at debug and
+    skipped, and a DJI card whose DCIM/101MEDIA threw a read error was judged
+    "Safe to format" on 100MEDIA alone. ledger_scan.walk has carried the
+    same list for drives since it was written.
     """
     from .wav_header import wav_seconds
 
@@ -399,13 +446,23 @@ def list_card(root: "str | Path") -> dict[str, Any]:
     files: list[list[Any]] = []
     texts: dict[str, str] = {}
     wav: dict[str, float] = {}
+    unreadable: list[str] = []
+
+    def _rel(path: Any) -> str:
+        try:
+            rel = Path(path).relative_to(base).as_posix()
+        except ValueError:
+            rel = str(path)
+        return "" if rel == "." else rel
+
     stack = [base]
     while stack:
         directory = stack.pop()
         try:
             entries = sorted(os.scandir(directory), key=lambda e: e.name)
         except OSError as exc:
-            log.debug("sorter cards: cannot read %s (%s)", directory, exc)
+            log.warning("sorter cards: cannot read %s (%s); the listing is partial", directory, exc)
+            unreadable.append(_rel(directory))
             continue
         for e in entries:
             lower = e.name.lower()
@@ -420,7 +477,14 @@ def list_card(root: "str | Path") -> dict[str, Any]:
                 if lower in SKIP_FILE_NAMES or e.name.startswith("._"):
                     continue
                 st = e.stat(follow_symlinks=False)
-            except OSError:
+            except OSError as exc:
+                # a name every rule above skips is not footage whether or not
+                # it will stat, and must not make a readable card partial
+                if (lower in SKIP_DIR_NAMES or lower in SKIP_FILE_NAMES
+                        or e.name.startswith(".")):
+                    continue
+                log.warning("sorter cards: cannot read %s (%s); the listing is partial", e.path, exc)
+                unreadable.append(_rel(e.path))
                 continue
             rel = Path(e.path).relative_to(base).as_posix()
             files.append([rel, int(st.st_size), round(st.st_mtime * 1000.0, 1)])
@@ -436,7 +500,8 @@ def list_card(root: "str | Path") -> dict[str, Any]:
                 if seconds is not None:
                     wav[rel] = round(seconds, 3)
     files.sort(key=lambda f: f[0])
-    return {"files": files, "texts": texts, "wav": wav}
+    unreadable.sort()
+    return {"files": files, "texts": texts, "wav": wav, "unreadable": unreadable}
 
 
 def is_fixed(vol: dict[str, Any]) -> bool:
@@ -454,6 +519,10 @@ def describe(vol: dict[str, Any], detected_at: str) -> Optional[dict[str, Any]]:
     if kind is None:
         return None
     listing = list_card(vol["root"])
+    if not listing.get("unreadable"):
+        # the card report's body is unchanged for a card that read in full;
+        # only a partial listing says so (the sorter reads cards with .get)
+        listing.pop("unreadable", None)
     return {"serial": vol["serial"], "label": vol.get("label", ""),
             "drive": vol["drive"], "kind": kind,
             "capacity": int(vol.get("capacity") or 0), "free": int(vol.get("free") or 0),
@@ -565,6 +634,7 @@ class SorterCards:
         # (WatchDriveTypes = Removable, Fixed) because CFexpress / Blackmagic
         # readers present cards as fixed; the content check gates (describe).
         vols = self._volumes("local", busy)
+        written = dest_busy_roots()
         present: dict[str, dict[str, Any]] = {}
         for vol in vols:
             if vol.get("system"):
@@ -576,6 +646,8 @@ class SorterCards:
             settled = seen is not None and (seen["card"] is not None or seen["misses"] >= SLOW_MOUNT_RETRIES)
             fresh = (seen is not None and seen["sig"] == sig and settled
                      and now - seen["at"] < RELIST_SECONDS)
+            if seen is not None and _root_key(vol["root"]) in written:
+                fresh = True                   # a copy is writing to it: see _dest_busy
             if not fresh:
                 first = self._first_seen.setdefault(serial, _now_iso())
                 card = describe(vol, first)

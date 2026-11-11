@@ -818,6 +818,23 @@ def fill_gaps(timestamps: list[float], duration_s: float, max_gap_s: float = 4.0
     return sorted(set(round(t, 3) for t in filled))
 
 
+# THE WIDTH A STILL IS CUT AT, whatever the file it is cut from (audit idx-1,
+# 2026-11-11). The stills are cut from the PROXY, and the local model was
+# tuned and evaluated on stills from the 540p proxy: 960x540, about 1,024
+# image tokens each. The proxy went to 1080p on 2026-09-17 and the stills went
+# with it, to about 2,040 tokens each, so an eight- or nine-frame window no
+# longer fits the model's 16,384-token context and every such clip would be
+# marked `error` (arithmetic from the tokeniser's rules; no local run has
+# happened since the change to prove it either way). Pinning the width here
+# keeps a still what the evaluation saw, and costs the other consumer nothing:
+# a contact-sheet cell is 384 px wide whatever it is scaled from. Never
+# upscaled, height follows the aspect ratio (even, as yuvj420p needs). The
+# companion's twin (broll_ingest_media.extract_frame_cmd) carries the same
+# number and a test in its suite fails if the two argvs ever differ.
+FRAME_MAX_WIDTH = 960
+FRAME_SCALE = f"scale='min({FRAME_MAX_WIDTH},iw)':-2"
+
+
 def extract_frames(
     src: str | Path,
     timestamps: list[float],
@@ -825,7 +842,7 @@ def extract_frames(
     duration_s: float | None = None,
     safety_margin: float = 0.05,
 ) -> list[tuple[float, Path]]:
-    """Extract one still per timestamp (accurate seek).
+    """Extract one still per timestamp (accurate seek), FRAME_MAX_WIDTH wide at most.
 
     Returns (timestamp, path) pairs in timestamp order, for frames that were
     actually produced. Pairs rather than two parallel lists on purpose: a frame
@@ -847,7 +864,8 @@ def extract_frames(
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-ss", f"{effective_ts:.3f}", "-i", str(src),
-            "-frames:v", "1", "-q:v", "3", "-pix_fmt", "yuvj420p",
+            "-frames:v", "1", "-vf", FRAME_SCALE,
+            "-q:v", "3", "-pix_fmt", "yuvj420p",
             str(out_path),
         ]
         subprocess.run(cmd, check=True)

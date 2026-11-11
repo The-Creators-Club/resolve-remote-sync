@@ -103,3 +103,62 @@ def _health_probe_answers_healthy(monkeypatch):
             True, {"ok": True, "version": expected or ida.repo_dashboard_version()},
             "stubbed by conftest"),
         raising=False)
+
+
+# NO TEST HERE LEAVES THIS MACHINE (audit tests-ci-2, 2026-11-11). The deploy
+# script's real-run tests stub run_ssh, the tree installs and the provisioning
+# steps, and their helper's docstring says "nothing here opens a socket". It
+# did: the TrueNAS version note calls the real API client against the
+# manifest's `[nas] host` with TRUENAS_PW="pw", so the first real-run test of
+# each process tried a TLS connection to a private address on whatever network
+# the suite was run from (a login attempt with a junk password on a studio
+# LAN; a 30 s timeout on CI). One unstubbed call is easy to add again, so the
+# guard is here rather than in that one helper: a connect to anything but this
+# machine fails at once, with a message that names the fix. A test that
+# stands up its own server on 127.0.0.1 is unaffected.
+import socket as _socket  # noqa: E402
+
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
+
+
+def _is_local(address) -> bool:
+    if not isinstance(address, tuple) or not address:
+        return True                       # AF_UNIX and friends: a path, not a network
+    host = str(address[0] or "").strip().lower()
+    return host in _LOCAL_HOSTS or host.startswith("127.")
+
+
+class _NoNetwork(OSError):
+    pass
+
+
+def _refuse(address):
+    raise _NoNetwork(
+        f"a server test tried to open a connection to {address!r}. No test may leave this "
+        "machine: stub the call that reaches the NAS (see server/tests/conftest.py).")
+
+
+@pytest.fixture(autouse=True)
+def _no_connections_off_this_machine(monkeypatch):
+    real_create, real_connect, real_connect_ex = (
+        _socket.create_connection, _socket.socket.connect, _socket.socket.connect_ex)
+
+    def create_connection(address, *args, **kwargs):
+        if not _is_local(address):
+            _refuse(address)
+        return real_create(address, *args, **kwargs)
+
+    def connect(self, address):
+        if not _is_local(address):
+            _refuse(address)
+        return real_connect(self, address)
+
+    def connect_ex(self, address):
+        if not _is_local(address):
+            _refuse(address)
+        return real_connect_ex(self, address)
+
+    monkeypatch.setattr(_socket, "create_connection", create_connection)
+    monkeypatch.setattr(_socket.socket, "connect", connect)
+    monkeypatch.setattr(_socket.socket, "connect_ex", connect_ex)
+    yield

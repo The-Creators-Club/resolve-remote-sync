@@ -1058,9 +1058,43 @@ def test_an_oversized_heavy_payload_sheds_sections_instead_of_413ing(caplog):
     assert sent["editor_name"] and sent["machine"]
     # rollups survive; only the per-file lists were shed, and it was logged
     assert sent["local_manifest"]["2026/FF5/P000"]["n_originals"] == 2000
-    assert sent["local_manifest"]["2026/FF5/P000"]["originals"] is None
-    assert sent["local_manifest"]["2026/FF5/P000"]["truncated"] is True
+    # FROM THE TAIL (audit comp-core-4, 2026-11-11): the manifest is in priority order, so the
+    # last project loses its lists and the first, the one that matters most, keeps its own.
+    # Every project used to lose them at once, however little the body was over by.
+    last = sent["local_manifest"]["2026/FF5/P063"]
+    assert last["originals"] is None and last["proxies"] is None and last["truncated"] is True
+    assert last["n_originals"] == 2000
+    first = sent["local_manifest"]["2026/FF5/P000"]
+    assert len(first["originals"]) == 2000 and first["truncated"] is False
+    kept = [rel for rel, entry in sent["local_manifest"].items() if entry["originals"] is not None]
+    assert kept == sorted(kept) and 0 < len(kept) < 64, len(kept)       # a prefix of the order
     assert "per-file lists" in " ".join(r.getMessage() for r in caplog.records)
+
+
+def test_one_project_over_the_budget_costs_one_projects_lists_not_all_of_them():
+    manifest = _big_manifest(10, 100)
+    whole = reporter_mod.payload_size({"local_manifest": manifest, "lanes": []})
+    one = reporter_mod.payload_size({"x": manifest["2026/FF5/P009"]["originals"]})
+    reporter = _reporter_with(manifest=manifest)
+    fitted = reporter._fit_payload({"local_manifest": manifest, "lanes": []}, budget=whole - one // 2)
+    lost = [rel for rel, entry in fitted["local_manifest"].items() if entry["originals"] is None]
+    assert lost == ["2026/FF5/P009"]
+    assert reporter_mod.payload_size(fitted) <= whole - one // 2
+    # the cache's own dicts are never edited in place
+    assert manifest["2026/FF5/P009"]["originals"] is not None and manifest["2026/FF5/P009"]["truncated"] is False
+
+
+def test_a_manifest_that_had_to_be_trimmed_is_still_recognised_as_unchanged():
+    """Audit comp-core-3 (2026-11-11): the stamp was the digest of the TRIMMED section and the
+    comparison is made on the section as built, so once a manifest had been trimmed it was
+    rebuilt, trimmed and re-sent on every heavy report, for exactly the biggest machines."""
+    calls = []
+    reporter = _reporter_with(manifest=_big_manifest(64, 2000), calls=calls)
+    reporter.post_once(light=False)
+    assert any(entry["originals"] is None for entry in calls[0]["local_manifest"].values())
+    reporter.post_once(light=False)
+    assert "local_manifest" not in calls[1]             # unchanged: not sent again
+    assert "lanes" in calls[1]
 
 
 def test_a_payload_that_fits_is_left_completely_alone():

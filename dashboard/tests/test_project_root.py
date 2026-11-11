@@ -365,3 +365,52 @@ def test_report_still_auto_maps_the_exact_name(tree_env):
     row = conn.execute("SELECT project_slug FROM project_roots WHERE resolve_project=?",
                        ("Beyond Nights",)).fetchone()
     assert row["project_slug"] == "2026-beyond-nights"
+
+
+def test_the_tree_is_walked_before_the_report_takes_the_write_lock(tree_env, monkeypatch):
+    """Audit dash-api-2 (2026-11-11): on a cache miss the CR-379 rival check os.walked the
+    Projects tree AFTER `BEGIN IMMEDIATE`, so every other report and click waited behind a
+    directory listing on the NAS's pool, again every 60 s while a rival kept the name unmapped."""
+    client, conn, projects = tree_env
+    (projects / "2025" / "Beyond Nights").mkdir(parents=True)
+    from ccsync_dashboard import api as apimod
+    from ccsync_dashboard import provision
+    apimod._UNREGISTERED_CACHE.clear()
+    seen = []
+    real = provision.scan_unregistered_dirs
+
+    def scan(path, max_depth=8):
+        probe = dbmod.connect(conn.execute("PRAGMA database_list").fetchone()["file"], busy_ms=0)
+        try:
+            probe.execute("BEGIN IMMEDIATE")        # only possible while NOBODY holds the write lock
+            probe.execute("ROLLBACK")
+            seen.append("free")
+        except Exception:                           # sqlite3.OperationalError: database is locked
+            seen.append("held")
+        finally:
+            probe.close()
+        return real(path, max_depth=max_depth)
+
+    monkeypatch.setattr(provision, "scan_unregistered_dirs", scan)
+    resp = client.post("/api/v1/report", headers=report_headers(), json=report("Beyond Nights"))
+    assert resp.json()["resolve_project_unmapped"] == "Beyond Nights"      # the rival still blocks it
+    assert seen == ["free"], seen                                          # one walk, lock not held
+
+
+def test_an_unreadable_tree_is_asked_once_a_minute_not_once_a_report(tree_env, monkeypatch):
+    client, conn, _ = tree_env
+    from ccsync_dashboard import api as apimod
+    from ccsync_dashboard import provision
+    apimod._UNREGISTERED_CACHE.clear()
+    walks = []
+
+    def scan(path, max_depth=8):
+        walks.append(1)
+        raise OSError("stale file handle")
+
+    monkeypatch.setattr(provision, "scan_unregistered_dirs", scan)
+    for _ in range(3):
+        resp = client.post("/api/v1/report", headers=report_headers(), json=report("Beyond Nights"))
+        assert resp.json()["resolve_project_unmapped"] == "Beyond Nights"  # doubt means ask
+    assert len(walks) == 1
+    assert conn.execute("SELECT COUNT(*) c FROM project_roots").fetchone()["c"] == 0

@@ -164,8 +164,11 @@ def test_notice_check_times_only_records_kinds_a_pass_actually_touched(conn):
 def test_notices_context_marks_ok_only_for_kinds_with_evidence(conn):
     """The exact bug this fix pass closes: a kind in the registry with no
     writer must not render as checked."""
-    dbmod.clear_notices_of_kind(conn, "dashboard_disk_low", [], now=NOW)  # ran, clean
-    dbmod.notice(conn, "machine_disk_low", "warn", "jsmith/PC", now=NOW)   # ran, found something
+    # stamped NOW-as-in-today, not the module's fixed date: evidence has to be fresh to count
+    # (audit dash-collector-2, 2026-11-11)
+    today = dbmod.utcnow_iso()
+    dbmod.clear_notices_of_kind(conn, "dashboard_disk_low", [], now=today)  # ran, clean
+    dbmod.notice(conn, "machine_disk_low", "warn", "jsmith/PC", now=today)   # ran, found something
     ctx = ui._notices_context(conn)
     assert "dashboard_disk_low" in ctx["checked_kinds"]
     assert "machine_disk_low" in ctx["checked_kinds"]
@@ -188,8 +191,8 @@ def test_the_rendered_panel_shows_not_checked_ok_and_found(tmp_path):
     with TestClient(app) as client:
         conn = dbmod.connect(tmp_path / "dash.db")
         try:
-            dbmod.clear_notices_of_kind(conn, "dashboard_disk_low", [], now=NOW)
-            dbmod.notice(conn, "machine_disk_low", "warn", "jsmith/PC", now=NOW,
+            dbmod.clear_notices_of_kind(conn, "dashboard_disk_low", [], now=dbmod.utcnow_iso())
+            dbmod.notice(conn, "machine_disk_low", "warn", "jsmith/PC", now=dbmod.utcnow_iso(),
                         body="low", fix="clear space")
             conn.commit()
             client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
@@ -355,3 +358,58 @@ def test_the_feed_kinds_are_checked_on_a_site_with_no_feed(conn):
     assert "feed_unreachable" in checked
     assert "feed_runtime_mismatch" in checked
     assert dbmod.open_notices(conn) == []
+
+
+# ------------------------------------- audit dash-collector-2 (2026-11-11): OK needs FRESH evidence
+
+def test_a_check_that_ran_long_ago_is_not_ok_any_more(conn):
+    """The panel tested only that a stamp existed, and the stamps outlive restarts: a kind
+    evaluated once, ever, read [ OK ] for the life of the database."""
+    dbmod.clear_notices_of_kind(conn, "dashboard_disk_low", [], now="2026-08-20T12:00:00+00:00")
+    dbmod.clear_notices_of_kind(conn, "projects_dir_missing", [], now=NOW)
+    fresh, stale = dbmod.notice_checks_fresh(conn, now=LATER)
+    assert fresh == {"projects_dir_missing"}
+    assert stale == {"dashboard_disk_low": "2026-08-20T12:00:00+00:00"}
+    # a stamp nobody can date is not evidence either
+    dbmod.meta_set_json(conn, dbmod.NOTICE_CHECKS_META, {"dashboard_disk_low": "not a time"})
+    assert dbmod.notice_checks_fresh(conn, now=LATER) == (set(), {"dashboard_disk_low": "not a time"})
+
+
+def test_the_slowest_honest_writer_is_still_ok_a_day_later(conn):
+    dbmod.mark_notice_checked(conn, "release_feed_stale", now=NOW)
+    a_day_on = "2026-08-29T13:00:00+00:00"
+    assert dbmod.notice_checks_fresh(conn, now=a_day_on)[0] == {"release_feed_stale"}
+
+
+def test_the_panel_context_counts_only_fresh_checks(conn):
+    dbmod.clear_notices_of_kind(conn, "dashboard_disk_low", [], now="2026-08-20T12:00:00+00:00")
+    dbmod.clear_notices_of_kind(conn, "projects_dir_missing", [], now=dbmod.utcnow_iso())
+    ctx = ui._notices_context(conn)
+    assert "projects_dir_missing" in ctx["checked_kinds"]
+    assert "dashboard_disk_low" not in ctx["checked_kinds"]
+    assert ctx["stale_kinds"] == {"dashboard_disk_low": "2026-08-20T12:00:00+00:00"}
+
+
+def test_a_check_that_raises_is_a_notice_and_one_that_recovers_closes_it(conn, tmp_path, monkeypatch):
+    """It was a traceback in the container log and nothing on any page."""
+    settings = Settings(db_path=str(tmp_path / "test.db"))
+
+    def boom(_conn, _settings, _now):
+        raise RuntimeError("the disk said no")
+
+    original = notices._check_tree
+    monkeypatch.setattr(notices, "_check_tree", boom)
+    notices.run_checks(conn, settings, NOW)
+    row = conn.execute("SELECT severity, subject, body, fix, cleared_at FROM notices "
+                       "WHERE kind='notice_check_failed'").fetchone()
+    assert row is not None and row["cleared_at"] is None and row["severity"] == "error"
+    assert row["subject"] == "boom" and "the disk said no" in row["body"]
+    assert chr(0x2014) not in row["body"] + row["fix"]
+    assert "notice_check_failed" in dbmod.NOTICE_KINDS
+
+    monkeypatch.setattr(notices, "_check_tree", original)
+    conn.execute("UPDATE notices SET subject='check_tree' WHERE kind='notice_check_failed'")
+    notices.run_checks(conn, settings, LATER)
+    row = conn.execute("SELECT cleared_at FROM notices WHERE kind='notice_check_failed' "
+                       "AND subject='check_tree'").fetchone()
+    assert row["cleared_at"] is not None                # the same check ran clean: closed

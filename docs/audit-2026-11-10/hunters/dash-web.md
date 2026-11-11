@@ -1,0 +1,112 @@
+# dash-web - dashboard web layer: app factory and middleware, login gate, UI routes and templates, static assets and service worker
+
+Files read (approximate coverage): `app.py` middleware stack and mounts (lines 1090-1920, full), `auth.py` session resolution (745-900), `sessions.py` validate/touch (60-380), `db.connect`, `ui.py` `_render`, `page_fleet`, `_sidebar_context`, `_switcher_context`, the route list and every `async def` route header, `ui_home.py` (full), `account_ui.py` (475-702), `static_files.py`, `ui_assets.py` (full), `static/sw.js` (full), `static/pwa.js` (full), `static/tab_memory.js` (full), `static/cc/cc.js` (330-716), `static/htmx_errors.js` (280-390), listener/timer grep over every static JS file, every `hx-trigger` in `templates/`, `templates/fleet.html` (full), `partials/fleet_grid.html` head. Not read line by line: the other 60-odd templates, `oidc.py`, `local_users.py` beyond the hashing header, `help.py`, `secrets_boot.py`, `runtime_id.py`, `settings.py`.
+
+Probes run (all under the scratch folder `dash-web\`, dashboard `.venv`, `DASH_DEV_INSECURE=1`, temp DBs, TestClient / httpx ASGITransport, no port bound):
+- `probe_home.py` / `probe_builders.py`: seeded 20 machines (10 editors x 2) x 100 projects x 20 ticks (and 500 projects x 50 ticks), with devices, completions, lane reports and 3 live transfers per machine; timed every home-page poll, counted SQL statements (trace callback) and connections, measured body size and gzip-6 size.
+- `probe_sql.py`: grouped the SQL each poll issues.
+- `probe_prof.py`: cProfile of `GET /` as admin; counted view-builder calls per request.
+- `probe_mw.py`: a static asset through the full app vs a bare `CachedStaticFiles` mount; `db.connect`+session SELECT vs a held connection.
+- `probe_stream.py`: 200 MB `FileResponse` throughput through 0 vs 5 no-op `@app.middleware("http")` layers.
+- `probe_loop.py`: held `BEGIN IMMEDIATE` on the DB in another thread, sent `POST /partials/account/display-name` and, 0.2 s later, an unrelated `GET /partials/halt-line`.
+- `python -X importtime` of `ccsync_dashboard.app`.
+
+## Findings
+
+### dash-web-1 - About 45 `async def` UI routes run their SQLite writes on the event loop; one click during a collector write freezes every request on the dashboard for up to 5 s
+- Category: concurrency
+- Severity: medium
+- Confidence: CONFIRMED
+- Where: `dashboard/src/ccsync_dashboard/account_ui.py:481-702` (display-name, session revoke, revoke-others, machine settings ask/withdraw); `ui.py` async routes at 1270, 1493, 1556, 2368, 2621, 2662, 2709, 2890, 3002, 3186, 3235, 3252, 3275, 3282, 3420, 3537, 3631, 3684, 3725, 3764, 3810, 3840, 3858, 3888, 3912, 3938, 3991, 4010, 4070, 4667, 4713, 4750, 4795, 4838, 4868, 4894 (list from `grep -A2 "^async def" | grep get_conn`)
+- What: these routes are `async def` only so they can `await request.form()`, but they take a `get_conn` connection (default `busy_ms=5000`) and run their reads, writes and commit inline, on the one event loop of the `--workers 1` container. A write that meets a held write lock sleeps inside sqlite's busy handler with the loop thread blocked. This is the CR-282F / bug-dash-auth-2 shape through a third door: both of those fixed one call site each (the 500 handler, the session touch), the routes were never swept.
+- Cost / failure scenario: an admin presses any of these (tick for someone, push an update, resume lane B, approve a key, rename themselves) while the collector or a companion report holds the write lock. Every other request in the process - every companion `/api/v1/report`, every htmx poll on every tab, every Cards fetch - waits until the lock clears or 5 s pass, and then the click itself 503s. Frequency is bounded by admin clicks x the fraction of time a write lock is held (CR-351 measured multi-second writes before its fix; still 0.1-1 s per big report after it).
+- Evidence: `probe_loop.py`: with another connection holding `BEGIN IMMEDIATE` for 3 s, the display-name POST took 3.08 s and a `GET /partials/halt-line` scheduled 0.2 s after it was not even SENT until 3.07 s (the loop could not wake its own `asyncio.sleep`), answered at 3.08 s. Without the held lock both take ~5 ms.
+- Ledger: new (same mechanism as CR-282F and bug-dash-auth-2, both FIXED for their own call sites only)
+- Suggested change: keep the `await request.form()` in the async handler and move everything after it into one `await run_in_threadpool(work, ...)` (the pattern `partial_account_password` and `partial_admin_display_name`'s users view already use), or parse the form in an async dependency and make the route a plain `def`. A test that holds the write lock and asserts a concurrent GET answers in < 0.5 s pins the class. Must not change the CSRF gate's reliance on body_size_gate having buffered the body (form parsing stays where it is).
+- Effort / risk: M effort (mechanical, ~45 routes), low risk
+
+### dash-web-2 - The home page and its polls rebuild the whole projects view 12 times a minute per open tab, and the page itself builds every view twice
+- Category: perf
+- Severity: medium
+- Confidence: CONFIRMED
+- Where: `ui.py:925-966` (`page_fleet`), `templates/fleet.html:27-28` (`home_readouts`, `home_tree` template globals), `ui_home.py:170-181` (`_plan_facts_for` opens its own connection and rebuilds the transfers view), `ui_home.py:296-368` (`home_tree` opens its own connection and calls `build_projects_view` again: `projects_view` is never passed), `ui.py:2811-2817` (`/partials/fleet` builds the projects view for the overview + OOB readouts every 15 s), `ui_home.py:436-453` (home-queue, every 10 s), `ui_home.py:406-413` (projects-tree, every 30 s); the per-build cost sits in `api.py:464-497` (`build_projects_view`: `db.fetch_projects` is one device/completion query PER PROJECT, and `_editor_view` -> `_lanes_view` recomputes the same (editor, machine) lane chips for every (project, editor) row)
+- What: `page_fleet` builds `build_projects_view` once and shares it with `_sidebar_context` and the queue (the DASH-6 fix), but the terminal template then calls `home_tree`, which opens a fresh connection and builds the projects view a second time, and `home_readouts`, which opens another and builds the transfers view a second time. `_sidebar_context`'s output is itself recomputed by `tree_context`. On the polls, three of the home windows each rebuild the projects view independently, and inside each build the lanes for an (editor, machine) are re-derived once per project that editor ticked.
+- Cost / failure scenario: measured on this desktop (the NAS CPU is slower). `GET /` as admin: 2 projects-view builds, 2 transfers-view builds, 7 connections, 1,170 SQL statements, 39 ms at 100 projects / 89 ms at 500. Per visible admin home tab per minute: fleet 4 x (25-38 ms) + queue 6 x (15-30 ms) + tree 2 x (14-36 ms) = 12 projects-view builds; with the 2 s transfers poll, the tab costs ~700 s of server CPU per day at 100 projects and ~1,150 s/day at 500 (0.8-1.3 % of a core, per tab, 24 h on a wall display), all of it GIL-serialised with the report handlers. `fetch_projects` is 100 statements per build at 100 projects (500 at 500). In the profile, `_lanes_view` is 8,600 calls per 10 page renders and ~57 % of `build_projects_view`'s time (lane_chip + `age_seconds` ISO parsing). The backlog half of `build_transfers_view` is PRAC-73 (open) and not counted again here; my seed had no `editor_media`, so these numbers are the floor.
+- Evidence: `probe_prof.py` "builder calls per request: build_projects_view 2, build_transfers_view 2, build_editors_view 1"; `probe_sql.py`: `/partials/fleet` 602 statements (100 of them the per-project device query), `/partials/home-queue` 178 (100), `/partials/projects-tree` 121 (100); `probe_builders.py` timings above.
+- Ledger: related to DASH-6 (bug-hunt-2026-08-14; its second half, "collapse db.fetch_projects' N+1", was never done) and PRAC-73 (open, the transfers/backlog half)
+- Suggested change: (a) pass the handler's `projects_view` and `transfers` into the template and have `home_tree` / `home_readouts` take them (one build each per page, ~40 % of the page); (b) in `build_projects_view`, compute `_lanes_view` once per (editor, machine) and reuse it per row (estimated -50 % per build); (c) one `completion_current JOIN devices` query grouped in Python instead of the per-project query; (d) optionally memoise the projects view per request-scope for ~2 s, since three windows of one tab ask for it within the same 30 s. All four keep the "one snapshot per render" property DASH-6 established.
+- Effort / risk: (a) S / low, (b)+(c) M / low, (d) M / medium
+
+### dash-web-3 - The service worker revalidates content-hashed, immutable assets on every navigation and rewrites them into CacheStorage each time
+- Category: perf
+- Severity: low
+- Confidence: CONFIRMED
+- Where: `dashboard/static/sw.js:141-181`; `static_files.py:36-42` (sets `immutable` on a current-hash URL)
+- What: every `/static/` request under the worker is answered from cache AND re-fetched with `{cache: 'no-cache'}`, including `?h=<hash>` URLs whose bytes cannot change. Per the Fetch spec a revalidated 304 comes back to the worker as the stored 200, so `res.ok` is true and `cache.put` rewrites every asset on every navigation. The `immutable` header that `CachedStaticFiles` sets is therefore dead for every secure-context client (anyone on Tailscale Serve https, i.e. every phone and the installed PWA). And because `activate` only deletes caches with another NAME, a same-version redeploy that changes hashes leaves the old `?h=` entries in the cache until the next VERSION bump.
+- Cost / failure scenario: a dashboard page loads about 19 static URLs (shell: 4 sheets, 6 scripts, 2 favicons, apple-touch icon; page: 2; 4 fonts from the sheets). Each navigation therefore costs ~19 conditional requests (each ~1.9 ms server time through the middleware stack, measured, plus a tailnet RTT each) and ~0.5 MB of CacheStorage writes on the phone, for nothing. An editor clicking through 50 pages a day: ~950 wasted requests and ~25 MB of flash writes per device per day.
+- Evidence: code path read; `probe_home.py` shows the hashed URL is served `public, max-age=31536000, immutable` and that a conditional request answers 304.
+- Ledger: new (the SWR rule is dash-mounts-ui-5 / dash-mounts-ui-b-3; this keeps it for un-hashed URLs)
+- Suggested change: in the `/static/` branch, if the URL carries `h=`, return a cache hit with no revalidation (cache-first; fetch and put only on a miss), and when putting a hashed URL delete cached entries for the same pathname with a different `h`. Keep stale-while-revalidate exactly as it is for un-hashed URLs (the PRECACHE list, fonts), which is the case dash-mounts-ui-5 exists for.
+- Effort / risk: S effort, low risk
+
+### dash-web-4 - Five `@app.middleware("http")` (BaseHTTPMiddleware) layers: +0.9 ms on every request and half the throughput on every streamed byte
+- Category: perf
+- Severity: low
+- Confidence: CONFIRMED
+- Where: `dashboard/src/ccsync_dashboard/app.py:1141` (csrf_gate), `1187` (stale_page_gate), `1195` (body_size_gate), `1373` (session_expiry_header), `1385` (login_gate)
+- What: each `@app.middleware("http")` is a Starlette `BaseHTTPMiddleware`, which runs the inner app in a task group and pipes the response body through an anyio memory stream. Five are stacked, so every request pays five task spawns and every response chunk crosses five streams. The mounted apps' own gates were already written as plain ASGI for this reason (`broll.py:204`, `music.py:158`, `ytdl.py:144`); the parent's own five were not.
+- Cost / failure scenario: a static asset through the full app took 1,937 us vs 1,069 us through a bare mount of the same `CachedStaticFiles` (+0.87 ms, +81 %). A 200 MB `FileResponse` streamed at 294 MB/s through 5 no-op layers vs 693 MB/s with none: every media byte the dashboard serves in-process (b-roll previews, music audio, Cards audio/video, `/api/v1/companion/package/` downloads of 40-120 MB, the sorter's thumbnails) costs ~2.4x the event-loop CPU. At a tailnet's ~50 MB/s that is ~17 % of a core per active stream instead of ~7 %.
+- Evidence: `probe_mw.py`, `probe_stream.py`.
+- Ledger: new
+- Suggested change: fold the five into ONE `@app.middleware("http")` function that runs the same checks in the same order (outermost first: login gate, expiry stamp, body-size gate, stale-page gate, CSRF), or rewrite them as one plain ASGI class. Must keep: body_size_gate buffering and re-arming the body before csrf_gate reads the form, and login_gate resolving the session before the expiry stamp. Short-circuit `/static/` at the top so assets skip everything.
+- Effort / risk: M effort, medium risk (ordering is load-bearing; the existing middleware tests cover it)
+
+### dash-web-5 - Each authenticated request opens a fresh SQLite connection on the event loop just to look up the session; connection setup is 25-75 % of a poll's server time
+- Category: perf
+- Severity: low
+- Confidence: CONFIRMED
+- Where: `auth.py:755-802` (`_resolve_session` -> `sessions.validate_ex`), `sessions.py:262-345` (`_run` opens `db.connect` per call), `db.py:710-728` (`connect` issues 4 PRAGMAs every time, including `journal_mode=WAL`, which is persistent in the file); `ui.py:783`, `806`, `819`, `ui_home.py:174`, `358`, `375` (each opens its own connection in the same request)
+- What: `login_gate` is async, so the session SELECT (connect + 4 PRAGMAs + query + close) runs on the loop for every non-static request; then the route's `get_conn` opens a second connection in the threadpool; `_render` and the template globals open more. `GET /` as admin opens 7.
+- Cost / failure scenario: connect + 4 PRAGMAs + SELECT + close = 1,524 us; the same SELECT on a held connection = 4 us. `/partials/halt-line` (polled every 60 s on every page) takes 4.0 ms of which ~3 ms is the two connection setups; `/partials/stamp` the same every 30 s. Across one admin home tab (~67,700 requests/day, all signed in) that is ~100 s/day of event-loop time spent opening connections for the session check alone, more on ZFS where opening the -wal/-shm files is slower (estimated).
+- Evidence: `probe_mw.py`; `probe_home.py` connection counts (`/` admin connects=7, every partial >= 2).
+- Ledger: new (sessions.py's own comment records why the touch got a short busy timeout; this is the read beside it)
+- Suggested change: cache `sid -> (username, created_at, last_seen)` in process for ~10 s and invalidate it from `revoke`/`revoke_others`/`delete` (single worker, so in-process invalidation is exact; the touch still writes at most once a minute); and drop `PRAGMA journal_mode=WAL` from `db.connect` after boot (set once in `ensure_schema`). Must keep: "log out everywhere" taking effect on the next request (the invalidation does that), the 250 ms touch timeout.
+- Effort / risk: S-M effort, low-medium risk
+
+### dash-web-6 - PRAC-72's missing compression is wider than the transfers page: every home poll and the cold static load ship uncompressed
+- Category: perf
+- Severity: low
+- Confidence: CONFIRMED
+- Where: `dashboard/src/ccsync_dashboard/app.py` (no `GZipMiddleware`; Tailscale Serve does not compress)
+- What: PRAC-72 (open) names `/partials/transfers`. The same is true of every poll on the home page and of the static assets, which are 260 KB raw on a cold load (components.css 84 KB, htmx.min.js 48 KB, terminal.css 31 KB, cc.js 31 KB, ...).
+- Cost / failure scenario: one visible admin home tab at 20 machines x 100 projects: home-transfers 33.5 KB every 2 s, fleet 75 KB / 15 s, queue 27 KB / 10 s, tree 83 KB / 30 s, problems 34 KB / 60 s = ~1.7 MB/min, ~2.4 GB/day for a wall display, vs ~55 KB/min gzipped (synthetic rows compress 20-50x; real HTML estimated 8-15x). At 500 projects the tree poll alone is 383 KB every 30 s.
+- Evidence: `probe_builders.py` body vs `gzip.compress(body, 6)` sizes per route.
+- Ledger: related to PRAC-72 (open)
+- Suggested change: PRAC-72's `GZipMiddleware(minimum_size=1024)` added as the OUTERMOST layer is safe on this Starlette (1.6): it already skips 206 responses, responses that carry Content-Encoding, and media/event-stream types, so the mounts' Range audio/video are untouched. Note one design choice for the owner: every page body carries the CSRF token beside some reflected query input (`?as=`, `?next=`), the BREACH precondition; the cheap answer is compressing `/static/` and `/partials/` only, or masking the token per response.
+- Effort / risk: S effort, low risk
+
+### dash-web-7 - tab_memory.js saves the scroll position after every poll swap: a forced layout and two storage writes every ~2 s on a visible tab
+- Category: idle
+- Severity: low
+- Confidence: CONFIRMED
+- Where: `dashboard/static/tab_memory.js:345-348` (`htmx:afterSettle` -> `saveThrottled`), `256-265` (`save`: `querySelectorAll("details")`, `nearestSection` = `getBoundingClientRect` on every `h1-h4[id]`/`section[id]`, then `sessionStorage` + `localStorage` `setItem`); `166` (expired entries are skipped on read, never removed)
+- What: a poll never moves the reader, but every poll's settle runs a full save (throttled to one per 500 ms). On the home page that is every 2 s from the transfers poll alone.
+- Cost / failure scenario: ~30 saves a minute on a visible home tab, ~43,000 a day on a wall display, each a synchronous layout read right after a swap plus two storage writes; on a phone (pwa.js slows the poll to 10 s) ~8,600 a day. Separately each `/project/<slug>` visited leaves a `ccsync.tab:` key in localStorage forever (at 500 projects, up to 500 stale keys; small but unbounded by time).
+- Evidence: code read; poll cadences from `templates/fleet.html:77-119`.
+- Ledger: new
+- Suggested change: in the afterSettle handler, return early when the request was a poll (cc.js already has the `isPoll` test: `every`/`load` trigger, no user event); scroll, pagehide and visibilitychange still save. On `start()`, delete `ccsync.tab:` entries older than MAX_AGE_MS. Keeps CR-188's behaviour unchanged.
+- Effort / risk: S effort, low risk
+
+## What is already good
+- Every `every Ns` poll in every template carries `[document.visibilityState === 'visible']`, and pwa.js aborts in-flight polls on hide and slows 2 s/5 s polls on a coarse pointer: a hidden or backgrounded tab costs nothing.
+- `asset_url()` content hashes plus `CachedStaticFiles` (immutable for the current hash, no-store for any other) is the right design; only the worker defeats it (dash-web-3).
+- `/static/` skips the session lookup entirely (no SQL on an asset), the login POST and the password change run scrypt in the threadpool, and `_render` keeps the notice/alert counts to full pages only.
+- Static JS listeners are document-level delegates registered once; nothing found that stacks a listener or a timer per htmx swap (cc.js, htmx_errors.js, home.js, account.js, pwa.js checked).
+- `create_app` builds in 0.11-0.18 s and the package imports in 0.54 s; boot is not worth optimising.
+
+## Coverage note
+Not covered: the 60-odd templates other than the home page's (only their poll triggers were listed), the Settings/Health/Packages poll routes' own costs (`/partials/admin/users` every 30 s asks the NAS: DASH-7 in bug-hunt-2026-08-14 already covers it), `oidc.py`, `help.py`, `secrets_boot.py`, `runtime_id.py`, `site_settings.js` and `assignments.js` beyond the listener grep, the `/sw.js` route's per-request precache list build (cheap: ~20 files), Jinja `auto_reload=True` (one `stat` per template per render, not measured, likely < 0.2 ms per page). The home-page numbers use a seed with no `editor_media`, so they exclude PRAC-73's backlog cost.
+
+## OUT OF TERRITORY
+- `dashboard/src/ccsync_dashboard/api.py:464-497`: `build_projects_view`'s per-row `_lanes_view` recompute and `db.fetch_projects`' per-project query (the fix lives there; measured under dash-web-2).
+- `dashboard/src/ccsync_dashboard/api.py:624`: `build_transfers_view` is called twice per home render and once per 10 s queue poll only for `safe_to_close` (PRAC-73, open).

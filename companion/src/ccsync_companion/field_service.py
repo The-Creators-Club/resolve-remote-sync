@@ -23,6 +23,7 @@ catch up. Offline, nothing is lost and nothing blocks: the outbox keeps them, th
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import platform
@@ -216,6 +217,7 @@ class FieldService:
         self._guesses: dict[str, str] = {}
         self._verdicts: dict[str, tuple[float, str, dict[str, Any]]] = {}
         self._verdict_gen = 0
+        self._verdict_lock = threading.Lock()
         self._physical_cache: dict[str, str] = {}
         self.sync_info: dict[str, Any] = {"at": None, "online": None, "error": "", "flushed": 0,
                                           "pending": 0, "pulledRows": 0, "running": False}
@@ -284,6 +286,17 @@ class FieldService:
                 if serial not in seen and held and held.get("vol"):
                     vols.append(held["vol"])
             self._vols, self._vols_at = vols, now
+            # WHICH DISK EACH VOLUME IS ON, AND WHERE IT IS MOUNTED, ARE ASKED AGAIN ON EVERY SCAN and
+            # kept for no longer (audit comp-field-8 and -7, 2026-11-11). Both used to be remembered
+            # by drive letter for the life of the process, and this process runs for weeks: a letter
+            # that held disk 3 last week kept "disk:3" when a two-partition SSD took it, so the
+            # SSD's two partitions got two different keys and one file on both read as two copies;
+            # and a field drive that had gone into the bag was still looked for at its old letter,
+            # not found (or another drive was found there), and its copies dropped, against the
+            # rule that a copy on a drive that is AWAY is believed.
+            self._physical_cache = {}
+            roots: dict[str, str] = {}
+            phys: dict[str, str] = {}
             # a volume that holds a laptop folder you configured IS the laptop's, whatever it is called
             with_folder = set()
             for folder in self.configured_folders():
@@ -299,8 +312,9 @@ class FieldService:
                         guess = "laptop"
                     self._guesses[f"vol:{serial}"] = guess
                     root = str(v.get("root") or "")
-                    self._root_by_vid[f"vol:{serial}"] = root
-                    self._phys_by_vid[f"vol:{serial}"] = self._lane_key(root, f"vol:{serial}")
+                    roots[f"vol:{serial}"] = root
+                    phys[f"vol:{serial}"] = self._lane_key(root, f"vol:{serial}")
+            self._root_by_vid, self._phys_by_vid = roots, phys
             return vols
 
     def _cards_from(self, vols: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -309,20 +323,33 @@ class FieldService:
         out: list[dict[str, Any]] = []
         present: set[str] = set()
         busy = sorter_cards.busy_serials()
+        written = {_norm(r) for r in sorter_cards.dest_busy_roots()}
         for v in vols:
             serial = str(v.get("serial") or "").upper()
-            if not serial or not v.get("removable") or v.get("system"):
+            if not serial or v.get("system"):
                 continue
+            # A FIXED volume can be a card too: CFexpress Type B and Blackmagic SSD readers present
+            # their cards as fixed disks. Companion 0.9.90 taught the sorter's card report that and
+            # nothing else, so such a card could not be backed up from this page and was offered
+            # as a "Copy to" destination instead (audit comp-field-5, 2026-11-11). The rule is
+            # sorter_cards.describe's: a fixed volume is a card only with a camera's own layout on
+            # it, never merely because it holds media (an internal disk full of footage is not one).
+            fixed = not v.get("removable")
             present.add(serial)
             vid = f"vol:{serial}"
             if self.resolver.kind(vid) in ("ours", "client", "laptop", "nas"):
                 continue                                          # a field drive, not a card
-            sig = (v.get("root"), v.get("capacity"), v.get("free"))
+            # a fixed disk's free space moves all day; it is not what says its card changed
+            sig = (v.get("root"), v.get("capacity"), None if fixed else v.get("free"))
             held = self._cards.get(serial)
-            if held and (serial in busy or (held["sig"] == sig and now - held["at"] < CARD_TTL_SECONDS)):
+            # a drive a copy is WRITING to is not re-read while it is written: its free space moves
+            # with every file, and a field drive that already holds a backup lists as a `generic`
+            # card, so it was walked in full on every look (audit comp-field-9)
+            if held and (serial in busy or _norm(str(v.get("root") or "")) in written
+                         or (held["sig"] == sig and now - held["at"] < CARD_TTL_SECONDS)):
                 card = held["card"]
             else:
-                kind = self._classify(v["root"])
+                kind = self._classify(v["root"], generic=False) if fixed else self._classify(v["root"])
                 if kind is None:
                     self._cards[serial] = {"sig": sig, "at": now, "card": None, "vol": v}
                     continue
@@ -330,7 +357,8 @@ class FieldService:
                 files = listing.get("files") or []
                 card = {"serial": serial, "label": str(v.get("label") or ""), "drive": str(v.get("drive") or ""),
                         "root": str(v["root"]), "kind": kind, "capacity": int(v.get("capacity") or 0),
-                        "free": int(v.get("free") or 0), "files": files}
+                        "free": int(v.get("free") or 0), "files": files,
+                        "unreadable": [str(u) for u in listing.get("unreadable") or []]}
                 self._cards[serial] = {"sig": sig, "at": now, "card": card, "vol": v}
                 self._verdict_gen += 1
             if card:
@@ -467,27 +495,62 @@ class FieldService:
 
     # --------------------------------------------------------------------------------- verdicts
     def card_verdict(self, card: dict[str, Any], dests: list[field_copy.Destination]) -> dict[str, Any]:
-        stamp = (f"{self._verdict_gen}:{len(self.local)}:{len(dests)}:{sorted(self.store.kinds().items())}"
-                 f":{sorted(self._guesses.items())}")
-        held = self._verdicts.get(card["serial"])
-        now = self._clock()
-        if held and held[1] == stamp and now - held[0] < VERDICT_TTL_SECONDS:
-            return held[2]
-        folders = field_mode.folder_variants(
-            field_mode.card_folder_name(card["label"], card["serial"], field_mode.card_day(card["files"])),
-            card["serial"])
-        v = field_mode.card_verdict(
-            card["files"], self.view.copies, self.resolver.kind,
-            dest_volumes={d.id: d.volume_id for d in dests if d.volume_id},
-            exclude_volumes=[f"vol:{card['serial']}"], phys_of=self._phys_of,
-            match_fn=lambda row, rel: field_mode.row_is_this_file(
-                row, rel, card["serial"], folders,
-                on_nas=lambda r: self.resolver.kind(str(r.get("volume_id") or "")) == "nas"))
-        mstat = self.mirror.status()
-        if not mstat.get("rows") and not mstat.get("pulled_at"):
-            v["notes"].append("This laptop has not heard from the ledger yet, so only copies made here count.")
-        self._verdicts[card["serial"]] = (now, stamp, v)
-        return v
+        def stamp(gen: int) -> str:
+            return (f"{gen}:{len(self.local)}:{len(dests)}:{sorted(self.store.kinds().items())}"
+                    f":{sorted(self._guesses.items())}")
+
+        def cached() -> Optional[dict[str, Any]]:
+            held = self._verdicts.get(card["serial"])
+            if held and held[1] == stamp(self._verdict_gen) and self._clock() - held[0] < VERDICT_TTL_SECONDS:
+                return held[2]
+            return None
+
+        got = cached()
+        if got is not None:
+            return got
+        # ONE VERDICT AT A TIME. The page polls every few seconds and each poll is its own thread;
+        # the answer is only cached when it is finished, so a slow verdict used to be started again
+        # by every poll that arrived while it ran (audit comp-field-3, 2026-11-11).
+        with self._verdict_lock:
+            got = cached()
+            if got is not None:
+                return got
+            gen = self._verdict_gen
+            folders = field_mode.folder_variants(
+                field_mode.card_folder_name(card["label"], card["serial"], field_mode.card_day(card["files"])),
+                card["serial"])
+            # a volume's kind is asked once per verdict, not once per file: each ask reads the
+            # kinds a person set, the ledger's names and the guesses (audit comp-field-4)
+            kinds: dict[str, str] = {}
+
+            def kind_of(vid: str) -> str:
+                got_kind = kinds.get(vid)
+                if got_kind is None:
+                    got_kind = kinds[vid] = self.resolver.kind(vid)
+                return got_kind
+
+            reading = getattr(self.mirror, "reading", None)
+            try:
+                with (reading() if callable(reading) else contextlib.nullcontext()):
+                    v = field_mode.card_verdict(
+                        card["files"], self.view.copies, kind_of,
+                        dest_volumes={d.id: d.volume_id for d in dests if d.volume_id},
+                        exclude_volumes=[f"vol:{card['serial']}"], phys_of=self._phys_of,
+                        match_fn=lambda row, rel: field_mode.row_is_this_file(
+                            row, rel, card["serial"], folders,
+                            on_nas=lambda r: kind_of(str(r.get("volume_id") or "")) == "nas"),
+                        unreadable=card.get("unreadable") or ())
+            finally:
+                # the copies the mirror turned out to hold are dropped from the local file HERE,
+                # once, not once per file inside the lookups
+                self.view.settle()
+            mstat = self.mirror.status()
+            if not mstat.get("rows") and not mstat.get("pulled_at"):
+                v["notes"].append("This laptop has not heard from the ledger yet, so only copies made here count.")
+            # the stamp is taken AFTER the settle (which shortens the local file) but with the
+            # generation this verdict STARTED from: a copy recorded while it ran must not be hidden
+            self._verdicts[card["serial"]] = (self._clock(), stamp(gen), v)
+            return v
 
     def invalidate(self) -> None:
         with self._lock:
@@ -680,7 +743,9 @@ class FieldService:
                 reached = res.get("status") == 200
                 ids = {f"vol:{str(v.get('serial') or '').upper()}" for v in self._scan() if v.get("serial")}
                 ids.add(self.pool_volume_id())
-                pulled = self.mirror.pull(ids)
+                # an AWAY volume stays in the pull unless it is a camera card: a card's copies
+                # never count, and there is a new one every few hours (audit comp-field-7)
+                pulled = self.mirror.pull(ids, keep=lambda vid: self.resolver.kind(vid) != "card")
                 info["online"] = bool(reached or pulled.get("ok"))
                 info["pulledRows"] = int(pulled.get("rows") or 0)
                 if not info["online"]:

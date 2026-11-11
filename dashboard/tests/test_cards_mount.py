@@ -38,7 +38,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from ccsync_dashboard import auth, cards, cards_pool
+from ccsync_dashboard import auth, cards, cards_pool, cards_wsgi
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
@@ -914,3 +914,145 @@ def test_the_health_line_is_not_served_to_a_stranger(tmp_path, monkeypatch):
     app = create_app(make_settings(tmp_path))
     with TestClient(app) as client:
         assert "cards" not in client.get("/api/v1/health").json()
+
+
+# -- audit dash-mounts-1 (2026-11-11): a stream nobody is reading stops ------------------------
+
+def _serve_handler_behind_the_real_stack(handler_cls):
+    """uvicorn on a loopback port the OS picks, the handler behind the shim, a2wsgi, the
+    disconnect listener and five BaseHTTPMiddleware layers (what app.py puts in front of it)."""
+    import asyncio
+    import socket
+    import threading
+
+    import uvicorn
+    from a2wsgi import WSGIMiddleware
+    from starlette.applications import Starlette
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.routing import Mount
+
+    inner = cards_wsgi.DisconnectAware(WSGIMiddleware(cards_wsgi.handler_wsgi(handler_cls), workers=4))
+    app = Starlette(routes=[Mount("/cards", inner)])
+
+    async def passthrough(request, call_next):
+        return await call_next(request)
+
+    for _ in range(5):
+        app.add_middleware(BaseHTTPMiddleware, dispatch=passthrough)
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="off"))
+    thread = threading.Thread(target=lambda: asyncio.run(server.serve(sockets=[sock])), daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 20
+    while not server.started and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert server.started
+
+    def stop():
+        server.should_exit = True
+        thread.join(20)
+
+    return sock.getsockname()[1], stop
+
+
+def test_a_media_stream_stops_when_the_browser_has_gone():
+    """Behind uvicorn a send after the disconnect returns silently, so the handler's own
+    `except (ConnectionError, OSError)` never fired and every abandoned media request read the
+    rest of the file into nothing, holding one of the engine's workers. Measured before the
+    fix: the client read 256 KiB of 200 MB and the producer produced all 200 MB."""
+    import socket
+    from http.server import BaseHTTPRequestHandler
+
+    total, chunk = 200 * 1024 * 1024, 1 << 16
+    made = {"n": 0, "how": None}
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(206)
+            self.send_header("Content-Length", str(total))
+            self.end_headers()
+            left = total
+            try:
+                while left > 0:
+                    self.wfile.write(b"\0" * chunk)
+                    made["n"] += chunk
+                    left -= chunk
+            except (ConnectionError, OSError):       # what handler._serve_range catches
+                made["how"] = "stopped"
+                return
+            made["how"] = "ran to the end"
+
+        def log_message(self, *a):
+            pass
+
+    port, stop = _serve_handler_behind_the_real_stack(H)
+    try:
+        s = socket.create_connection(("127.0.0.1", port))
+        s.sendall(b"GET /cards/video HTTP/1.1\r\nHost: x\r\nRange: bytes=0-\r\n\r\n")
+        got = 0
+        while got < 256 * 1024:
+            data = s.recv(65536)
+            assert data
+            got += len(data)
+        s.close()                                    # the seek: this request is abandoned
+        deadline = time.monotonic() + 30
+        while made["how"] is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+    finally:
+        stop()
+    assert made["how"] == "stopped", made
+    assert made["n"] < 32 * 1024 * 1024, made        # a few buffers past the close, not the file
+
+
+def test_a_stream_that_is_read_to_the_end_arrives_whole_and_a_post_is_untouched():
+    import http.client
+    from http.server import BaseHTTPRequestHandler
+
+    body = bytes(range(256)) * 4096                  # 1 MiB with a pattern
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            for at in range(0, len(body), 65536):
+                self.wfile.write(body[at:at + 65536])
+
+        def do_POST(self):
+            got = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(got)))
+            self.end_headers()
+            self.wfile.write(got)
+
+        def log_message(self, *a):
+            pass
+
+    port, stop = _serve_handler_behind_the_real_stack(H)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        conn.request("GET", "/cards/whole")
+        r = conn.getresponse()
+        assert r.status == 200 and r.read() == body
+        conn.request("POST", "/cards/echo", body=b"x" * 70000, headers={"Content-Type": "application/octet-stream"})
+        r = conn.getresponse()
+        assert r.status == 200 and r.read() == b"x" * 70000
+        conn.close()
+    finally:
+        stop()
+
+
+def test_the_writer_raises_the_closed_sockets_error_once_the_browser_has_gone():
+    import threading
+
+    gone = threading.Event()
+    sent = []
+    w = cards_wsgi._Writer(lambda status, headers: sent.append, gone)
+    w.write(b"HTTP/1.0 200 OK\r\nContent-Length: 4\r\n\r\nab")
+    assert sent == [b"ab"] and not w.client_gone()
+    gone.set()
+    with pytest.raises(BrokenPipeError):
+        w.write(b"cd")
+    assert sent == [b"ab"]
+    assert cards_wsgi._Writer(lambda s, h: sent.append).client_gone() is False     # no listener: as before

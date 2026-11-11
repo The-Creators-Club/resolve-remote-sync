@@ -896,3 +896,109 @@ def test_no_rescan_for_other_errors_idle_or_paused_folders(tmp_path):
     ):
         _path_missing_lane(tmp_path, root, state, posts, paused=paused).check_once()
     assert posts == []
+
+
+# -- audit comp-sync-5 (2026-11-11): the quiet poll ------------------------------------------
+
+class _QuietSyncthing:
+    """An idle Syncthing with one folder, one peer; counts what it is asked."""
+
+    def __init__(self):
+        self.asked: list[str] = []
+        self.bytes = 1_000_000
+        self.peers = {"PEER-1": {"connected": True, "inBytesTotal": 0, "outBytesTotal": 0, "type": "tcp-client"}}
+        self.up = True
+
+    def __call__(self, url, api_key, timeout):
+        path = url.split("8384", 1)[-1].split("?", 1)[0]
+        self.asked.append(path)
+        if not self.up:
+            raise ConnectionRefusedError("gone")
+        if path == "/rest/system/ping":
+            return {"ping": "pong"}
+        if path == "/rest/system/connections":
+            return {"total": {"inBytesTotal": self.bytes, "outBytesTotal": 0}, "connections": dict(self.peers)}
+        if path == "/rest/config":
+            return {"folders": [{"id": "proj-1", "path": "/x", "paused": False,
+                                 "devices": [{"deviceID": "ME"}, {"deviceID": "PEER-1"}]}]}
+        if path == "/rest/system/status":
+            return {"myID": "ME"}
+        if path == "/rest/db/status":
+            return {"state": "idle", "needTotalItems": 0, "needBytes": 0, "errors": 0, "pullErrors": 0}
+        if path == "/rest/db/completion":
+            return {"completion": 100, "needItems": 0, "needBytes": 0}
+        return {}
+
+    def sweeps(self):
+        return self.asked.count("/rest/db/status")
+
+
+def _quiet_lane(tmp_path, st):
+    cfg_xml = tmp_path / "config.xml"
+    cfg_xml.write_text("<configuration><gui><apikey>k</apikey></gui></configuration>", encoding="utf-8")
+    return SyncthingLane(api_key="k", config_xml_path=cfg_xml, http_get=st, expected_folder_ids=["proj-1"])
+
+
+def test_an_idle_lane_stops_sweeping_every_folder_every_poll(tmp_path):
+    st = _QuietSyncthing()
+    lane = _quiet_lane(tmp_path, st)
+    t = 0.0
+    for _ in range(syncthing_lane.QUIET_AFTER_IDLE_POLLS):
+        assert lane.poll_once(now=t) is True
+        t += 15
+    assert lane.status().state == STATE_IDLE
+    before = st.sweeps()
+    st.asked.clear()
+    for _ in range(4):                                          # a minute of quiet polls
+        st.bytes += 500                                         # keep-alives
+        assert lane.poll_once(now=t) is False
+        t += 15
+    assert st.sweeps() == 0 and set(st.asked) == {"/rest/system/ping", "/rest/system/connections"}
+    assert before >= syncthing_lane.QUIET_AFTER_IDLE_POLLS       # and before that it swept every poll
+
+
+def test_the_quiet_poll_sweeps_at_once_when_bytes_move_a_peer_changes_or_time_is_up(tmp_path):
+    st = _QuietSyncthing()
+    lane = _quiet_lane(tmp_path, st)
+    t = 0.0
+
+    def settle():
+        nonlocal t
+        lane._idle_streak = 0
+        for _ in range(syncthing_lane.QUIET_AFTER_IDLE_POLLS):
+            lane.poll_once(now=t)
+            t += 15
+        assert lane.poll_once(now=t) is False
+        t += 15
+
+    settle()
+    st.bytes += syncthing_lane.QUIET_BYTES + 1                  # a file is moving
+    assert lane.poll_once(now=t) is True
+    settle()
+    st.peers = {}                                               # the server dropped
+    assert lane.poll_once(now=t) is True
+    st.peers = {"PEER-1": {"connected": True}}
+    settle()
+    t += syncthing_lane.QUIET_FULL_SECONDS                      # nothing moved, but it has been long enough
+    assert lane.poll_once(now=t) is True
+
+
+def test_a_syncthing_that_dies_while_quiet_is_seen_on_the_next_poll(tmp_path):
+    st = _QuietSyncthing()
+    lane = _quiet_lane(tmp_path, st)
+    ticks: list[bool] = []
+
+    class Sup:
+        def tick(self, ok):
+            ticks.append(ok)
+
+    lane.supervisor = Sup()
+    t = 0.0
+    for _ in range(syncthing_lane.QUIET_AFTER_IDLE_POLLS + 1):
+        lane.poll_once(now=t)
+        t += 15
+    assert ticks and all(ticks)
+    st.up = False
+    assert lane.poll_once(now=t) is True                        # the full check runs and says so
+    assert ticks[-1] is False and lane.status().state == STATE_ERROR
+    assert lane._idle_streak == 0

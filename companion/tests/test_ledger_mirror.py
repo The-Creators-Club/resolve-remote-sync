@@ -122,14 +122,80 @@ def test_the_cursor_carries_over_and_pages_are_followed(tmp_path):
     assert srv2.calls[0][1].endswith("&since=3") and m.status()["rows"] == 4
 
 
-def test_a_different_set_of_volumes_starts_over(tmp_path):
-    srv = Server([([row(1)], "7")])
+def test_a_new_volume_is_caught_up_on_its_own_and_the_rest_carry_on(tmp_path):
+    """Audit comp-field-7 (2026-11-11): a different set used to start the whole pull over from
+    nothing, the NAS's ledger included, every time a card went in or out of a reader."""
+    srv = Server([([row(1, volume="vol:A")], "7")])
     m = mirror(tmp_path, srv)
     m.pull(["vol:A"])
-    srv2 = Server([([row(2, volume="vol:B")], "1")])
+    srv2 = Server([([row(2, volume="vol:B", name="B.braw")], "3"), ([], "3"), ([row(3, volume="vol:A", name="C.braw")], "9")])
     m._request = srv2
+    out = m.pull(["vol:A", "vol:B"])
+    urls = [c[1] for c in srv2.calls]
+    assert urls[0].endswith("?volumes=vol:B&since=")            # vol:B alone, from the start
+    assert urls[2].endswith("?volumes=vol:A,vol:B&since=7")     # then everything, from where it was
+    assert out["ok"] and m.status()["cursor"] == "9" and m.status()["volumes"] == ["vol:A", "vol:B"]
+    assert m.where("A001.braw", 100) and m.where("B.braw", 100) and m.where("C.braw", 100)
+
+
+def test_a_drive_that_went_into_the_bag_keeps_its_rows_and_stays_in_the_pull(tmp_path):
+    """The other half of comp-field-7: unplugging a drive deleted its rows, so a card copied to
+    two field drives dropped to "one copy" the moment one of them was put away."""
+    srv = Server([([row(1, volume="vol:A"), row(2, volume="vol:B", name="B.braw")], "5")])
+    m = mirror(tmp_path, srv)
     m.pull(["vol:A", "vol:B"])
-    assert srv2.calls[0][1].endswith("&since=")
+    srv2 = Server([([], "5")])
+    m._request = srv2
+    m.pull(["vol:A"])                                           # vol:B is in the bag
+    assert srv2.calls[0][1].endswith("?volumes=vol:A,vol:B&since=5")
+    assert m.where("B.braw", 100) and m.status()["volumes"] == ["vol:A", "vol:B"]
+
+
+def test_an_away_volume_is_dropped_when_it_is_a_card_or_long_gone(tmp_path):
+    now = [1_000_000.0]
+    srv = Server([([row(1, volume="vol:A"), row(2, volume="vol:CARD", name="B.braw"),
+                    row(3, volume="vol:OLD", name="C.braw")], "5")])
+    m = LedgerMirror({"dashboard_url": "http://dash.example", "dashboard_token": "tok"},
+                     path=tmp_path / "m.sqlite", request_fn=srv, clock=lambda: now[0])
+    m.pull(["vol:A", "vol:CARD", "vol:OLD"])
+    m._request = Server([([], "5")])
+    m.pull(["vol:A", "vol:OLD"], keep=lambda vid: vid != "vol:CARD")     # the card came out
+    assert m.where("B.braw", 100) == [] and m.where("C.braw", 100)
+    assert m.status()["volumes"] == ["vol:A", "vol:OLD"]
+    now[0] += (lm.KEEP_DAYS + 1) * 86400
+    m._request = Server([([], "5")])
+    m.pull(["vol:A"])                                           # vol:OLD not seen for two months
+    assert m.where("C.braw", 100) == [] and m.status()["volumes"] == ["vol:A"]
+
+
+def test_a_catch_up_that_dies_is_done_again_and_moves_no_cursor(tmp_path):
+    srv = Server([([row(1, volume="vol:A")], "7")])
+    m = mirror(tmp_path, srv)
+    m.pull(["vol:A"])
+    down = Server([])
+    down.status = OSError("dropped")
+    m._request = down
+    out = m.pull(["vol:A", "vol:B"])
+    assert out["ok"] is False and m.status()["cursor"] == "7" and m.status()["volumes"] == ["vol:A"]
+    srv3 = Server([([row(2, volume="vol:B", name="B.braw")], "3"), ([], "3"), ([], "7")])
+    m._request = srv3
+    assert m.pull(["vol:A", "vol:B"])["ok"] and srv3.calls[0][1].endswith("?volumes=vol:B&since=")
+
+
+def test_a_verdicts_lookups_share_one_connection(tmp_path, monkeypatch):
+    """Audit comp-field-4 (2026-11-11): one connection, one WAL pragma and the whole schema per
+    file on the card."""
+    srv = Server([([row(1)], "1")])
+    m = mirror(tmp_path, srv)
+    m.pull(["vol:6880882B"])
+    opened = []
+    real = lm.sqlite3.connect
+    monkeypatch.setattr(lm.sqlite3, "connect", lambda *a, **k: (opened.append(1), real(*a, **k))[1])
+    with m.reading():
+        for _ in range(200):
+            assert len(m.where("A001.braw", 100, T0)) == 1
+    assert len(opened) == 1
+    assert len(m.where("A001.braw", 100, T0)) == 1 and len(opened) == 2     # outside: one per call, as before
 
 
 def test_a_failed_pull_keeps_what_it_had_and_says_why(tmp_path):

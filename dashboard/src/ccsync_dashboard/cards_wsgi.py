@@ -40,8 +40,11 @@ Three smaller decisions, each with its reason:
 """
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import json
 import logging
+import threading
 from typing import Any, Callable, Iterable
 
 log = logging.getLogger("ccsync.dashboard.cards")
@@ -56,6 +59,81 @@ _DROP_HEADERS = frozenset({
 # `handle_one_request` bounds its own readline at 65 536 and a header block
 # larger than this is not a request anybody made on purpose.
 MAX_REQUEST_HEAD_BYTES = 64 * 1024
+
+# THE BROWSER THAT WENT AWAY (audit dash-mounts-1, 2026-11-11).
+#
+# Behind uvicorn a `send` after the client has disconnected returns silently
+# (ASGI spec 2.3), so the handler's `except (ConnectionError, OSError)`, which
+# is how the standalone server has always stopped a media stream nobody is
+# reading, never fired here. Every response ran to its last byte: a `<video>`
+# seek aborts its request and opens `bytes=N-`, and each abort then cost the
+# REST of an hour-long proxy read off the vault into nothing, on one of the
+# engine's 24 workers, for seconds. A few seconds of scrubbing filled the pool
+# and the page's own polls queued behind dead streams. Measured: a client that
+# read 256 KiB of a 200 MB answer and closed left the producer producing all
+# 200 MB; with this listener it stopped at 0.4 MiB.
+#
+# `DisconnectAware` watches `receive()` for `http.disconnect` and sets an
+# event; the event rides a ContextVar into the WSGI thread (a2wsgi runs the
+# app inside `contextvars.copy_context()`), where `_Writer.write` raises
+# BrokenPipeError once it is set: the very exception the handler already
+# expects from a closed socket. GET and HEAD only: a request with a body has
+# other readers of `receive` (app.body_size_gate replays a buffered POST body
+# as a `receive` that answers `http.request` for ever), and nothing a POST
+# returns here is big enough to matter.
+_CLIENT_GONE: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "ccsync_cards_client_gone", default=None)
+# A `receive` that keeps answering something other than a disconnect without
+# ever waiting is not one this listener can use; it stops asking after this
+# many, rather than spin.
+_MAX_STRAY_MESSAGES = 16
+
+
+async def watch_for_disconnect(receive: Callable, on_gone: Callable[[], None],
+                               forward: Any = None) -> None:
+    """Read `receive()` until `http.disconnect`, then call `on_gone()`.
+
+    Anything else it reads (a GET that does carry a body) is put on `forward`
+    (an asyncio.Queue) for the application, so no message is swallowed. Never
+    raises, and gives up quietly on a `receive` it cannot use: not hearing a
+    disconnect is exactly how things were before, never worse."""
+    stray = 0
+    try:
+        while True:
+            message = await receive()
+            if forward is not None:
+                forward.put_nowait(message)
+            if isinstance(message, dict) and message.get("type") == "http.disconnect":
+                on_gone()
+                return
+            stray += 1
+            if stray >= _MAX_STRAY_MESSAGES:
+                return
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - e.g. BaseHTTPMiddleware's "Unexpected message received"
+        log.debug("the disconnect listener stopped", exc_info=True)
+
+
+class DisconnectAware:
+    """ASGI wrapper for the a2wsgi-mounted handler: see _CLIENT_GONE."""
+
+    def __init__(self, app: Callable) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope.get("type") != "http" or scope.get("method") not in ("GET", "HEAD"):
+            await self.app(scope, receive, send)
+            return
+        gone = threading.Event()
+        inbox: asyncio.Queue = asyncio.Queue()
+        listener = asyncio.ensure_future(watch_for_disconnect(receive, gone.set, inbox))
+        token = _CLIENT_GONE.set(gone)
+        try:
+            await self.app(scope, inbox.get, send)
+        finally:
+            _CLIENT_GONE.reset(token)
+            listener.cancel()
 
 
 def _json_string(text: str) -> str:
@@ -117,18 +195,26 @@ class _Writer:
     call would break silently the day it is two.
     """
 
-    def __init__(self, start_response: Callable) -> None:
+    def __init__(self, start_response: Callable, gone: Any = None) -> None:
         self._start_response = start_response
         self._write: Callable[[bytes], Any] | None = None
         self._head = bytearray()
         self.started = False
         self.status = 0
+        # a threading.Event set when the browser has gone, or None (see
+        # _CLIENT_GONE): every write after that is the closed socket's error
+        self._gone = gone
+
+    def client_gone(self) -> bool:
+        return self._gone is not None and self._gone.is_set()
 
     # -- the file-like surface handler.py uses -----------------------------
 
     def write(self, data: bytes) -> int:
         if not data:
             return 0
+        if self.client_gone():
+            raise BrokenPipeError("the browser went away")
         if self.started:
             self._write(bytes(data))          # type: ignore[misc]
             return len(data)
@@ -222,7 +308,7 @@ def handler_wsgi(handler_cls: type, server: Any = None) -> Callable:
     """
 
     def app(environ: dict, start_response: Callable) -> Iterable[bytes]:
-        writer = _Writer(start_response)
+        writer = _Writer(start_response, _CLIENT_GONE.get())
         handler = handler_cls.__new__(handler_cls)
         handler.rfile = _Reader(request_head(environ), environ.get("wsgi.input"))
         handler.wfile = writer
@@ -236,6 +322,18 @@ def handler_wsgi(handler_cls: type, server: Any = None) -> Callable:
         handler.command = ""
         try:
             handler.handle_one_request()
+        except OSError:
+            if writer.client_gone():
+                # the browser left and a route that does not catch its own
+                # write errors let this one out: a closed tab, not a crash
+                log.debug("the browser went away during %s %s",
+                          environ.get("REQUEST_METHOD"), environ.get("PATH_INFO"))
+                return ()
+            log.exception("the Timeline Cards handler raised on %s %s",
+                          environ.get("REQUEST_METHOD"), environ.get("PATH_INFO"))
+            writer.fallback("500 Internal Server Error",
+                            "the Timeline Cards handler raised; see the "
+                            "dashboard log")
         except Exception:  # noqa: BLE001 - a route's crash is a 500, not a dead mount
             log.exception("the Timeline Cards handler raised on %s %s",
                           environ.get("REQUEST_METHOD"), environ.get("PATH_INFO"))

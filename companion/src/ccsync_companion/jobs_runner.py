@@ -823,7 +823,23 @@ class JobRunner:
             # this list with what it would have offered, so naming ids can
             # only ever narrow what comes back, never widen it.
             body["ids"] = list(ids)
-        status, parsed = self._call("/claim", body)
+        try:
+            status, parsed = self._call("/claim", body)
+        except Exception as exc:                                  # noqa: BLE001
+            # A TRANSPORT FAILURE IS "NOT NOW", like the heartbeat's (audit
+            # comp-jobs-3, 2026-11-11). default_request RAISES on a refused
+            # connection, a DNS wobble or a timeout; this let it out of the
+            # tick, so the offer was never cleared (only a delivered report
+            # reply replaces one), the state stayed "ready", and a laptop taken
+            # off the tailnet with a job on offer made a claim attempt and
+            # wrote a full traceback every 20 s for as long as it was away,
+            # pushing the history a diagnostics bundle needs out of the log.
+            # Returning None lands the tick in "nothing offered": the offer is
+            # an invitation, and the next report reply that gets through
+            # re-issues it. Nothing about a 401/403 changes (that is an answer).
+            log.info("jobs: could not reach the dashboard to claim (%s); "
+                     "waiting for the next offer", exc)
+            return None
         if status in CREDENTIAL_REFUSED_STATUSES:
             # wire-5: the same door, and the claim is where a suspended
             # machine notices next after the job it was running ended.

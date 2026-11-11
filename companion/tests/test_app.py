@@ -7748,3 +7748,31 @@ def test_a_pushed_update_refused_at_receipt_backs_off_the_same_way(tmp_path, mon
     app._run_pushed_update("9.9.9@now", "9.9.9", first_attempt=False)
     assert app._pushed_update_retry_at - clock[0] == \
         upgrade_mod.UPGRADE_BACKOFF_SECONDS[0]
+
+
+def test_the_staging_folders_are_not_walked_again_on_every_tray_tick(tmp_path):
+    """Audit comp-app-1 (2026-11-11): the tray rebuilds sync_guard() every 2 s, and its ingest
+    section walked and stat'ed every finished or held staging batch on the sync drive each time."""
+    app = _unblocked_app(tmp_path)
+    walks = []
+
+    class _Ingestor:
+        def staging_report(self):
+            walks.append(1)
+            return {"bytes": 5, "batches": len(walks), "oldest_at": "2026-08-01T00:00:00Z"}
+
+        def prune_staging(self, max_age_days=0):
+            return {"removed": 1, "freed_bytes": 5}
+
+    app.broll_ingestor = _Ingestor()
+    app.music_ingestor = None
+    first = app.ingest_staging_report()
+    for _ in range(20):
+        assert app.ingest_staging_report() == first
+    assert len(walks) == 1
+    first["bytes"] = 999                                   # a caller's copy is its own
+    assert app.ingest_staging_report()["bytes"] == 5
+    app.clear_finished_ingest_staging()                    # the button: what shows next is fresh
+    assert app.ingest_staging_report()["batches"] == 2 and len(walks) == 2
+    app._ingest_staging_memo = (0.0, {})                   # and so is anything older than the TTL
+    assert app.ingest_staging_report()["batches"] == 3

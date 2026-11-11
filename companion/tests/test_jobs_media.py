@@ -253,6 +253,31 @@ def test_a_decode_that_produced_nothing_is_a_header_and_no_bins():
     assert jobs_media.peaks_bytes(b"") == b"PK" + bytes([200, 0])
 
 
+@pytest.mark.parametrize("sizes", [[1], [79], [80], [81], [1 << 20], [7, 4096, 3, 65536, 1], [160001]])
+def test_the_streaming_binner_makes_the_same_bytes_whatever_the_block_sizes(sizes):
+    """Audit comp-jobs-1 (2026-11-11): the recipe held the whole decode in memory and five more
+    copies of it (288 MB per hour of audio). The binner that replaced it must produce exactly
+    what peaks_bytes produces: a page in the other repo reads these files, and a block boundary
+    that falls inside a sample or a bin must not move a single byte."""
+    import random
+    rnd = random.Random(11)
+    raw = bytes(rnd.getrandbits(8) for _ in range(8000 * 2 * 3 + 37))      # 3 s and a ragged tail
+    binner = jobs_media.PeakBinner()
+    at, n = 0, 0
+    while at < len(raw):
+        step = sizes[n % len(sizes)]
+        binner.append(raw[at:at + step])
+        at += step
+        n += 1
+    assert binner.total == len(raw)
+    assert binner.payload() == jobs_media.peaks_bytes(raw) == reference_peaks(raw)
+
+
+def test_the_streaming_binner_with_nothing_fed_is_a_header_and_no_bins():
+    binner = jobs_media.PeakBinner()
+    assert binner.total == 0 and binner.payload() == b"PK" + bytes([200, 0])
+
+
 # =====================================================================
 # Against real ffmpeg.
 # =====================================================================

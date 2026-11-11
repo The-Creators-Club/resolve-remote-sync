@@ -247,3 +247,45 @@ def test_the_flusher_is_off_when_the_ledger_is_off(box):
     srv = Server()
     f = ob.OutboxFlusher({"sorter_ledger_enabled": False}, path=box, send=srv)
     assert f.tick() is None and f.start() is None and f._thread is None and not srv.got
+
+
+def test_a_big_backlog_is_sent_with_a_handful_of_rewrites_not_one_per_batch(box, monkeypatch):
+    """Audit comp-field-6 (2026-11-11): every 500-copy batch re-read, re-serialised and rewrote
+    the whole file with fsync, so a backlog cost quadratic work (21 s at 40,000 copies)."""
+    ob.append([copy(path=f"Trip/A{i:05d}.braw") for i in range(2500)], box)
+    writes, reads = [], []
+    real_write, real_read = ob._write_all, ob._read
+    monkeypatch.setattr(ob, "_write_all", lambda path, items: (writes.append(len(items)), real_write(path, items))[1])
+    monkeypatch.setattr(ob, "_read", lambda path: (reads.append(1), real_read(path))[1])
+    srv = Server()
+    out = ob.flush(srv, box, batch=100)
+    assert (out["sent"], out["remaining"]) == (2500, 0) and len(srv.got) == 25
+    assert writes == [500, 0]                       # one drop after 20 batches, one at the end
+    assert len(reads) <= 6
+
+
+def test_a_flush_that_stops_halfway_drops_exactly_what_was_delivered(box):
+    ob.append([copy(path=f"Trip/A{i:03d}.braw") for i in range(30)], box)
+    out = ob.flush(Server(200, 200, "boom"), box, batch=10)
+    assert (out["sent"], out["remaining"]) == (20, 10)
+    assert [c["path"] for c in ob.peek(box)][0] == "Trip/A020.braw"
+
+
+def test_a_refused_batch_in_the_middle_is_set_aside_and_the_rest_still_go(box):
+    ob.append([copy(path=f"Trip/A{i:03d}.braw") for i in range(30)], box)
+    out = ob.flush(Server(200, 422, 200), box, batch=10)
+    assert (out["sent"], out["rejected"], out["remaining"]) == (20, 10, 0)
+    side = box.with_name(ob.REJECTED_FILENAME)
+    assert len(side.read_text(encoding="utf-8").splitlines()) == 10
+
+
+def test_pending_parses_the_file_only_when_it_changed(box, monkeypatch):
+    ob.append([copy(), copy(path="Trip/B.braw")], box)
+    reads = []
+    real = ob._read
+    monkeypatch.setattr(ob, "_read", lambda path: (reads.append(1), real(path))[1])
+    assert [ob.pending(box) for _ in range(20)] == [2] * 20 and len(reads) == 1
+    ob.append([copy(path="Trip/C.braw")], box)
+    assert ob.pending(box) == 3
+    ob.flush(Server(), box)
+    assert ob.pending(box) == 0

@@ -1909,7 +1909,9 @@ def _notices_context(conn, error: str | None = None) -> dict:
     # rather than in the template so the panel and its headline can never
     # disagree: same registry, same evidence set.
     kinds = db.notice_kinds()
-    checked = set(db.notice_check_times(conn))
+    # FRESH evidence only (audit dash-collector-2, 2026-11-11): a stamp from the
+    # last time a check ran, however long ago, used to be enough for OK.
+    checked, stale = db.notice_checks_fresh(conn)
     ran = sum(1 for k in kinds if k["kind"] in checked)
     return {
         "notices": open_rows,
@@ -1922,6 +1924,9 @@ def _notices_context(conn, error: str | None = None) -> dict:
         # with no writer must render NOT CHECKED, never a false OK. Evidence,
         # not the registry itself -- see db.notice_check_times.
         "checked_kinds": checked,
+        # {kind: when it last ran} for a kind that HAS run but not recently:
+        # rendered NOT CHECKED, with a title that says so instead of "never"
+        "stale_kinds": stale,
         # UX-6: how many of the registry's kinds this build has actually
         # evaluated, and how many have never run.
         "notice_checks_ran": ran,

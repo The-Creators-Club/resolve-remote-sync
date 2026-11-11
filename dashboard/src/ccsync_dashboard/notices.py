@@ -190,11 +190,14 @@ def run_checks(
     )
     ran = 0
     for check in checks:
+        name = getattr(check, "__name__", "?")
         try:
             check(conn, settings, stamp)
             ran += 1
-        except Exception:  # noqa: BLE001 - see the docstring
-            log.exception("notice check %s failed; continuing", getattr(check, "__name__", "?"))
+            _check_ran_clean(conn, name, stamp)
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            log.exception("notice check %s failed; continuing", name)
+            _check_raised(conn, name, exc, stamp)
         # ONE COMMIT PER CHECK (2026-09-03 database is locked, api_report held
         # the lock). Each check does its own syscalls FIRST and its writes
         # after, so committing here is what keeps a syscall out of an open
@@ -208,16 +211,53 @@ def run_checks(
     try:
         _check_pending_devices(conn, stamp, pending_devices)
         ran += 1
-    except Exception:  # noqa: BLE001
+        _check_ran_clean(conn, "_check_pending_devices", stamp)
+    except Exception as exc:  # noqa: BLE001
         log.exception("notice check for pending devices failed; continuing")
+        _check_raised(conn, "_check_pending_devices", exc, stamp)
     _commit(conn)
     try:
         _check_plan_without_share(conn, stamp, folder_devices)
         ran += 1
-    except Exception:  # noqa: BLE001
+        _check_ran_clean(conn, "_check_plan_without_share", stamp)
+    except Exception as exc:  # noqa: BLE001
         log.exception("notice check for plan without share failed; continuing")
+        _check_raised(conn, "_check_plan_without_share", exc, stamp)
     conn.commit()
     return ran
+
+
+CHECK_FAILED_KIND = "notice_check_failed"
+
+
+def _check_raised(conn, name: str, exc: BaseException, stamp: str) -> None:
+    """A check that RAISED is a finding of its own (audit dash-collector-2,
+    2026-11-11): it was a traceback in a log nobody opens while the panel kept
+    its kinds at OK. Never raises. No rollback here on purpose: the connection
+    is the collector cycle's, and what it holds uncommitted before this pass
+    is not this function's to throw away."""
+    try:
+        db.notice(
+            conn, CHECK_FAILED_KIND, "error", subject=str(name).lstrip("_"),
+            body=(f"The server's own check `{str(name).lstrip('_')}` stopped with an error "
+                  f"({type(exc).__name__}: {str(exc)[:200]}), so whatever it watches is not "
+                  "being watched right now. Its last findings are left as they were."),
+            fix=("Open the dashboard container's log and look for "
+                 f"\"notice check {name} failed\" for the full error. If it follows an "
+                 "update, roll back from Settings, Packages; otherwise send the log line "
+                 "to support."),
+            now=stamp)
+    except Exception:  # noqa: BLE001
+        log.exception("could not record that %s failed", name)
+
+
+def _check_ran_clean(conn, name: str, stamp: str) -> None:
+    """The other half: a check that has run without raising closes its own
+    `notice_check_failed`. Never raises."""
+    try:
+        db.clear_notice(conn, CHECK_FAILED_KIND, str(name).lstrip("_"), now=stamp)
+    except Exception:  # noqa: BLE001
+        log.debug("could not clear the failed-check notice for %s", name, exc_info=True)
 
 
 def _commit(conn) -> None:

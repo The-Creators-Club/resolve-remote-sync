@@ -332,23 +332,65 @@ def peaks_bytes(raw: bytes) -> bytes:
     branch's `min(255, ...)` and the numpy branch's uint8 cast agree even at
     -32768, the one sample value where the arithmetic exceeds 255.
     """
+    return b"PK" + bytes([PEAK_RATE, 0]) + _peak_bins(raw)
+
+
+def _peak_bins(raw: bytes) -> bytes:
+    """The bins of `peaks_bytes`, without the header: one byte per whole bin of
+    `raw`; a trailing part-bin makes none."""
     per = PEAK_SAMPLE_RATE // PEAK_RATE
     count = len(raw) // 2 // per
     if count <= 0:
-        return b"PK" + bytes([PEAK_RATE, 0])
+        return b""
     try:
         import numpy as np
         samples = np.frombuffer(raw, dtype="<i2", count=count * per)
-        peaks = (np.abs(samples.astype("int32")).reshape(-1, per).max(axis=1)
-                 * 255 // 32767).astype("uint8").tobytes()
+        return (np.abs(samples.astype("int32")).reshape(-1, per).max(axis=1)
+                * 255 // 32767).astype("uint8").tobytes()
     except ImportError:
         import array
         block = array.array("h")
         block.frombytes(raw[:count * per * 2])
-        peaks = bytes(
+        return bytes(
             min(255, max(map(abs, block[i * per:(i + 1) * per])) * 255 // 32767)
             for i in range(count))
-    return b"PK" + bytes([PEAK_RATE, 0]) + peaks
+
+
+class PeakBinner:
+    """`peaks_bytes`, fed a block at a time: the SAME BYTES out, without the
+    whole decode ever being in memory.
+
+    Audit comp-jobs-1 (2026-11-11): the recipe kept every PCM block the decode
+    produced, joined them into one bytes object, and then widened that to
+    int32 and took its absolute value: about six times the PCM in transient
+    memory, 288 MB for an hour of audio and over a gigabyte for a three-hour
+    interview, inside the companion on an editor's machine beside Resolve.
+    A bin is PEAK_SAMPLE_RATE // PEAK_RATE samples and never spans more than
+    the part-bin carried from the block before, so each block is binned as it
+    arrives and only the bins (one byte per 5 ms) are kept.
+
+    It is a list as far as `_drain_binary` is concerned (`append`), so the
+    drain thread, its failure hand-back and the "read to the end" check
+    (comp-ytdl-jobs-4) are exactly what they were.
+    """
+
+    def __init__(self) -> None:
+        self._carry = b""
+        self._bins = bytearray()
+        self.total = 0                    # PCM bytes seen, for "was there any audio"
+
+    def append(self, block: bytes) -> None:
+        self.total += len(block)
+        data = self._carry + block if self._carry else block
+        whole = len(data) // (2 * (PEAK_SAMPLE_RATE // PEAK_RATE)) * (2 * (PEAK_SAMPLE_RATE // PEAK_RATE))
+        if whole:
+            self._bins += _peak_bins(data[:whole])
+        self._carry = data[whole:]
+
+    def payload(self) -> bytes:
+        """The `.peaks` file. The part-bin left over at the end is dropped, as
+        `peaks_bytes` drops it."""
+        return b"PK" + bytes([PEAK_RATE, 0]) + bytes(self._bins)
 
 
 # ======================================================================
@@ -638,8 +680,14 @@ def _read_pcm(
     ceiling: float = COPY_TIMEOUT_SECONDS,
     clock: Callable[[], float] = time.monotonic,
     popen: Optional[Callable[..., Any]] = None,
+    sink: Optional[Any] = None,
 ) -> tuple[int, bytes, str]:
     """Run an ffmpeg that writes PCM to stdout, reading it as it comes.
+
+    `sink` (anything with `append(bytes)`, e.g. a PeakBinner) is handed each
+    block as it is read and the PCM is then NOT kept or returned (the second
+    item of the answer is b""); without one the whole decode comes back, as
+    it always did.
 
     The PCM is drained on its OWN thread and the stop/ceiling checks ride a
     POLL_SECONDS timer here, which is `_run_ffmpeg`'s shape and now for the
@@ -657,7 +705,7 @@ def _read_pcm(
     except Exception as exc:                                    # noqa: BLE001
         raise MediaJobError(f"could not start ffmpeg: {exc}") from exc
     errors: list[str] = []
-    chunks: list[bytes] = []
+    chunks: Any = sink if sink is not None else []
     failure: list[str] = []
     stderr_thread = threading.Thread(target=_drain_text, args=(proc.stderr, errors),
                                      name="ccsync-media-stderr", daemon=True)
@@ -714,11 +762,11 @@ def _read_pcm(
         proc.wait(timeout=30)
     except Exception:
         _kill(proc)
-    return int(proc.returncode or 0), b"".join(chunks), \
+    return int(proc.returncode or 0), (b"" if sink is not None else b"".join(chunks)), \
         "\n".join(errors).strip()[-200:]
 
 
-def _drain_binary(stream: Any, sink: list[bytes],
+def _drain_binary(stream: Any, sink: Any,
                   failure: Optional[list[str]] = None) -> None:
     """Read a binary pipe to EOF. Never raises -- it runs on its own thread,
     where an exception would go to a stderr a windowed build does not have;
@@ -937,9 +985,11 @@ class MediaJob:
             return [final.name], True, None
         out_dir.mkdir(parents=True, exist_ok=True)
         _codec, duration = probe_audio(self.ffmpeg_path, source)
-        code, raw, err = _read_pcm(
+        binner = PeakBinner()
+        code, _unused, err = _read_pcm(
             peaks_cmd(self.ffmpeg_path, source), should_stop=self.should_stop,
-            ceiling=COPY_TIMEOUT_SECONDS, clock=self.clock, popen=self.popen)
+            ceiling=COPY_TIMEOUT_SECONDS, clock=self.clock, popen=self.popen,
+            sink=binner)
         if code != 0:
             # bug-comp-media-4 (2026-09-25): a video-only angle (a drone, a
             # second camera with no sound) makes this decode exit non-zero
@@ -953,9 +1003,9 @@ class MediaJob:
             if not _codec and _NO_OUTPUT_STREAM in (err or "").lower():
                 raise MediaJobError("no audio track", retryable=False)
             raise MediaJobError(err or f"ffmpeg exited {code}")
-        if not raw:
+        if not binner.total:
             raise MediaJobError("there is no audio to draw", retryable=False)
-        payload = peaks_bytes(raw)
+        payload = binner.payload()
 
         def write(partial: Path) -> None:
             partial.write_bytes(payload)

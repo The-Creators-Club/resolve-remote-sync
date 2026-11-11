@@ -284,6 +284,57 @@ def ci_green_for(sha: str) -> bool:
     return any(str(r.get("headSha") or "") == sha for r in runs)
 
 
+def ci_jobs_not_run(sha: str, needed: tuple[str, ...]) -> list[str] | None:
+    """Which of the ci.yml jobs in `needed` did NOT run to success in the
+    green run for exactly `sha`: [] when all of them did, the names otherwise,
+    and None when the question could not be answered (the caller refuses).
+
+    WHY A GREEN RUN IS NOT ENOUGH (audit deploy-release-2 = tests-ci-6,
+    2026-11-11). ci.yml's `linux` job has been `if: false` since 2026-11-10
+    (it held companion releases while its dashboard suite flaked), and A
+    SKIPPED JOB LEAVES THE RUN GREEN. That job is the only place the
+    dashboard, server, tools and web-app suites run, and the CRLF, licence
+    and notices gates with them, so "ci.yml green on this commit" stopped
+    saying anything about a dashboard. Every gate here read the run's
+    conclusion and nothing else. Asking per JOB is what lets the companion
+    half keep releasing on the two jobs that do run, while a dashboard is
+    refused until its own job has.
+
+    A matrix job is listed as `name (leg)`, so a needed name matches itself
+    and anything that starts with it and a space; every leg has to be a
+    success."""
+    if not sha or not needed:
+        return None if not sha else []
+    rc, out, _err = run(["gh", "run", "list", "--workflow", CI_WORKFLOW,
+                         "--commit", sha, "--status", "success", "--limit", "1",
+                         "--json", "databaseId,headSha"])
+    if rc != 0:
+        return None
+    try:
+        runs = [r for r in json.loads(out or "[]") if str(r.get("headSha") or "") == sha]
+    except (ValueError, AttributeError, TypeError):
+        return None
+    if not runs:
+        return None
+    rc, out, _err = run(["gh", "run", "view", str(runs[0].get("databaseId")), "--json", "jobs"])
+    if rc != 0:
+        return None
+    try:
+        jobs = json.loads(out or "{}").get("jobs")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(jobs, list) or not jobs:
+        return None
+    missing = []
+    for want in needed:
+        legs = [j for j in jobs if isinstance(j, dict)
+                and (str(j.get("name") or "") == want
+                     or str(j.get("name") or "").startswith(want + " "))]
+        if not legs or any(str(j.get("conclusion") or "") != "success" for j in legs):
+            missing.append(want)
+    return missing
+
+
 def full_commit(sha: str) -> str:
     """The full 40-hex commit for `sha` (manifests record `rev-parse --short`), or "" when
     this checkout cannot resolve it. ci_green_for compares headSha exactly, so a short sha

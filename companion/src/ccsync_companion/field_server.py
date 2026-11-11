@@ -159,6 +159,22 @@ class FieldRequestHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             length = -1
         if length < 0 or length > MAX_BODY_BYTES:
+            # Take a modestly oversized body off the socket before refusing it (never kept, and
+            # never more than 16x the limit). Answering and closing with the body still unread
+            # makes Windows RESET the connection, and the page then sees "network error" instead
+            # of this sentence; the suite caught it as a WinError 10053 once in a few runs under
+            # pytest -n (2026-11-11). Anything bigger is refused unread, as before.
+            if 0 < length <= 16 * MAX_BODY_BYTES:
+                left = length
+                try:
+                    while left > 0:
+                        chunk = self.rfile.read(min(left, 65536))
+                        if not chunk:
+                            break
+                        left -= len(chunk)
+                except OSError:
+                    pass
+            self.close_connection = True
             self._json(413 if length > 0 else 400, {"ok": False, "error": "that request is too large"})
             return None
         raw = self.rfile.read(length) if length else b""

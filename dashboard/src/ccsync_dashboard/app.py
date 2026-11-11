@@ -939,7 +939,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
-            # The watchdog first: stopping the collector is exactly what it
+            # THE NEW EDITOR'S CHILD FIRST (audit lens-longrun-dashboard-1,
+            # 2026-11-11). Its SIGTERM handler is what flushes every open cut
+            # list (cards_edit), and it used to be the LAST thing stopped
+            # here, behind joins of the watchdog (5 s), the collector (10 s)
+            # and the executor (5 s). `docker stop` gives the container ten
+            # seconds in all before SIGKILL, and uvicorn spends some of that
+            # draining requests before this block even starts, so the step
+            # that saves an editor's unsaved cuts was the one that got killed.
+            # Nothing below depends on the child being alive, and the child
+            # depends on nothing below: it writes its own files in the vault.
+            try:
+                await cards_edit.shutdown(app)
+            except Exception:  # noqa: BLE001 - the rest of the shutdown still has to run
+                log.exception("could not stop the new editor's child cleanly")
+            # The watchdog next: stopping the collector is exactly what it
             # would otherwise report as a dead thread.
             watchdog.stop()
             if collector is not None:
@@ -956,9 +970,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             executor.stop()
             cards.stop_engine(app)
             sorter.stop_sorter(app)
-            # The new editor's child process: stopped GRACEFULLY, because its
-            # SIGTERM handler is what flushes every open cut list (cards_edit).
-            await cards_edit.shutdown(app)
             if feed_poller is not None:
                 feed_poller.stop()
             # ...and the other half: an update that has finished staging asks

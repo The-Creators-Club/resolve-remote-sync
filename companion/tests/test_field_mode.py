@@ -351,6 +351,7 @@ def test_once_the_mirror_has_it_the_local_row_is_dropped_so_it_is_not_said_twice
     view = fm.LedgerView(mirror, lc)
     got = view.copies("A.braw", 10, 1000)
     assert sorted((c["volume_id"], c["source"]) for c in got) == [("vol:A", "mirror"), ("vol:B", "local")]
+    assert view.settle() == 1                      # dropped at the end of a verdict, in one go
     assert len(lc) == 1 and fm.LocalCopies(tmp_path / "c.jsonl").matching("A.braw", 10)[0]["volume_id"] == "vol:B"
 
 
@@ -362,3 +363,113 @@ def test_a_broken_mirror_does_not_break_the_verdict(tmp_path):
     lc = fm.LocalCopies(tmp_path / "c.jsonl")
     lc.add([local_row()])
     assert len(fm.LedgerView(Broken(), lc).copies("A.braw", 10, 1000)) == 1
+
+
+# ------------------------------------------------------- the 2026-11-11 audit (comp-field-*)
+@pytest.mark.parametrize("rel,size,judged", [
+    ("DCIM/100NZ9_1/DSC_0001.NEV", 5_000_000_000, True),      # Nikon N-RAW: on no list before
+    ("A001/A001C001.arx", 2_000_000_000, True),
+    ("CLIP0001.cine", 9_000_000_000, True),
+    ("DCIM/100CANON/CRW_0001.CRW", 8_000_000, True),
+    ("DCIM/100GOPRO/GX010001.LRV", 300_000_000, False),       # a low-res twin, however big
+    ("DCIM/100MEDIA/DJI_0001.SRT", 4_000_000, False),
+    ("PRIVATE/M4ROOT/MEDIAPRO.XML", 9_000, False),
+    ("FIRMWARE/BODYDATA.DAT", 400_000_000, False),
+    ("CLIPS/TAKE0001.xyzraw", 3_000_000_000, True),           # nobody knows it: it is big, so it waits
+    ("CLIPS/TAKE0001.xyzraw", 1 << 20, True),
+    ("MISC/INDEX.xyz", 40_000, False),                        # small bookkeeping under an unknown name
+    ("._TAKE0001.xyzraw", 3_000_000_000, False),
+    ("TAKE0001.xyzraw.partial", 3_000_000_000, False),
+])
+def test_an_unknown_file_big_enough_to_be_footage_is_waited_for(rel, size, judged):
+    """comp-field-2: the verdict waited only for extensions on a list, so a card of Nikon N-RAW
+    alone read "Nothing on this card needs backing up"."""
+    assert fm.is_judged(rel, size) is judged
+
+
+def test_without_a_size_an_unknown_file_gets_the_list_answer():
+    assert fm.is_judged("CLIPS/TAKE0001.xyzraw") is False and fm.is_judged("DSC_0001.NEV") is True
+
+
+def test_a_card_of_a_format_nobody_listed_is_not_called_empty():
+    v = fm.card_verdict([["CLIPS/TAKE0001.xyzraw", 3_000_000_000, 1.0]], lookup({}), kind_of)
+    assert (v["state"], v["safeToFormat"], v["tracked"], v["none"]) == ("unsafe", False, 1, 1)
+
+
+def test_a_card_with_a_folder_that_would_not_read_is_never_safe():
+    """comp-field-1: every file that DID list is at home, and the card is still not safe."""
+    files = card("DCIM/100MEDIA/A.mp4", "DCIM/100MEDIA/B.mp4")
+    table = {"A.mp4": ["nas:pool"], "B.mp4": ["nas:pool"]}
+    v = fm.card_verdict(files, lookup(table), kind_of, unreadable=["DCIM/101MEDIA"])
+    assert (v["state"], v["safeToFormat"], v["safe"]) == ("unsafe", False, 2)
+    assert "could not be read" in v["headline"] and "DCIM/101MEDIA" in v["headline"]
+    assert v["unreadable"] == ["DCIM/101MEDIA"] and "unreadable" in v["flags"]
+    assert fm.card_verdict(files, lookup(table), kind_of)["safeToFormat"] is True     # and without it, it is
+
+
+def test_a_card_that_listed_nothing_because_it_would_not_read_is_not_nothing_to_back_up():
+    v = fm.card_verdict([], lookup({}), kind_of, unreadable=[""])
+    assert v["state"] == "unsafe" and v["safeToFormat"] is False
+    assert "the card's top folder" in v["headline"] and "Nothing on this card" not in v["headline"]
+
+
+def test_what_the_machine_says_now_beats_the_disk_a_row_was_stamped_with():
+    """comp-field-8: two partitions of one disk, recorded on different days under different disk
+    numbers, are one copy when the machine can say they are one disk now."""
+    rows = [{"volume_id": "vol:OURS1", "path": "x", "phys": "disk:3"},
+            {"volume_id": "vol:OURS2", "path": "x", "phys": "disk:2"}]
+    assert fm.file_verdict(rows, kind_of)["counted"] == 2                       # nothing else to go on
+    assert fm.file_verdict(rows, kind_of, lambda vid: "disk:2")["counted"] == 1
+    assert fm.file_verdict(rows, kind_of, lambda vid: "")["counted"] == 2       # away: the stamp is all there is
+
+
+def test_a_whole_verdict_rewrites_the_local_file_once_not_once_per_file(tmp_path, monkeypatch):
+    """comp-field-3: 2,000 lookups that each found the mirror now held the copy rewrote and
+    fsynced the whole file 2,000 times, inside the page's poll."""
+    lc = fm.LocalCopies(tmp_path / "c.jsonl")
+    names = [f"A{i:04d}.braw" for i in range(300)]
+    lc.add([local_row(name=n, path=f"FieldBackup/d/{n}") for n in names])
+    mirror = FakeMirror([{"name": n, "size": 10, "volume_id": "vol:A", "path": f"FieldBackup/d/{n}"} for n in names])
+    view = fm.LedgerView(mirror, lc)
+    writes = []
+    real = fm._atomic_write
+    monkeypatch.setattr(fm, "_atomic_write", lambda path, text: (writes.append(path), real(path, text))[1])
+    for n in names:
+        assert [c["source"] for c in view.copies(n, 10, 1000)] == ["mirror"]
+    assert writes == [] and len(lc) == 300
+    assert view.settle() == 300 and len(writes) == 1 and len(lc) == 0
+    assert view.settle() == 0 and len(writes) == 1
+    assert len(fm.LocalCopies(tmp_path / "c.jsonl")) == 0
+
+
+def test_local_copies_are_found_by_name_and_size_after_every_kind_of_change(tmp_path):
+    p = tmp_path / "c.jsonl"
+    lc = fm.LocalCopies(p)
+    lc.add([local_row(), local_row(volume_id="vol:B"), local_row(name="B.braw", path="FieldBackup/d/B.braw")])
+    assert {r["volume_id"] for r in lc.matching("a.braw", 10)} == {"vol:A", "vol:B"}
+    lc.add([local_row(size=11)])                                # the same place, a different file now
+    assert [r["volume_id"] for r in lc.matching("A.braw", 10)] == ["vol:B"]
+    assert [r["size"] for r in lc.matching("A.braw", 11)] == [11]
+    lc.forget([{"volume_id": "vol:B", "path": local_row()["path"]}])
+    assert lc.matching("A.braw", 10) == [] and len(lc) == 2
+    again = fm.LocalCopies(p)                                   # and the file says the same
+    assert len(again) == 2 and [r["size"] for r in again.matching("A.braw", 11)] == [11]
+    assert len(again.matching("B.braw", 10)) == 1
+
+
+def test_the_state_file_is_read_again_only_when_it_changed(tmp_path, monkeypatch):
+    """comp-field-4: a verdict asks for the kinds several times per file on the card."""
+    p = tmp_path / "state.json"
+    store = fm.FieldStore(p)
+    store.set_kind("vol:A", "ours")
+    reads = []
+    real = Path.read_text
+    monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: (reads.append(self), real(self, *a, **k))[1])
+    for _ in range(50):
+        assert store.kinds() == {"vol:A": "ours"}
+    assert len(reads) == 1
+    store.set_kind("vol:B", "client")                           # its own write is seen
+    assert store.kinds() == {"vol:A": "ours", "vol:B": "client"}
+    other = fm.FieldStore(p)                                    # and so is somebody else's
+    other.set_kind("vol:A", "laptop")
+    assert store.kinds()["vol:A"] == "laptop"

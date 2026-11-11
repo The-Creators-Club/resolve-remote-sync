@@ -1,0 +1,47 @@
+[
+  {
+    "id": "lens-sql-1",
+    "title": "The sorter ledger opens a new SQLite connection for every short-lived thread and never closes it",
+    "category": "leak",
+    "severity": "high",
+    "confidence": "CONFIRMED",
+    "where": "footage-sorter footage_sorter/ledger.py:342-351 (_rd); footage_sorter/engine.py:808 (thread per ledger change), also engine.py:387,422,939,1451,1477, ledger_sources.py:227,365",
+    "what": "_rd() caches a reader in threading.local but also appends it to self._readers, closed only in close(). A thread that exits loses its slot but the list keeps the connection. ledger_summaries_now starts a new thread on every ledger version change and batch_summaries calls _rd() there; scans, moves, audits and NAS/cloud listings do the same per event.",
+    "cost": "One leaked connection (about 2.3 MB page cache + shm map, 2 handles) per ledger change a page sees, for the life of the dashboard process. Hundreds of MB within weeks today; days at commercial scale.",
+    "evidence": "p_readers.py: 200 short-lived threads each reading a 200k-row ledger -> 200 readers, +401 handles, +466 MB RSS.",
+    "ledger": "new",
+    "fix": "Use a per-call reader (or close it in a finally) in short-lived threads, or a small fixed reader pool; make ledger_summaries_now single-flight on one long-lived worker. Keep readers separate from the writer and query_only.",
+    "effort": "S",
+    "risk": "low"
+  },
+  {
+    "id": "lens-sql-2",
+    "title": "Every ledger change makes each open page re-run two whole-table scans of copies (1.0 s + 0.7 s at 2M files); the stats scan has no covering index",
+    "category": "perf",
+    "severity": "medium",
+    "confidence": "CONFIRMED",
+    "where": "footage-sorter footage_sorter/ledger.py:576-585 (_volume_stats), :1548-1572 (_not_home), :544-546 (memo on version); public/ledger.js:358-365 (changed())",
+    "what": "_volume_stats groups every live row of copies (plan: SCAN copies USING INDEX copies_seq + TEMP B-TREE FOR GROUP BY). The memo lasts only until the next version bump, and each bump makes every open sorter page reload volumes and not-home.",
+    "cost": "Per ledger change per process, at 2,010,000 rows: 1013 ms + 701 ms on NVMe, estimated several times that on the NAS HDD pool, each holding a threadpool worker.",
+    "evidence": "p_big.py on the real Ledger schema with 2,010,000 rows and ANALYZE; p_big2.py: partial covering index copies(volume_id, role, size) WHERE live -> covering scan, 114-116 ms (9x).",
+    "ledger": "new",
+    "fix": "Add the partial covering index in a v4 migration; narrow _not_home with a partial index on (name_lc, size, volume_id) for live master/audio rows or a maintained home flag. Keep test_ledger_plans.py green.",
+    "effort": "S",
+    "risk": "low"
+  },
+  {
+    "id": "lens-sql-3",
+    "title": "The daily ledger backup holds the writer lock for the whole online backup",
+    "category": "concurrency",
+    "severity": "low",
+    "confidence": "CONFIRMED",
+    "where": "footage-sorter footage_sorter/ledger.py:1724-1729",
+    "what": "backup() runs self._w.backup(dst) in one step under _wlock, so every volume report, copy receipt and scan chunk waits. In WAL a separate read connection gives a consistent snapshot without the writer lock.",
+    "cost": "Once a day: 0.9 s at 2M rows (458 MB) to local NVMe, estimated several seconds to the HDD pool, during which all ledger writes block.",
+    "evidence": "Online backup of the probe DB: 0.9 s; integrity_check 2.6 s (outside the lock).",
+    "ledger": "new",
+    "fix": "Back up from a fresh query_only connection without taking _wlock. Never a file copy of the live DB or WAL.",
+    "effort": "S",
+    "risk": "low"
+  }
+]

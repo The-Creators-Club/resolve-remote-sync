@@ -428,7 +428,15 @@ def test_rows_of_a_volume_no_longer_pulled_are_dropped(tmp_path):
                                    path=tmp_path / "m.sqlite", request_fn=req)
     m.pull(["vol:AAAA", "nas:thecreatorspool"])
     assert m.volumes_holding("A001.braw", 5, T0) == ["vol:AAAA", "nas:thecreatorspool"]
-    m.pull(["nas:thecreatorspool"])                                    # the drive went home
+    # 2026-11-11 (audit comp-field-7): a drive that is merely AWAY keeps its rows and stays in the
+    # pull, so "a copy on a drive that is away is believed" holds. This test used to assert the
+    # opposite: unplugging a field drive deleted its rows, and a card copied to two drives dropped
+    # to one copy the moment one went into the bag.
+    m.pull(["nas:thecreatorspool"])                                    # the drive went into the bag
+    assert m.volumes_holding("A001.braw", 5, T0) == ["vol:AAAA", "nas:thecreatorspool"]
+    assert "vol:AAAA" in asked[-1]
+    # ...and a volume the caller says is not worth keeping (a camera card) IS dropped, rows and all
+    m.pull(["nas:thecreatorspool"], keep=lambda vid: vid != "vol:AAAA")
     assert m.volumes_holding("A001.braw", 5, T0) == ["nas:thecreatorspool"]
     assert set(m.volume_info()) == {"nas:thecreatorspool"} and m.status()["rows"] == 1
 

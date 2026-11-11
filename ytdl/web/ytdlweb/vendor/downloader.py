@@ -31,8 +31,50 @@ import json
 import os
 import re
 import subprocess
+import time
 from fractions import Fraction
 from pathlib import Path
+
+# [vendor] THE SERVER'S WORKER IS ONE THREAD FOR THE WHOLE FLEET, AND NOTHING
+# BOUNDED A CLIP (audit web-ytdl-1, 2026-11-11). A pasted /live/ link, or a
+# live result an editor ticked, was handed to yt-dlp as it stood, and yt-dlp
+# records a live stream until the stream ENDS: hours, or never. The worker
+# reads the cancel flag only between clips, so [ CANCEL ] could not reach it
+# either, and every other editor's job waited behind it. The companion's
+# executor has had a wall-clock ceiling per clip since it was written; this
+# is the same ceiling here (its CLIP_TIMEOUT_SECONDS), a refusal of anything
+# still live, and a stop the caller can ask for from inside the download.
+CLIP_TIMEOUT_SECONDS = 2 * 3600.0
+# [vendor] ...and the conversion that follows a download had no limit either
+# (audit web-ytdl-2, 2026-11-11): `subprocess.run` with no timeout, where the
+# companion's twin of this code (ytdl_executor.py) has had CONVERT_TIMEOUT_SECONDS
+# and a probe ceiling since it was written. A hung ffmpeg or an ffprobe on a file
+# a stalled share will not hand over held the fleet's one worker for good.
+# The numbers are the companion's.
+CONVERT_TIMEOUT_SECONDS = 3 * 3600.0
+PROBE_TIMEOUT_SECONDS = 120.0
+LIVE_REFUSAL = ("this is a live stream that has not finished, so it would record "
+                "until it ends. Download it again once it is an ordinary video.")
+
+
+class ClipStopped(Exception):
+    """A download ended on purpose: a live stream refused, the ceiling
+    reached, or the caller's `should_stop` saying so. str() is the sentence
+    the clip row shows."""
+
+
+def refuse_live(info: dict, *, incomplete: bool = False):
+    """yt-dlp `match_filter`: None lets the video through, a string skips it.
+
+    Refused: a stream that is live now, and one that has not started
+    (`is_upcoming`, which yt-dlp would sit and wait for). A stream that has
+    ENDED (`was_live`, `post_live`) is an ordinary video and is let through.
+    With `incomplete` (the flat-playlist pass) the fields may simply be absent,
+    and absent is not live."""
+    status = str(info.get("live_status") or "")
+    if info.get("is_live") is True or status in ("is_live", "is_upcoming"):
+        return LIVE_REFUSAL
+    return None
 
 # [vendor] yt_dlp is imported inside the functions below, not here -- see
 # ytdlweb/vendor/__init__.py. A container venv without it must degrade
@@ -277,6 +319,8 @@ def build_opts(outdir: str, quality: str, container: str = "mp4",
         opts["ffmpeg_location"] = ffmpeg_location
     if progress_hook:
         opts["progress_hooks"] = [progress_hook]
+    # [vendor] never a stream that is still going: see CLIP_TIMEOUT_SECONDS
+    opts["match_filter"] = refuse_live
     return opts
 
 
@@ -303,8 +347,9 @@ def probe_streams(filepath: str, ffmpeg_location: str | None = None) -> dict:
            "-print_format", "json", "-show_streams", filepath]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True,
-                             encoding="utf-8", errors="replace", **_NO_WINDOW)
-    except Exception as exc:  # noqa: BLE001
+                             encoding="utf-8", errors="replace",
+                             timeout=PROBE_TIMEOUT_SECONDS, **_NO_WINDOW)
+    except Exception as exc:  # noqa: BLE001 - a timeout is "could not probe", as any failure is
         return {"_probe_error": f"{type(exc).__name__}: {exc}"}
     if out.returncode != 0:
         return {"_probe_error": (out.stderr or "").strip()[-300:] or
@@ -454,10 +499,23 @@ def ensure_edit_ready(filepath: str, edit_codec: str = "h264",
            + vargs + aargs + ["-map_metadata", "0"] + muxargs + [tmp])
     try:
         res = subprocess.run(cmd, capture_output=True, text=True,
-                             encoding="utf-8", errors="replace", **_NO_WINDOW)
+                             encoding="utf-8", errors="replace",
+                             timeout=CONVERT_TIMEOUT_SECONDS, **_NO_WINDOW)
     except FileNotFoundError:
         unstage()
         return filepath  # no ffmpeg available — keep what we have
+    except subprocess.TimeoutExpired:
+        # subprocess.run has already killed the child. The half-written output
+        # goes, the download is put back as it was, and the clip fails with a
+        # sentence instead of holding the worker (web-ytdl-2).
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        unstage()
+        raise RuntimeError(
+            f"the conversion to an editable file took longer than "
+            f"{CONVERT_TIMEOUT_SECONDS / 3600:.0f} hours and was stopped") from None
     except Exception:
         unstage()
         raise
@@ -640,8 +698,15 @@ def download(url: str, outdir: str, quality: str = "best",
              ffmpeg_location: str | None = None,
              write_sidecar: bool = False, edit_codec: str = "h264",
              on_status=None, cookies_browser: str | None = None,
-             cookies_file: str | None = None) -> dict:
+             cookies_file: str | None = None, should_stop=None,
+             deadline_seconds: float | None = CLIP_TIMEOUT_SECONDS) -> dict:
     """Download `url` into `outdir`. Returns a summary dict.
+
+    [vendor] `should_stop() -> str` is asked from inside the download (on the
+    calling thread, through yt-dlp's progress hook) and a non-empty answer
+    ends it; `deadline_seconds` is the wall-clock ceiling for the download
+    itself (None for no ceiling). Both, and a refused live stream, raise
+    ClipStopped with the sentence to show. See CLIP_TIMEOUT_SECONDS.
 
     The channel name and video URL are always embedded in the media file
     (artist + comment tags). The optional .credits.json sidecar is off by
@@ -653,11 +718,42 @@ def download(url: str, outdir: str, quality: str = "best",
     import yt_dlp  # [vendor] lazy
 
     os.makedirs(outdir, exist_ok=True)
-    opts = build_opts(outdir, quality, container, progress_hook, ffmpeg_location,
+    started = time.monotonic()
+
+    def guarded_hook(d):
+        # BEFORE the caller's hook, and raised from here: yt-dlp runs progress
+        # hooks on the thread that called extract_info, so the download is
+        # ended by the thread that owns it and unwinds through yt-dlp's own
+        # cleanup (never torn down from another thread).
+        if deadline_seconds and time.monotonic() - started > deadline_seconds:
+            raise ClipStopped(f"the download took longer than "
+                              f"{deadline_seconds / 3600:.0f} hours and was stopped")
+        if should_stop is not None:
+            reason = should_stop()
+            if reason:
+                raise ClipStopped(str(reason))
+        if progress_hook is not None:
+            progress_hook(d)
+
+    opts = build_opts(outdir, quality, container, guarded_hook, ffmpeg_location,
                       edit_codec, cookies_browser, cookies_file)
+    refused: list = []
+
+    def live_filter(info, *, incomplete=False):
+        why = refuse_live(info, incomplete=incomplete)
+        if why:
+            refused.append(why)
+        return why
+
+    opts["match_filter"] = live_filter
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
+        if refused:
+            # yt-dlp SKIPS what a match_filter refuses and returns normally;
+            # with nothing on disk the caller would report "no file landed"
+            # and the editor would retry the same live link for ever.
+            raise ClipStopped(refused[0])
         filepath = _final_filepath(ydl, info)
 
     convert_notes: list = []

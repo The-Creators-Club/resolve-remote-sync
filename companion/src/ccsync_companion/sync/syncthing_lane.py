@@ -63,6 +63,21 @@ FOLDER_PATH_MISSING = "folder path missing"
 # folder waits before it is asked to rescan again. A rescan of a folder whose
 # path really is gone just re-fails, so the cooldown only bounds noise.
 PATH_HEAL_INTERVAL_SECONDS = 60.0
+# THE QUIET POLL (audit comp-sync-5, 2026-11-11). The poll asked Syncthing for
+# every folder's /rest/db/status (which its own REST docs call expensive) and
+# each remote device's completion every 15 s for the life of the process:
+# 3 + 2N requests, about 13,700 an hour at 27 ticked projects, computed on the
+# editor's machine beside Resolve whether or not anything had moved for days.
+# After QUIET_AFTER_IDLE_POLLS full sweeps in a row that all said idle, a poll
+# is a ping (so the supervisor still hears within one poll that Syncthing is
+# gone) and ONE /rest/system/connections call; the full sweep runs again the
+# moment that call shows a device connecting or dropping or more than
+# QUIET_BYTES crossing the wire, and at least every QUIET_FULL_SECONDS
+# regardless. So a sync that starts is still seen within one poll, which is
+# what the power guards and the tray read this lane's status for.
+QUIET_AFTER_IDLE_POLLS = 4
+QUIET_FULL_SECONDS = 120.0
+QUIET_BYTES = 64 * 1024
 PATH_HEAL_COOLDOWN_SECONDS = 300.0
 
 
@@ -299,6 +314,11 @@ class SyncthingLane(LaneAdapter):
         self._active_api_key = ""
         self.timeout = timeout
         self.poll_interval = poll_interval
+        # the quiet poll: full sweeps in a row that said idle, when the last
+        # full sweep ran, and what the wire looked like then
+        self._idle_streak = 0
+        self._full_check_at: Optional[float] = None
+        self._quiet_mark: Optional[tuple[frozenset[str], int]] = None
         self._http_get = http_get or default_http_get
         self._http_post = http_post or default_http_post
         # CR-278: monotonic stamps for the path-missing heal pass.
@@ -994,8 +1014,67 @@ class SyncthingLane(LaneAdapter):
         stop_event = stop_event if stop_event is not None else self._stop_event
         while not stop_event.is_set():
             try:
-                self.check_once()
+                self.poll_once()
             except Exception:
                 log.exception("%s: poll cycle failed", self.name)
             if stop_event.wait(self.poll_interval):
                 break
+
+    def poll_once(self, now: Optional[float] = None) -> bool:
+        """One turn of the poll loop: the full sweep (check_once), or, while
+        the lane has been idle for a while, the quiet poll described at
+        QUIET_AFTER_IDLE_POLLS. -> True when the full sweep ran. Raises what
+        check_once raises (nothing, by its contract)."""
+        now = time.monotonic() if now is None else now
+        quiet = (self._idle_streak >= QUIET_AFTER_IDLE_POLLS
+                 and self._full_check_at is not None
+                 and now - self._full_check_at < QUIET_FULL_SECONDS)
+        if quiet and self._still_quiet():
+            return False
+        status = self.check_once()
+        self._full_check_at = now
+        self._idle_streak = self._idle_streak + 1 if status.state == STATE_IDLE else 0
+        # where the wire stood when this sweep ran: what the quiet poll compares with
+        self._quiet_mark = self._wire_mark() if self._idle_streak >= QUIET_AFTER_IDLE_POLLS else None
+        return True
+
+    def _wire_mark(self) -> Optional[tuple[frozenset[str], int]]:
+        """(the devices connected, bytes in + out) right now, or None when
+        Syncthing will not say. One request. Never raises."""
+        try:
+            payload = self._get("/rest/system/connections")
+            total = connection_bytes_total(payload)
+            if total is None or not isinstance(payload, dict):
+                return None
+            peers = payload.get("connections")
+            if not isinstance(peers, dict):
+                return None
+            connected = frozenset(str(dev) for dev, info in peers.items()
+                                  if isinstance(info, dict) and info.get("connected"))
+            return connected, int(total)
+        except Exception:
+            return None
+
+    def _still_quiet(self) -> bool:
+        """Is it safe to skip the full sweep this poll? Only when Syncthing
+        answers, the same devices are connected as at the last full sweep,
+        and next to nothing has crossed the wire since. Every doubt is False,
+        which runs the sweep. The supervisor is told about a ping that
+        answers; one that does not is left to the sweep, which already knows
+        how to say why."""
+        if self._quiet_mark is None:
+            return False
+        try:
+            self._get("/rest/system/ping")
+        except Exception:
+            return False
+        self._note_supervisor(True)
+        mark = self._wire_mark()
+        if mark is None or mark[0] != self._quiet_mark[0]:
+            return False
+        if mark[1] < self._quiet_mark[1] or mark[1] - self._quiet_mark[1] > QUIET_BYTES:
+            return False                      # restarted (counters went back) or data is moving
+        with self._lock:
+            # the stall rule's progress token keeps following the wire while quiet
+            self._connection_bytes = mark[1]
+        return True

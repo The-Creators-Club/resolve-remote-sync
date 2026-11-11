@@ -353,3 +353,136 @@ def test_a_locked_original_delivers_under_the_converted_name_with_a_note(tmp_pat
     assert Path(got).exists() and original.exists()
     assert notes and 'was in use' in notes[0]
     assert 'saved as Chan - T.converted [abcdefghijk].mp4' in notes[0]
+
+
+# -- audit web-ytdl-1 (2026-11-11): live streams, the ceiling, and a stop from inside -------------
+
+@pytest.mark.parametrize("info,refused", [
+    ({"is_live": True, "live_status": "is_live"}, True),
+    ({"live_status": "is_live"}, True),
+    ({"live_status": "is_upcoming"}, True),           # yt-dlp would sit and wait for it to start
+    ({"is_live": False, "live_status": "was_live"}, False),
+    ({"live_status": "post_live"}, False),            # ended: an ordinary video
+    ({"live_status": "not_live"}, False),
+    ({}, False),                                      # the flat pass says nothing: not live
+])
+def test_a_stream_that_is_still_going_is_refused_and_one_that_ended_is_not(info, refused):
+    assert bool(downloader.refuse_live(info)) is refused
+    assert bool(downloader.refuse_live(info, incomplete=True)) is refused
+
+
+def test_every_download_carries_the_live_refusal(tmp_path):
+    assert downloader.build_opts(str(tmp_path), quality="1080p")["match_filter"] is downloader.refuse_live
+
+
+class _FakeYdl:
+    """yt_dlp.YoutubeDL, as far as download() drives it."""
+
+    script = None
+
+    def __init__(self, opts):
+        self.opts = opts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def extract_info(self, url, download=True):
+        return type(self).script(self.opts)
+
+    def prepare_filename(self, info):
+        return ""
+
+
+def _with_fake_ydl(monkeypatch, script):
+    import types
+
+    _FakeYdl.script = staticmethod(script)
+    monkeypatch.setitem(__import__("sys").modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=_FakeYdl))
+    monkeypatch.setattr(downloader, "_final_filepath", lambda ydl, info: None)
+    monkeypatch.setattr(downloader, "build_opts",
+                        lambda outdir, quality, container, hook, *a, **k: {"progress_hooks": [hook]})
+
+
+def test_a_live_link_raises_the_sentence_instead_of_landing_nothing(tmp_path, monkeypatch):
+    """yt-dlp SKIPS what a match_filter refuses and returns normally; the caller then saw "no
+    output file" and the editor retried the same live link."""
+    def script(opts):
+        why = opts["match_filter"]({"is_live": True, "live_status": "is_live"}, incomplete=False)
+        assert why
+        return {"title": "live now"}
+
+    _with_fake_ydl(monkeypatch, script)
+    with pytest.raises(downloader.ClipStopped) as err:
+        downloader.download("https://www.youtube.com/live/abc", str(tmp_path))
+    assert "live stream" in str(err.value) and chr(0x2014) not in str(err.value)
+
+
+def test_the_caller_can_stop_a_download_from_inside_it(tmp_path, monkeypatch):
+    seen = []
+
+    def script(opts):
+        for n in range(1000):
+            opts["progress_hooks"][0]({"status": "downloading", "downloaded_bytes": n})
+        raise AssertionError("ran to the end")
+
+    _with_fake_ydl(monkeypatch, script)
+    asks = iter(["", "", "cancelled"])
+    with pytest.raises(downloader.ClipStopped, match="cancelled"):
+        downloader.download("u", str(tmp_path), progress_hook=seen.append,
+                            should_stop=lambda: next(asks))
+    assert len(seen) == 2                               # the caller's hook ran until the stop
+
+
+def test_a_download_past_its_ceiling_is_stopped(tmp_path, monkeypatch):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(downloader.time, "monotonic", lambda: clock["t"])
+
+    def script(opts):
+        opts["progress_hooks"][0]({"status": "downloading"})
+        clock["t"] += downloader.CLIP_TIMEOUT_SECONDS + 1
+        opts["progress_hooks"][0]({"status": "downloading"})
+        raise AssertionError("ran past the ceiling")
+
+    _with_fake_ydl(monkeypatch, script)
+    with pytest.raises(downloader.ClipStopped, match="took longer than 2 hours"):
+        downloader.download("u", str(tmp_path))
+
+
+# -- audit web-ytdl-2 (2026-11-11): the conversion and the probe are bounded ---------------------
+
+def test_a_conversion_that_never_ends_is_stopped_and_the_download_is_kept(monkeypatch, tmp_path):
+    """`subprocess.run` with no timeout held the one worker the whole fleet shares for as long
+    as a hung ffmpeg cared to. The companion's twin has had the ceiling since it was written."""
+    src = tmp_path / 'clip.mp4'
+    src.write_bytes(b'the download')
+    seen = {}
+
+    def run(cmd, **kw):
+        if 'ffprobe' in cmd[0]:
+            seen['probe'] = kw.get('timeout')
+            return types.SimpleNamespace(returncode=0, stdout=_streams(vcodec='vp9'), stderr='')
+        seen['convert'] = kw.get('timeout')
+        Path(cmd[-1]).write_bytes(b'half a file')
+        raise downloader.subprocess.TimeoutExpired(cmd, kw.get('timeout'))
+
+    monkeypatch.setattr(downloader.subprocess, 'run', run)
+    with pytest.raises(RuntimeError, match='took longer than 3 hours and was stopped'):
+        downloader.ensure_edit_ready(str(src), 'h264')
+    assert seen == {'probe': downloader.PROBE_TIMEOUT_SECONDS,
+                    'convert': downloader.CONVERT_TIMEOUT_SECONDS}
+    assert src.read_bytes() == b'the download'                    # put back as it was
+    assert [p.name for p in tmp_path.iterdir()] == ['clip.mp4']   # and no half-written output
+
+
+def test_a_probe_that_never_answers_is_could_not_probe_not_a_hang(monkeypatch, tmp_path):
+    src = tmp_path / 'clip.mp4'
+    src.write_bytes(b'x')
+
+    def run(cmd, **kw):
+        raise downloader.subprocess.TimeoutExpired(cmd, kw.get('timeout'))
+
+    monkeypatch.setattr(downloader.subprocess, 'run', run)
+    assert 'TimeoutExpired' in downloader.probe_streams(str(src), None)['_probe_error']

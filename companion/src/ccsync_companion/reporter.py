@@ -1171,12 +1171,16 @@ class DashboardReporter:
         section _fit_payload shed is remembered as NOT sent."""
         now = time.monotonic()
         omitted: set[str] = set()
+        # The digest of each section AS BUILT, before _fit_payload trims it,
+        # kept for _note_sections_sent (audit comp-core-3, 2026-11-11).
+        self._built_digests = {}
         for key in OMITTABLE_SECTIONS:
             if key not in payload:
                 continue
             digest = _section_digest(payload[key])
             if not digest:
                 continue
+            self._built_digests[key] = digest
             sent = self._section_state.get(key)
             if sent is None or sent[0] != digest or (now - sent[1]) >= SECTION_RESEND_SECONDS:
                 continue
@@ -1189,17 +1193,27 @@ class DashboardReporter:
         """Remember what the dashboard just accepted, per section.
 
         Three shapes, and only the first two keep a stamp: the section rode
-        this report (record the digest of what actually went, which is the
-        FITTED content -- a trimmed manifest must not be mistaken for the
-        full one next cycle); it was omitted as unchanged (its existing stamp
-        stands, so the forced resend still lands on time); or _fit_payload
-        shed it to make the body fit, in which case the dashboard never got
-        it and the stamp has to go or the section would be suppressed on the
-        strength of a report that dropped it."""
+        this report; it was omitted as unchanged (its existing stamp stands,
+        so the forced resend still lands on time); or _fit_payload shed it to
+        make the body fit, in which case the dashboard never got it and the
+        stamp has to go or the section would be suppressed on the strength of
+        a report that dropped it.
+
+        THE STAMP IS THE DIGEST OF THE SECTION AS BUILT, not as trimmed (audit
+        comp-core-3, 2026-11-11). It used to be the digest of what went on the
+        wire, while _drop_unchanged_sections compares the section BEFORE
+        fitting: once a manifest had been trimmed to fit, the two could never
+        match again, so exactly the machines with the biggest manifests
+        rebuilt, trimmed and re-sent them on every heavy report with a WARNING
+        each time. Fitting is a function of the payload, so an unchanged
+        section trims to what the dashboard already holds; and the forced
+        resend every SECTION_RESEND_SECONDS still goes, so a section that
+        would now fit whole is sent whole within that time."""
         now = time.monotonic()
+        built = getattr(self, "_built_digests", {})
         for key in OMITTABLE_SECTIONS:
             if key in payload:
-                digest = _section_digest(payload[key])
+                digest = built.get(key) or _section_digest(payload[key])
                 if digest:
                     self._section_state[key] = (digest, now)
                 else:
@@ -1244,24 +1258,57 @@ class DashboardReporter:
             # shallow copy, so its per-project dicts are shared with the live
             # cache -- stripping them here would blank the cached file lists
             # until the next full rescan (manifest_refresh_interval later).
+            #
+            # FROM THE TAIL, AND ONLY AS FAR AS THE BODY NEEDS (audit
+            # comp-core-4, 2026-11-11). This step used to drop the lists from
+            # EVERY project at once, so a machine one byte over the budget
+            # lost all of its per-file presence. The manifest is already in
+            # priority order (ticked, then most recently touched), so the
+            # lists are taken from the last project backwards and the ones
+            # that matter keep theirs. Each list's size is measured the way
+            # the body is encoded; the body is measured again at the end, and
+            # if that estimate came up short the rest go as before.
+            trimmed: dict[str, Any] = dict(manifest)
             stripped = 0
-            trimmed: dict[str, Any] = {}
-            for rel, entry in manifest.items():
-                if (isinstance(entry, dict)
+            estimate = size
+
+            def _has_lists(entry: Any) -> bool:
+                return (isinstance(entry, dict)
                         and (entry.get("originals") is not None
-                             or entry.get("proxies") is not None)):
-                    entry = {**entry, "originals": None, "proxies": None,
-                             "truncated": True}
+                             or entry.get("proxies") is not None))
+
+            def _strip(rel: str, entry: dict) -> int:
+                saved = 0
+                for name in ("originals", "proxies"):
+                    encoded = _encode_payload(entry.get(name))
+                    saved += max(0, (len(encoded) if encoded is not None else 0) - len("null"))
+                trimmed[rel] = {**entry, "originals": None, "proxies": None,
+                                "truncated": True}
+                return saved
+
+            for rel in reversed(list(manifest)):
+                if estimate <= budget:
+                    break
+                if _has_lists(manifest[rel]):
+                    estimate -= _strip(rel, manifest[rel])
                     stripped += 1
-                trimmed[rel] = entry
             if stripped:
-                payload["local_manifest"] = manifest = trimmed
-                log.warning(
-                    "report payload is %.1f MB (budget %.1f MB): dropped the per-file "
-                    "lists from %d project(s); rollup counts are unaffected",
-                    size / 1e6, budget / 1e6, stripped)
+                payload["local_manifest"] = trimmed
                 body = _encode_payload(payload)
                 size = len(body) if body is not None else 0
+                if size > budget:
+                    for rel in list(manifest):
+                        if _has_lists(trimmed[rel]):
+                            _strip(rel, trimmed[rel])
+                            stripped += 1
+                    body = _encode_payload(payload)
+                    size = len(body) if body is not None else 0
+                manifest = trimmed
+                log.warning(
+                    "report payload was over its %.1f MB budget: dropped the per-file "
+                    "lists from %d of %d project(s), lowest priority first; rollup counts "
+                    "are unaffected",
+                    budget / 1e6, stripped, len(manifest))
                 if size <= budget:
                     return _measured(payload, body)
 

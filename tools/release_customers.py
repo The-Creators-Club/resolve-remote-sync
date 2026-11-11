@@ -69,6 +69,11 @@ DASHBOARD_ARTIFACT = "ccsync-dashboard-bundle"
 DIGEST_ARTIFACT = "image-digests"
 # Every workflow that must have gone green on THIS commit before it is cut.
 REQUIRED_RUNS = (DASHBOARD_WORKFLOW, "release-windows.yml", "release-macos.yml")
+# The ci.yml jobs that must have RUN to success, not merely not failed, before
+# a dashboard goes to customers: the dashboard, server, tools and web-app
+# suites and the CRLF / licence / notices gates all live in `linux`, and
+# release-dashboard.yml runs no test at all (see pl.ci_jobs_not_run).
+DASHBOARD_CI_JOBS = ("linux",)
 
 
 class ReleaseError(Exception):
@@ -101,7 +106,8 @@ def tag_state(tag: str, sha: str) -> str:
     return "same" if sha in commits else "elsewhere"
 
 
-def verify(sha: str, branch_tip: str, channel: dict) -> tuple[str, dict]:
+def verify(sha: str, branch_tip: str, channel: dict,
+           allow_unrun_ci_jobs: bool = False) -> tuple[str, dict]:
     """Every refusal, in the order an operator can act on them. Returns
     (dashboard_version, {workflow: run_info})."""
     if not pl.commit_is_on_main(sha, branch_tip):
@@ -110,6 +116,22 @@ def verify(sha: str, branch_tip: str, channel: dict) -> tuple[str, dict]:
     if not pl.ci_green_for(sha):
         raise ReleaseError(f"{sha[:7]} has no successful {pl.CI_WORKFLOW} run. Customers get "
                            "only what the full suite passed; fix it or wait for CI.")
+    unrun = pl.ci_jobs_not_run(sha, DASHBOARD_CI_JOBS)
+    if unrun is None or unrun:
+        which = (", ".join(unrun) if unrun else ", ".join(DASHBOARD_CI_JOBS))
+        problem = (f"the {pl.CI_WORKFLOW} run for {sha[:7]} is green, but its `{which}` job "
+                   + ("could not be read" if unrun is None else "did not run to success (a skipped "
+                      "job leaves the run green)")
+                   + ". That job is the only place the dashboard, server, tools and web-app "
+                   "suites run, with the CRLF, licence and notices gates, so nothing has tested "
+                   "this dashboard. Turn the job back on (the `if: false` under `linux:` in "
+                   f".github/workflows/{pl.CI_WORKFLOW}), get it green on this commit, and "
+                   "release then; or pass --allow-unrun-ci-jobs to send customers a dashboard "
+                   "that no automated suite has run.")
+        if not allow_unrun_ci_jobs:
+            raise ReleaseError(problem)
+        step("WARNING: --allow-unrun-ci-jobs: " + problem.split(". That job")[0]
+             + ". No automated suite has run this dashboard.")
     version = dashboard_version_at(sha)
     newest = pl.newest_published(channel, "dashboard", "linux")
     if newest and pl.version_tuple(version) < pl.version_tuple(newest):
@@ -389,6 +411,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="do not rewrite compose.appliance.yaml")
     ap.add_argument("--soak-hours", type=float, default=SOAK_HOURS_DEFAULT,
                     help="hours the studio's own dashboard must have run this commit first")
+    ap.add_argument("--allow-unrun-ci-jobs", action="store_true",
+                    help="release although the ci.yml job that runs the dashboard, server and "
+                         "web-app suites (linux) was skipped or could not be read on this "
+                         "commit. A skipped job leaves the run green; this says you know that "
+                         "no automated suite has run the dashboard being released.")
     ap.add_argument("--allow-no-soak", action="store_true",
                     help="release without the studio soak (a hotfix the studio cannot wait for)")
     args, passthrough = ap.parse_known_args(argv)
@@ -402,7 +429,8 @@ def main(argv: list[str] | None = None) -> int:
         if len(sha) != 40:
             raise ReleaseError("--sha must be the full 40-character commit id")
         channel = pl.published_channel()
-        version, runs = verify(sha, tip, channel)
+        version, runs = verify(sha, tip, channel,
+                               allow_unrun_ci_jobs=args.allow_unrun_ci_jobs)
         tag = f"v{version}"
         state = tag_state(tag, sha)
         if state == "elsewhere":
@@ -419,7 +447,11 @@ def main(argv: list[str] | None = None) -> int:
                 raise ReleaseError(soak_problem)
             step(f"studio soak satisfied ({args.soak_hours:g} h on {version})")
         step(f"commit {sha[:7]}  dashboard {version}  tag {tag} ({state})")
-        step("verified: ci.yml green, " + ", ".join(REQUIRED_RUNS) + " green on this commit")
+        step("verified: ci.yml green"
+             + (" (BUT its " + ", ".join(DASHBOARD_CI_JOBS) + " job was not required to have run)"
+                if args.allow_unrun_ci_jobs
+                else " and its " + ", ".join(DASHBOARD_CI_JOBS) + " job ran")
+             + ", " + ", ".join(REQUIRED_RUNS) + " green on this commit")
         with tempfile.TemporaryDirectory(prefix="ccsync-customer-release-") as tmp:
             bundle = read_bundle(str(runs[DASHBOARD_WORKFLOW]["databaseId"]), Path(tmp), sha, version)
             mismatch = bundle_channel_refusal(bundle, channel, version)

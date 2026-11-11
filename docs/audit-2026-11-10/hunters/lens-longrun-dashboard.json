@@ -1,0 +1,62 @@
+[
+  {
+    "id": "lens-longrun-dashboard-1",
+    "title": "Shutdown is unbounded in front and serial behind, so docker stop SIGKILLs the lifespan - including the Node editor's cut-list flush - whenever a Cards page or agent is connected",
+    "category": "resilience",
+    "severity": "medium",
+    "confidence": "CONFIRMED",
+    "where": "dashboard/deploy/run.sh:592-598 and :607 (no --timeout-graceful-shutdown); uvicorn server.py:272-302; dashboard/src/ccsync_dashboard/app.py:942-972; cards_edit.py:107 and 303-322; no stop_grace_period in the repo",
+    "what": "uvicorn drains every in-flight request with no timeout BEFORE the lifespan shutdown runs (a Cards page always has a 25 s long poll; each Cards-role machine a 25 s /cards/agent/pending; abandoned media ranges run to EOF). The lifespan then joins watchdog (5 s), collector (10 s) and executor (5 s) before sending the Node editor the SIGTERM that flushes cut lists (15 s grace). Docker's SIGTERM reaches only run.sh and uvicorn.",
+    "cost": "Every image deploy is a docker stop with the default 10 s grace: with one Cards page open the SIGKILL lands before the lifespan starts (no engine stop, no Node flush). With nothing connected the joins still sum to 20 s before Node is asked. On the exit-75 OTA path the same sequence is up to ~65 s of downtime before re-exec. Becomes high when /cards/edit is released.",
+    "evidence": "uvicorn _wait_tasks_to_complete loops while connections exist, timeout_graceful_shutdown default None; run.sh flags read; repo-wide grep for stop_grace|stop_timeout|timeout-graceful returns nothing; app.py shutdown order read.",
+    "ledger": "new",
+    "fix": "Pass --timeout-graceful-shutdown 5 in run.sh; send Node its SIGTERM first and overlap the other stops (signal all, join after); set stop_grace_period ~40s in the compose. Keep watchdog-before-collector and executor-before-engine ordering.",
+    "effort": "S",
+    "risk": "low"
+  },
+  {
+    "id": "lens-longrun-dashboard-2",
+    "title": "Mount-time workers are never stopped, and on an exit-75 restart their ffmpeg/CLI children outlive the process into the next one",
+    "category": "resilience",
+    "severity": "medium",
+    "confidence": "PLAUSIBLE",
+    "where": "dashboard/src/ccsync_dashboard/ytdl.py:813-826; ytdl/web/ytdlweb/worker.py:170-201, 234-241; ytdl/web/ytdlweb/vendor/downloader.py:452-456; dashboard/deploy/run.sh:576-604; app.py:942-972; cards_ai.py:559",
+    "what": "The ytdl worker/canary/nightly start in create_app and nothing stops them. Exit 75 (OTA restart, collector-watchdog recovery) ends only uvicorn; run.sh stays PID 1 and adopts orphans. The conversion ffmpeg runs at -loglevel error, writes nothing to its readerless stderr pipe, so it keeps encoding while the next process's _boot_recovery restarts the same job. Cards claude CLI children also run to completion unread.",
+    "cost": "An OTA during a 1440p/2160p conversion (tens of minutes, web-ytdl-2) leaves two ffmpeg processes on the NAS CPU and an orphan writing staging files the new run also produces or sweeps. A watchdog exit-75 during a translation leaves 3-14 orphan CLIs (dash-mounts-4). Rare today, likelier at 20 editors.",
+    "evidence": "Read as cited; ffmpeg progress is info-level and suppressed by -loglevel error; run.sh restart loop keeps PID 1 across exit 75. Not reproduced in a container.",
+    "ledger": "new",
+    "fix": "Start the ytdl worker from the lifespan or register a stop hook; keep Popen handles of ffmpeg/CLI children in a registry the lifespan terminates, or start them in their own process group and killpg before exiting 75. Keep ytdl boot recovery treating the job as resumable.",
+    "effort": "M",
+    "risk": "low"
+  },
+  {
+    "id": "lens-longrun-dashboard-3",
+    "title": "No memory limit, and every resident cache lives in the one process the fleet depends on: the OOM victim is the dashboard",
+    "category": "resilience",
+    "severity": "medium",
+    "confidence": "PLAUSIBLE",
+    "where": "app compose / install scripts (no mem_limit or limits in the repo); music/web/musicweb/text_encoder.py:266; b-roll and music index holders (web-broll-3, web-music-4); cards_ai.py:559",
+    "what": "The music text tower (+560 MB after one search), both search indexes with 2-3x rebuild peaks, two Cards engines and the sorter catalog accumulate in uvicorn for life; the spiky consumers (CLI children, ffmpeg) are other processes in the same container. With no cgroup limit the host OOM killer picks by RSS: the uvicorn process.",
+    "cost": "Busy moment today about 2.6 GB (1.4 GB in uvicorn); commercial scale about 8.8 GB (4.7 GB in uvicorn). Headroom on today's 64 GB NAS; an OOM of the fleet dashboard on an 8-16 GB appliance with ZFS ARC during a 50k-track rebuild plus a translation.",
+    "evidence": "Sum of hunters' measured figures (CARDS_TWO_PROJECTS s12, web-music-3/4, web-broll-3) plus labelled estimates; grep for memory limits finds none.",
+    "ledger": "related to web-music-3, web-music-4, web-broll-3, dash-mounts-4",
+    "fix": "Set a container memory limit sized from the budget (about 4 GB today); evict the ONNX session after N idle minutes (reload 0.67 s); cap CLI children per dash-mounts-4. A reload failure must degrade search, never the mount.",
+    "effort": "M",
+    "risk": "low"
+  },
+  {
+    "id": "lens-longrun-dashboard-4",
+    "title": "One unpartitioned 40-token threadpool carries both 25 s parked long polls and every sync route, so the standing reservation grows with fleet size",
+    "category": "concurrency",
+    "severity": "low",
+    "confidence": "CONFIRMED",
+    "where": "dashboard/src/ccsync_dashboard/cards_tunnel.py:455-528; gear_ai.py:296-298; every sync route in the dashboard and broll/music/ytdl mounts; no CapacityLimiter in dashboard/src",
+    "what": "All blocking work shares anyio's default 40 tokens. The Cards agent long poll parks one token and one open SQLite connection per Cards-role machine for 25 s back to back; gear photos park one each while queued; index rebuilds and provider probes hold one for seconds.",
+    "cost": "At 20 Cards-role machines, 20 of 40 tokens are permanently asleep; 20 more slow holders (a gear burst, rebuilds during an ingest batch) queue /api/v1/report and every sync route with no error. Today it needs a 40-photo burst.",
+    "evidence": "Census of holders from the code and territory reports; the 2026-09-18b verifier grep confirms no limiter is configured.",
+    "ledger": "related to wire-5 (open, low) and dash-mounts-3",
+    "fix": "Give long-hold routes their own anyio.CapacityLimiter (async def + to_thread.run_sync with that limiter) and release the get_conn connection before the hold. Keep the no-engine hold's pacing (dash-cards-1).",
+    "effort": "S",
+    "risk": "low"
+  }
+]

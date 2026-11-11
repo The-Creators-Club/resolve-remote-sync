@@ -347,6 +347,13 @@ class SelectionClient:
         stamp = data.get("fetched_at")
         return str(stamp) if stamp else None
 
+    @staticmethod
+    def _without_stamp(response: Any) -> Any:
+        """`response` minus the keys that differ on every answer by design."""
+        if not isinstance(response, dict):
+            return response
+        return {k: v for k, v in response.items() if k != "generated_at"}
+
     def _write_cache(self, response: dict[str, Any], editor: str = "") -> None:
         # comp-sync-14: BEFORE the write-on-change early return -- the point
         # is that a fetch that changed nothing still happened.
@@ -361,7 +368,16 @@ class SelectionClient:
         # must still leave the file naming the one signed in now, or
         # load_cached() would refuse the right person's plan.
         editor = str(editor or "").strip().lower()
-        if response == self._last_written and editor == self._last_written_editor:
+        # ...and the reply's own timestamp is NOT part of "change" (audit
+        # dash-api-1, 2026-11-11). The dashboard stamps every answer with
+        # `generated_at` to the second, so the comparison below never matched
+        # and the P11 guard above was dead: selection.json was rewritten
+        # (tmp + replace) on every fetch, every 30 s, on every machine, for
+        # a plan that had not changed in days. The stamp still reaches the
+        # file whenever anything else does.
+        if (self._without_stamp(response) == self._without_stamp(self._last_written)
+                and editor == self._last_written_editor
+                and self._last_written is not None):
             return
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)

@@ -566,3 +566,28 @@ def test_an_explicit_public_url_in_the_sorter_settings_wins(tmp_path):
     engine_mod = sys.modules["footage_sorter.engine"]
     assert engine_mod.SorterEngine.instances[-1].host["publicUrl"] == "https://a.example"
     sorter.stop_sorter(app)
+
+
+def test_a_card_closed_on_the_page_can_be_brought_back_through_the_mount(mounted):
+    """Alex, 2026-11-11: "if you close a card in source on /sorter there seems to be no way of
+    getting it back again". End to end through the dashboard: closed, listed as closed while its
+    companion keeps reporting it, and back on the list with one press."""
+    client, *_ = mounted
+    login(client, "owen")
+    assert _report(client, "alex", "creator-1", [CARD]).status_code == 200
+    me = login(client, "owen")
+    h = {"x-csrf-token": me["csrf"]}
+    listed = client.get("/sorter/api/ingest/sessions").json()
+    sid = listed["sessions"][0]["id"]
+    assert listed["closed"] == []
+    assert client.post("/sorter/api/ingest/dismiss", json={"sessionId": sid}, headers=h).status_code == 200
+
+    assert _report(client, "alex", "creator-1", [CARD]).status_code == 200       # the companion's next report
+    login(client, "owen")
+    listed = client.get("/sorter/api/ingest/sessions").json()
+    assert listed["sessions"] == [] and [s["id"] for s in listed["closed"]] == [sid]
+
+    back = client.post("/sorter/api/ingest/restore", json={"sessionId": sid}, headers=h)
+    assert back.status_code == 200 and back.json()["session"]["id"] == sid
+    listed = client.get("/sorter/api/ingest/sessions").json()
+    assert [s["id"] for s in listed["sessions"]] == [sid] and listed["closed"] == []

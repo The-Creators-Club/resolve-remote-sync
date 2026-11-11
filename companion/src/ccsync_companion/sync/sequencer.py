@@ -1839,6 +1839,20 @@ class Sequencer:
             changed = (set(slug_to_item) != set(self._slug_to_item)
                        or upload_only != self._upload_only_slugs
                        or borrowed_by_slug != self._borrowed_by_slug)
+            if changed:
+                # A clean check says "this subpath, UNDER THE FILTER IT RAN WITH and
+                # while it was WATCHED, had nothing to upload". A tick, an untick or
+                # a mode flip breaks one of those: full -> upload-only widens lane
+                # A's filter from video to every file (GL-13), and a project that
+                # was unticked had no watcher mapping, so writes made meanwhile set
+                # no change time. Neither used to forget anything, so lane A SKIPPED
+                # files it had never looked at for up to lane_a_verify_seconds (two
+                # hours), with the tray saying "found nothing" (audit comp-sync-2,
+                # 2026-11-11; in CR-381's code, shipped 2026-11-05). Every check is
+                # dropped, not just the changed project's: a borrowed subpath's
+                # check is keyed by subpath, and "every doubt is LANE_A_FULL" costs
+                # one full round after a change a person made by hand.
+                self._lane_a_clean.clear()
             self._rel_to_slug = rel_to_slug
             self._slug_to_item = slug_to_item
             self._upload_only_slugs = upload_only
@@ -1993,6 +2007,8 @@ class Sequencer:
             for key in [k for k in self._turn_records if k not in live_slugs]:
                 self._turn_records.pop(key, None)
             self._lane_a_dirty &= live_slugs
+            for key in [k for k in self._lane_a_changed_at if k not in live_slugs]:
+                self._lane_a_changed_at.pop(key, None)
 
     def _ignores_unconfirmed_for(self, slug: str) -> bool:
         """Whether this folder's .stignore is NOT known to be in place, so no

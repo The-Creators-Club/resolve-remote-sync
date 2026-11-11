@@ -1,0 +1,143 @@
+# tests-ci - the test suites, CI and the Cards gate as a cost
+Files read (approximate coverage): `.github/workflows/ci.yml` (all), `tools/select_suites.py` (header + wiring), `tools/run_all_tests.ps1` (invocation lines), `dashboard/tests/conftest.py` (all), `dashboard/deploy/run.sh` (retry loop), `server/tests/test_deploy_resilience.py` (`_real_run` and the step-3 tests), `server/install_dashboard_app.py` / `server/common.py` (version note path), `companion/tests/test_rclone_lane_races.py` (SYNC-3 block), `companion/src/ccsync_companion/sync/rclone_lane.py` (`_run_popen`, `_express_partition`, `_live_handoffs`), `companion/tests/test_rclone_filters.py` (express tests), `dashboard/tests/test_presence.py` / `test_multi_machine.py` (env fixtures), MulticamPipeline `tests/run_all.py` (SUITES table, groups, `--jobs`). Per-test timings for all 13 junit files of CI run 42804473185 (nightly, 57eb0b2, all three jobs green) and job/step timings of the last 30 ci.yml runs.
+Probes run: (1) junit analysis of run 42804473185 (per-file and per-test seconds, distribution buckets, Windows-vs-macOS deltas); (2) `create_app` + `TestClient` lifespan with a fresh DB vs a pre-migrated template copy, dashboard venv, 4-6 reps; (3) `dbmod.migrate` x20; (4) `pytest --collect-only` of companion and dashboard; (5) AST scan of every hunt/review/cr/sweep test file for asserts already present in the module's home files; (6) single-file runs with `-o faulthandler_timeout` of `test_deploy_resilience.py -k step_3` and `test_rclone_lane_races.py -k express_still_runs` to get the stall's stack; (7) `test_admin_users.py --durations` + cProfile of one test. All files under the scratchpad `tests-ci\`.
+
+Multipliers used throughout: ~600 commits in 3.5 months = ~5.7 commits/day; the last 30 ci.yml runs (2026-11-06..10) average ~7 runs/day. A green full run costs, measured: windows job 327-916 s, macos job 311-644 s, linux job 864-1257 s (linux now off, see -9).
+
+## Findings
+
+### tests-ci-1 - Every dashboard test migrates a fresh SQLite DB from schema v0
+- Category: perf
+- Severity: medium
+- Confidence: CONFIRMED
+- Where: dashboard/tests/conftest.py:138 (`conn` fixture), and the ~300 `create_app(Settings(db_path=tmp_path/...))` call sites in 168 test files; `dashboard/src/ccsync_dashboard/db.py:2331` (`migrate`)
+- What: Each test builds a new DB and replays all ~60 migration steps (in `conn` or in the app lifespan), then boots the whole app. Migration is the largest single slice of per-test setup.
+- Cost / failure scenario: Measured locally: `migrate` = 73 ms per fresh DB; `create_app`+lifespan = 98-110 ms on a fresh DB vs 29-45 ms on a pre-migrated copy, and the copy (`sqlite3.backup` from a session template) costs 6 ms. So ~65 ms saved per test locally. 3,950 of the 6,596 dashboard tests take 0.1-1 s on CI (sum 1,560 s of the 1,991 s total); CI's runner is ~2x slower than the base rig. Estimated: 3,900 x ~0.13 s = ~500 s CPU per CI run = ~125 s of the 529 s wall step on 4 workers, and ~4 min off a serial local run. At ~7 runs/day: ~15 min of linux-runner time per day (when the job is back on).
+- Evidence: probe_app.py / probe_app2.py output: "fresh copy 0.000 app+lifespan 0.108 / premigrated copy 0.006 app+lifespan 0.032"; "migrate x20 avg 0.0727"; junit buckets 0.1-0.2 s: 380, 0.2-0.4: 1,477, 0.4-0.7: 1,465, 0.7-1: 425 tests.
+- Ledger: new
+- Suggested change: A session-scoped fixture migrates one template DB; `conn` and a `fresh_db(tmp_path)` helper copy it with `sqlite3.backup` (keeps WAL/user_version exact). Tests about migration itself (`test_db_migrations*`, anything passing `steps=`) keep the fresh path. Must not share one DB between tests (parallel rule in CLAUDE.md) - the copy is per test.
+- Effort / risk: M effort (call sites build Settings inline; a helper plus a sed-able pattern); low risk
+
+### tests-ci-2 - test_deploy_resilience opens a real socket to the studio NAS (site.toml 192.168.0.102) with TRUENAS_PW="pw"
+- Category: bug
+- Severity: medium
+- Confidence: CONFIRMED
+- Where: server/tests/test_deploy_resilience.py:302 (`_real_run`) -> server/install_dashboard_app.py:6164 `print_truenas_version_note(truenas_api, ...)` -> server/common.py:1694 `truenas_rpc.rest_call` -> truenas_rpc.py:158 `socket.create_connection`
+- What: `_real_run`'s docstring says "Nothing here opens a socket", but it stubs `run_ssh`/`install_tree`/provisioning and not the TrueNAS version note, which calls the real `truenas_api` against `site_value("nas","host")`. A module global (`_VERSION_NOTE_PRINTED`) makes only the FIRST real-run test per process pay it, so the cost lands on whichever test runs first.
+- Cost / failure scenario: CI: `test_a_step_3_query_failure_restarts_the_container` = 30.0 s (the connect timeout), the slowest server test and 38% of the 78 s suite sum; base rig: 21 s (Windows' SYN-retry give-up; the NAS did not answer on :443 during my run). On any machine where the NAS IS reachable on 443 (a LAN editor box, or TRUENAS_WS_URL set), the suite performs a real JSON-RPC login to the production NAS with password "pw" - a failed-auth event in the NAS log and a step towards its login throttle, from a test. Once per server-suite run (every CI run, every `ship.cmd`, which gates on this suite).
+- Evidence: faulthandler dump at 8 s: `truenas_rpc.py:158 __init__ <- _open_ws <- rest_call <- common.py:1694 truenas_api <- common.py:2277 print_truenas_version_note <- install_dashboard_app.py:6164 main <- test_deploy_resilience.py:324 _real_run`. site.toml:3 `host = "192.168.0.102"`. junit: 30.0 s on CI.
+- Ledger: new
+- Suggested change: In `_real_run`, `monkeypatch.setattr(ida, "print_truenas_version_note", lambda *a, **k: "")`; better, a server/tests conftest autouse fixture that makes `socket.create_connection` to any non-loopback address raise, so the next unstubbed path fails in 0 s instead of reaching a NAS. Saves 30 s per server-suite run.
+- Effort / risk: S effort; low risk
+
+### tests-ci-3 - Three SYNC-3 express tests each stall 10 s and now pass via a timed-out fake spawn
+- Category: perf
+- Severity: medium
+- Confidence: CONFIRMED
+- Where: companion/tests/test_rclone_lane_races.py:836 (`_periodic_run_in_flight`), tests at :856, :883, :907; companion/src/ccsync_companion/sync/rclone_lane.py:6484 (`with self._proc_lock: ... factory(cmd)`), :3677 (`_live_handoffs` takes `_proc_lock`), :7351 (`_express_partition` -> `handoff_inflight_paths`)
+- What: The fake "periodic child" blocks INSIDE the Popen factory, which runs under `_proc_lock` (the deliberate spawn-and-publish lock, KNOWN_BUGS B13). Since the 2026-09-26 handoff work, `_express_partition` calls `handoff_inflight_paths()`, which takes `_proc_lock` - so every flush waits until the factory's `release.wait(10)` times out and raises in the background thread. The tests then pass against a periodic run that FAILED, not one in flight.
+- Cost / failure scenario: 3 x 10.0 s on Windows and on macOS every CI run (30 s summed per OS, ~60 s per run) and on every local companion run; ~7 CI runs/day = ~7 min/day of runner time. Worse: the scenario no longer matches the docstring, so a regression in "express defers while a periodic child is running" (where the child has spawned and the lock is free) is not what these tests exercise.
+- Evidence: faulthandler at 5 s: thread A in `test_rclone_lane_races.py:846 factory <- rclone_lane.py:6486 _run_popen`; main thread in `rclone_lane.py:3678 _live_handoffs <- 3685 handoff_inflight_paths <- 7351 _express_partition <- 7254 _express_flush_inner <- test:171 _flush_now`. junit: 10.0 / 10.0 / 11.0 s (Windows), 10.0-10.1 s (macOS).
+- Ledger: new (related to B13, which stays as is)
+- Suggested change: Return the `_FakeProc` immediately and make its `wait()`/`poll()` block on `release` (the child is running, the spawn is over), which is what the test means and frees `_proc_lock`. Do not loosen the B13 lock in production.
+- Effort / risk: S effort; low risk
+
+### tests-ci-4 - The companion and dashboard suites run serially in run_all_tests.ps1
+- Category: deploy
+- Severity: medium
+- Confidence: CONFIRMED
+- Where: tools/run_all_tests.ps1:202 and :212 (`-m pytest $targets -q` / `@targets -q`)
+- What: CLAUDE.md (2026-11-10) says to run the two big suites with `-n auto` (dashboard `--dist loadfile`) and quotes ~1 min vs ~10 and ~2.5 vs ~19; CI does so, but the one script CLAUDE.md names for "everything at once" passes no `-n`, and `-Changed` scoped runs inherit the same.
+- Cost / failure scenario: Every local full gate costs ~29 min for those two suites instead of ~3.5 (CLAUDE.md's own measurements): ~25 min per local run. The memory notes record a full local gate after each fix pass; at even one a day that is ~2 h/week of wall time on the base rig, which also runs the live companion.
+- Evidence: grep of run_all_tests.ps1 finds no `-n`, `xdist` or `loadfile`; xdist 3.8.0 is installed in both venvs (`import xdist` from the dashboard venv) and is in both locks.
+- Ledger: new
+- Suggested change: Add per-suite extra args to the suite table: companion `-n auto`, dashboard `-n auto --dist loadfile`; leave the 11 small suites serial (each is under 70 s and xdist start-up would eat the gain). Keep `server/` serial and through bash.
+- Effort / risk: S effort; low risk
+
+### tests-ci-5 - CI runs the full matrix for duplicate pushes, docs-only commits and an unchanged nightly SHA; select_suites.py is not wired in
+- Category: deploy
+- Severity: medium
+- Confidence: CONFIRMED
+- Where: .github/workflows/ci.yml:30-47 (`push: branches: ["**"]`, `schedule`, `concurrency: ci-${{ github.ref }}`); tools/select_suites.py (used only by run_all_tests.ps1 -Changed)
+- What: Concurrency is per ref, so one SHA pushed to `main` and a feature branch runs twice; the nightly schedule re-runs main even when that SHA already has a green push run; there is no `paths-ignore`, so a docs-only commit (e.g. this audit's files) runs every suite; `select_suites.py`'s docstring promises "the shape CI's per-push plan will use" but ci.yml never calls it.
+- Cost / failure scenario: In the last 30 runs: 57eb0b2 ran 3x (main push, release-speed push, nightly), fabee82/43a9e59/ffdf9f2 2x each (main + sorter-module), dd084b6 and 1bc7ede 2x (push + nightly), 93d3253 nightly 2x on consecutive days with no new commit: ~9 of 30 runs (30%) re-tested a SHA already tested. At ~7 runs/day that is ~2 redundant full runs/day = ~2 x (windows ~6-15 min + macos ~5-11 min, and macOS minutes bill at 10x on private repos) = ~25-50 runner-minutes/day, plus queue time in front of the run that matters (run 42837667812 took 3,450 s end to end for ~800 s of job time).
+- Evidence: `gh run list --workflow ci.yml -L 30` and `gh run view --json jobs` (timings above).
+- Ledger: new
+- Suggested change: (a) `push: branches: [main]` plus `pull_request`, or a `concurrency` group keyed on `github.sha` for push events; (b) nightly job's first step exits 0 if `gh run list --commit $SHA --status success` already has a green ci.yml run (publish_latest still finds a green run for that SHA); (c) `paths-ignore: ['docs/**', '**/*.md']` on push, keeping CLAUDE.md-cited docs that tests read (check `test_test_map.py`'s path-literal audit first). Do not skip-by-select_suites in CI until M2's "last full green" base exists - its own fail-closed rules need that base.
+- Effort / risk: S effort; low risk for (a)/(b), medium for (c) (some tests read docs)
+
+### tests-ci-6 - With the linux job off, a green CI run gates no dashboard, server or web suite
+- Category: resilience
+- Severity: medium
+- Confidence: CONFIRMED
+- Where: .github/workflows/ci.yml:264 (`if: false`, d20af6a, 2026-11-10)
+- What: `publish_latest.py` and `release_customers.py` publish "the newest GREEN ci.yml run"; since today that run contains the companion, onboarding, bench and installer suites only. The dashboard (6,596 tests), server (944, the deploy-script guard), broll/web, music/web, ytdl/web, broll/indexer, tools suites, the CRLF gate, the licence gate for the container and the notices check now run nowhere automatically. The owner's reason was flakiness and wall time, both of which -1, -7 and -2 here reduce.
+- Cost / failure scenario: A dashboard regression or a CRLF `run.sh` (which once took the dashboard down) reaches a green CI run and the vendor feed's provenance with nothing red. Image builds (image.yml) still ship the dashboard.
+- Evidence: ci.yml:259-264 and its comment; run 42847901497 (d20af6a) completed in 17 s.
+- Ledger: related to the owner decision of 2026-11-10 (d20af6a)
+- Suggested change: Cheaper way to keep the guarantee without holding companion releases: re-enable the job with `continue-on-error: true` (it reports, does not hold publish_latest) and keep the cheap steps (CRLF gate, licence gate, server suite, the small web suites, ~4 min total) blocking; restore the dashboard step to blocking once -1/-7 land. Do not touch the owner's choice to unblock companion releases.
+- Effort / risk: S effort; low risk
+
+### tests-ci-7 - Six dashboard tests sit exactly on the 10 s SQLite busy_timeout on CI
+- Category: concurrency
+- Severity: medium
+- Confidence: PLAUSIBLE
+- Where: dashboard/tests/test_presence.py:19 (`env`), dashboard/tests/test_multi_machine.py (`env`), tests `test_presence::test_prune_completion_not_shared` (10.2 s), `test_multi_machine::test_adopt_onto_the_same_computers_own_empty_row_is_allowed` (10.2 s), `::test_adopt_renamed_machine_refuses_a_taken_name` (10.1 s), `test_dashboard_update::test_a_wedged_dashboard_leaves_the_boot_counter_standing` (10.3 s); `db.connect` busy_timeout (db.py:714)
+- What: These fixtures open a second connection with `dbmod.connect(db_path)` while the app's lifespan is live inside `TestClient`; a test that writes through that connection waits out the full busy_timeout behind a lifespan writer, then proceeds. Locally the same tests take well under 1 s, so it depends on how slow the runner is.
+- Cost / failure scenario: ~41 s summed per CI dashboard run; the same shape on a slower or busier runner is "database is locked" at 10 s, i.e. a test that fails "a different pair each run" - the exact symptom for which the linux job was switched off today (test_smoke_boot, test_cards_edit, test_cli_tools were named; these are the same class).
+- Evidence: junit run 42804473185: four tests at 10.1-10.3 s plus two more at >= 9.5 s; all < 1 s in local single-file runs of test_presence / test_multi_machine (not re-run here: estimated from the 10.0 s quantisation).
+- Ledger: new
+- Suggested change: Have these fixtures write their seed rows BEFORE entering `TestClient` (the app then boots onto a seeded DB), or wait for a lifespan "boot writes done" event before yielding; identify the lifespan writer that holds the lock (collector first cycle is the likely one) with `CCSYNC`-style logging on CI.
+- Effort / risk: S-M effort; low risk
+
+### tests-ci-8 - A one-off ~35 s stall per process on the macOS runner
+- Category: perf
+- Severity: low
+- Confidence: PLAUSIBLE
+- Where: companion tests `test_broll_server::test_status_over_http` (35.5 s mac / 0.5 s win), `test_field_review_paths::test_the_guard` (35.5 / 0.5), `test_lane_watchdog::test_the_media_tree_loop_stamps_a_heartbeat` (35.0 / 0.0), onboarding `test_legal_steps::test_the_identity_token_does_not_follow_a_redirect` (36.0 / 1.0)
+- What: Exactly one test per pytest process (three companion xdist workers + the serial onboarding run) pays ~35 s on macOS only; the first two and the onboarding one start a stdlib `ThreadingHTTPServer`, whose `server_bind` calls `socket.getfqdn(host)` - a reverse lookup that is slow on GitHub's macOS image. Every later test in the same process is fast.
+- Cost / failure scenario: ~140 s summed per CI run; ~35 s of the macOS job's ~200-530 s companion step plus ~36 s of its 47 s onboarding step. ~7 runs/day = ~16 macOS runner-minutes/day (billed at 10x).
+- Evidence: junit Windows-vs-macOS deltas: the only four tests with a > 2 s mac-only delta are these, all 35.0-36.0 s. The getfqdn mechanism is inferred, not traced on a Mac.
+- Ledger: new
+- Suggested change: In companion and onboarding conftest, a session autouse fixture that resolves once (`socket.getfqdn("127.0.0.1")`) to confirm, then override `server_bind` in `BrollCompanionServer`/`FieldHTTPServer` to set `server_name` without `getfqdn` (see OUT OF TERRITORY: the same call runs at tray start on an editor's Mac).
+- Effort / risk: S effort; low risk
+
+### tests-ci-9 - Fixed real sleeps pinned in two run.sh tests and one rclone test
+- Category: perf
+- Severity: low
+- Confidence: CONFIRMED
+- Where: dashboard/tests/test_run_sh_restart_loop.py:253 (50.1 s, pays run.sh:321's 5/15/30 s retry sleeps "deliberately"), :350 (12.0 s, `STUB_NIGHTLY_SLEEP="12"`); companion/tests/test_rclone_filters.py:1644 (30.2 s win / 30.1 s mac: a deliberately failing rclone run under production `--retries 3 --retries-sleep 10s`, rclone_lane.py:2346)
+- What: The behaviour pinned is "gives up cleanly after 4 attempts" and "rclone reads a blank line as the root dir", not the wall time of the waits.
+- Cost / failure scenario: ~62 s on the dashboard suite (one worker's critical path under loadfile) and ~30 s on each companion OS, every run: ~2 min summed per CI run, ~14 min/day.
+- Evidence: junit timings above; run.sh:321 `for unblock_delay in 5 15 30 0`.
+- Ledger: new
+- Suggested change: run.sh reads its retry delays from an env var defaulting to "5 15 30 0" (the test sets "0 0 0 0"; still asserts attempts=4); the nightly test can use 3 s with the >8 s assertion scaled; append `--retries 1` to the express argv in the blank-line test (it asserts rclone's parse, not retries).
+- Effort / risk: S effort; low risk (run.sh change ships in the image, defaults unchanged)
+
+### tests-ci-10 - The Cards gate runs every kind and every python suite one at a time
+- Category: deploy
+- Severity: medium
+- Confidence: PLAUSIBLE
+- Where: MulticamPipeline (Editing tree) tests/run_all.py:1091 (`--jobs` default 1), :1192 (python half always sequential), SUITES table :123
+- What: The SUITES table's own measured seconds sum to 753 s (116 suites), of which BROWSER_AGENT 357 s, PYTHON 135 s, BROWSER_PERF 133 s, OWN 92 s; the rest of the owner's ~25 min is per-kind server boots, the 20 s SETTLE pauses and untimed suites. `--fast` keeps the 281 s of suites under 15 s and drops every perf suite, every encode/settle suite and the six slowest browser suites (test_looks 112 s, test_ui_pass 66 s, test_edit_view 45 s, ...).
+- Cost / failure scenario: With `--jobs 3` the browser half is bounded by its largest kind (~357 s + its boot) instead of the sum (~620 s + all boots): estimated ~4-5 min off a 25 min gate; the two perf kinds (133 s) judge timings and are skewed by running beside anything, so they are better as a separate `--group perf` step than inside the merge gate. Gate runs are per Cards deploy (the memory index records roughly one a day in busy weeks).
+- Evidence: SUITES table parsed (rows/secs above); argparse default `--jobs 1`; not measured end to end (the gate must not be run in this audit).
+- Ledger: new
+- Suggested change: Default the gate to `--jobs 3` (one server per kind is already built for it) and move `perf` out of the default full gate into its own invocation; keep the SETTLES suites serial. Measure once before changing the default.
+- Effort / risk: S effort; medium risk (parallel kinds share the box with Resolve tests' timings)
+
+## What is already good
+- Duplicate-test folding would save almost nothing at run time: AST scan of the 35 companion / 61 dashboard hunt-style files (793 / 1,112 tests) finds only 49 and 41 tests whose every assert text also appears in a home test file (and many of those are generic `status_code == 200`), and no identical bodies; collection is 3.95 s (companion, 9,102 tests) and 1.67 s (dashboard). Fold files for navigation when editing both, as CLAUDE.md says - not as a speed wave.
+- The companion suite is lean per test (median 16 ms on Windows, 6 ms on macOS); its cost is ~10 outliers, not fixtures.
+- The small suites (broll/web 18 s, music/web 6 s, ytdl/web 13 s, bench 1 s, music/indexer < 1 s summed) are cheap; xdist would cost more than it saves there.
+- The session-scoped autouse fixtures in dashboard/tests/conftest.py are correctly session scoped and cost nothing per test.
+- ci.yml's per-step `if: !cancelled()`, pinned action SHAs and the ffmpeg/rclone fallbacks are sound; keep them.
+
+## Coverage note
+- Did not root-cause the 2-4 s/test (local) of `test_admin_users` / `test_admin_delete` (~1.1-1.6 s/test on CI; cProfile showed 2.5 s in `select.select` and ~4,400 unlinks per run from pytest's basetemp cleanup, scrypt N=2^15 at 68 ms per hash is a candidate) or `test_dashboard_update` (78 s).
+- Did not check the 28 companion / 7 dashboard tests with no `assert` statement for whether they verify by other means (mocks' assert_called, return codes).
+- Did not time the Cards gate or read the editor (`/cards/edit`) test setup; installer PowerShell suites (14 s) not examined.
+
+## OUT OF TERRITORY
+- companion/src/ccsync_companion/broll_server.py:2888 and field_server.py:256: stdlib `ThreadingHTTPServer.server_bind` calls `socket.getfqdn`, which costs ~35 s on the macOS CI image (tests-ci-8); if an editor's Mac resolves slowly too, the tray's 8899 bind stalls at start. PLAUSIBLE.
+- server/install_dashboard_app.py:2604: an unconditional `time.sleep(10)` before reading the container log on every real deploy.

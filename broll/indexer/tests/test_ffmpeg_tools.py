@@ -401,3 +401,34 @@ def test_build_proxy_survives_an_odd_height_non_420_source(tmp_path, require_ffm
     dest = tmp_path / "proxy_odd.mp4"
     ffmpeg_tools.build_proxy(odd, dest, use_nvenc=False, height=1080)
     assert ffmpeg_tools.probe_video(dest)["height"] == 480
+
+
+def test_stills_are_cut_at_the_width_the_local_model_was_tuned_on(require_ffmpeg, tmp_path):
+    """Audit idx-1 (2026-11-11): the stills are cut from the proxy, the proxy went from 540p to
+    1080p on 2026-09-17, and at native size a still is about twice the image tokens the local
+    model was evaluated on, so an eight- or nine-frame window no longer fits its context."""
+    from PIL import Image
+
+    wide = tmp_path / "wide.mp4"
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "testsrc=duration=1:size=1920x1080:rate=25",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(wide)], check=True)
+    frames = ffmpeg_tools.extract_frames(wide, [0.2], tmp_path / "wide_frames", duration_s=1.0)
+    with Image.open(frames[0][1]) as im:
+        assert im.size == (960, 540)
+
+    tall = tmp_path / "tall.mp4"                    # a phone clip's proxy: 608 wide, 1080 high
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "testsrc=duration=1:size=608x1080:rate=25",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(tall)], check=True)
+    frames = ffmpeg_tools.extract_frames(tall, [0.2], tmp_path / "tall_frames", duration_s=1.0)
+    with Image.open(frames[0][1]) as im:
+        assert im.size == (608, 1080)               # never upscaled
+
+
+def test_a_small_clip_is_not_enlarged(tiny_clip, tmp_path):
+    from PIL import Image
+
+    frames = ffmpeg_tools.extract_frames(tiny_clip, [0.5], tmp_path / "frames", duration_s=2.0)
+    with Image.open(frames[0][1]) as im:
+        assert im.size == (320, 240)

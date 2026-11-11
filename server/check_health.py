@@ -48,6 +48,7 @@ from common import (  # noqa: F401 - synology_api/truenas_api/run_ssh are also
     DEFAULT_PROJECTS_ROOT,
     DEFAULT_TRUENAS_HOST,
     EDITORS_GROUP,
+    EnvError,
     ScriptCalls,
     add_host_key_arg,
     add_nas_kind_arg,
@@ -104,6 +105,28 @@ def report(passed: bool, message: str):
     RESULTS.append((passed, message))
     status = "PASS" if passed else "FAIL"
     print(f"{status}: {message}")
+
+
+def run_check(name: str, fn, *fn_args):
+    """Run one check; a check that RAISES is that check failing, and the rest still run.
+
+    Audit 2026-11-10 ops-server-2. The moment an operator runs this is when
+    something is down, and three of the checks reached the NAS with no guard:
+    with sshd unreachable the run ended in a paramiko traceback after the
+    first check, the five behind it never ran, and the process exited 1, which
+    by this script's own contract ("exit code = number of failed checks")
+    read as "one check failed". The rule further down this file ("a health
+    CHECK must not crash on the thing it is checking") was applied to two
+    checks only. EnvError and NotImplementedError still go to cli(): they are
+    "this cannot be run at all", not a finding about the server.
+    """
+    try:
+        fn(*fn_args)
+    except (EnvError, NotImplementedError):
+        raise
+    except Exception as exc:                       # noqa: BLE001 - see above
+        detail = " ".join(str(exc).split())[:200] or "no message"
+        report(False, f"{name}: the check could not run ({type(exc).__name__}: {detail})")
 
 
 def warn(message: str):
@@ -609,16 +632,15 @@ def main():
 
     print(f"Checking CC Sync server ({os.environ.get('TRUENAS_HOST', DEFAULT_TRUENAS_HOST)})...\n")
 
-    check_postgres(args.dry_run)
-    check_tailscale(args.dry_run)
-    check_tailscale_path_from_here(
-        nas_peer_hints(args.tailscale_peer, args.dashboard_url), args.dry_run
-    )
-    check_syncthing_app(args.gui_url, args.api_key, args.dry_run)
-    check_tree(args.projects_root, args.dry_run)
-    check_editor_accounts(args.dry_run)
-    check_sftp_transport(args.dry_run)
-    check_dashboard(args.dashboard_url, args.dry_run)
+    run_check("postgres", check_postgres, args.dry_run)
+    run_check("tailscale", check_tailscale, args.dry_run)
+    run_check("tailnet path from here", check_tailscale_path_from_here,
+              nas_peer_hints(args.tailscale_peer, args.dashboard_url), args.dry_run)
+    run_check("syncthing", check_syncthing_app, args.gui_url, args.api_key, args.dry_run)
+    run_check("project tree", check_tree, args.projects_root, args.dry_run)
+    run_check("editor accounts", check_editor_accounts, args.dry_run)
+    run_check("sftp transport", check_sftp_transport, args.dry_run)
+    run_check("dashboard", check_dashboard, args.dashboard_url, args.dry_run)
 
     if args.dry_run:
         print("\n[dry-run] no checks were actually executed.")

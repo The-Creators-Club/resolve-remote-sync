@@ -2516,3 +2516,115 @@ def test_a_lane_b_recovery_does_not_erase_a_later_lane_a_stall(tmp_path):
     assert down.stall_report()["lane"] == "A"
     assert _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, [])
                       ).stall_report()["lane"] == "A"
+
+
+# -- audit comp-sync-3 (2026-11-11): one project's clean scan must not hide another's ----
+
+def test_a_clean_projects_scan_does_not_wipe_another_projects_mismatches(tmp_path, monkeypatch):
+    """The scan runs per project and every project's turn is in the same pass; the single slot
+    it wrote meant the report described only the LAST project scanned, so stranded re-exports
+    in project 3 showed for a few minutes every ~20 passes."""
+    lane = _make_lane(tmp_path)
+    for name in ("One", "Two", "Three"):
+        (tmp_path / "local" / "Projects" / name).mkdir(parents=True, exist_ok=True)
+    answers = {"Projects/One": {"count": 0, "samples": []},
+               "Projects/Two": {"count": 4, "samples": ["B-roll/a.mov", "B-roll/b.mov"]},
+               "Projects/Three": {"count": 0, "samples": []}}
+    monkeypatch.setattr(rclone_lane, "scan_size_mismatches",
+                        lambda *a, **k: dict(answers[a[5] if len(a) > 5 else k.get("subpath")]))
+    for sub in answers:
+        lane._refresh_size_mismatches(sub)
+    report = lane.size_mismatch_report()
+    assert (report["count"], report["subpath"]) == (4, "Projects/Two")
+    assert [s["path"] for s in lane.size_mismatch_samples()] == ["B-roll/a.mov", "B-roll/b.mov"]
+    # a second project with some: the total, labelled as the tree, samples named by project
+    answers["Projects/One"] = {"count": 1, "samples": ["x.mov"]}
+    lane._refresh_size_mismatches("Projects/One")
+    report = lane.size_mismatch_report()
+    assert (report["count"], report["subpath"]) == (5, None)
+    assert "Projects/One/x.mov" in report["samples"] and "Projects/Two/B-roll/a.mov" in report["samples"]
+    # fixed (or unticked): it goes, and when all are clean the answer is a ZERO, which is what
+    # clears the dashboard's alarm, not silence
+    answers["Projects/One"] = {"count": 0, "samples": []}
+    lane._refresh_size_mismatches("Projects/One")
+    lane.forget_scan_reports(["Projects/One", "Projects/Three"])
+    assert lane.size_mismatch_report()["count"] == 0
+
+
+def test_the_tree_wide_scans_run_once_per_scan_pass_not_once_per_project(tmp_path, monkeypatch):
+    lane = _make_lane(tmp_path)
+    walks, strays = [], []
+    monkeypatch.setattr(rclone_lane, "scan_orphan_partials", lambda *a, **k: {"count": 1, "bytes": 10})
+    monkeypatch.setattr(rclone_lane, "scan_trash_dir", lambda root: (walks.append(root), {"count": 2, "bytes": 5})[1])
+    monkeypatch.setattr(lane, "_refresh_size_mismatches", lambda sub=None: None)
+    monkeypatch.setattr(lane, "_refresh_future_dated", lambda sub: None)
+    monkeypatch.setattr(lane, "_refresh_stray_projects", lambda: strays.append(1))
+    for i in range(12):
+        (tmp_path / "local" / "Projects" / f"P{i}").mkdir(parents=True, exist_ok=True)
+        lane.refresh_orphan_report(f"Projects/P{i}")
+    assert len(walks) == 1 and len(strays) == 1
+    report = lane.orphan_report()
+    assert report["partials"] == {"count": 12, "bytes": 120} and report["trash"] == {"count": 2, "bytes": 5}
+
+
+# -- audit comp-sync-1 (2026-11-11): lane B's narrow pool for a re-check ----------------
+
+def _flag(cmd, name):
+    return cmd[cmd.index(name) + 1]
+
+
+def test_lane_b_rechecks_a_quiet_project_on_the_narrow_pool_and_only_then(tmp_path):
+    """CR-381 gave lane A a narrow pool for projects with nothing to do; lane B kept opening
+    the full one for every project on every pass."""
+    lane = _make_lane(tmp_path, direction=DIRECTION_DOWN)
+    wide = lane._build_command(subpath="Projects/Show")
+    assert _flag(wide, "--checkers") == str(lane.tuning.checkers)
+    lane._down_quiet.add("Projects/Show")               # its last pass completed and found nothing
+    narrow = lane._build_command(subpath="Projects/Show")
+    assert _flag(narrow, "--checkers") == str(lane.tuning.checkers_verify)
+    assert _flag(narrow, "--sftp-connections") == str(lane.tuning.sftp_connections_verify)
+    # nothing else about the run changes: same verb, same filter, same safety flags
+    strip = lambda cmd: [a for i, a in enumerate(cmd)                           # noqa: E731
+                         if a not in ("--checkers", "--sftp-connections")
+                         and cmd[i - 1] not in ("--checkers", "--sftp-connections")]
+    assert strip(wide) == strip(narrow)
+    # another project is not affected
+    assert _flag(lane._build_command(subpath="Projects/Other"), "--checkers") == str(lane.tuning.checkers)
+
+
+QUIET_LINES = [
+    '{"level":"info","msg":"rclone starting"}\n',
+    '{"level":"notice","msg":"",'
+    '"stats":{"bytes":0,"totalBytes":0,"speed":0,"eta":0,'
+    '"transfers":0,"totalTransfers":0,"errors":0,"fatalError":false}}\n',
+]
+
+
+def test_the_narrow_pool_is_earned_by_a_quiet_pass_and_lost_by_one_that_moves_or_fails(tmp_path):
+    calls: list[list[str]] = []
+    script = {"lines": QUIET_LINES, "rc": 0}
+
+    def factory(cmd, **kwargs):
+        calls.append(cmd)
+        return _FakeProc(script["lines"], script["rc"])
+
+    lane = _make_lane(tmp_path, direction=DIRECTION_DOWN, popen_factory=factory)
+    sub = "Projects/2026/FF5/Show"
+    width = lambda: _flag(calls[-1], "--checkers")                               # noqa: E731
+    lane.run_once(subpath=sub)
+    assert width() == str(lane.tuning.checkers)                 # nothing known yet: full
+    lane.run_once(subpath=sub)
+    assert width() == str(lane.tuning.checkers_verify)          # the last pass found nothing
+    script["lines"] = STATS_LINES                               # this one downloads a file
+    lane.run_once(subpath=sub)
+    assert width() == str(lane.tuning.checkers_verify)
+    script["lines"] = QUIET_LINES
+    lane.run_once(subpath=sub)
+    assert width() == str(lane.tuning.checkers)                 # after a pass that moved: full again
+    lane.run_once(subpath=sub)
+    assert width() == str(lane.tuning.checkers_verify)
+    script["rc"] = 1                                            # and after one that failed
+    lane.run_once(subpath=sub)
+    script["rc"] = 0
+    lane.run_once(subpath=sub)
+    assert width() == str(lane.tuning.checkers)

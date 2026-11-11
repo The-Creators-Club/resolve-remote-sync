@@ -1,0 +1,62 @@
+[
+ {
+  "id": "cards-page-a-1",
+  "title": "The edit view rebuilds every row by innerHTML on every new state version",
+  "category": "perf",
+  "severity": "medium",
+  "confidence": "CONFIRMED",
+  "where": "MulticamPipeline multicam_pipeline/cards/page/09-edit.js:108-109 and :147-150 (edvBuild), reached from 01-state.js:4274 (paintList -> laneDraw(true) -> edvDraw -> edvBuild)",
+  "what": "edvBuild's cache key includes `CARDS` by identity, and render() assigns a fresh `CARDS=LIVE` array on every version, so any version bump (an edit confirm, every translate answer, a note, another device's edit) throws away all rows and rebuilds them with `EDLIST.innerHTML=rows.map(edvRowHtml).join('')`. The card list beside it got a keyed patch on 2026-09-03; the edit view never did.",
+  "cost": "measured at 500 cards with the edit view open: 500 rows = 5,000 nodes including 1,000 `<canvas>` elements, rebuilt on 10 of 10 version bumps; render() goes from 5.7 ms (edit view shut, 3 DOM mutations for a one-card change) to 23.2 ms on the desktop. Estimated 90-140 ms per version on a phone at the repo's 4-6x CPU factor - and the edit view is the phone's main view (GOTCHAS section 22). A 91-card translate run republishes per answer, so that is ~91 full rebuilds; every edit costs one, on top of the waveform canvases each row must redraw.",
+  "evidence": "probe2-out-500.json `edv` {rows 500, nodes 5000, canv 1000} and `edvBump` {rebuilds 10/10, rebuildMsAvg 4.6 (the innerHTML alone), renderMsAvg 23.2} vs probe-out-500.json `oneChange` {renderMs 5.7, mutations 3}.",
+  "ledger": "new (LANE-ZOOM-PERF-INVESTIGATION section 10 fixed the shorten panel's forced `edvBuild(true)`, not this path)",
+  "fix": "key edvBuild on what the rows DRAW (LSEG identity already changes only when laneModel rebuilds; or a per-row signature like cardItems' `stable` string) and patch rows by uid as patchList does, re-using each row's element and canvas; only `top`, number and the changed row need writing. Must keep EDKEY's existing invalidations (zoom, width, language, shorten removals) and the `cur` row bookkeeping (EDCUR reset).",
+  "effort": "M",
+  "risk": "medium"
+ },
+ {
+  "id": "cards-page-a-2",
+  "title": "An unchanged poll still repaints the whole lane canvas and walks every card row",
+  "category": "idle",
+  "severity": "low",
+  "confidence": "CONFIRMED",
+  "where": "MulticamPipeline multicam_pipeline/cards/page/08-places.js:319 and :347; 02-markers.js:790-818 (hilite)",
+  "what": "every poll whose version did not move calls hilite(), which unconditionally asks for a full `laneDraw` (and through it `edvDraw`) and removes/re-adds `.ph` on every child of #list, even when PH and PHUID are what they were last time. The poll runs every 600 ms on the NAS-served page (REMOTE) and keeps running in a hidden tab (no visibilitychange gate in 08-places.js; Chrome throttles it to 1/s, then 1/min after 5 minutes hidden).",
+  "cost": "measured: 8 polls -> 8 full lane redraws in 5 s with nothing changing (1.6 Hz); hilite 0.19 ms over 500 rows, laneDraw 0.15 ms headless without peaks, ~1.2-1.4 ms with real peaks at 80 clips and 7-8 ms at CPU x4 (take five's table). Per open tab that is a full-canvas GPU raster + composite 1.6 times a second all day, on the machine whose Chrome shares an iGPU with Resolve; small per tick, but it is pure waste and it also keeps the GPU process from idling.",
+  "evidence": "probe-out-500.json `idleDraws` {fullDrawsIn5s 8, pollsIn5s 8, REMOTE true}, `hiliteMs` 0.19.",
+  "ledger": "new",
+  "fix": "in hilite (or at the poll's `else` branch) skip when PH, PHUID and the list's version are unchanged since the last hilite, and keep a reference to the previous `.ph` element instead of sweeping all children. Optionally stretch the poll to a few seconds while `document.visibilityState==='hidden'` (15-offline.js already re-asks on visible). Must not break follow (laneFollowTick needs the call when FOLLOW is on and the card has drifted - keep that branch).",
+  "effort": "S",
+  "risk": "low"
+ },
+ {
+  "id": "cards-page-a-3",
+  "title": "The spoken-word highlight rewrites the playhead card's innerHTML on every poll",
+  "category": "perf",
+  "severity": "low",
+  "confidence": "PLAUSIBLE",
+  "where": "MulticamPipeline multicam_pipeline/cards/page/02-markers.js:824-855 (cardWordTick)",
+  "what": "each poll with a playhead clip and source time rebuilds the `.txt` (or `.en`) element's innerHTML with the current word wrapped, even when the word index is the same as last poll, and finds the card with `CARDS.find` (O(n)) each time.",
+  "cost": "1.6 times a second while Resolve's playhead is parked on a word: one text subtree replaced, its layout invalidated, its style recomputed, in a 500-card list. Estimated well under 1 ms a tick on a desktop; it is a re-layout nobody needs and it also defeats text selection inside that card.",
+  "evidence": "read only; no `res` comparison against the last highlighted index before the innerHTML write (line 852).",
+  "ledger": "new",
+  "fix": "remember the last (uid, word index) and return early when unchanged; use `cardEl`'s element dataset or a uid->card map instead of `CARDS.find`.",
+  "effort": "S",
+  "risk": "low"
+ },
+ {
+  "id": "cards-page-a-4",
+  "title": "flip() interleaves layout reads with style writes over every card near the viewport",
+  "category": "perf",
+  "severity": "low",
+  "confidence": "PLAUSIBLE",
+  "where": "MulticamPipeline multicam_pipeline/cards/page/02-markers.js:662-673",
+  "what": "the loop reads `c.offsetTop` and `getBoundingClientRect()` for each card and, for a moved one, writes `style.transition` / `style.transform` before reading the next card, so each later read forces a style (and layout-validity) pass. A delete or a move near the top shifts every card below, so every card within three screens is written.",
+  "cost": "per confirmed delete / move / insert: estimated 30-60 forced style passes (the number of cards in the 3-screen window), each small; at CPU x4 on a phone this is a few ms of the confirm's paint. The ripple-trim path that moves nothing pays nothing.",
+  "evidence": "read only (my probe's one-card text change moved no card, so it did not exercise this).",
+  "ledger": "related to the 2026-09-03 FLIP limit (FLIP_MS) - this is the remaining read/write interleave, not the old 373-card transition",
+  "fix": "two passes - collect (card, dy, top) for all cards first, then write all transforms - same visual result.",
+  "effort": "S",
+  "risk": "low"
+ }
+]

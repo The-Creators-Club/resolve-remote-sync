@@ -428,3 +428,40 @@ def test_prioritise_keeps_a_diacritic_project_the_editor_ticked(tmp_path):
     )
     assert kept == [_nfd("2026/Français/Été")]
     assert dropped == 1
+
+
+def test_the_walk_gives_the_paths_pathlib_gave_and_builds_none_of_them(tmp_path, monkeypatch):
+    """Audit comp-core-1 (2026-11-11): the walk built a pathlib.Path and called relative_to for
+    every video file (85% of its CPU, 3.6 s per 50,000 files every five minutes on every
+    machine). The strings it reports must be exactly the ones pathlib produced: the dashboard
+    compares them with the NAS's listing, and CR-90 says the bytes on disk are the truth."""
+    import pathlib
+
+    project = _make_project(tmp_path, "2026", "FF5", "Show")
+    wanted = {
+        "originals": ["A001.mov", "B-roll/Day 1/C0001.MP4", "Interview/Matej Šimalčík/int.braw"],
+        "proxies": ["B-roll/Proxy/C0001.mov", "Proxy/A001.mov", "deep/PROXY/x/y.mp4"],
+    }
+    for rel in wanted["originals"] + wanted["proxies"]:
+        _touch(project / rel, 7)
+    _touch(project / "B-roll/notes.txt", 3)                                 # not video
+    _touch(project / "B-roll/Day 1/C0001.sync-conflict-20261111-AAAA.MP4", 7)
+
+    calls = []
+    real = pathlib.PurePath.relative_to
+    monkeypatch.setattr(pathlib.PurePath, "relative_to",
+                        lambda self, *a, **k: (calls.append(self), real(self, *a, **k))[1])
+    conflicts: dict = {}
+    out = manifest_mod.scan_local_manifest(
+        str(tmp_path), selected_rels={"2026/FF5/Show"}, conflicts_out=conflicts)
+    entry = out["2026/FF5/Show"]
+    got_orig = sorted(p for p, _size in entry["originals"])
+    got_prox = sorted(p for p, _size in entry["proxies"])
+    conflict_name = "B-roll/Day 1/C0001.sync-conflict-20261111-AAAA.MP4"
+    assert got_orig == sorted(wanted["originals"] + [conflict_name])
+    assert got_prox == sorted(wanted["proxies"])
+    assert (entry["n_originals"], entry["n_proxies"]) == (4, 3)
+    assert entry["bytes_originals"] == 28 and entry["bytes_proxies"] == 21
+    assert conflicts["count"] == 1 and conflicts["paths"] == [f"2026/FF5/Show/{conflict_name}"]
+    per_file = [c for c in calls if str(c).lower().endswith((".mov", ".mp4", ".braw", ".txt"))]
+    assert per_file == [], "the walk went back to building a Path per file"

@@ -369,6 +369,17 @@ class SynologyBackend:
             self.root_cmd(self._compose("restart dashboard")), dry_run, 300)
         return (dry_run or rc == 0), err
 
+    def container_image(self) -> str:
+        """`.Config.Image` of the running dashboard container, or ""."""
+        try:
+            rc, out, _err = self.calls.ssh_guarded(
+                self.root_cmd("docker inspect --format '{{.Config.Image}}' "
+                              + common.shell_quote(self.dashboard_container)),
+                False, 60)
+        except Exception:  # noqa: BLE001 - "could not tell" is an answer here
+            return ""
+        return (out or "").strip().splitlines()[-1].strip() if rc == 0 and (out or "").strip() else ""
+
     def container_exec(self, container: str, argv: str,
                        dry_run: bool) -> tuple[int, str, str]:
         return self._root(f"docker exec {container} {argv}", dry_run)

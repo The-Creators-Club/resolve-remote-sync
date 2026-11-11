@@ -89,6 +89,14 @@ class ServerBackend(Protocol):
     def restart_stack(self, dry_run: bool) -> tuple[bool, str]:
         """Restart the dashboard container onto freshly installed code."""
 
+    def container_image(self) -> str:
+        """The image the RUNNING dashboard container was created from, as its
+        compose named it (`docker inspect`'s `.Config.Image`), or "" when there
+        is no such container or the question could not be answered. Read-only.
+        Never raises (audit deploy-nas-1, 2026-11-11: see
+        install_dashboard_app.mode_flag_needs_recreate)."""
+        return ""
+
     def container_exec(self, container: str, argv: str,
                        dry_run: bool) -> tuple[int, str, str]:
         """Run `argv` inside `container`. Returns (rc, stdout, stderr)."""

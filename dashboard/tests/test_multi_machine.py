@@ -36,7 +36,13 @@ def env(tmp_path):
         dbmod.upsert_project(conn, "p2", "2026/Two", "/y", now)
         conn.commit()
         client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
-        yield client, conn, now
+        try:
+            yield client, conn, now
+        finally:
+            # BEFORE the app shuts down (2026-11-11, audit tests-ci-7): a test that ends with
+            # a write still open on this second connection made the lifespan's own shutdown
+            # write wait out SQLite's whole 10 s busy timeout, in the teardown of that test.
+            conn.close()
 
 
 def hdr(editor):

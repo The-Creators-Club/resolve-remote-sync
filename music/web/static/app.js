@@ -1029,7 +1029,14 @@ async function init() {
 
   wireDropzone();
   refreshResolveStatus();
-  setInterval(refreshResolveStatus, 30000);
+  // Only while this tab is the one being looked at (2026-11-11, audit
+  // web-music-1). Each ask makes the companion on this computer do real
+  // work, and a tab left open in the background asked every 30 s for days.
+  // Coming back to the tab asks at once, so the dot is never stale on screen.
+  setInterval(() => { if (!document.hidden) refreshResolveStatus(); }, 30000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refreshResolveStatus();
+  });
   await loadLibraryMeta();
   await loadTracks();
 }

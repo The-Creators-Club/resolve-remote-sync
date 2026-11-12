@@ -41,6 +41,7 @@ def check(name: str):
     text = open(path, encoding="utf-8", errors="replace").read().replace("\r\n", "\n")
     section = ""
     placed: dict[str, int] = {}
+    moved: set[str] = set()
     entry = None
     finished = sealed = removed = 0
     seen_ids = set()
@@ -69,7 +70,12 @@ def check(name: str):
         if f.get("From") and not got:
             problems.append(f"{e['id']}: no entry id in From")
         for i in got:
-            placed[i] = placed.get(i, 0) + 1
+            # A second lesson split off for another capability carries the same
+            # source id with a `Move to:` line: that is allowed (the brief).
+            if f.get("Move to"):
+                moved.add(i)
+            else:
+                placed[i] = placed.get(i, 0) + 1
         for field, limit in (("title", 15), ("What was going on", 34),
                              ("What the product must do", 34)):
             t = e["title"] if field == "title" else f.get(field, "")
@@ -125,7 +131,10 @@ def check(name: str):
             problems.append(f"{i} is placed {n} times")
         if i not in want:
             problems.append(f"{i} is not in this bundle")
-    missing = [i for i in want if i not in placed]
+    for i in moved:
+        if i not in want:
+            problems.append(f"{i} is not in this bundle")
+    missing = [i for i in want if i not in placed and i not in moved]
     if missing:
         show = ", ".join(missing[:40]) + (" ..." if len(missing) > 40 else "")
         problems.append(f"{len(missing)} of {len(want)} bundle entries not placed: {show}")

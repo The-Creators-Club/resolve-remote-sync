@@ -5,7 +5,12 @@ list of all the features that this project has, without discussing the
 architecture at all. Do not trust the documentation or notes throughout the
 code ... to create a briefing doc for a full rebuild of the whole project."
 
-**Status: 29 sections written. Nine are owed: five listed below (24, 31 to 34) and the Footage Sorter (35 to 38). The plan this belongs to is [`../REBUILD_PLAN.md`](../REBUILD_PLAN.md).**
+**Status: complete, 40 sections, as of 2026-11-12. Nothing is owed. The plan this belongs to is [`../REBUILD_PLAN.md`](../REBUILD_PLAN.md). This inventory stays behind: under that plan's purge rule it is never shown to the session that rebuilds the product.**
+
+Known to be behind already: sections 01 to 30 were read at ccsync `7a81073`,
+and ten companion commits about camera cards landed the same day (0.9.92 to
+0.9.96), so sections 06 and 10 need a top-up; and section 36 read the
+Footage Sorter's audio sync while another session was still building it.
 
 ## How to read it
 
@@ -35,6 +40,14 @@ Every section ends with three lists:
   list is often answered in another section.
 - Nothing here was checked by running the software. It is a reading of the
   code as it stood on 2026-11-12 (ccsync `7a81073`, Editing `94cbab7`).
+  Sections 24 and 31 to 40 were read later the same day: ccsync at
+  `b02d1cd`, Editing still at `94cbab7`, and the Footage Sorter's working
+  tree on branch `sorter-dashboard-module` at `663080d` plus its uncommitted
+  changes.
+- Readers 36, 38 and 39 shared a temporary folder and one overwrote
+  another's temporary files. Each checked its finished section, and every
+  source tag in sections 24 and 31 to 40 was checked afterwards to point
+  only into that section's own files.
 - Sections 13, 17, 18, 20, 21, 22, 23, 25, 26, 27, 28 and 29 were interrupted
   once (a usage pause) and finished by the same reader from where it stopped.
 - Section 21 is in five files: the main file plus four parts in `_parts/`,
@@ -114,7 +127,7 @@ describe what actually happens.
 | | Section |
 |---|---|
 | 39 | [Sending a cut to Resolve, reading it back, and the cut-list rules](39-timeline-cards-engine-sending-to-resolve.md) (also the multicam and angle-sync tools in `multicam_pipeline/resolve`) |
-| 40 | **OWED.** The media library, shortening, search, chat edits, translation and the rest (`library_engine`, `shorten`, `chat_edit`, `transcript_search`, `translate`, `corpus`, `text`, `gap_notes`, `offline`, `stores`, `montage`, `fleet_jobs`, `claude*`, `models`, `config`, and the small files) |
+| 40 | [The media library, shortening, search, chat edits, translation and the rest](40-timeline-cards-engine-library-shorten-search-chat.md) (marks what only the retired page could reach) |
 
 Not read: `handler.py`, `server.py`, `page.py` and the `page` folder, which
 are the old Timeline Cards page's own server, retired 2026-11-12.
@@ -130,11 +143,9 @@ are the old Timeline Cards page's own server, retired 2026-11-12.
 
 ## Left out on purpose
 
-- **The Footage Sorter app** (`E:\Projects\Editing\footage-sorter`, about
-  45,000 lines) is NOT left out any more: the owner asked on 2026-11-12 for
-  the rebuild to include it. It is owed as sections 35 to 38
-  (`../REBUILD_PLAN.md` has the split). Until then only the dashboard's and
-  the companion's sides of it are covered, in sections 10 and 19.
+- **The Footage Sorter app** is NOT left out any more: the owner asked on
+  2026-11-12 for the rebuild to include it, and it is sections 35 to 38. The
+  dashboard's and the companion's sides of it are in sections 10 and 19.
 - **The old Timeline Cards page** (`multicam_pipeline/cards/page`). It was
   retired on 2026-11-12. What the dashboard still does for it is in section 19.
 - **The rest of the MulticamPipeline repo** (the transcript and canvas

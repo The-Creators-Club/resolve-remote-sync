@@ -1309,3 +1309,26 @@ def test_the_quick_check_still_catches_a_bad_end_of_the_recording(tmp_path):
     w.write(w.pool, "Footage/Day1/a.MP4", bytes(data))
     _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 3 * MIB)]))
     assert len(res["result"]["conflicts"]) == 1 and res["result"]["skipped"] == []
+
+
+def test_a_finished_card_copy_says_so_in_the_tray(tmp_path):
+    """2026-11-12, Alex: "after the fast verification finishes you should get a notification message"."""
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    w.write(w.card, "b.MP4", b"678")
+    dash = IngestDash(card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5), copy_item("b.MP4", "Footage/Day1/b.MP4", 3)]))
+    said = []
+    r = runner_mod.JobRunner(
+        w.cfg(), request_fn=dash.request, identity_token_fn=lambda: "ident", capabilities_fn=lambda: CAPS,
+        idle_probe=FakeIdle(900), resolve_running_fn=lambda: False, halted_fn=lambda: False,
+        machine_name="EDIT-PC", volumes_fn=w.volumes, notify=said.append)
+    r.note_report_reply({"commands": {"jobs": {"offered": [21]}}})
+    r.tick()
+    assert said == ["Card SD-3: quick verify complete. 2 copied, 0 already there, all checked OK."]
+
+
+def test_the_message_names_failures_and_never_uses_an_em_dash():
+    msg = runner_mod.copy_done_message({"label": "G013"}, {"copied": 40, "skipped": 6, "failed": 2, "conflicts": 1}, quick=True)
+    assert msg == ("Card G013: quick verify found problems. 40 copied, 6 already there, "
+                   "1 left alone (a different file was there), 2 failed. Open the sorter to see which.")
+    assert "—" not in msg

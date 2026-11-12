@@ -228,6 +228,22 @@ _WHISPER_AT_RE = re.compile(r"^\s+([0-9.]+)s / ([0-9.]+)s\s*$")
 _WHISPER_DONE_RE = re.compile(r"^done: \d+ transcribed")
 
 
+
+def copy_done_message(inputs: dict[str, Any], small: dict[str, Any], quick: bool) -> str:
+    """The tray line when a card copy has finished and been checked. No em dashes (owner's rule)."""
+    card = str(inputs.get("label") or inputs.get("serial") or "the card")
+    done, skipped = int(small.get("copied") or 0), int(small.get("skipped") or 0)
+    bad, conflicts = int(small.get("failed") or 0), int(small.get("conflicts") or 0)
+    check = "Quick verify" if quick else "Verify"
+    head = f"Card {card}: {check.lower()} complete." if not bad else f"Card {card}: {check.lower()} found problems."
+    parts = [f"{done} copied", f"{skipped} already there"]
+    if conflicts:
+        parts.append(f"{conflicts} left alone (a different file was there)")
+    if bad:
+        parts.append(f"{bad} failed")
+        return f"{head} {', '.join(parts)}. Open the sorter to see which."
+    return f"{head} {', '.join(parts)}, all checked OK."
+
 class JobRunner:
     """The loop. Never raises out of tick()/start()/stop()."""
 
@@ -1377,6 +1393,13 @@ class JobRunner:
         log.info("jobs: job #%s (%s) copied %d, skipped %d, %d conflicts, %d failed",
                  job_id, kind, small["copied"], small["skipped"],
                  small["conflicts"], small["failed"])
+        if self._notify is not None and kind == card_copy.KIND_CARD_INGEST:
+            # 2026-11-12, Alex: "after the fast verification finishes you should get a notification message"
+            # (the Node sorter's "Quick verify complete" balloon, lost in the move to the companion)
+            try:
+                self._notify(copy_done_message(inputs, small, quick=bool(getattr(job_obj, "quick", False))))
+            except Exception:                                   # noqa: BLE001
+                log.debug("jobs: notify failed", exc_info=True)
         if not delivered:
             # Copies are idempotent (same size is skipped), so running it again
             # is safe and is the only way the sorter ever gets its receipt.

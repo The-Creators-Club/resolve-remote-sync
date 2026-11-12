@@ -42,6 +42,7 @@ reported at all when it holds none -- a USB stick of documents is not a card.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -184,6 +185,60 @@ def last_drive(serial: str) -> str:
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
         "+00:00", "Z")
+
+
+# CARD THUMBNAILS (2026-11-12). The sorter on the NAS makes thumbnails from files it can open, and a card in this
+# computer is not one of them: G013's BRAWs showed a blank grid. The reply to a report names the files to make them
+# from (the camera's own proxy for a BRAW); they ride in the next reports, a few at a time, so the report stays
+# small and the reader stays free for a copy.
+THUMBS_PER_REPORT = 8
+THUMBS_SECONDS = 20.0
+THUMB_TIMEOUT_SECONDS = 15.0
+THUMB_MAX_BYTES = 256 * 1024            # the sorter's own cap per size (Thumbnailer.SUPPLIED_MAX_BYTES)
+
+
+def card_root(drive: Any) -> Optional[Path]:
+    d = str(drive or "").strip()
+    if re.fullmatch(r"[A-Za-z]:", d):
+        return Path(d + "\\")
+    return Path(d) if d.startswith("/Volumes/") else None
+
+
+def safe_join(root: Path, rel: str) -> Optional[Path]:
+    """root/rel, or None when rel would leave the card (an absolute path, a drive, or a '..')."""
+    parts = [p for p in str(rel or "").replace("\\", "/").split("/") if p]
+    if not parts or any(p in (".", "..") or ":" in p for p in parts):
+        return None
+    return root.joinpath(*parts)
+
+
+def make_card_thumb(ffmpeg: str, src: Path, kind: str) -> Optional[tuple[bytes, bytes]]:
+    """(320 px, 160 px) JPEGs of one frame of `src`, or None. A video is read a second in (a black first frame is
+    common), then from its start if it is shorter than that."""
+    import tempfile
+    from . import ffmpeg_tools
+    exe = ffmpeg_tools._resolve_binary(ffmpeg)
+    if not exe or not src.is_file():
+        return None
+    graph = "[0:v]scale=320:-2:flags=bicubic,split=2[a][b];[b]scale=160:-2:flags=bicubic[c]"
+    seeks = [["-ss", "1"], []] if kind == "video" else [[]]
+    with tempfile.TemporaryDirectory(prefix="ccsync-thumb-") as tmp:
+        big, small = Path(tmp) / "l.jpg", Path(tmp) / "s.jpg"
+        for seek in seeks:
+            argv = [exe, "-hide_banner", "-loglevel", "error", "-y", *seek, "-i", str(src), "-filter_complex", graph,
+                    "-map", "[a]", "-frames:v", "1", "-q:v", "4", str(big), "-map", "[c]", "-frames:v", "1", "-q:v", "5", str(small)]
+            try:
+                subprocess.run(argv, capture_output=True, timeout=THUMB_TIMEOUT_SECONDS,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            try:
+                a, b = big.read_bytes(), small.read_bytes()
+            except OSError:
+                continue
+            if a[:3] == b"\xff\xd8\xff" and b[:3] == b"\xff\xd8\xff" and max(len(a), len(b)) <= THUMB_MAX_BYTES:
+                return a, b
+    return None
 
 
 # A VOLUME THAT NEVER ANSWERS (2026-11-12). GetVolumeInformationW has no timeout, and on creator-1 one call on a
@@ -684,6 +739,10 @@ class SorterCards:
         self.last_status: Optional[int] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # thumbnails the sorter asked for (serial -> [{rel, kind}]), and the ones that could not be made
+        self._need_thumbs: dict[str, list[dict[str, Any]]] = {}
+        self._thumb_failed: set[tuple[str, str]] = set()
+        self._thumb_fn: Callable[[str, Path, str], Optional[tuple[bytes, bytes]]] = make_card_thumb
 
     # -- config ----------------------------------------------------------
     @property
@@ -790,12 +849,48 @@ class SorterCards:
             return None
         cards = self.current_cards()
         digest = set_hash(cards)
-        due = (self._last_hash is None or digest != self._last_hash
+        cards, sending_thumbs = self._with_thumbs(cards)
+        due = (self._last_hash is None or digest != self._last_hash or sending_thumbs
                or (cards and self._last_sent is not None
                    and now - self._last_sent >= RESEND_SECONDS))
         if not due:
             return None
         return self._post(cards, digest, now)
+
+    def _with_thumbs(self, cards: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+        """The cards, with a few of the thumbnails the sorter asked for attached (2026-11-12: the NAS cannot read a
+        card in this computer, so G013's BRAWs had no picture). At most THUMBS_PER_REPORT per report, each made
+        from the file the sorter named on that card; one that cannot be made is not asked again this run."""
+        if not self._need_thumbs:
+            return cards, False
+        ffmpeg = str(self.cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
+        budget, deadline, out, any_sent = THUMBS_PER_REPORT, time.monotonic() + THUMBS_SECONDS, [], False
+        for card in cards:
+            want = self._need_thumbs.get(str(card.get("serial")))
+            made: list[dict[str, str]] = []
+            root = card_root(card.get("drive"))
+            for item in want or []:
+                if budget <= 0 or time.monotonic() > deadline or root is None:
+                    break
+                rel = str(item.get("rel") or "")
+                key = (str(card.get("serial")), rel)
+                src = safe_join(root, rel)
+                if key in self._thumb_failed or src is None:
+                    continue
+                pics = self._thumb_fn(ffmpeg, src, str(item.get("kind") or "video"))
+                budget -= 1
+                if not pics:
+                    self._thumb_failed.add(key)
+                    continue
+                made.append({"rel": rel, "l": base64.b64encode(pics[0]).decode("ascii"),
+                             "s": base64.b64encode(pics[1]).decode("ascii")})
+            if made:
+                card = {**card, "thumbs": made}
+                any_sent = True
+            out.append(card)
+        if not any_sent:
+            self._need_thumbs = {}                 # nothing more this computer can make: wait for the next reply
+        return out, any_sent
 
     def _post(self, cards: list[dict[str, Any]], digest: str, now: float) -> Optional[int]:
         request = self._request
@@ -825,6 +920,9 @@ class SorterCards:
             self._backoff_until = now + 60.0
             return int(status)
         self._last_hash, self._last_sent = digest, now
+        need = _parsed.get("needThumbs") if isinstance(_parsed, dict) else None
+        self._need_thumbs = {str(k): [i for i in v if isinstance(i, dict)] for k, v in need.items()
+                             if isinstance(v, list)} if isinstance(need, dict) else {}
         return 200
 
 

@@ -573,3 +573,44 @@ def test_no_media_and_a_failing_query_are_both_none(monkeypatch):
     def boom(root):
         raise OSError("device not ready")
     assert sorter_cards._volume_info("T:\\", timeout=2, query=boom) is None
+
+
+# ------------------------------------------------- card thumbnails for the sorter
+def test_the_thumbnails_the_sorter_asks_for_ride_in_the_next_report(tmp_path):
+    """2026-11-12: the NAS cannot read a card in this computer, so G013's BRAWs had no picture. The reply names
+    the file on the card; the next report carries the thumbnail made from it, a few at a time."""
+    touch(tmp_path, "G013_C001.braw")
+    touch(tmp_path, "Proxy/G013_C001.mp4")
+    posts = []
+
+    def request(method, url, body, headers, timeout):
+        posts.append(body)
+        if len(posts) == 1:
+            return 200, {"ok": True, "needThumbs": {"S1": [{"rel": "Proxy/G013_C001.mp4", "kind": "video"},
+                                                           {"rel": "../outside.mp4", "kind": "video"}]}}
+        return 200, {"ok": True, "needThumbs": {}}
+
+    vol = {"serial": "S1", "label": "G013", "drive": str(tmp_path)[:2], "root": str(tmp_path), "removable": False,
+           "drive_type": "fixed", "system": False, "capacity": 1, "free": 1}
+    rep = sorter_cards.SorterCards({"dashboard_url": "https://dash", "dashboard_token": "t"}, request_fn=request,
+                                   volumes_fn=lambda scope, skip: [vol], identity_token_fn=lambda: "id")
+    made = []
+    rep._thumb_fn = lambda ffmpeg, src, kind: (made.append(src), (b"\xff\xd8\xffL", b"\xff\xd8\xffS"))[1]
+    import ccsync_companion.sorter_cards as sc
+    real_root = sc.card_root
+    sc.card_root = lambda drive: tmp_path
+    try:
+        assert rep.tick() == 200 and "thumbs" not in posts[0]["cards"][0]
+        assert rep.tick() == 200                       # due at once: it has thumbnails to send
+        sent = posts[1]["cards"][0]["thumbs"]
+        assert [t["rel"] for t in sent] == ["Proxy/G013_C001.mp4"] and made == [tmp_path / "Proxy" / "G013_C001.mp4"]
+        assert rep.tick() is None                      # nothing left to send and nothing changed: quiet again
+    finally:
+        sc.card_root = real_root
+
+
+def test_a_path_that_leaves_the_card_is_never_opened():
+    root = Path("H:/")
+    assert sorter_cards.safe_join(root, "Proxy/a.mp4") == root / "Proxy" / "a.mp4"
+    for bad in ("../x.mp4", "Proxy/../../x", "C:/Windows/x", "", "/"):
+        assert sorter_cards.safe_join(root, bad) is None

@@ -113,7 +113,7 @@ describe what actually happens.
 
 | | Section |
 |---|---|
-| 39 | **OWED.** What happens when a cut is sent to Resolve, and the cut-list and project rules behind it (`resolve_engine`, `project_engine`, `project_conform`, `project_diff`, `project_edit`, `project_agent`, `project_pick`, `agent`, `cutlist`, `timecode`, plus the `multicam_pipeline/resolve` package) |
+| 39 | [Sending a cut to Resolve, reading it back, and the cut-list rules](39-timeline-cards-engine-sending-to-resolve.md) (also the multicam and angle-sync tools in `multicam_pipeline/resolve`) |
 | 40 | **OWED.** The media library, shortening, search, chat edits, translation and the rest (`library_engine`, `shorten`, `chat_edit`, `transcript_search`, `translate`, `corpus`, `text`, `gap_notes`, `offline`, `stores`, `montage`, `fleet_jobs`, `claude*`, `models`, `config`, and the small files) |
 
 Not read: `handler.py`, `server.py`, `page.py` and the `page` folder, which

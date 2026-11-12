@@ -108,7 +108,7 @@ and writes `_merged/<bundle>.md`. `python docs/rebuild-spec/tools/check_merge.py
 with no arguments shows which bundles are merged and passing.
 
 A merger's prompt is: "First read the brief at
-`E:\Projects\Editing\ccsync\docsebuild-spec\knowledge-base\_parts\KB_MERGE_BRIEF.md`
+`E:\Projects\Editing\ccsync\docs\rebuild-spec\knowledge-base\_parts\KB_MERGE_BRIEF.md`
 and follow it exactly. Do NOT start sub-agents of your own. Your bundle is
 `<name>`: read `...\_raw\merge\<name>.md` completely." Then the output path
 `...\knowledge-base\_merged\<name>.md`, the id prefix (below), and the

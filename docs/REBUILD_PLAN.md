@@ -165,7 +165,9 @@ exactly.
 **AMENDED again the same day, for Timeline Cards' translation only:** the
 editor's translate controls do NOT cross ("Timeline cards doesn't need
 Google translate or Claude translate any more"). A card's English is picked
-from the part of the transcript the card covers, on its own. Everything else
+from the part of the transcript the card covers, on its own. The controls
+that exist only for the notes program go as well (pasting its links as
+cards, copying cards out as its embeds): "obsidian is gone". Everything else
 a person sees and touches in the editor still crosses exactly. And the
 editor gains a front door it does not have today: dropping clips in (next
 section but one).
@@ -306,33 +308,79 @@ crosses):
   goes is translating again, on request, inside the editor. Which translator
   is used is the fresh instance's choice and is never put to the owner.
 
+Answered by the owner 2026-11-12 (these cross, as requirements):
+
+1. **Resolve only to start.** Nothing before the hand-over touches an
+   editing program; the hand-over is written for Resolve first, and each
+   further program is its own module when a client needs it. Assumed, not
+   yet said by him: this is about Timeline Cards only, and the syncing
+   product's Resolve features stay Resolve features.
+2. **The notes program is gone**, for this studio too. Nothing in the
+   rebuild reads its links, writes its embeds or expects its folders.
+3. **Every automatic guess can be corrected** in the product: a word, a
+   translation, a speaker, which clips belong to one interview.
+4. **The join check stays**: the editor reads a join between two cuts afresh
+   and warns when the meaning or the grammar broke.
+
+### The board: themes and outline (owner's requirement, 2026-11-12)
+
+In his words: "the initial step which is a themed canvas and outline tool,
+originally canvas in obsidian, needs a replacement. It should be a kind of
+kanban which you can do manually by dragging paragraphs out from a
+transcript into, create your own column with themes and drag things around,
+etc., and it should still be in .md format so that it stays in the same
+format as the transcripts themselves and can be transferred elsewhere."
+
+Restated, and crossing to the fresh instance:
+
+- **A board inside the product for planning the film**, before cutting.
+  Columns are themes. Cards are paragraphs of the transcripts.
+- **A person drags a paragraph out of a transcript onto the board**, makes
+  their own columns, names them, and drags cards and columns around.
+- **The board is a Markdown file**, like the transcripts, complete in
+  itself and readable anywhere, so it can be taken elsewhere.
+- **Transcripts are Markdown files too.** This follows from his words and is
+  now a requirement, not a leftover.
+
+What this changes in the plan (for the preparing sessions; does not cross):
+
+- The canvas tools and Story Deck are in the inventory's scope after all:
+  the board cannot be specified without knowing what the planning step does
+  for him today. Sections 43 (the canvas tools and the two story
+  instruction files) and 44 (Story Deck) started 2026-11-12.
+- "Markdown" crosses because he asked for it. The old files' exact layout
+  does not: it stays in the old-data drawer, and the fresh instance designs
+  its own layout. The specification says only what a person must be able to
+  read in the file.
+- Real episodes have several hundred paragraphs. The specification must
+  give the real sizes (paragraphs per interview, interviews per episode,
+  themes per board), measured from this studio's work, so the board is
+  designed for them.
+
 Put to the owner 2026-11-12, not yet answered:
 
-1. **Which editing programs at the start?** "Not tied to one" can be built
-   honestly: nothing before the hand-over touches an editing program. But
-   the hand-over itself has to be written and tested once per program, on
-   that program, and a multicam is among the hardest things to hand over.
-   Recommended: Resolve at the start, each further program as its own module
-   when a client needs it. Assumed until he says otherwise: this is about
-   Timeline Cards only, and the syncing product's Resolve features (relink,
-   proxies, the project watcher) stay Resolve features.
-2. **Is the notes program gone for his own studio too, or only no longer
-   required?** Today the editor accepts pasted block links, copies cards out
-   as embeds, and keeps the cut list as a file a person can edit outside;
-   the planning canvas and Story Deck live there entirely. Recommended: not
-   required by anything, and what this studio still uses becomes one
-   optional module, off unless switched on. The canvas tools and Story Deck
-   (about 13,500 lines, not inventoried) are read only if he wants them in
-   the rebuild.
-3. **Where is a wrong guess put right?** Today a wrong word or a wrong
-   translation is fixed by editing the note, and a person chooses which
-   clips make an interview. With the notes program gone and the grouping
-   automatic, the product needs its own place to correct a word, a
-   translation, a speaker, and which clips belong together. Recommended:
-   every automatic guess is shown and can be corrected in the product.
-4. **The join check stays?** The editor reads a join between two cuts afresh
-   and warns when the meaning or the grammar broke. It is not the translate
-   button, so it is assumed kept.
+1. **Does the product still make the first sort?** Today an assistant reads
+   every transcript, proposes the themes, and places every paragraph into
+   one before he touches anything; he then rearranges. He described the
+   board as something "you can do manually". Recommended: both. The first
+   sort is offered as the last automatic step of processing, and everything
+   on the board can then be dragged; a person can also start from an empty
+   board.
+2. **What becomes of Story Deck?** It is already a board of columns and
+   paragraph cards, built for ordering the film together with the agents
+   (suggestions, competing options, transitions), with game-like looks and
+   rules. Recommended by the guiding principle: ONE board. The agents' help
+   is offered on that same board, and whether the game dressing is kept is
+   his call once he has the list of what it does (section 44).
+3. **From the board to the cut.** Today an ordered canvas becomes a cut list
+   in Timeline Cards, and can also go straight to a Resolve timeline.
+   Assumed: the board hands its order to Timeline Cards, and only Timeline
+   Cards hands over to an editing program.
+4. **Is the cut list a Markdown file too?** Assumed yes, for the same
+   reason. And "can be transferred elsewhere" is assumed to mean the files
+   are complete and readable anywhere, not that the product follows changes
+   made to a file in another program while it has it open. Whether it must
+   is a step 4 question.
 
 So the product of this work is **a briefing pack a fresh Claude can rebuild
 from**, covering CC Sync, the Timeline Cards editor with the pipeline that
@@ -687,10 +735,13 @@ What the two readers found that bears on the owner's requirement:
 | 41 | `multicam_pipeline\transcripts`, `pipeline.py`, `pipeline_web.py`, `zh_fold.py`, `zh_fold_table.py`, `paths.py`, `webtheme.py`, `tools\gen_zh_fold.py` (about 10,300 lines) | `41-interview-pipeline-transcripts-translation-word-timing.md` |
 | 42 | `multicam_pipeline\library` (about 4,800 lines), the interview-preparation instruction file `~\.claude\skills\canvas-sorter` (not code, but it is what runs), and `deploy` | `42-project-library-tools-and-interview-prep.md` |
 
-Waiting on the owner (question 2 under "Timeline Cards in the rebuild"):
-`multicam_pipeline\canvas` (about 4,800 lines) and
-`multicam_pipeline\storydeck` with its tools (about 8,700). Two more
-sections if he wants them in.
+The planning step, in scope since the owner asked for a board to replace
+the canvas (2026-11-12). Readers started the same day:
+
+| | Files | Write to |
+|---|---|---|
+| 43 | `multicam_pipeline\canvas` (about 4,800 lines) and the instruction files `~\.claude\skills\story-flow` and `structure-notes` | `43-planning-canvas-tools-and-story-skills.md` |
+| 44 | `multicam_pipeline\storydeck` with its page, `storydeck_web.py`, and the `storydeck_*` files in `tools` (about 15,000 lines) | `44-story-deck.md` |
 
 ### The Footage Sorter (`E:\Projects\Editing\footage-sorter`, not started)
 

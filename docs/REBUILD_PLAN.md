@@ -330,6 +330,18 @@ Answered by the owner 2026-11-12 (these cross, as requirements):
    rebuild reads its links, writes its embeds or expects its folders.
 3. **Every automatic guess can be corrected** in the product: a word, a
    translation, a speaker, which clips belong to one interview.
+   Strengthened the same day: "for the multicam generation and transcript
+   names and everything there must always be a manual override of
+   everything." So this is a rule for the whole of "footage in, ready to
+   cut", with no exceptions: anything the product decides on its own (which
+   clips make an interview, which camera or recorder is which angle, how
+   the angles line up, what the interview, the multicam and the transcript
+   are called, who is speaking, the language, where paragraphs break, which
+   lines are questions, the translation, the word timing, the themes and
+   the first sort) a person can see and set by hand. A value set by hand is
+   never overwritten by a later automatic pass. The specification must list
+   every such decision and, beside each, how it is overridden; a decision
+   with no override is a defect in the specification.
 4. **The join check stays**: the editor reads a join between two cuts afresh
    and warns when the meaning or the grammar broke.
 

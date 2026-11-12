@@ -357,30 +357,51 @@ What this changes in the plan (for the preparing sessions; does not cross):
   themes per board), measured from this studio's work, so the board is
   designed for them.
 
-Put to the owner 2026-11-12, not yet answered:
+Answered by the owner later the same day (these cross, as requirements):
 
-1. **Does the product still make the first sort?** Today an assistant reads
-   every transcript, proposes the themes, and places every paragraph into
-   one before he touches anything; he then rearranges. He described the
-   board as something "you can do manually". Recommended: both. The first
-   sort is offered as the last automatic step of processing, and everything
-   on the board can then be dragged; a person can also start from an empty
-   board.
-2. **What becomes of Story Deck?** It is already a board of columns and
-   paragraph cards, built for ordering the film together with the agents
-   (suggestions, competing options, transitions), with game-like looks and
-   rules. Recommended by the guiding principle: ONE board. The agents' help
-   is offered on that same board, and whether the game dressing is kept is
-   his call once he has the list of what it does (section 44).
-3. **From the board to the cut.** Today an ordered canvas becomes a cut list
-   in Timeline Cards, and can also go straight to a Resolve timeline.
-   Assumed: the board hands its order to Timeline Cards, and only Timeline
-   Cards hands over to an editing program.
-4. **Is the cut list a Markdown file too?** Assumed yes, for the same
-   reason. And "can be transferred elsewhere" is assumed to mean the files
-   are complete and readable anywhere, not that the product follows changes
-   made to a file in another program while it has it open. Whether it must
-   is a step 4 question.
+1. **The product makes the first sort, and the board can also be worked by
+   hand** ("yes both"). The first sort (themes proposed, every paragraph
+   placed in one) is the last automatic step of processing. Everything on
+   the board can then be dragged, and a person can start from an empty
+   board instead.
+2. **Story Deck is cut.** "Story deck gets canned, the game thing is
+   annoying." Nothing of it crosses: not the stages, the quests, the
+   scoring or the look. There is one board.
+3. **The board is part of Timeline Cards, as its step 1.** "The board hands
+   to timeline cards and timeline cards hands to resolve, but the board
+   should be integrated as part of timeline cards, as a step 1." So
+   Timeline Cards, in order: clips dropped in and processed, the board, the
+   cut, the hand-over to the editing program. One module, one look, and
+   only the last step knows about an editing program. Nothing goes from the
+   board straight to an editing program.
+4. **The cut list stays a `.cut.md` file "as it currently is".** The file
+   keeps its present format exactly.
+
+What answers 2 and 4 change in the plan (for the preparing sessions):
+
+- **Story Deck is not inventoried.** Its reader was stopped when he cut it.
+  What it had written (the rules, stages, agents and notes; not the page)
+  is kept as `feature-inventory/44-story-deck.md`, marked partial, as a
+  record only. It feeds no later step.
+- **The cut list's file format is the one place where something the old
+  build shaped crosses on purpose**, by his decision. It crosses as a format
+  a person meets: what the file looks like and what each part means
+  (inventory section 34 has it exactly), with no word about the code that
+  reads it. The gain is that every cut list this studio has opens in the
+  rebuild unchanged. Assumed, and to confirm with him: the transcripts keep
+  their present format too, for the same gain; and the board's file is new,
+  designed by the fresh instance to sit beside them.
+- **What Story Deck was for is still a question for step 4**, asked without
+  the game: after the first sort he reads the board, writes notes, and
+  wants the order worked out from them. Today two instruction files do that
+  outside the board (the story check and the re-order from his notes;
+  section 43). Whether the board offers that help, and how much, is asked
+  once he has section 43's list.
+- **The board must follow the editor's ways of working.** The editor is
+  touch-first and is driven by keys, a controller and gestures that cross
+  exactly. The board is new, so it has no screenshots to match; it takes
+  the editor's look and, where the same act exists in both (select, move,
+  undo), the same keys and gestures.
 
 So the product of this work is **a briefing pack a fresh Claude can rebuild
 from**, covering CC Sync, the Timeline Cards editor with the pipeline that
@@ -741,7 +762,7 @@ the canvas (2026-11-12). Readers started the same day:
 | | Files | Write to |
 |---|---|---|
 | 43 | `multicam_pipeline\canvas` (about 4,800 lines) and the instruction files `~\.claude\skills\story-flow` and `structure-notes` | `43-planning-canvas-tools-and-story-skills.md` |
-| 44 | `multicam_pipeline\storydeck` with its page, `storydeck_web.py`, and the `storydeck_*` files in `tools` (about 15,000 lines) | `44-story-deck.md` |
+| 44 | `multicam_pipeline\storydeck` with its page, `storydeck_web.py`, and the `storydeck_*` files in `tools` (about 15,000 lines). **Stopped part-way 2026-11-12 when the owner cut Story Deck**: the Python side is written, the page was not read. The reader can be resumed if the full record is wanted. | `44-story-deck.md` (partial, a record only) |
 
 ### The Footage Sorter (`E:\Projects\Editing\footage-sorter`, not started)
 

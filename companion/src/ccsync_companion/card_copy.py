@@ -38,7 +38,7 @@ Rules, each with its reason:
   * **A FILE APPEARS ONLY WHEN IT IS WHOLE AND VERIFIED** (Python copier).
     Bytes go to `<dst>.partial`, are fsynced, CHECKED, and only then renamed
     into place. The check is the job's `verify`: "quick" (the sorter's, and the
-    default since 2026-11-12, Alex's rule) is field_mode.quick_compare -- size,
+    one since 2026-11-12, Alex's rule) is field_mode.quick_compare -- size,
     first and last MiB, the moov -- and "full" reads it back IN FULL against a
     hash taken while copying. The same choice decides whether a same-size file
     already at the destination is the card's file. A
@@ -568,12 +568,14 @@ class CardJob:
         self._volumes = volumes_fn or sorter_cards.list_volumes
         self.progress = progress or Progress()
         self.stopped = ""
-        self.quick = True                    # set per job from its "verify" (run)
+        self.quick = False                   # set per job from its "verify" (run)
         # whether a stop is worth retrying (a cancel is decided by the caller)
         self.stop_retryable = True
         # which copier ran, for the receipt; `teracopy_fn` -> (TeraCopy | None, why not)
         self.teracopy_used = False
-        self._teracopy_fn = teracopy_fn or (lambda: teracopy_mod.detect(self.cfg))
+        # quick mode does its own check after TeraCopy, so TeraCopy's verify (a full read-back) need not be on
+        self._teracopy_fn = teracopy_fn or (lambda: teracopy_mod.detect(
+            {**self.cfg, "teracopy_allow_unverified": True} if self.quick else self.cfg))
         self._ingest_serial = ""
         self._vol_cache: dict[tuple[str, str], Path] = {}
         # the automatic backup's home check, a seam for the suite: (host, rtt_ms) -> (home, why not)
@@ -664,7 +666,9 @@ class CardJob:
         # verify "quick", and this copier used to ignore it and read every file back in full: Alex's rule since
         # 2026-10-18 is "headers and byte size. Don't run the full verification" (doubles the time), and since
         # 2026-10-30 "everywhere" the end of the recording and its moov too (field_mode.quick_compare).
-        self.quick = str(inputs.get("verify") or "quick").lower() != "full"
+        # Only when the job ASKS for it: field mode sends no verify and keeps its own rules (it compares a copy
+        # TeraCopy did not verify in full itself, and sets a bad one aside), which must not change under it.
+        self.quick = str(inputs.get("verify") or "").lower() == "quick"
         folders = inputs.get("folders") or []
         if kind == KIND_DRIVE_COPY and inputs.get("homeOnly"):
             # an automatic backup copies only at home (footage-sorter docs/AUTO-BACKUP-PLAN.md): over a slow link
@@ -1033,7 +1037,7 @@ class CardJob:
         tag = os.path.basename(folder.rstrip("\\/")) or "job"
         try:
             out = tc.copy_group([str(w.src) for w, _ in members], folder, switch, tag,
-                                on_tick=tick, expect_verify=not self._unverified_ok(),
+                                on_tick=tick, expect_verify=self._expect_tc_verify(tc),
                                 should_stop=self._should_stop)
         except (OSError, ValueError) as exc:
             self._stop_if_card_gone()
@@ -1064,6 +1068,13 @@ class CardJob:
             elif r is not None and r.get("result") not in (None, teracopy_mod.RESULT_COPIED):
                 self._note(result, "failed", w,
                            why=r.get("message") or f"TeraCopy gave result {r.get('result')} for it")
+            elif have == w.size and self.quick:
+                # TeraCopy did not verify it (its verify is off): the quick check, as the Python copier does
+                why = self._same(w.src, path, w.size)
+                if why:
+                    self._note(result, "failed", w, why=f"quick check failed: {why}")
+                else:
+                    self._note(result, "copied", w, size=w.size, verified=True, filename=path.name)
             elif have == w.size:
                 # on disk at the right size, not hash-verified by TeraCopy
                 self._note(result, "copied", w, size=w.size, verified=False, filename=path.name)
@@ -1078,6 +1089,15 @@ class CardJob:
             raise _Stopped(stopped)
         if lost:
             self._stop_if_card_gone()
+
+    def _expect_tc_verify(self, tc: teracopy_mod.TeraCopy) -> bool:
+        """Whether to wait for TeraCopy's own verify: only when it is on (in quick mode it may be off)."""
+        if self.quick:
+            try:
+                return bool(teracopy_mod.verify_is_on(tc.options_ini)[0])
+            except Exception:                                   # noqa: BLE001
+                return False
+        return not self._unverified_ok()
 
     def _unverified_ok(self) -> bool:
         return teracopy_mod._truthy(self.cfg.get("teracopy_allow_unverified"))

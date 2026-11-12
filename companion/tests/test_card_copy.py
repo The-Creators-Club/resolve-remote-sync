@@ -998,9 +998,18 @@ def test_a_copy_teracopy_did_not_verify_is_reported_unverified(tmp_path, fake_tc
     fake_tc["tc"] = FakeTeraCopy(result=1)
     w = World(tmp_path)
     w.write(w.card, "a.MP4", b"12345")
-    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)]))
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)], verify="full"))
     assert res["result"]["copied"][0]["verified"] is False
     assert res["result"]["failed"] == []
+
+
+def test_in_quick_mode_a_teracopy_copy_is_quick_checked_and_counts_as_verified(tmp_path, fake_tc):
+    """2026-11-12: with TeraCopy's own verify off, the quick check (size, first/last MiB, moov) vouches for it."""
+    fake_tc["tc"] = FakeTeraCopy(result=1)
+    w = World(tmp_path)
+    w.write(w.card, "a.MP4", b"12345")
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)], verify="quick"))
+    assert res["result"]["copied"][0]["verified"] is True and res["result"]["failed"] == []
 
 
 @windows_only

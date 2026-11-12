@@ -202,6 +202,12 @@ It lists every id of your slice that your file does not account for, every
 id accounted for twice in the lists, and every entry with a missing or
 misspelt field. Fix what it reports and run it again until it prints `OK`.
 
+Then run `python E:\Projects\Editing\ccsync\docs\rebuild-spec\tools\lint_parts.py <slice>`.
+It flags words in an entry's three text fields that give away how the old
+product was built, and fields over the length limits. Reword each one it
+flags, unless the word is plainly something a person sees or a given (say so
+in your final reply), and run it again.
+
 ## Other rules
 
 - Plain language. Define a term the first time you use it. No em dashes.

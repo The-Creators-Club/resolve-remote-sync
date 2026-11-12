@@ -26,6 +26,7 @@ The properties defended, each a way this goes wrong live:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import subprocess
 import sys
@@ -37,7 +38,8 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from ccsync_dashboard import auth, cards_edit, cards_landing
+from ccsync_dashboard import (auth, cards, cards_catalog, cards_edit, cards_exec,
+                              cards_landing, db, jobs)
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
@@ -487,31 +489,14 @@ def test_editor_href_names_the_newest_cut_list(tmp_path):
     assert cards_edit.editor_href(str(vdir), str(tmp_path)) == "/cards/edit/"
 
 
-def _request(editor):
-    state = SimpleNamespace(cards_edit=editor, settings=SimpleNamespace(
-        cards_vault_root=""))
-    return SimpleNamespace(app=SimpleNamespace(state=state))
+# ------------------------------------- the old page retired at the door (2026-11-12)
 
+@contextlib.contextmanager
+def cards_app(tmp_path, monkeypatch, **kw):
+    """A dashboard with the stand-in Cards checkout mounted AND the editor on.
 
-def test_the_link_is_drawn_only_while_the_editor_answers(tmp_path):
-    vdir, root = vault(tmp_path)
-    cards_edit._CUT_CACHE.clear()
-    s = settings_for(tmp_path, checkout(tmp_path), vdir)
-    editor = cards_edit.Editor(s)
-    rows = [{"root": str(root), "slug": "x"}]
-    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        cards_edit=editor, settings=s)))
-    cards_landing._editor_links(req, rows)
-    assert rows[0]["editor_href"] == ""               # not running: no link
-    editor.adopt(12345)
-    cards_landing._editor_links(req, rows)
-    assert rows[0]["editor_href"].startswith("/cards/edit/?key=FF5/Civil%20Defence/")
-    cards_landing._editor_links(_request(None), rows)  # disabled: blank again
-    assert rows[0]["editor_href"] == ""
-
-
-def test_the_landing_page_draws_the_link(tmp_path, monkeypatch):
-    """Through the real template: a Jinja slip here would break /cards/."""
+    No lifespan unless the test enters one: nothing is spawned. Yields
+    (app, episode root)."""
     from test_cards_mount import FAKE_ENGINE, FAKE_HANDLER
 
     monkeypatch.delenv("CARDS_SRC", raising=False)
@@ -522,41 +507,276 @@ def test_the_landing_page_draws_the_link(tmp_path, monkeypatch):
     (pkg / "__init__.py").write_text("", encoding="utf-8")
     (pkg / "handler.py").write_text(textwrap.dedent(FAKE_HANDLER), encoding="utf-8")
     (pkg / "project_agent.py").write_text(textwrap.dedent(FAKE_ENGINE), encoding="utf-8")
-    vdir, _root = vault(tmp_path)
+    vdir, root = vault(tmp_path)
     cards_edit._CUT_CACHE.clear()
     try:
-        app = create_app(settings_for(tmp_path, src, vdir, cards_enabled=True))
-        client = TestClient(app)            # no lifespan: nothing is spawned
-        sign_in(client)
-        before = client.get("/cards/")
-        assert before.status_code == 200 and "Open in the new editor" not in before.text
-        app.state.cards_edit.adopt(12345)
-        after = client.get("/cards/")
-        assert after.status_code == 200
-        assert "Open in the new editor" in after.text
-        assert "/cards/edit/?key=FF5/Civil%20Defence/Script%20Docs/Cuts/" in after.text
-        # beside the old mount, not over it: the kill-switch worker, the flat
-        # PWA files and the landing still belong to /cards
-        anon = TestClient(app)
-        sw = anon.get("/cards/sw.js")
-        assert sw.status_code == 200 and "cards-landing" in sw.text
-        assert anon.get("/cards/manifest.webmanifest").status_code == 200
-        assert client.get("/cards/edit/", headers={"accept": "text/html"}).status_code == 503
+        app = create_app(settings_for(tmp_path, src, vdir, cards_enabled=True, **kw))
+        assert app.state.cards_status == cards.MOUNTED, app.state.cards_detail
+        yield app, root
     finally:
+        cards_exec._RETIRED.clear()
         for name in [n for n in sys.modules if n.split(".")[0] == "multicam_pipeline"]:
             del sys.modules[name]
         while str(src) in sys.path:
             sys.path.remove(str(src))
 
 
-def test_no_em_dash_in_what_an_editor_reads():
-    import inspect
+def _no_build(app):
+    """The pool's builder, replaced by one that fails the test if called."""
+    calls = []
 
+    def build(root):
+        calls.append(root)
+        raise AssertionError("the retired old page must never build an engine")
+
+    app.state.cards_pool._build = build
+    return calls
+
+
+def _slug(client):
+    rows = client.get("/cards/state.json").json()["episodes"]
+    assert len(rows) == 1, rows
+    return rows[0]["slug"]
+
+
+def test_the_predicate_is_the_editor_on_and_no_rollback():
+    on = SimpleNamespace(cards_editor=True, cards_old_page=False)
+    assert cards.old_page_retired(on) is True
+    assert cards.old_page_retired(SimpleNamespace(cards_editor=True, cards_old_page=True)) is False
+    # the vendor build: the editor off is the old page exactly as before
+    assert cards.old_page_retired(SimpleNamespace(cards_editor=False, cards_old_page=False)) is False
+    assert cards.old_page_retired(None) is False
+
+
+def test_the_setting_reads_dash_cards_old_page(monkeypatch):
+    monkeypatch.setenv("DASH_CARDS_OLD_PAGE", "1")
+    assert Settings.from_env().cards_old_page is True
+    monkeypatch.setenv("DASH_CARDS_OLD_PAGE", "yes")
+    assert Settings.from_env().cards_old_page is False
+
+
+def test_the_retired_picker_draws_one_open_link_per_row(tmp_path, monkeypatch):
+    """Through the real template: a Jinja slip here would break /cards/."""
+    with cards_app(tmp_path, monkeypatch) as (app, _root):
+        calls = _no_build(app)
+        client = TestClient(app)
+        sign_in(client)
+        slug = _slug(client)
+        page = client.get("/cards/")
+        assert page.status_code == 200
+        text = page.text
+        go = f'href="/cards/go/{slug}"'
+        # the row's Open (one plain link, the primary key) and the name link
+        assert text.count(go) == 2, text
+        assert f'class="key primary sm cl-btn cl-btn-go" {go}' in text
+        assert '<span class="t">Open</span>' in text
+        for gone in ('action="/cards/open"', 'action="/cards/close"', "cl-badge",
+                     "cl-btn-close", "Open in the new editor", "cl-editor-link",
+                     "/cards/p/", "cards_offline", "open now",
+                     "episodes at once on this server", "Your Resolve follows",
+                     "An episode stays open behind you", "cl-opening"):
+            assert gone not in text, gone
+        assert "newest cut list." in text and "one tap away inside the editor" in text
+        assert "in the vault" in text
+        assert "—" not in text
+        state = client.get("/cards/state.json").json()
+        row = state["episodes"][0]
+        assert (row["state"], row["href"], row["may_close"]) == ("", f"/cards/go/{slug}", False)
+        assert state["open"] == 0 and state["ready"] == []
+        # a stale `?want=` draws no "opening" note
+        assert "cl-want" not in client.get(f"/cards/?want={slug}").text
+        assert calls == [] and app.state.cards_pool.entries() == []
+
+
+def test_go_records_the_visit_sets_the_cookie_and_opens_the_editor(tmp_path, monkeypatch):
+    with cards_app(tmp_path, monkeypatch) as (app, root):
+        calls = _no_build(app)
+        client = TestClient(app)
+        sign_in(client)
+        slug = _slug(client)
+        resp = client.get(f"/cards/go/{slug}", follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == (
+            "/cards/edit/?key=FF5/Civil%20Defence/Script%20Docs/Cuts/Part%201%20-%20Ordered.cut.md")
+        assert f"{cards_landing.LAST_COOKIE}={slug}" in resp.headers["set-cookie"]
+        _anyone, mine = cards_catalog.opened(app.state.settings, "owen")
+        assert slug in mine
+        # the picker now offers to carry on, through the same door, and the
+        # recent tile is a link to it too
+        page = client.get("/cards/").text
+        assert "Carry on with Civil Defence" in page
+        assert page.count(f'href="/cards/go/{slug}"') == 4, page
+        # an episode with no cut list: the editor's own sheet
+        (root / "Script Docs" / "Cuts" / "Part 1 - Ordered.cut.md").unlink()
+        cards_edit._CUT_CACHE.clear()
+        bare = client.get(f"/cards/go/{slug}", follow_redirects=False)
+        assert bare.status_code == 303 and bare.headers["location"] == "/cards/edit/"
+        # not an episode, or not even a slug: refused, back on the picker
+        for bad in ("not-in-the-vault-0000", "UPPER"):
+            no = client.get(f"/cards/go/{bad}", follow_redirects=False)
+            assert no.status_code == 303
+            assert no.headers["location"].startswith("/cards/?refused=")
+        assert calls == []
+
+
+def test_go_never_500s_when_the_visit_cannot_be_noted(tmp_path, monkeypatch):
+    with cards_app(tmp_path, monkeypatch) as (app, _root):
+        client = TestClient(app)
+        sign_in(client)
+        slug = _slug(client)
+
+        def boom(*a, **k):
+            raise OSError("the data dataset is gone")
+
+        monkeypatch.setattr(cards_catalog, "note_opened", boom)
+        resp = client.get(f"/cards/go/{slug}", follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"].startswith("/cards/edit/")
+
+
+def test_a_stale_tab_open_and_close_still_land_somewhere(tmp_path, monkeypatch):
+    with cards_app(tmp_path, monkeypatch) as (app, _root):
+        calls = _no_build(app)
+        client = TestClient(app)
+        sign_in(client)
+        slug = _slug(client)
+        opened = client.post("/cards/open", data={"slug": slug}, follow_redirects=False)
+        assert opened.status_code == 303
+        assert opened.headers["location"] == f"/cards/go/{slug}"
+        closed = client.post("/cards/close", data={"slug": slug}, follow_redirects=False)
+        assert closed.status_code == 303 and closed.headers["location"] == "/cards/"
+        assert calls == [] and app.state.cards_pool.entries() == []
+
+
+def test_the_retired_workers_are_kill_switches(tmp_path, monkeypatch):
+    from ccsync_dashboard import VERSION
+    from ccsync_dashboard import app as app_mod
+
+    with cards_app(tmp_path, monkeypatch) as (app, _root):
+        client = TestClient(app)
+        sign_in(client)
+        slug = _slug(client)
+        anon = TestClient(app)          # a worker update carries no session
+        front = anon.get("/cards/sw.js")
+        assert front.status_code == 200
+        assert "javascript" in front.headers["content-type"]
+        assert front.text == cards_landing.CARDS_SW_KILL.replace("%VER%", VERSION)
+        assert "unregister()" in front.text and "caches.delete('cards-landing')" in front.text
+        assert "'fetch'" not in front.text and VERSION in front.text
+        ep = anon.get(f"/cards/p/{slug}/sw.js")
+        assert ep.status_code == 200, ep.text
+        assert "javascript" in ep.headers["content-type"]
+        assert ep.headers["cache-control"] == "no-cache"
+        assert ep.text == cards.EPISODE_SW_KILL.replace("%VER%", VERSION)
+        assert "unregister()" in ep.text and VERSION in ep.text
+        # unsent edits may live in the old page's caches and IndexedDB: kept
+        for kept in ("'fetch'", "caches", "indexedDB"):
+            assert kept not in ep.text, kept
+        # the login gate leaves the per-episode worker open, for GET only
+        assert app_mod._open_path(f"/cards/p/{slug}/sw.js", "GET")
+        assert not app_mod._open_path(f"/cards/p/{slug}/sw.js", "POST")
+
+
+def test_the_retired_old_page_redirects_a_navigation_and_410s_a_fetch(tmp_path, monkeypatch):
+    with cards_app(tmp_path, monkeypatch) as (app, _root):
+        calls = _no_build(app)
+        client = TestClient(app)
+        sign_in(client)
+        slug = _slug(client)
+        nav = {"accept": "text/html", "sec-fetch-mode": "navigate"}
+        for url in (f"/cards/p/{slug}/", f"/cards/p/{slug}"):
+            resp = client.get(url, headers=nav, follow_redirects=False)
+            assert resp.status_code == 303, url
+            assert resp.headers["location"] == f"/cards/go/{slug}"
+        api = client.get(f"/cards/p/{slug}/api/state",
+                         headers={"accept": "application/json"}, follow_redirects=False)
+        assert api.status_code == 410
+        body = api.json()
+        assert body["landing"] == "/cards/" and "retired" in body["error"]
+        assert "—" not in body["error"] and " -- " not in body["error"]
+        post = client.post(f"/cards/p/{slug}/api/edit", json={"x": 1}, follow_redirects=False)
+        assert post.status_code == 410
+        assert calls == [] and app.state.cards_pool.entries() == []
+        # the old URL notes no visit
+        assert slug not in cards_catalog.opened(app.state.settings, "owen")[1]
+        # the flat-path answers are unchanged
+        flat = client.get("/cards/api/state", headers={"accept": "application/json"})
+        assert flat.status_code == 404 and "landing" in flat.json()
+
+
+def test_dash_cards_old_page_brings_the_old_flow_back(tmp_path, monkeypatch):
+    with cards_app(tmp_path, monkeypatch, cards_old_page=True) as (app, _root):
+        assert cards.old_page_retired(app.state.settings) is False
+        client = TestClient(app)
+        sign_in(client)
+        slug = _slug(client)
+        app.state.cards_edit.adopt(12345)       # the editor answering changes nothing
+        page = client.get("/cards/").text
+        assert 'action="/cards/open"' in page and "cards_offline" in page
+        assert "/cards/go/" not in page and "Open in the new editor" not in page
+        assert "episodes at once on this server" in page
+        state = client.get("/cards/state.json").json()
+        assert state["episodes"][0]["href"] == f"/cards/p/{slug}/"
+        go = client.get(f"/cards/go/{slug}", follow_redirects=False)
+        assert go.status_code == 303 and go.headers["location"] == f"/cards/?want={slug}"
+        sw = TestClient(app).get("/cards/sw.js")
+        assert sw.text.startswith("// CC Sync dashboard: the Timeline Cards app's front door")
+        # the old page's door: not open yet, so the picker, not the editor
+        nav = client.get(f"/cards/p/{slug}/", headers={"accept": "text/html"},
+                         follow_redirects=False)
+        assert nav.headers["location"] == f"/cards/?want={slug}"
+
+
+@pytest.mark.parametrize("old_page,said", [(False, "retired"), (True, "serving")])
+def test_the_health_line_says_whether_the_old_page_serves(tmp_path, monkeypatch,
+                                                          old_page, said):
+    monkeypatch.setattr(cards_edit, "start", lambda app: None)   # spawn nothing
+    with cards_app(tmp_path, monkeypatch, cards_old_page=old_page) as (app, _root):
+        with TestClient(app) as client:
+            sign_in(client)
+            health = client.get("/api/v1/health").json()["cards"]
+    assert health["old_page"] == said
+
+
+def test_a_retired_dashboard_pins_no_job(tmp_path, monkeypatch):
+    """The executor borrows an engine the retired page never builds."""
+    monkeypatch.setattr(cards_edit, "start", lambda app: None)   # spawn nothing
+    with cards_app(tmp_path, monkeypatch) as (app, _root):
+        with TestClient(app):
+            ex = app.state.pinned_executor
+            assert ex.retired and ex.available() is False
+            assert ex.why_not() == cards_exec.RETIRED_WHY
+            assert jobs.can_pin(app) is False
+            assert cards_exec.is_running() is False
+            assert cards_exec.waiting_for_an_engine() is False
+            # a row pinned before the retirement is not described as in hand
+            words = jobs._terminal_summary({"state": db.JOB_PINNED})
+            assert "retired" in words and "cancel it" in words
+            assert "—" not in words
+
+
+def test_the_rollback_keeps_the_executor_as_it_was(tmp_path, monkeypatch):
+    monkeypatch.setattr(cards_edit, "start", lambda app: None)
+    with cards_app(tmp_path, monkeypatch, cards_old_page=True) as (app, _root):
+        with TestClient(app):
+            ex = app.state.pinned_executor
+            assert not ex.retired and callable(ex._engine_src)
+            assert cards_exec.is_running() is True
+            assert cards_exec.retired_why() == ""
+            assert ex.why_not() == ("no episode is open yet, so there is no "
+                                    "Timeline Cards engine to hand a pinned job to")
+            assert "retired" not in jobs._terminal_summary({"state": db.JOB_PINNED})
+
+
+def test_no_em_dash_in_what_an_editor_reads():
     page = cards_edit.unavailable(
         SimpleNamespace(method="GET", headers={"accept": "text/html"}),
         None)
-    assert "—" not in page.body.decode()
-    assert "—" not in inspect.getsource(cards_landing._editor_links).split('"""')[0]
+    body = page.body.decode()
+    assert "—" not in body
+    assert "new editor" not in body and "Timeline Cards is not running" in body
+    for text in (cards.RETIRED_SENTENCE, cards_exec.RETIRED_WHY):
+        assert "—" not in text and " -- " not in text
 
 
 # -- audit dash-mounts-1 (2026-11-11): the proxy stops pulling when the browser has gone --------

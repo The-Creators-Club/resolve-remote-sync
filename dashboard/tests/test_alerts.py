@@ -931,6 +931,24 @@ def test_a_pinned_job_with_cards_mounted_and_no_worker_is_a_finding(env, mounts,
     assert "not running" in finding["diagnosis"]
 
 
+def test_a_pinned_job_on_a_retired_old_page_says_so_not_restart(env, mounts,
+                                                                monkeypatch):
+    """2026-11-12: with the old Timeline Cards page retired no drain thread is
+    started ON PURPOSE, so "restart the dashboard" would change nothing. A row
+    pinned before the retirement is told to be cancelled and queued again."""
+    _client, conn, settings = env
+    mounts.record("cards", "mounted", "")
+    monkeypatch.setattr(cards_exec, "is_running", lambda: False)
+    monkeypatch.setattr(cards_exec, "retired_why", lambda: cards_exec.RETIRED_WHY)
+    job_id = _queue(conn, kind="proxy-480p", hours_old=30)
+    conn.execute("UPDATE jobs SET state='pinned' WHERE id=?", (job_id,))
+    conn.commit()
+    finding = one(alerts.scan(conn, settings, NOW), "jobs_pinned_no_executor")
+    assert "retired" in finding["diagnosis"]
+    assert "Restart" not in finding["fix"] and "Cancel" in finding["fix"]
+    assert "executor=retired" in finding["detail"]
+
+
 def test_a_pinned_job_with_no_cards_mount_is_an_error(env, mounts):
     _client, conn, settings = env
     mounts.record("cards", "absent", "the vault root is not mounted (/vault)")

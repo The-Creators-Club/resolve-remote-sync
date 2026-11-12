@@ -3113,7 +3113,19 @@ def _check_jobs_pinned_no_executor(ctx: Ctx) -> list[Finding]:
         # no app object (mount_status' own reasoning).
         from . import cards_exec
 
-        if not cards_exec.is_running():
+        retired = cards_exec.retired_why()
+        if retired:
+            # 2026-11-12: the old page retired, so no drain thread is started
+            # on purpose and a restart would change nothing.
+            out.append(_f(
+                "the dashboard's own worker",
+                f"{len(rows)} job(s) were pinned to this server before the "
+                f"old Timeline Cards page was retired, and {retired}. They "
+                f"will wait for ever.",
+                "Settings, Jobs, then \"Cancel\" on each one and queue it "
+                "again.",
+                f"cards mount={cards} pinned={len(rows)} executor=retired"))
+        elif not cards_exec.is_running():
             out.append(_f(
                 "the dashboard's own worker",
                 f"{len(rows)} job(s) were pinned to this server because no "

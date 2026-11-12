@@ -78,9 +78,9 @@ run alongside the tray app — it would hold port 8899.
   check FAILED" at the end is usually premature -- `docker ps` before any
   rollback. Never pipe `TRUENAS_PW` into `bash -s` or put it on a command
   line.
-- **The NEW editor at `/cards/edit`, beside the old page** (2026-11-05,
-  `dashboard/src/ccsync_dashboard/cards_edit.py`, `docs/CARDS_EDITOR.md`,
-  built and tested, NOT yet released or deployed): the rebuilt Timeline Cards
+- **The Timeline Cards editor at `/cards/edit`** (2026-11-05,
+  `dashboard/src/ccsync_dashboard/cards_edit.py`, `docs/CARDS_EDITOR.md`; live
+  on this studio's dashboard since 0.7.79): the rebuilt Timeline Cards
   is a Node server (`editor/dist-server/host.mjs` in the Cards checkout), so
   the dashboard starts it as a supervised child (restart with backoff, log
   prefix `editor:`, stopped gracefully by the lifespan because its SIGTERM
@@ -92,7 +92,21 @@ run alongside the tray app — it would hold port 8899.
   install). Off in the vendor build (`DASH_CARDS_EDITOR`, `[timeline_cards]
   editor`); tri-state and never fatal; adds `websockets` and `httpx` to the
   `cards` extra, so shipping it is a dashboard release (rebuilt image) first.
-  The old `/cards` mount is untouched, and the later flip is in that doc.
+- **Where the editor is on, the OLD page is retired at the door** (2026-11-12,
+  dashboard 0.7.80, `docs/CARDS_OLD_PAGE_RETIREMENT.md`; in the repo, NOT yet
+  released). ONE predicate, `cards.old_page_retired(settings)` (editor on and
+  `DASH_CARDS_OLD_PAGE` unset), and everything asks it: the picker's Open is a
+  plain link to `/cards/go/<slug>` (records "last opened", then the editor on
+  the newest cut list), `/cards/p/<slug>/` redirects a navigation there and
+  answers a fetch 410, no engine is ever built, `/cards/sw.js` and each
+  episode's `sw.js` are kill switches that DELETE NOTHING a device saved (an
+  old page's unsent edits must survive the rollback), and the pinned-job
+  executor gets no engine source, so a spent media job is abandoned visibly
+  instead of pinned into a queue nothing drains. The old page's code, the
+  pool, `cards_ai.py` and `cards_wsgi.py` are all still here: taking them out
+  is a later change, after the executor has an engine of its own. With the
+  editor OFF (the vendor build) nothing changed. Everything below about the
+  engine pool describes the old page, i.e. the rollback and the vendor build.
 - **One engine per EPISODE, and the URL is the key** (2026-09-14,
   `docs/CARDS_TWO_PROJECTS.md` phase 1): `/cards` is a LANDING page that needs
   no engine to draw (which is why it answers when every engine is busy), and

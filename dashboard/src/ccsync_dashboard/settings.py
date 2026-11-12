@@ -642,6 +642,15 @@ class Settings:
     cards_editor: bool = False
     cards_editor_port: int = 0
     cards_node: str = ""
+    # --- the OLD Timeline Cards page, retired at the door (2026-11-12) -----
+    # Owner, 2026-11-12: "The old timeline cards should be retired" and the
+    # picker's Open goes straight into the new editor. `cards.old_page_retired`
+    # is the one predicate: with the editor ON, the old page at
+    # /cards/p/<slug>/ is retired unless this is set. `DASH_CARDS_OLD_PAGE=1`
+    # is the ROLLBACK: the picker, the engine pool and the old page come back
+    # exactly as they were. With the editor off (the vendor build) this does
+    # nothing, because the old page is then the only page there is.
+    cards_old_page: bool = False
 
     # Auto-provisioning: when projects_dir is a mounted copy of the server's
     # Projects tree, the collector creates a Syncthing folder (and shares it
@@ -1030,6 +1039,8 @@ class Settings:
             cards_editor=env.get("DASH_CARDS_EDITOR", "") == "1",
             cards_editor_port=max(0, int(num("DASH_CARDS_EDITOR_PORT", 0))),
             cards_node=env.get("DASH_NODE", "").strip(),
+            # "1" and nothing else, like DASH_CARDS_ENABLED.
+            cards_old_page=env.get("DASH_CARDS_OLD_PAGE", "") == "1",
             packages_dir=env.get("DASH_PACKAGES_DIR", ""),
             # Only entries that actually decode to a 32-byte Ed25519 key are
             # kept: the shipped compose sets "REPLACE_ME", and a placeholder

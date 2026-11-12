@@ -111,6 +111,30 @@ PROJECT_PREFIX = "/p/"
 # can never appear on the session-gated prefix without being noticed.
 AGENT_PREFIX = "/agent/"
 
+# What a fetch from an old page's tab is told once the page is retired
+# (2026-11-12). A person reads it: no " -- ", no em dash.
+RETIRED_SENTENCE = ("The old Timeline Cards page is retired. Open the episode "
+                    "from the Timeline Cards page.")
+
+# The worker an old episode page's installed service worker updates to once
+# the page is retired (2026-11-12). It unregisters itself and nothing else.
+# IT DELETES NO CACHE AND NO IndexedDB, on purpose: an old page's on-device
+# copy may still hold edits it has not sent, and if the old page is brought
+# back (DASH_CARDS_OLD_PAGE=1) those must still be there to send. With no
+# fetch handler, every request from the moment it activates goes to the
+# network, which is the dispatcher's redirect to the editor.
+EPISODE_SW_KILL = r"""// CC Sync dashboard: the old Timeline Cards page is retired.
+// cards.py EPISODE_SW_KILL has the reasoning. version: %VER%
+self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.registration.unregister()));
+"""
+
+
+def _version() -> str:
+    from . import VERSION
+
+    return VERSION
+
 
 def _detail(status: str, detail: str) -> tuple[str, str]:
     return status, detail
@@ -142,6 +166,26 @@ def enabled(settings: Settings | None) -> bool:
     if bool(getattr(settings, "cards_enabled", False)):
         return True
     return bool(os.environ.get("CARDS_SRC", "").strip())
+
+
+def old_page_retired(settings: Settings | None) -> bool:
+    """Is the OLD Timeline Cards page retired at this dashboard's door?
+
+    2026-11-12 (owner: "The old timeline cards should be gotten rid of ... just
+    open should open the new editor"). True when the new editor is on
+    (`cards_edit.enabled`) and `DASH_CARDS_OLD_PAGE` is not set. The editor
+    off (the vendor build) is the old page exactly as before; the editor on
+    plus `DASH_CARDS_OLD_PAGE=1` is the rollback. THE ONE PREDICATE: the
+    picker, the dispatcher, the pinned-job executor and the health line all
+    ask this, never their own reading of the two settings.
+    """
+    from . import cards_edit
+
+    try:
+        return bool(cards_edit.enabled(settings)
+                    and not getattr(settings, "cards_old_page", False))
+    except Exception:  # noqa: BLE001 - the old page is the safe default
+        return False
 
 
 def parse_media_map(text: str) -> list[tuple[str, str]]:
@@ -516,6 +560,10 @@ class CardsDispatch:
         # helper, security-3). Set by mount_cards; None means "set no
         # cookie", which is what a dispatcher built by hand in a test does.
         self.cookie_secure: Callable[[dict], bool] | None = None
+        # The old page retired at the door (2026-11-12, `old_page_retired`).
+        # Set by mount_cards; False in a dispatcher built by hand, which is
+        # the old page exactly as it was.
+        self.retired = False
 
     async def __call__(self, scope, receive, send) -> None:
         if scope.get("type") != "http":
@@ -541,6 +589,11 @@ class CardsDispatch:
         slug, _, tail = rest.partition("/")
         if not cards_pool.is_slug(slug):
             await self._not_here(scope, send, rel)
+            return
+        if self.retired:
+            # Before the bare-URL redirect below: a retired episode URL goes
+            # to the editor in one hop, not two.
+            await self._retired(scope, send, slug, tail)
             return
         if not rel.endswith("/") and not tail:
             # The bare project URL. The page's own URLs are document-relative
@@ -680,6 +733,25 @@ class CardsDispatch:
                      f"where it opens",
             "state": state, "slug": slug, "landing": MOUNT_PATH + "/"})
 
+    async def _retired(self, scope, send, slug: str, tail: str) -> None:
+        """`/cards/p/<slug>/...` once the old page is retired (2026-11-12).
+
+        Three answers and NOTHING ELSE: no engine is asked for or built, no
+        visit is noted, no gate is made. The worker gets a kill switch, a
+        navigation goes to `/cards/go/<slug>` (which opens the episode in the
+        editor), and a fetch from an old tab gets a 410 it can show.
+        """
+        method = str(scope.get("method") or "GET").upper()
+        if tail == "sw.js" and method in ("GET", "HEAD"):
+            await _js_response(send, EPISODE_SW_KILL.replace(
+                "%VER%", _version()), head=method == "HEAD")
+            return
+        if _wants_html(scope):
+            await _redirect(send, f"{MOUNT_PATH}/go/{slug}")
+            return
+        await _json_response(send, 410, {
+            "error": RETIRED_SENTENCE, "landing": MOUNT_PATH + "/"})
+
     async def _not_here(self, scope, send, rel: str) -> None:
         if _wants_html(scope):
             await _redirect(send, MOUNT_PATH + "/")
@@ -720,6 +792,18 @@ async def _redirect(send: Callable, location: str) -> None:
                 "headers": [(b"location", location.encode()),
                             (b"content-length", b"0")]})
     await send({"type": "http.response.body", "body": b""})
+
+
+async def _js_response(send: Callable, text: str, head: bool = False) -> None:
+    payload = text.encode()
+    await send({
+        "type": "http.response.start",
+        "status": 200,
+        "headers": [(b"content-type", b"text/javascript; charset=utf-8"),
+                    (b"cache-control", b"no-cache"),
+                    (b"content-length", str(len(payload)).encode())],
+    })
+    await send({"type": "http.response.body", "body": b"" if head else payload})
 
 
 async def _json_response(send: Callable, status: int, body: dict) -> None:
@@ -848,9 +932,19 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
         return auth.cookie_secure(settings, _Request(scope))
 
     dispatch.cookie_secure = _secure
+    # 2026-11-12: the old page retired at the door. The pool is still built
+    # (the health line and the executor's provider read it); with nothing
+    # routed into it, it stays empty.
+    dispatch.retired = old_page_retired(settings)
     app.mount(MOUNT_PATH, dispatch)
-    log.info("Timeline Cards mounted at %s (vault %s, from %s, up to %d "
-             "episode(s) at once)", MOUNT_PATH, root, src, pool.cap)
+    if dispatch.retired:
+        log.info("Timeline Cards mounted at %s (vault %s, from %s); the old "
+                 "page is RETIRED: Open goes to the editor at %s/edit/ "
+                 "(DASH_CARDS_OLD_PAGE=1 brings it back)", MOUNT_PATH, root,
+                 src, MOUNT_PATH)
+    else:
+        log.info("Timeline Cards mounted at %s (vault %s, from %s, up to %d "
+                 "episode(s) at once)", MOUNT_PATH, root, src, pool.cap)
     return _detail(MOUNTED, f"serving {root}")
 
 
@@ -900,6 +994,12 @@ def health_block(app: FastAPI) -> dict[str, Any]:
         "status": status,
         "detail": getattr(app.state, "cards_detail", ""),
     }
+    # 2026-11-12: whether /cards/p/<slug>/ still serves the old page.
+    try:
+        out["old_page"] = ("retired" if old_page_retired(
+            getattr(app.state, "settings", None)) else "serving")
+    except Exception:  # noqa: BLE001 - a health line never raises
+        pass
     # The new editor beside the old page (cards_edit.py): its own sub-block,
     # because it can be up while /cards is absent and the reverse.
     try:

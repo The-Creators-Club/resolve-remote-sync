@@ -5,7 +5,9 @@
   <script src="{{ asset_url('cards_landing.js') }}" defer></script>
   {# The app's front door offline (2026-10-11): registers /cards/sw.js and
      marks the cut lists downloaded on this device. #}
-  <script src="{{ asset_url('cards_offline.js') }}" defer></script>
+  {# Not once the old page is retired (2026-11-12): it marks and launches the
+     OLD page's on-device copies, and /cards/sw.js is then a kill switch. #}
+  {% if not retired %}<script src="{{ asset_url('cards_offline.js') }}" defer></script>{% endif %}
 {% endblock %}
 {# The installed phone app's front door (2026-10-06): this page links the
    Cards app's manifest, not the dashboard's, so Chrome's update check on
@@ -47,6 +49,12 @@
 {% endmacro %}
 
 {% macro ep_actions(ep) %}
+  {% if retired %}
+    {# The old page retired (2026-11-12): ONE plain link, into the editor
+       through /cards/go/<slug>. Nothing opens on the server, so there is no
+       form, no badge and nothing to close. #}
+    <a class="key primary sm cl-btn cl-btn-go" href="{{ ep.href }}" title="Open this episode's newest cut list."><span class="t">Open</span></a>
+  {% else %}
   {# dash-cards-2 / security-2 (2026-09-18): close is drawn from
      `ep.may_close`. A FAILED episode offers both: open retries the build,
      close forgets the entry. #}
@@ -62,12 +70,6 @@
               title="{{ 'Opening this episode failed last time. Try opening it again.' if ep.state == 'failed' else 'Opens this episode on the server. Up to ' ~ cap ~ ' can be open at once.' }}"><span class="t">{{ 'Try again' if ep.state == 'failed' else 'Open' }}</span></button>
     </form>
   {% endif %}
-  {% if ep.editor_href %}
-    {# The NEW editor beside the old page (cards_edit.py, 2026-11-05). Quiet on
-       purpose, and NOT a cl-btn: cards_landing.js picks its "go" target by
-       that class. Drawn only while the editor is answering. #}
-    <a class="key quiet sm cl-editor-link" href="{{ ep.editor_href }}" title="Open this episode in the new Timeline Cards editor. The original page stays as it is."><span class="t">Open in the new editor</span></a>
-  {% endif %}
   {% if ep.may_close %}
     {# The prompt is built server-side and emitted with `tojson`: an episode
        name with an apostrophe in it would otherwise end the JS string. #}
@@ -77,6 +79,7 @@
       <input type="hidden" name="slug" value="{{ ep.slug }}">
       <button class="key quiet sm cl-btn cl-btn-close" type="submit" title="Closes this episode on the server so another one can open. You are asked first."><span class="t">close</span></button>
     </form>
+  {% endif %}
   {% endif %}
 {% endmacro %}
 
@@ -92,7 +95,7 @@
     <span class="ico cl-ico" aria-hidden="true">{% if ep.state == 'ready' %}&#9679;{% elif ep.state == 'loading' %}&#9684;{% elif ep.state == 'failed' %}&#215;{% else %}&#9642;{% endif %}</span>
     <div class="cl-info">
       <div class="nmline cl-name">
-        {% if ep.state == 'ready' %}<a href="{{ ep.href }}" class="nm cl-name-text">{{ ep.name }}</a>
+        {% if retired or ep.state == 'ready' %}<a href="{{ ep.href }}" class="nm cl-name-text">{{ ep.name }}</a>
         {% else %}<span class="nm cl-name-text">{{ ep.name }}</span>{% endif %}
         {{ badge(ep) }}
       </div>
@@ -146,22 +149,35 @@
       <div>
         <h1><span><span class="prompt" aria-hidden="true">&gt;</span> TIMELINE CARDS</span></h1>
         <div class="sub">
+          {% if retired %}
+          {% if episodes %}<b>{{ episodes | length }}</b> in the vault{% endif %}
+          {% else %}
           <span title="The server keeps at most {{ cap }} episodes open at the same time, to save memory. Another one waits until one is closed.">up to <b>{{ cap }}</b> episodes at once on this server</span>
           &middot; <b>{{ open_count }}</b> open now
           {% if episodes %}&middot; <b>{{ episodes | length }}</b> in the vault{% endif %}
+          {% endif %}
         </div>
       </div>
       <div class="acts">
-        {% if carry_on and carry_on.state == 'ready' %}
+        {% if retired and carry_on %}
+          <a class="key primary cl-carry" href="{{ carry_on.href }}" title="Back into the last episode you opened."><span class="t">Carry on with {{ carry_on.name }}</span></a>
+        {% elif carry_on and carry_on.state == 'ready' %}
           <a class="key primary cl-carry" href="{{ carry_on.href }}" title="Back into the last episode you were in. It is still open, so this is instant."><span class="t">Carry on with {{ carry_on.name }}</span></a>
         {% endif %}
       </div>
     </div>
 
+    {% if retired %}
+    {# The old page retired (2026-11-12): the pool's two ledes describe
+       engines nothing opens any more. #}
+    <p class="lede cl-lede">Open goes into the episode's newest cut list.
+      Another cut list is one tap away inside the editor.</p>
+    {% else %}
     {# logic-cards-3 (2026-09-25): the one rule that IS true. #}
     <p class="lede cl-lede">Your Resolve follows the last episode you went into.
       Two people in the <b>same</b> episode is fine: the cut list takes one
       edit at a time and both browsers see the same cards.</p>
+    {% endif %}
 
     {% set opening = episodes | selectattr('state', 'equalto', 'loading') | list %}
     {% if refusal or want or opening %}
@@ -248,7 +264,13 @@
         <div class="tiles cl-tiles">
           {% for ep in recent %}
             {% set search = ((ep.name or '') ~ ' ' ~ (ep.show or '') ~ ' ' ~ (ep.path_label or '') ~ ' ' ~ (ep.year or '')) | lower %}
-            {% if ep.state == 'ready' %}
+            {% if retired %}
+              <a class="tile cl-tile" data-state="" href="{{ ep.href }}" data-search="{{ search }}" data-year="{{ ep.year or '' }}" title="Open {{ ep.name }}.">
+                <span class="tn cl-tile-name">{{ ep.name }}</span>
+                <span class="tp cl-tile-path">{{ ep.path_label or ep.show }}</span>
+                <span class="tw cl-tile-when">{{ ep.opened_phrase }}</span>
+              </a>
+            {% elif ep.state == 'ready' %}
               <a class="tile cl-tile" data-state="ready" href="{{ ep.href }}" data-search="{{ search }}" data-year="{{ ep.year or '' }}" title="Go into {{ ep.name }}.">
                 <span class="tn cl-tile-name">{{ ep.name }}</span>
                 <span class="tp cl-tile-path">{{ ep.path_label or ep.show }}</span>
@@ -290,9 +312,11 @@
     </section>
     {% endif %}
 
+    {% if not retired %}
     <p class="lede cl-lede cl-foot">An episode stays open behind you once it
       is open, so switching back is instant. You can close your own episode,
       or one nobody has been in for a while; closing one somebody else is in
       is for an admin.</p>
+    {% endif %}
   </main>
 {% endblock %}

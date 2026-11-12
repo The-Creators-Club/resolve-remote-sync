@@ -861,8 +861,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # there is none, a job whose retry budget runs out is abandoned
         # exactly as it was in phase 1. Started before the collector because
         # the collector's prune cycle asks it whether pinning is possible.
-        executor = cards_exec.PinnedExecutor(
-            settings, cards.engine_provider(app))
+        # 2026-11-12: with the old page retired (`cards.old_page_retired`)
+        # nothing fills the pool this executor borrows engines from, and a
+        # job pinned into a queue nothing drains is the failure cards_exec's
+        # docstring names. So it gets NO engine source: `available()` is
+        # false, `jobs.can_pin` says no, and a spent media job is abandoned,
+        # visibly, as on a dashboard with no Cards mount.
+        retired = cards.old_page_retired(settings)
+        if retired:
+            executor = cards_exec.PinnedExecutor(settings, None, retired=True)
+        else:
+            executor = cards_exec.PinnedExecutor(
+                settings, cards.engine_provider(app))
         app.state.pinned_executor = executor
         # res-fleet-1 (2026-09-18): asked of the MOUNT, never of `available()`.
         # The engine pool builds engines lazily on first entry to an episode,
@@ -872,7 +882,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # got true, and pinned rows into a queue with no worker. `start()` is
         # already safe to call with no engine (its loop returns at once per
         # tick), which is what makes the un-gated call the right one.
-        if executor.available() or bool(getattr(app.state, "cards_mounted", False)):
+        if not retired and (executor.available()
+                            or bool(getattr(app.state, "cards_mounted", False))):
             conn = db.connect(settings.db_path)
             try:
                 # A container that went down mid-encode left rows marked in

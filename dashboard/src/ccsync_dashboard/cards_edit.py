@@ -590,13 +590,15 @@ def _wants_html(request: Request) -> bool:
 def unavailable(request: Request, editor: Editor | None) -> Response:
     """A plain page (or JSON for a fetch) saying what the editor is missing."""
     if editor is None:
-        state, why = S_ABSENT, "the new editor is not set up on this dashboard"
+        state, why = S_ABSENT, "the editor is not set up on this dashboard"
     else:
         d = editor.as_dict()
         state, why = d["state"], d["detail"]
     starting = state in (S_STARTING, S_IDLE)
-    headline = ("The new editor is starting" if starting
-                else "The new editor is not running")
+    # One editor now (2026-11-12): "the new editor" read oddly once the old
+    # page was retired, and the page no longer offers the old one.
+    headline = ("Timeline Cards is starting" if starting
+                else "Timeline Cards is not running")
     headers = {"Retry-After": "5", "Cache-Control": "no-store"}
     if not _wants_html(request):
         return JSONResponse({"detail": f"{headline}: {why}", "state": state},
@@ -609,8 +611,8 @@ def unavailable(request: Request, editor: Editor | None) -> Response:
         "<style>body{font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:4rem auto;"
         "padding:0 1rem}code{background:#8882;padding:.1em .3em}</style></head><body>"
         f"<h1>{html.escape(headline)}</h1><p>{html.escape(why)}</p>"
-        "<p>Your cut lists are untouched. The original Timeline Cards page still "
-        "works: <a href=\"/cards/\">go to Timeline Cards</a>.</p></body></html>")
+        "<p>Your cut lists are untouched. "
+        "<a href=\"/cards/\">Back to the Timeline Cards page</a>.</p></body></html>")
     return Response(body, status_code=503, media_type="text/html; charset=utf-8",
                     headers=headers)
 
@@ -839,7 +841,7 @@ async def edit_proxy(request: Request, path: str) -> Response:
     except httpx.HTTPError as e:
         log.warning("the editor did not answer %s %s (%s: %s)",
                     request.method, request.url.path, type(e).__name__, e)
-        return JSONResponse({"detail": "the new editor did not answer"}, status_code=502)
+        return JSONResponse({"detail": "the editor did not answer"}, status_code=502)
 
     drop = set(HOP_BY_HOP) | STRIP_RESPONSE
     for k, v in upstream.headers.multi_items():

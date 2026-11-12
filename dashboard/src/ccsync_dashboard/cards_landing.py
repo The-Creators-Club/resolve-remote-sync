@@ -28,6 +28,12 @@ from the page, document-relative (`navigator.serviceWorker.register('sw.js')`
 in 15-offline.js), which under the new prefix is already the right scope --
 that half needed no change in the other repo.
 
+ONCE THE OLD PAGE IS RETIRED (2026-11-12, `cards.old_page_retired`: the new
+editor on and `DASH_CARDS_OLD_PAGE` unset) the second job goes away: nothing
+opens an engine, every Open is a plain link to `/cards/go/<slug>`, which sends
+the browser into the editor, and `/cards/sw.js` is a kill switch again
+(CARDS_SW_KILL). The picker itself, its catalogue and its search, is unchanged.
+
 The routes are registered BEFORE the mount (cards.mount_cards), because
 Starlette matches in order and the mount would otherwise swallow them.
 """
@@ -116,8 +122,43 @@ def _episodes(request: Request) -> list[dict]:
     return list(rows)
 
 
+def _retired(request: Request) -> bool:
+    """`cards.old_page_retired`, for this app. The one predicate (2026-11-12)."""
+    from . import cards
+
+    return cards.old_page_retired(getattr(request.app.state, "settings", None))
+
+
+def go_href(slug: str) -> str:
+    """Where every Open on the retired picker points (2026-11-12)."""
+    return f"/cards/go/{slug}"
+
+
+def _state_retired(request: Request) -> dict:
+    """`_state` once the old page is retired (2026-11-12).
+
+    NO POOL ENTRY IS MERGED: nothing opens an engine any more, so a row has
+    no ready / opening / failed state, no occupants and no close button, and
+    every Open is one plain link to `/cards/go/<slug>`. The catalogue (when
+    you opened it, its size, its folder) is the same as before.
+    """
+    rows = []
+    for row in _episodes(request):
+        rows.append({**row, "state": "", "detail": "", "occupants": [],
+                     "occupants_shown": [], "last_in": "",
+                     "last_in_seconds": None, "opening_seconds": None,
+                     "last_in_phrase": "", "opening_phrase": "",
+                     "close_prompt": "", "may_close": False,
+                     "href": go_href(row["slug"])})
+    me = auth.get_session_user(request) or ""
+    _catalogue(request, rows, me, _display_names(request))
+    return {"episodes": rows, "cap": 0, "open": 0, "ready": [], "me": me}
+
+
 def _state(request: Request) -> dict:
     """What the page draws and what `state.json` answers. Never raises."""
+    if _retired(request):
+        return _state_retired(request)
     pool = _pool(request)
     open_by_slug = {}
     if pool is not None:
@@ -151,7 +192,6 @@ def _state(request: Request) -> dict:
     admin = auth.is_admin(request.app.state.settings, me)
     names = _display_names(request)
     _catalogue(request, rows, me, names)
-    _editor_links(request, rows)
     for row in rows:
         # account page 2026-09-25: "in it now" by display name; the sign-in
         # names stay in `occupants` (and in the row's title) as the keys.
@@ -190,32 +230,6 @@ def _state(request: Request) -> dict:
         "ready": [r["slug"] for r in rows if r.get("state") == cards_pool.READY],
         "me": auth.get_session_user(request) or "",
     }
-
-
-def _editor_links(request: Request, rows: list[dict]) -> None:
-    """`editor_href` on each row: the quiet "Open in the new editor" link.
-
-    Only while the new editor is really answering (cards_edit.Editor.ready):
-    a link to a page that says "not running" is a worse landing page than no
-    link. Always set (blank when off) so the template never meets a missing
-    key. Never raises; the picker must draw regardless.
-    """
-    from . import cards, cards_edit
-
-    for row in rows:
-        row["editor_href"] = ""
-    try:
-        editor = getattr(request.app.state, "cards_edit", None)
-        if editor is None or not editor.ready():
-            return
-        vault = cards.vault_root(request.app.state.settings)
-        for row in rows:
-            if row.get("root"):
-                row["editor_href"] = cards_edit.editor_href(vault, row["root"])
-    except Exception:  # noqa: BLE001
-        log.exception("Timeline Cards picker: could not build the editor links")
-        for row in rows:
-            row["editor_href"] = ""
 
 
 def _catalogue(request: Request, rows: list[dict], me: str,
@@ -345,9 +359,12 @@ def cards_bare(request: Request) -> Response:
 def cards_landing(request: Request) -> Response:
     from . import ui
 
+    retired = _retired(request)
     state = _state(request)
     last = request.cookies.get(LAST_COOKIE, "")
-    want = str(request.query_params.get("want") or "")
+    # Retired (2026-11-12): nothing is ever "opening", so there is nothing
+    # for a `want` note to wait on.
+    want = "" if retired else str(request.query_params.get("want") or "")
     refusal = str(request.query_params.get("refused") or "")
     by_slug = {row["slug"]: row for row in state["episodes"]}
     episodes = state["episodes"]
@@ -366,7 +383,45 @@ def cards_landing(request: Request) -> Response:
         "carry_on": by_slug.get(last) if last in by_slug else None,
         "want": by_slug.get(want) if want in by_slug else None,
         "refusal": refusal,
+        "retired": retired,
     })
+
+
+@router.get("/cards/go/{slug}", include_in_schema=False)
+def cards_go(request: Request, slug: str) -> Response:
+    """Open an episode in the editor. What every Open on the picker links to.
+
+    2026-11-12 (owner: "just open should open the new editor"). A plain GET
+    and a plain `def`, so the vault scan runs in the threadpool. It records
+    the visit for the picker's "last opened", sets the carry-on cookie, and
+    sends the browser to the episode's newest cut list in the editor (or the
+    editor's own sheet when the episode has none). With the old page NOT
+    retired it is the old flow's door instead: the picker, asked to open it.
+    """
+    from urllib.parse import quote
+
+    from . import cards, cards_edit
+
+    if not cards_pool.is_slug(slug):
+        return RedirectResponse("/cards/?refused=that+episode+is+not+in+the+vault",
+                                status_code=303)
+    if not _retired(request):
+        return RedirectResponse(f"/cards/?want={quote(slug)}", status_code=303)
+    row = next((r for r in _episodes(request) if r["slug"] == slug), None)
+    if row is None:
+        return RedirectResponse("/cards/?refused=that+episode+is+not+in+the+vault",
+                                status_code=303)
+    settings = request.app.state.settings
+    user = auth.get_session_user(request) or ""
+    try:
+        cards_catalog.note_opened(settings, slug, user)
+    except Exception:  # noqa: BLE001 - a recency note is never a 500
+        log.exception("Timeline Cards: could not note %s opening %s", user, slug)
+    response = RedirectResponse(
+        cards_edit.editor_href(cards.vault_root(settings), row["root"]),
+        status_code=303)
+    remember(response, slug, auth.cookie_secure(settings, request))
+    return response
 
 
 @router.get("/cards/state.json", include_in_schema=False)
@@ -386,6 +441,14 @@ async def cards_open(request: Request) -> Response:
     """
     form = await request.form()
     slug = str(form.get("slug") or "")
+    if _retired(request):
+        # 2026-11-12: a tab drawn before the retirement still posts here.
+        # Nothing opens on the server any more; `/cards/go` does the rest
+        # (and refuses a slug that is not an episode).
+        from urllib.parse import quote
+
+        return RedirectResponse(f"/cards/go/{quote(slug, safe='')}",
+                                status_code=303)
     pool = _pool(request)
     if pool is None:
         return RedirectResponse("/cards/?refused=Timeline+Cards+is+not+mounted",
@@ -446,6 +509,9 @@ async def cards_close(request: Request) -> Response:
     from urllib.parse import quote
 
     settings = request.app.state.settings
+    if _retired(request):
+        # 2026-11-12: nothing is open on the server to close.
+        return RedirectResponse("/cards/", status_code=303)
     user = auth.get_session_user(request)
     form = await request.form()
     slug = str(form.get("slug") or "")
@@ -685,12 +751,31 @@ self.addEventListener('message', e => {
 """
 
 
+# THE FRONT DOOR'S KILL SWITCH, once the old page is retired (2026-11-12).
+# The installed worker above saves a copy of the picker and serves it when the
+# server is slow or away, and every Open in that saved copy points at the OLD
+# page (`/cards/p/<slug>/`) or posts to open an engine. Left in place, a phone
+# would go on drawing the old picker from its cache, offline or on a slow
+# network, for as long as that copy lived. So the path it updates from serves
+# a worker that throws its own saved picker away and unregisters itself. It
+# deletes ONLY `cards-landing` (the picker and its assets): each episode's own
+# caches belong to that episode's worker, and may hold edits not yet sent.
+CARDS_SW_KILL = r"""// CC Sync dashboard: the Timeline Cards front door, retired worker.
+// cards_landing.py CARDS_SW_KILL has the reasoning. version: %VER%
+self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(
+  caches.delete('cards-landing').catch(() => null)
+    .then(() => self.registration.unregister())));
+"""
+
+
 @router.get("/cards/sw.js", include_in_schema=False)
 def cards_sw(request: Request) -> Response:
     # The version in the bytes, so every release re-installs the worker.
     from . import VERSION
 
-    return Response(CARDS_SW.replace("%VER%", VERSION),
+    body = CARDS_SW_KILL if _retired(request) else CARDS_SW
+    return Response(body.replace("%VER%", VERSION),
                     media_type="text/javascript; charset=utf-8",
                     headers={"cache-control": "no-cache"})
 
@@ -820,4 +905,4 @@ def remember(response: Response, slug: str, secure: bool) -> None:
                         httponly=True, samesite="lax", secure=secure)
 
 
-__all__ = ["router", "remember", "LAST_COOKIE", "CARDS_SW"]
+__all__ = ["router", "remember", "LAST_COOKIE", "CARDS_SW", "CARDS_SW_KILL"]

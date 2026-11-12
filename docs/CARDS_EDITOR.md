@@ -1,13 +1,18 @@
 # The new Timeline Cards editor at /cards/edit
 
 Written 2026-11-05 (MulticamPipeline `editor/docs/NAS-CUTOVER.md`, phase 2).
-Built and tested, **not released and not deployed**: nothing here has run
-against the NAS. This is the dashboard's half; the editor's half is
+Live on the studio's NAS since dashboard 0.7.79 (2026-11-11). This is the
+dashboard's half; the editor's half is
 `editor/features/projects/README.md` section 3, "What CC Sync must do".
 
-The plan is "beside first, then flip": the rebuilt editor is served at
-`/cards/edit` while the original page stays at `/cards`; `/cards` moves over
-once the new one has been used live on the NAS.
+The plan was "beside first, then flip": the rebuilt editor is served at
+`/cards/edit` while the original page stayed at `/cards`.
+
+**Since dashboard 0.7.80 (2026-11-12) the original page is retired wherever
+the editor is on**: the picker's Open goes straight into the editor, and the
+old page's addresses lead there too. What that changed, what it costs and how
+to undo it (`DASH_CARDS_OLD_PAGE=1`) are in
+[`CARDS_OLD_PAGE_RETIREMENT.md`](CARDS_OLD_PAGE_RETIREMENT.md).
 
 Shipping it is two things, in this order, because they are two different
 pipelines (`docs/CARDS_DEPLOY.md` says why):
@@ -73,11 +78,14 @@ pipelines (`docs/CARDS_DEPLOY.md` says why):
   backoff / failed, `detail`, `port`, `pid`, `restarts`, `last_exit`).
 * **Does not depend on the old mount.** It reads `DASH_CARDS_SRC` and
   `DASH_CARDS_VAULT_ROOT` itself, so it works whether or not `/cards` mounted.
-* **Links from the landing page.** `/cards/` shows a quiet "Open in the new
-  editor" beside each episode, to `/cards/edit/?key=<Episode>/Script
-  Docs/Cuts/<name>.cut.md` (newest cut list; the bare `/cards/edit/`, where the
-  editor's own sheet chooses, when the episode has none), and **only while the
-  editor is really answering**.
+* **Is what the picker opens.** Each episode's Open on `/cards/` is a link to
+  `/cards/go/<slug>`, which records the visit and redirects to
+  `/cards/edit/?key=<Episode>/Script Docs/Cuts/<name>.cut.md` (newest cut list;
+  the bare `/cards/edit/`, where the editor's own sheet chooses, when the
+  episode has none). Until 0.7.80 this was a second, quiet "Open in the new
+  editor" link beside the old page's Open, drawn only while the editor was
+  answering; now it is the only Open, and an editor that is not answering says
+  so on its own page (the 503 below) rather than the link going missing.
 
 Routes are registered before the `/cards` mount (which is a catch-all under the
 same prefix); `/cards/sw.js`, the manifest and the landing are untouched.
@@ -92,6 +100,7 @@ same prefix); `/cards/sw.js`, the manifest and the landing are untouched.
 | env | `DASH_CARDS_EDITOR` | unset (off) | `1` turns the mount on |
 | env | `DASH_NODE` | blank | the Node binary. Blank means `/opt/node/bin/node`, then `node` on PATH (a dev run). A named path that is not a file is an `absent` editor that says so, never a silent fallback |
 | env | `DASH_CARDS_EDITOR_PORT` | `0` | `0` = a free loopback port per start; a number fixes it |
+| env | `DASH_CARDS_OLD_PAGE` | unset | `1` brings the old page back while the editor is on (the rollback; `CARDS_OLD_PAGE_RETIREMENT.md`) |
 | env | `DASH_CARDS_SRC`, `DASH_CARDS_VAULT_ROOT` | (the old mount's) | the bundle's checkout and the vault, as for `/cards` |
 | installer | `--no-node` | | skip provisioning Node for this run |
 | installer | `CARDS_NODE_FILE` | | a copy of the pinned tarball already on this machine (its checksum is still enforced) |
@@ -158,7 +167,14 @@ is checked on the host at install and again by the supervisor at first start
 * **Stanza** is absent in the container, so the editor's cross-language
   analysis aids degrade (stored alignments and word links still work).
 
-## The flip, later (phase 5)
+## The flip (phase 5)
+
+**Done another way on 2026-11-12** (dashboard 0.7.80): the editor stayed at
+`/cards/edit` and the old page was retired at the door instead, which gave the
+owner what was asked for (Open opens the editor) without moving a mount.
+`CARDS_OLD_PAGE_RETIREMENT.md` is the record. The plan below, moving the
+editor to `/cards` itself, is kept for the day the old page's code is taken
+out; steps 1 and 4 no longer describe how it would be done.
 
 When the new editor has been used live and is trusted:
 

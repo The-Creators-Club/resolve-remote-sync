@@ -154,13 +154,36 @@ def waiting_for_an_engine() -> bool:
     return _RUNNING.is_set() and _NO_ENGINE.is_set()
 
 
+# The old Timeline Cards page retired at the door (2026-11-12,
+# `cards.old_page_retired`). The engines this executor borrows are the ones
+# the old page's pool builds, so with the page retired nothing ever builds
+# one: the executor is made with NO engine source, `available()` is false,
+# and a media job that spends its fleet retry budget is abandoned, visibly.
+# The sentence lives here, module-level, for the reason `_RUNNING` does:
+# `jobs.explain` and the alert check run with a connection and no app, and a
+# row pinned BEFORE the retirement must not be described as in hand.
+RETIRED_WHY = ("the old Timeline Cards page is retired, so this dashboard "
+               "opens no engine to run a pinned job on")
+_RETIRED = threading.Event()
+
+
+def retired_why() -> str:
+    """RETIRED_WHY while this process built its executor retired, else ""."""
+    return RETIRED_WHY if _RETIRED.is_set() else ""
+
+
 class PinnedExecutor:
     """The thread that drains `pinned`. Never raises out of tick()."""
 
     def __init__(self, settings: Any, engine: Any,
                  connect: Callable[[], Any] | None = None,
-                 poll_seconds: float = POLL_SECONDS) -> None:
+                 poll_seconds: float = POLL_SECONDS,
+                 retired: bool = False) -> None:
         self.settings = settings
+        # 2026-11-12: the old page retired, so there is no engine source at
+        # all and `why_not` says why (RETIRED_WHY). Pass `engine=None` with it.
+        self.retired = bool(retired)
+        _RETIRED.set() if self.retired else _RETIRED.clear()
         # AN ENGINE, OR SOMETHING THAT ANSWERS WITH ONE (2026-09-14,
         # docs/CARDS_TWO_PROJECTS.md phase 1). This used to be handed
         # `app.state.cards_engine` at boot, and `available()` was decided
@@ -210,6 +233,8 @@ class PinnedExecutor:
         return callable(getattr(self.engine, ENGINE_METHOD, None))
 
     def why_not(self) -> str:
+        if self.retired and self.engine is None:
+            return RETIRED_WHY
         if self.engine is None:
             # res-fleet-1 (2026-09-18): "no engine right now" is not "not
             # mounted". With the lazily built pool there is no engine at boot

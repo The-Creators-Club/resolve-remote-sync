@@ -1304,8 +1304,16 @@ def _terminal_summary(job: Mapping[str, Any]) -> str:
             from . import cards_exec
 
             waiting = cards_exec.waiting_for_an_engine()
+            retired = cards_exec.retired_why()
         except Exception:  # noqa: BLE001 - an explanation never raises
-            waiting = False
+            waiting, retired = False, ""
+        if retired:
+            # 2026-11-12: a row pinned before the old page was retired. No
+            # worker here will ever take it, and saying it is pinned to one
+            # would be the "in hand" lie bug-dash-cards-jobs-3 removed.
+            return (f"the fleet could not finish this, and it was pinned to "
+                    f"the dashboard's own worker, but {retired}. Nothing will "
+                    f"run it here: cancel it and queue it again")
         if waiting:
             words += (". It is waiting: no Timeline Cards episode is open on "
                       "the dashboard, and it runs as soon as somebody opens one")

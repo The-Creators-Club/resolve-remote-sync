@@ -97,9 +97,27 @@ Every section ends with three lists:
 | 29 | [Every screen, panel, control and setting; playback; what works offline](29-timeline-cards-screens-panels-playback-offline.md) |
 | 30 | [The transcript panel, English-to-original alignment, reading aids](30-timeline-cards-transcripts-alignment-reading-aids.md) |
 | 31 | [Search across transcripts, auto-shorten, the edit chat, translation](31-timeline-cards-search-shorten-chat-translate.md) |
-| 32 | **OWED.** Sending to Resolve, the projects sheet and keep-on-this-device, the video window, the montage builder, markers (`features/resolve`, `projects`, `video`, `montage`, `markers`) |
+| 32 | [Sending to Resolve, the projects sheet and keep-on-this-device, the video window, the montage builder, markers](32-timeline-cards-resolve-projects-video-montage-markers.md) |
 | 33 | **OWED.** The shelf, gap notes, keep, looks, the lane feature, audio, the Windows and Android apps (`features/shelf`, `gapnotes`, `keep`, `looks`, `lane`, `audio`, `adapters`, `apps`) |
 | 34 | **OWED.** The editor's server, the cut-list model and the `.cut.md` file format as a user and other tools meet them (`server`, `core`, `cutmd`) |
+
+### The engine behind Timeline Cards (found owed 2026-11-12)
+
+The editor is not self-contained: its server calls a Python engine in the
+same repo (`Resolve/MulticamPipeline/multicam_pipeline/cards`, about 38,000
+lines without the old page) for the real work of sending a cut to Resolve,
+shortening, searching, the chat's edits, translation and the media library.
+Section 31's reader could not settle several behaviours for that reason.
+Sections 28 to 34 describe what the editor shows and asks for; these two
+describe what actually happens.
+
+| | Section |
+|---|---|
+| 39 | **OWED.** What happens when a cut is sent to Resolve, and the cut-list and project rules behind it (`resolve_engine`, `project_engine`, `project_conform`, `project_diff`, `project_edit`, `project_agent`, `project_pick`, `agent`, `cutlist`, `timecode`, plus the `multicam_pipeline/resolve` package) |
+| 40 | **OWED.** The media library, shortening, search, chat edits, translation and the rest (`library_engine`, `shorten`, `chat_edit`, `transcript_search`, `translate`, `corpus`, `text`, `gap_notes`, `offline`, `stores`, `montage`, `fleet_jobs`, `claude*`, `models`, `config`, and the small files) |
+
+Not read: `handler.py`, `server.py`, `page.py` and the `page` folder, which
+are the old Timeline Cards page's own server, retired 2026-11-12.
 
 ## Left out on purpose
 

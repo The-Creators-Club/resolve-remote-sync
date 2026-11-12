@@ -282,6 +282,17 @@ chose. These cross to the fresh instance:
 - **No translate controls in the editor.** A card's English is picked from
   the part of the transcript it covers. The translate button and the draft
   translations go.
+- **The cut can be exported as timeline files and as a script.** "We should
+  also keep the ability to export an xml otio edl and a txt script"
+  (2026-11-12). The editor does this today (inventory sections 32 and 33:
+  Final Cut Pro XML, OpenTimelineIO, a CMX3600 EDL, and the plain script as
+  text or Markdown, each export listing what the format could not carry),
+  so it already crossed under "what a person sees and touches"; his word
+  makes it a requirement that no later cut may remove. These files are also
+  what makes "not tied to one editing program" true from the first day: a
+  program with no hand-over of its own can still open the cut. Reading such
+  a file back in (the editor's Import) is kept on the same footing unless
+  he says otherwise.
 
 What this changes in the plan (for the preparing sessions; none of this
 crosses):

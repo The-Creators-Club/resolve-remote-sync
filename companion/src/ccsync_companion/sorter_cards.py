@@ -186,6 +186,77 @@ def _now_iso() -> str:
         "+00:00", "Z")
 
 
+# A VOLUME THAT NEVER ANSWERS (2026-11-12). GetVolumeInformationW has no timeout, and on creator-1 one call on a
+# drive that went bad (a card or SSD pulled or re-seated at the wrong moment) never returned: the card thread and
+# the drive thread sat in it for 90 minutes and counting, every card vanished from the sorter, and nothing was
+# logged, because a thread blocked in the kernel raises nothing. Each query now runs on a helper thread and is
+# waited for VOLUME_INFO_TIMEOUT seconds; a drive that does not answer is skipped (and logged once), and while its
+# query is still stuck that drive is skipped without a new one, so the stuck threads stay at one per drive.
+VOLUME_INFO_TIMEOUT = 5.0
+_stuck_lock = threading.Lock()
+_stuck: dict[str, threading.Thread] = {}         # drive root -> the query thread that has not come back
+
+
+def _volume_info_raw(root: str) -> Optional[tuple[int, str, str]]:
+    """GetVolumeInformationW on this thread: (serial, label, file system), or None when there is no media."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32                     # type: ignore[attr-defined]
+    old = wintypes.DWORD(0)
+    try:
+        kernel32.SetThreadErrorMode(1, ctypes.byref(old))     # per thread: this one needs its own
+    except Exception:                                         # noqa: BLE001
+        pass
+    try:
+        label = ctypes.create_unicode_buffer(261)
+        fsname = ctypes.create_unicode_buffer(64)
+        serial = wintypes.DWORD(0)
+        ok = kernel32.GetVolumeInformationW(
+            root, label, 261, ctypes.byref(serial), None, None, fsname, 64)
+        return (int(serial.value), label.value, fsname.value) if ok else None
+    finally:
+        try:
+            kernel32.SetThreadErrorMode(old.value, None)
+        except Exception:                                     # noqa: BLE001
+            pass
+
+
+def _volume_info(root: str, timeout: Optional[float] = None,
+                 query: Optional[Callable[[str], Optional[tuple[int, str, str]]]] = None
+                 ) -> Optional[tuple[int, str, str]]:
+    """The volume's (serial, label, fs), None for no media or for a volume that did not answer in time."""
+    query = query or _volume_info_raw
+    with _stuck_lock:
+        prev = _stuck.get(root)
+        if prev is not None:
+            if prev.is_alive():
+                return None                    # still stuck from an earlier pass: do not pile up another
+            _stuck.pop(root, None)
+            log.info("sorter cards: %s answers again", root)
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["v"] = query(root)
+        except Exception as exc:                              # noqa: BLE001
+            box["e"] = exc
+
+    t = threading.Thread(target=run, name=f"ccsync-volinfo-{root[:1]}", daemon=True)
+    t.start()
+    t.join(VOLUME_INFO_TIMEOUT if timeout is None else timeout)
+    if t.is_alive():
+        with _stuck_lock:
+            _stuck[root] = t
+        log.warning("sorter cards: %s did not answer within %.0f s; skipping it until it does",
+                    root, VOLUME_INFO_TIMEOUT if timeout is None else timeout)
+        return None
+    if "e" in box:
+        log.debug("sorter cards: reading %s failed (%s)", root, box["e"])
+        return None
+    return box.get("v")
+
+
 def _windows_volumes(scope: str, skip: set[str]) -> list[dict[str, Any]]:
     import ctypes
     from ctypes import wintypes
@@ -213,18 +284,15 @@ def _windows_volumes(scope: str, skip: set[str]) -> list[dict[str, Any]]:
             wanted = (2,) if scope == "removable" else (2, 3)
             if dtype not in wanted:
                 continue
-            label = ctypes.create_unicode_buffer(261)
-            fsname = ctypes.create_unicode_buffer(64)
-            serial = wintypes.DWORD(0)
-            ok = kernel32.GetVolumeInformationW(
-                root, label, 261, ctypes.byref(serial), None, None, fsname, 64)
-            if not ok:
-                continue                       # no media in the reader
-            out.append({"serial": f"{serial.value:08X}", "label": label.value,
+            info = _volume_info(root)
+            if info is None:
+                continue                       # no media in the reader, or a volume that does not answer
+            serial_value, label_value, fs_value = info
+            out.append({"serial": f"{serial_value:08X}", "label": label_value,
                         "drive": drive, "root": root, "removable": dtype == 2,
                         # the volume report's extras (scope "all"): the file system,
                         # "removable" | "fixed", and whether Windows lives here
-                        "fs": fsname.value,
+                        "fs": fs_value,
                         "drive_type": "removable" if dtype == 2 else "fixed",
                         "system": drive.upper() == system_drive})
     finally:

@@ -538,3 +538,38 @@ def test_diskutil_is_asked_once_for_both_loops_and_never_again_for_the_startup_d
     # and a diskutil that will not answer is no answer, not a stale one
     monkeypatch.setattr(SC.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("no diskutil")))
     assert SC._mac_info("/Volumes/OTHER", card) is None
+
+
+# ------------------------------------------------- a volume that never answers
+def test_a_volume_that_never_answers_is_skipped_not_waited_on(monkeypatch):
+    """2026-11-12, creator-1: GetVolumeInformationW on a drive that went bad never returned, and the card thread
+    sat in it for good, so every card vanished from the sorter with nothing in the log. A query that does not come
+    back in time is skipped, and later passes do not start a second one for the same drive while it is stuck."""
+    import threading
+    monkeypatch.setattr(sorter_cards, "_stuck", {})
+    release = threading.Event()
+    calls = []
+
+    def hung(root):
+        calls.append(root)
+        release.wait(30)
+        return (0x1234ABCD, "G011", "exFAT")
+
+    assert sorter_cards._volume_info("Q:\\", timeout=0.2, query=hung) is None
+    assert sorter_cards._volume_info("Q:\\", timeout=0.2, query=hung) is None
+    assert calls == ["Q:\\"], "a second query was started on a drive that is still stuck"
+    # another drive is not held up by it
+    assert sorter_cards._volume_info("R:\\", timeout=2, query=lambda r: (1, "CARD", "exFAT")) == (1, "CARD", "exFAT")
+    # once the stuck call returns, the drive is asked again on the next pass
+    release.set()
+    sorter_cards._stuck["Q:\\"].join(5)
+    assert sorter_cards._volume_info("Q:\\", timeout=2, query=lambda r: (2, "G011", "exFAT")) == (2, "G011", "exFAT")
+
+
+def test_no_media_and_a_failing_query_are_both_none(monkeypatch):
+    monkeypatch.setattr(sorter_cards, "_stuck", {})
+    assert sorter_cards._volume_info("S:\\", timeout=2, query=lambda r: None) is None
+
+    def boom(root):
+        raise OSError("device not ready")
+    assert sorter_cards._volume_info("T:\\", timeout=2, query=boom) is None

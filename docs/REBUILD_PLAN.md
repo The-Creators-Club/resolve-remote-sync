@@ -358,7 +358,13 @@ What this changes in the plan (for the preparing sessions; does not cross):
 - The canvas tools and Story Deck are in the inventory's scope after all:
   the board cannot be specified without knowing what the planning step does
   for him today. Sections 43 (the canvas tools and the two story
-  instruction files) and 44 (Story Deck) started 2026-11-12.
+  instruction files) and 44 (Story Deck) started 2026-11-12. Section 43
+  is written. What its reader found that bears on the board: today there
+  are two routes from the canvas to a cut that disagree in details, three
+  tools that change a canvas in place with three different rules for which
+  group a card is in, and a re-order from his notes that takes seven steps
+  and many agents, mostly because the canvas does not keep its own order.
+  A board that keeps its own order removes the need for most of that.
 - "Markdown" crosses because he asked for it. The old files' exact layout
   does not: it stays in the old-data drawer, and the fresh instance designs
   its own layout. The specification says only what a person must be able to
@@ -424,7 +430,7 @@ read the current code.
 
 | Step | What | State |
 |---|---|---|
-| 1 | **Finish the inventory**: a list of everything the software does, read from the code alone, in `docs/feature-inventory/`. | **40 sections written 2026-11-12**, the Footage Sorter (35 to 38) and the engine behind Timeline Cards (39, 40) included. **Sections 41 and 42 added the same day**, when the owner brought the pipeline before the editor into the rebuild. **Still open:** the canvas tools and Story Deck wait on his answer (two more sections if they are in). Two top-ups also owed before it is used: sections 06 and 10 (ten companion commits about camera cards landed after they were read), and section 36's audio sync (read while another session was still building it). |
+| 1 | **Finish the inventory**: a list of everything the software does, read from the code alone, in `docs/feature-inventory/`. | **40 sections written 2026-11-12**, the Footage Sorter (35 to 38) and the engine behind Timeline Cards (39, 40) included. **Sections 41 to 43 added the same day**, when the owner brought the pipeline before the editor, and the planning step, into the rebuild; section 44 (Story Deck) is a partial record only, because he cut Story Deck. **Complete at 43.** Two top-ups owed before it is used: sections 06 and 10 (ten companion commits about camera cards landed after they were read), and section 36's audio sync (read while another session was still building it). |
 | 2 | **The knowledge base**: everything real use taught, gathered from every place it was written down (the owner's own messages, the bug ledger, the gotchas, the hunts, the memory notes, the commits), one entry per lesson, each ending in a rule the rebuild can be tested against. In `docs/rebuild-spec/knowledge-base/`. | Not started. Sources measured, method below. |
 | 3 | **Rewrite the inventory as one specification organised by what people do** (sync a project, make proxies, find b-roll, cut in Timeline Cards, and so on). No source-file tags, no route or config-key names, each capability described once, each capability linked to the knowledge-base entries that apply to it. | Not started. |
 | 4 | **A decision list for the owner**: every overlap in what a person can do, every several-ways-in, every dormant or dead feature, each as a keep / cut / merge question with a recommendation. Only questions about WHAT the product does; never an engineering question. A question he has already answered in a past session is shown with his answer, not asked cold. The list itself stays behind; only his answers, restated as what the product does, reach the specification. | Not started. |
@@ -1015,10 +1021,8 @@ Paste this into a new Claude Code session opened in
 `E:\Projects\Editing\ccsync`:
 
 > Read `docs/REBUILD_PLAN.md` and `docs/feature-inventory/README.md`, then
-> carry on with the plan. Step 1, the inventory, has 42 sections written;
-> first ask me the open questions under "Timeline Cards in the rebuild"
-> (whether the canvas tools and Story Deck are in decides if two more
-> sections are read). Then step 2, the knowledge base. Read "The guiding principle" and "The purge rule"
+> carry on with the plan. Step 1, the inventory, is complete at 43
+> sections; start with step 2, the knowledge base. Read "The guiding principle" and "The purge rule"
 > before anything else: nothing about how the old product was built may
 > reach the pack. Arm the usage watcher at 70 % first
 > (`E:\Projects\Utilities\claude-usage\usage.mjs`), run at most four readers

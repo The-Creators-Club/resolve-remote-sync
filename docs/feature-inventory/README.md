@@ -5,7 +5,7 @@ list of all the features that this project has, without discussing the
 architecture at all. Do not trust the documentation or notes throughout the
 code ... to create a briefing doc for a full rebuild of the whole project."
 
-**Status: 42 sections written as of 2026-11-12. Sections 41 and 42 were added the same day, when the owner brought the pipeline before the Timeline Cards editor into the rebuild. Still open: whether the canvas tools and Story Deck are in the rebuild (asked, not answered); two more sections if so. The plan this belongs to is [`../REBUILD_PLAN.md`](../REBUILD_PLAN.md). This inventory stays behind: under that plan's purge rule it is never shown to the session that rebuilds the product.**
+**Status: complete at 43 sections as of 2026-11-12, plus section 44, a partial record of Story Deck, which the owner cut from the rebuild while it was being read. Sections 41 to 43 were added the same day, when the owner brought the pipeline before the Timeline Cards editor, and the planning step, into the rebuild. The plan this belongs to is [`../REBUILD_PLAN.md`](../REBUILD_PLAN.md). This inventory stays behind: under that plan's purge rule it is never shown to the session that rebuilds the product.**
 
 Known to be behind already: sections 01 to 30 were read at ccsync `7a81073`,
 and ten companion commits about camera cards landed the same day (0.9.92 to
@@ -144,6 +144,14 @@ it needs from Resolve, a GPU, Claude and the notes program. Read at Editing
 | 41 | [From recorded interview to transcript, translation and word timing; the stage page; the one command line](41-interview-pipeline-transcripts-translation-word-timing.md) |
 | 42 | [The tools that read and write Resolve's project library directly; interview preparation as the assistant's instruction file; the old stand-alone NAS install](42-project-library-tools-and-interview-prep.md) |
 
+| 43 | [The planning canvas: building it, adding to it, regrouping and reordering it, reading it back, turning it into a cut list or a timeline; the story check and the re-order from notes](43-planning-canvas-tools-and-story-skills.md) |
+| 44 | [Story Deck](44-story-deck.md): PARTIAL and a record only. Cut by the owner 2026-11-12; the Python side was read, the page was not |
+
+The owner is replacing the canvas with a board inside Timeline Cards, so
+section 43 is the list of what the planning step does for him today. Its
+story check and re-order are read from two more instruction files
+(`story-flow`, `structure-notes`), on the same exception as below.
+
 Section 42's interview preparation is read from an instruction file an AI
 assistant follows (`~/.claude/skills/canvas-sorter`), not from code: it is
 what actually runs, so it is the one exception to "the code is the only
@@ -166,11 +174,11 @@ looks like for that reason; section 42 answers it.
   dashboard's and the companion's sides of it are in sections 10 and 19.
 - **The old Timeline Cards page** (`multicam_pipeline/cards/page`). It was
   retired on 2026-11-12. What the dashboard still does for it is in section 19.
-- **The canvas tools and Story Deck** in the MulticamPipeline repo
-  (`multicam_pipeline/canvas`, `multicam_pipeline/storydeck`). Not read
-  unless the owner wants them in the rebuild; asked 2026-11-12. The
-  transcript pipeline in the same repo is NOT left out any more: sections 41
-  and 42.
+- **Story Deck's page** (`multicam_pipeline/storydeck/page` and `lab`, and
+  the `tools/storydeck_*` files). The owner cut Story Deck on 2026-11-12;
+  section 44 holds what had been read by then. The transcript pipeline and
+  the canvas tools in the same repo are NOT left out any more: sections 41
+  to 43.
 
 ## Where the overlap is, across sections
 

@@ -1,0 +1,91 @@
+# The knowledge base: what real use taught
+
+Step 2 of [`../../REBUILD_PLAN.md`](../../REBUILD_PLAN.md). The owner,
+2026-11-12: "every thing that was found and reported and fixed makes it into
+the rebuild document so that none of those bugs have to be re-discovered and
+re-fixed. It should be like a knowledge base."
+
+**State: being gathered, started 2026-11-12. The register is built (7,855
+items in 59 slices); the readers are running. See "Progress" below.**
+
+Nothing in this folder crosses to the rebuild as it stands. The parts in
+`_parts/` cite bug numbers and commit ids and name the old build's tools in
+their `Tool:` and "Stays behind" lines. The mergers (step 3 of the method)
+turn them into the entries that cross, the sealed per-tool notes that are
+released later, and the trace file that stays behind.
+
+## How it is made
+
+1. **The register.** `../tools/build_register.py` turns every place feedback
+   was written down into numbered items and packs them into slices. It
+   writes to `../_raw/`, which is gitignored and must never be committed: the
+   owner's messages can hold passwords and people's names. Run it again to
+   rebuild; it costs no usage.
+2. **The readers.** One per slice, four at a time, each following
+   [`_parts/KB_BRIEF.md`](_parts/KB_BRIEF.md) and writing `_parts/<slice>.md`.
+3. **The mergers.** One pass per capability folds the copies of one problem
+   into one entry. Not started.
+4. **The count.** `../tools/check_parts.py` with no arguments. Step 2 is not
+   finished until it prints `OK`: every one of the register's ids is in an
+   entry's sources, in a "Stays behind" list, or in a "No entry" list with a
+   reason.
+
+A reader's prompt is: "First read the brief at
+`E:\Projects\Editing\ccsync\docs\rebuild-spec\knowledge-base\_parts\KB_BRIEF.md`
+and follow it exactly. Do NOT start sub-agents of your own. Your slice is
+`<S>`: read `E:\Projects\Editing\ccsync\docs\rebuild-spec\_raw\slices\<S>.md`
+completely." Then one sentence on what the slice holds, the output path
+`...\knowledge-base\_parts\<S>.md`, that entry ids are `<S>-001` onwards, and
+that temporary files start `kb<S>-`.
+
+## What the register holds, and how far each source was read
+
+Built 2026-11-12. A top-up pass from these marks runs before the pack is
+handed over.
+
+| Slices | Source | Items | Read up to |
+|---|---|---|---|
+| P01 to P19 | Everything the owner typed to Claude Code on creator-1, in the product's folders or naming something of the product. 331 of them carry Claude's closing answer for that turn (session files survive only from October). | 3,871 | his last message of 2026-11-12 |
+| L01 to L11 | The bug ledger, `KNOWN_BUGS.md`, one item per entry | 1,247 | ccsync `1457afc` |
+| G01 | The two gotchas files | 46 | ccsync `1457afc`, Editing `94cbab7` |
+| H01 to H08 | Ten hunt summaries, three review notes from the last hunt, two sweeps, the UI port review, the pre-launch review, the 2026-11-10 audit | 556 | ccsync `1457afc` |
+| D01 to D07 | Plans and investigations in the other two repos' `docs` folders | 451 | Editing `94cbab7`, footage-sorter `663080d` |
+| M01 to M06 | Memory notes from the product's folders, plus those from the home and `E:\Projects` folders that name something of the product | 383 | 2026-11-12 |
+| C01 to C07 | Commit messages: ccsync (669), the Editing repo where they touch the Timeline Cards or montage pipelines (545), footage-sorter on every branch (87) | 1,301 | the heads above |
+
+Left out, on purpose, and why:
+
+- **5,182 of the owner's messages**: 3,931 typed outside the product's
+  folders and naming nothing of it, 1,251 bare slash commands.
+- **338 raw files inside the hunt folders** (each hunter's and verifier's own
+  output, tallies, briefs, JSON). The hunt summaries above are their digest.
+  The cross-check against bug numbers cited in the code is the net for
+  anything a summary dropped.
+- **61 notes and commits** the script itself set aside (a note with no
+  product word in it; a commit touching another part of the Editing repo).
+  Listed with reasons in `../_raw/auto_no_entry.tsv`.
+- **Memory notes of other projects** (After Effects scripts, the website,
+  and so on).
+
+Not yet in the register, and owed:
+
+- **Razer's own message history and notes.** Only creator-1's are read.
+- **Anything editors told the owner outside Claude Code.** He has not said
+  whether any of it should be read.
+- **Session transcripts before October 2026** are gone (deleted at 30 days),
+  so a report from before then is followed to its outcome through the
+  ledger, the commits and the notes of the same days.
+
+## Progress
+
+Updated as parts are checked in.
+
+| Slices | Written and passing the count |
+|---|---|
+| P01 to P19 | none yet |
+| L01 to L11 | none yet |
+| G01 | no |
+| H01 to H08 | none yet |
+| D01 to D07 | none yet |
+| M01 to M06 | none yet |
+| C01 to C07 | none yet |

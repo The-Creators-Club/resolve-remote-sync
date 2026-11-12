@@ -925,6 +925,19 @@ Not yet looked at: anything editors told the owner outside Claude Code
 
 ### What an entry looks like
 
+**Terse.** The owner, 2026-11-12: "the point of this knowledge base should
+ultimately be for it to be terse." It will hold thousands of lessons and is
+only useful if each can be read in seconds. So in the finished knowledge
+base an entry is at most three short sentences: what a person saw (15 words
+at most), what was going on (one sentence, 30 words at most, the fact and
+not the story of finding it), and what the product must do (one sentence,
+30 words at most, that could be turned into a test). Numbers that matter
+stay; history, hedging and second examples go. The mergers cut harder than
+the readers: one rule appears once, however many times it was reported, and
+the test of the finished thing is that a capability's lessons fit on a page
+or two. Everything longer (the sources, the old build's account of the
+cause) is in the trace that stays behind.
+
 Written in plain words under the purge rule: no file, function, route or
 setting name, no tool the old build chose, none of its internal nouns, and
 nothing that reveals how many of anything it had. An entry says what a

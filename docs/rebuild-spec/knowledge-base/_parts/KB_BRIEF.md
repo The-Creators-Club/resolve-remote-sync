@@ -49,6 +49,22 @@ YouTube, and the plain facts of a studio's network (slow uplinks, laptops
 that sleep, drives that get unplugged). A fact about a given is the most
 valuable thing you can write down.
 
+## Terse
+
+The owner's word for this knowledge base is **terse**. It will hold thousands
+of lessons and is only useful if each one can be read in seconds.
+
+- The title: one plain sentence, 15 words at most.
+- "What was going on": ONE sentence, 30 words at most. The fact, not the
+  story of how it was found.
+- "What the product must do": ONE sentence, 30 words at most, that could be
+  turned into a test.
+- Keep the numbers that matter (a time, a size, a count a person would
+  meet). Drop everything else: no history, no "it turned out", no hedging,
+  no second example.
+- Fewer, sharper entries beat many overlapping ones. If two items teach the
+  same rule, that is one entry.
+
 ## What to do with each item
 
 Read your slice file completely, start to end, in chunks. Every item is

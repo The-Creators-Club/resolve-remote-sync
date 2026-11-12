@@ -460,7 +460,7 @@ read the current code.
 | Step | What | State |
 |---|---|---|
 | 1 | **Finish the inventory**: a list of everything the software does, read from the code alone, in `docs/feature-inventory/`. | **40 sections written 2026-11-12**, the Footage Sorter (35 to 38) and the engine behind Timeline Cards (39, 40) included. **Sections 41 to 43 added the same day**, when the owner brought the pipeline before the editor, and the planning step, into the rebuild; section 44 (Story Deck) is a partial record only, because he cut Story Deck. **Complete at 43.** Two top-ups owed before it is used: sections 06 and 10 (ten companion commits about camera cards landed after they were read), and section 36's audio sync (read while another session was still building it). |
-| 2 | **The knowledge base**: everything real use taught, gathered from every place it was written down (the owner's own messages, the bug ledger, the gotchas, the hunts, the memory notes, the commits), one entry per lesson, each ending in a rule the rebuild can be tested against. In `docs/rebuild-spec/knowledge-base/`. | Not started. Sources measured, method below. |
+| 2 | **The knowledge base**: everything real use taught, gathered from every place it was written down (the owner's own messages, the bug ledger, the gotchas, the hunts, the memory notes, the commits), one entry per lesson, each ending in a rule the rebuild can be tested against. In `docs/rebuild-spec/knowledge-base/`. | **Started 2026-11-12.** The register is built: 7,855 items in 59 slices (`docs/rebuild-spec/tools/build_register.py`; the raw register is in `docs/rebuild-spec/_raw/`, gitignored). The readers are running, one per slice; progress and the reader's prompt are in `docs/rebuild-spec/knowledge-base/README.md`. 59 readers is about twice the 27 first estimated, so about two usage windows. Then the mergers, then the count. |
 | 3 | **Rewrite the inventory as one specification organised by what people do** (sync a project, make proxies, find b-roll, cut in Timeline Cards, and so on). No source-file tags, no route or config-key names, each capability described once, each capability linked to the knowledge-base entries that apply to it. | Not started. |
 | 4 | **A decision list for the owner**: every overlap in what a person can do, every several-ways-in, every dormant or dead feature, each as a keep / cut / merge question with a recommendation. Only questions about WHAT the product does; never an engineering question. A question he has already answered in a past session is shown with his answer, not asked cold. The list itself stays behind; only his answers, restated as what the product does, reach the specification. | Not started. |
 | 5 | **Three companions**: (a) the givens the rebuild must live with, taken from the knowledge base; (b) what information must still be there afterwards; (c) the look book: screenshots of every screen plus the look written as plain values. Plus the two sealed drawers: notes per chosen tool, and the old data's real formats. | Not started. |
@@ -1049,15 +1049,19 @@ they go?), and either-or tools (built-in card copier or TeraCopy, and so on).
 Paste this into a new Claude Code session opened in
 `E:\Projects\Editing\ccsync`:
 
-> Read `docs/REBUILD_PLAN.md` and `docs/feature-inventory/README.md`, then
-> carry on with the plan. Step 1, the inventory, is complete at 43
-> sections; start with step 2, the knowledge base. Read "The guiding principle" and "The purge rule"
-> before anything else: nothing about how the old product was built may
-> reach the pack. Arm the usage watcher at 70 % first
-> (`E:\Projects\Utilities\claude-usage\usage.mjs`), run at most four readers
-> at a time, tell every reader not to start sub-agents and to prefix its
-> temporary files, and stop and report when the watcher says PAUSE. Build
-> the register with scripts first, keep the raw register out of git, and do
-> not call step 2 finished until the count shows nothing unaccounted for.
-> Then step 3. Bring me the step 4 questions a page at a time. Commit each
+> Read `docs/REBUILD_PLAN.md`, `docs/feature-inventory/README.md` and
+> `docs/rebuild-spec/knowledge-base/README.md`, then carry on with the plan.
+> Step 1, the inventory, is complete at 43 sections. Step 2, the knowledge
+> base, is under way: the register is built and readers are working through
+> its 59 slices. Run `python docs/rebuild-spec/tools/check_parts.py` to see
+> which parts are written and passing, start a reader for each slice that
+> is not (the prompt is in the knowledge-base README), then the mergers, and
+> do not call step 2 finished until that script prints OK. Do NOT rebuild
+> the register while parts are missing: it would repack the slices. Read
+> "The guiding principle" and "The purge rule" before anything else: nothing
+> about how the old product was built may reach the pack. Arm the usage
+> watcher at 70 % first (`E:\Projects\Utilities\claude-usage\usage.mjs`),
+> run at most four readers at a time, tell every reader not to start
+> sub-agents and to prefix its temporary files, and stop and report when
+> the watcher says PAUSE. Then step 3. Bring me the step 4 questions a page at a time. Commit each
 > finished piece.

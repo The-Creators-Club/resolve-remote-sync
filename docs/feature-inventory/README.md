@@ -119,6 +119,15 @@ describe what actually happens.
 Not read: `handler.py`, `server.py`, `page.py` and the `page` folder, which
 are the old Timeline Cards page's own server, retired 2026-11-12.
 
+### The Footage Sorter (`E:\Projects\Editing\footage-sorter`, read as its working tree stood on 2026-11-12)
+
+| | Section |
+|---|---|
+| 35 | [The engine, part 1: scanning, collating, sorting, ingest, suggestions, the catalogue](35-footage-sorter-engine-part-1.md) |
+| 36 | **OWED.** The engine, part 2: the footage ledger, card tracking, audio matching, downloads, thumbnails, moves, automatic backup, audio sync |
+| 37 | **OWED.** Every page, screen and control (`public`) |
+| 38 | **OWED.** The server, ingest, NAS and cloud parts, the tools and the mover script (`server.js`, `lib`, `ingest`, `nas`, `cloud`, `tools`, `mover.ps1`) |
+
 ## Left out on purpose
 
 - **The Footage Sorter app** (`E:\Projects\Editing\footage-sorter`, about

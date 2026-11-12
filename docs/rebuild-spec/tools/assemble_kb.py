@@ -76,6 +76,17 @@ FAMILIES = [
     ("truenas", "truenas"),
     ("zfs", "zfs"),
     ("cloudflare", "cloudflare"),
+    ("anthropic", "anthropic-api-and-models"), ("claude haiku", "anthropic-api-and-models"),
+    ("claude as", "anthropic-api-and-models"), ("claude fable", "anthropic-api-and-models"),
+    ("hugging face", "hugging-face"),
+    ("opencc", "opencc"),
+    ("clap", "clap-audio-embeddings"),
+    ("tk on", "tkinter"),
+    ("python", "python-standard-library"),
+    ("trusted web activity", "android-web-app-wrapper"), ("bubblewrap", "android-web-app-wrapper"),
+    ("hetzner", "offsite-storage-providers"), ("backblaze", "offsite-storage-providers"),
+    ("powershell", "windows-powershell"),
+    ("browser", "browser-features"),
 ]
 
 

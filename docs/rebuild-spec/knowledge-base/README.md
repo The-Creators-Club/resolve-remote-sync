@@ -135,11 +135,34 @@ temporary-file prefix `kbm<name>-`.
 | whole-product | 167 | ALL |
 | youtube | 230 | YTD |
 
-After the mergers: a pass across capabilities for the same rule filed in
-two places; a script that splits each merged file into the text that
-crosses, the sealed per-tool notes and the trace; the list of lessons still
-open or with no outcome found, for the owner; and the owner's test (twenty
-things he remembers going wrong, each must be findable).
+After the mergers, in this order (tools written 2026-11-12, not yet run on
+all 20 bundles):
+
+1. **The pass across capabilities.** `python docs/rebuild-spec/tools/build_cross_candidates.py`
+   lays side by side, under `_cross/`, the finished entries from different
+   merged files that read alike (it decides nothing), plus one group per
+   entry a merger marked `Move to:`. One reader per batch follows
+   [`_parts/KB_CROSS_BRIEF.md`](_parts/KB_CROSS_BRIEF.md) and writes
+   `_cross/<batch>.rulings`: `same` (one stays, the other becomes a pointer
+   to it), `distinct`, `conflict` (a question for the owner) or, for a
+   marked entry, `move` / `stay`. Nobody rewrites an entry in this pass, so
+   nothing can be lost in it. `python docs/rebuild-spec/tools/check_cross.py`
+   checks the rulings. A cross reader's prompt is the brief line, "Your
+   batch is `<name>`: read `...\knowledge-base\_cross\<name>.md`
+   completely", the output path `...\_cross\<name>.rulings` and the
+   temporary-file prefix `kbx<name>-`.
+2. **The three pieces of the Timeline Cards editor become one** in the same
+   pass (they are different merged files, so repeats between them are found
+   like any other), plus `_cross/topics.tsv`, which maps each piece's
+   sub-topics onto one list (`bundle <tab> old heading <tab> new heading`).
+3. **The split.** `python docs/rebuild-spec/tools/assemble_kb.py` applies the
+   rulings and writes the text that crosses (`<capability>.md` in this
+   folder), the sealed notes (`../sealed/<tool>.md`), the trace
+   (`_trace/`, stays behind) and the owner's list (`_owner/QUESTIONS.md`,
+   stays behind). It refuses to write while the merge count, the rulings or
+   the purge net report a problem. An id is never renumbered.
+4. The owner's test (twenty things he remembers going wrong, each must be
+   findable).
 
 What each kind of slice needs said in its reader's prompt, beyond the
 standard paragraph above:

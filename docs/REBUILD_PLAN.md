@@ -350,8 +350,28 @@ Restated, and crossing to the fresh instance:
   their own columns, names them, and drags cards and columns around.
 - **The board is a Markdown file**, like the transcripts, complete in
   itself and readable anywhere, so it can be taken elsewhere.
-- **Transcripts are Markdown files too.** This follows from his words and is
-  now a requirement, not a leftover.
+- **A place on the board to write notes, and the assistant can be called to
+  update the board from them.** "Still want claude assists on the themes and
+  things. There needs to be a place to write your notes in this canvas, and
+  then a way to call claude to get it to update the canvas based on your
+  ideas" (2026-11-12). So the assistant helps in two places: it proposes the
+  themes and makes the first sort, and later, when asked, it rearranges the
+  board to follow what he has written. It acts only when called, and what
+  it changed can be seen and undone.
+- **One file per interview holds everything together** (DECIDED 2026-11-12:
+  "make it one file where everything is together"): the text, the
+  translation, the time of every word, and which English words go with
+  which original words. They are tied to each other directly, never found
+  again by matching text, so correcting a word cannot loosen its timing or
+  its translation.
+- **There is always a readable Markdown transcript that can be taken
+  elsewhere.** Whether that is the same file or a copy the product keeps in
+  step beside it is the fresh instance's design; both guarantees must hold.
+  The product does not promise to follow changes made to it in another
+  program.
+- **Existing transcripts are brought in once**, and every paragraph keeps
+  the reference it has today, so every existing cut list still points at
+  the right paragraphs.
 
 What this changes in the plan (for the preparing sessions; does not cross):
 
@@ -405,15 +425,24 @@ What answers 2 and 4 change in the plan (for the preparing sessions):
   a person meets: what the file looks like and what each part means
   (inventory section 34 has it exactly), with no word about the code that
   reads it. The gain is that every cut list this studio has opens in the
-  rebuild unchanged. Assumed, and to confirm with him: the transcripts keep
-  their present format too, for the same gain; and the board's file is new,
-  designed by the fresh instance to sit beside them.
-- **What Story Deck was for is still a question for step 4**, asked without
-  the game: after the first sort he reads the board, writes notes, and
-  wants the order worked out from them. Today two instruction files do that
-  outside the board (the story check and the re-order from his notes;
-  section 43). Whether the board offers that help, and how much, is asked
-  once he has section 43's list.
+  rebuild unchanged. The board's file is new, designed by the fresh
+  instance to sit beside it.
+- **The transcripts do NOT keep their present format** (his decision the
+  same day, after asking what it is). Today a transcript is five separate
+  pieces per interview (the text, the word timings, two subtitle files, the
+  phrase alignment, the word links) that find each other by matching text
+  and by a fingerprint of the text, which is where a good share of this
+  year's Timeline Cards bugs came from, and which a correction made in the
+  product would break every time. None of that description crosses. What
+  crosses is the three requirements above. The present layout goes in the
+  old-data drawer, for the importer.
+- **What Story Deck was for is kept, without the game** (answered above):
+  notes on the board, and the assistant called to update the board from
+  them. Today two instruction files do this outside the board (the story
+  check and the re-order from his notes; section 43). Which of their
+  particular behaviours the board keeps is a step 4 page, with section 43's
+  list in hand.
+- **Story Deck's reader is not to be resumed** (his word, 2026-11-12).
 - **The board must follow the editor's ways of working.** The editor is
   touch-first and is driven by keys, a controller and gestures that cross
   exactly. The board is new, so it has no screenshots to match; it takes
@@ -779,7 +808,7 @@ the canvas (2026-11-12). Readers started the same day:
 | | Files | Write to |
 |---|---|---|
 | 43 | `multicam_pipeline\canvas` (about 4,800 lines) and the instruction files `~\.claude\skills\story-flow` and `structure-notes` | `43-planning-canvas-tools-and-story-skills.md` |
-| 44 | `multicam_pipeline\storydeck` with its page, `storydeck_web.py`, and the `storydeck_*` files in `tools` (about 15,000 lines). **Stopped part-way 2026-11-12 when the owner cut Story Deck**: the Python side is written, the page was not read. The reader can be resumed if the full record is wanted. | `44-story-deck.md` (partial, a record only) |
+| 44 | `multicam_pipeline\storydeck` with its page, `storydeck_web.py`, and the `storydeck_*` files in `tools` (about 15,000 lines). **Stopped part-way 2026-11-12 when the owner cut Story Deck**: the Python side is written, the page was not read. Not to be resumed (the owner, 2026-11-12). | `44-story-deck.md` (partial, a record only) |
 
 ### The Footage Sorter (`E:\Projects\Editing\footage-sorter`, not started)
 

@@ -915,7 +915,24 @@ Not yet looked at: anything editors told the owner outside Claude Code
 3. **The mergers.** One pass per subject (the same subjects as the
    specification) folds the copies of one problem into one entry that keeps
    every source id. Where two sources disagree about the cause or the fix,
-   the later one wins and the entry says so.
+   the later one wins.
+   **The finished document holds only what is still true and still needed**
+   (the owner, 2026-11-12: "if there are any lessons which are no longer
+   relevant, or repeated lessons, or superseded lessons, etc, they should
+   all get removed from the final document"). So the mergers remove:
+   - **repeats**: one rule appears once, however many times it was met;
+   - **superseded lessons**: an earlier ruling he later changed, a fact
+     about a given that a later finding corrected, a rule a later rule
+     replaced. Only the current one stays, with no mention of the old;
+   - **lessons that no longer apply**: anything about a thing he has cut
+     from the rebuild (Story Deck, the notes program and everything shaped
+     by it, the translate controls in the editor, the old Timeline Cards
+     page, and whatever step 4 cuts later), and anything a decision of his
+     about the rebuild makes impossible (a lesson about text-matched
+     transcripts once transcripts are one file).
+   Nothing removed is lost: each removed entry goes to the trace that stays
+   behind, with the reason and what replaced it, so the count still closes.
+   Step 4's cuts run the same filter again before the pack is handed over.
 4. **The count.** A script checks that every id in the register appears
    either in an entry or in `NO_ENTRY.md` with a reason (not about the
    product, small talk, a duplicate, about running the live system only).

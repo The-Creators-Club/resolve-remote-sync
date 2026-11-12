@@ -32,7 +32,13 @@ released later, and the trace file that stays behind.
 2. **The readers.** One per slice, four at a time, each following
    [`_parts/KB_BRIEF.md`](_parts/KB_BRIEF.md) and writing `_parts/<slice>.md`.
 3. **The mergers.** One pass per capability folds the copies of one problem
-   into one entry. Not started.
+   into one entry, and removes from the finished document every repeat,
+   every superseded lesson (only the current ruling or fact stays) and
+   every lesson that no longer applies (about something the owner has cut
+   from the rebuild, or made impossible by a decision of his). What is
+   removed goes to the trace that stays behind, with the reason, so the
+   count still closes. The list of what he has cut is in the plan, under
+   "Timeline Cards in the rebuild" and the step 4 answers. Not started.
 4. **The count.** `../tools/check_parts.py` with no arguments. Step 2 is not
    finished until it prints `OK`: every one of the register's ids is in an
    entry's sources, in a "Stays behind" list, or in a "No entry" list with a

@@ -85,7 +85,7 @@ Every section ends with three lists:
 | | Section |
 |---|---|
 | 23 | [B-roll: the search app, its API, client folders, the public share page](23-broll-search-app-and-client-folders.md) |
-| 24 | **OWED.** B-roll: the clip indexing pipeline and the search evaluation tools (`broll/indexer`, `broll/eval`) |
+| 24 | [B-roll: the clip indexing pipeline and the search evaluation tools](24-broll-indexer-and-search-eval.md) |
 | 25 | [Music: the search app, its API, the audio indexing pipeline](25-music-search-app-and-indexer.md) |
 | 26 | [The YouTube downloader: pages, API, jobs, AI search, download strategies](26-youtube-downloader-service.md) |
 

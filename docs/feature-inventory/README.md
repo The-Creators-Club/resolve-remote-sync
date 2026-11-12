@@ -125,7 +125,7 @@ are the old Timeline Cards page's own server, retired 2026-11-12.
 |---|---|
 | 35 | [The engine, part 1: scanning, collating, sorting, ingest, suggestions, the catalogue](35-footage-sorter-engine-part-1.md) |
 | 36 | [The engine, part 2: the footage ledger, card tracking, audio matching, downloads, thumbnails, moves, automatic backup, audio sync](36-footage-sorter-engine-part-2.md) (audio sync was unfinished and untracked when read) |
-| 37 | **OWED.** Every page, screen and control (`public`) |
+| 37 | [Every page, screen and control](37-footage-sorter-pages.md) |
 | 38 | **OWED.** The server, ingest, NAS and cloud parts, the tools and the mover script (`server.js`, `lib`, `ingest`, `nas`, `cloud`, `tools`, `mover.ps1`) |
 
 ## Left out on purpose

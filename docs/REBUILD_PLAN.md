@@ -377,10 +377,10 @@ Restated, and crossing to the fresh instance:
   again by matching text, so correcting a word cannot loosen its timing or
   its translation.
 - **There is always a readable Markdown transcript that can be taken
-  elsewhere.** Whether that is the same file or a copy the product keeps in
-  step beside it is the fresh instance's design; both guarantees must hold.
-  The product does not promise to follow changes made to it in another
-  program.
+  elsewhere.** DECIDED 2026-11-12: it is a copy the product writes and
+  keeps in step, alongside the one file that holds everything ("readable
+  markdown is a copy file kept alongside, that's fine"). The product does
+  not promise to follow changes made to the copy in another program.
 - **Existing transcripts are brought in once**, and every paragraph keeps
   the reference it has today, so every existing cut list still points at
   the right paragraphs.

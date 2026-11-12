@@ -96,7 +96,7 @@ Every section ends with three lists:
 | 28 | [Every key, controller control, pointer gesture and editing command](28-timeline-cards-keyboard-controller-pointer-commands.md) |
 | 29 | [Every screen, panel, control and setting; playback; what works offline](29-timeline-cards-screens-panels-playback-offline.md) |
 | 30 | [The transcript panel, English-to-original alignment, reading aids](30-timeline-cards-transcripts-alignment-reading-aids.md) |
-| 31 | **OWED.** Search across transcripts, auto-shorten, the edit chat, translation (`features/search`, `shorten`, `chat`, `translate`) |
+| 31 | [Search across transcripts, auto-shorten, the edit chat, translation](31-timeline-cards-search-shorten-chat-translate.md) |
 | 32 | **OWED.** Sending to Resolve, the projects sheet and keep-on-this-device, the video window, the montage builder, markers (`features/resolve`, `projects`, `video`, `montage`, `markers`) |
 | 33 | **OWED.** The shelf, gap notes, keep, looks, the lane feature, audio, the Windows and Android apps (`features/shelf`, `gapnotes`, `keep`, `looks`, `lane`, `audio`, `adapters`, `apps`) |
 | 34 | **OWED.** The editor's server, the cut-list model and the `.cut.md` file format as a user and other tools meet them (`server`, `core`, `cutmd`) |

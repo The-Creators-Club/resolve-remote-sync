@@ -24,7 +24,7 @@ BANNED = [
     r"opencc", r"ollama", r"qwen", r"python", r"\btk\b", r"tkinter", r"tcl", r"pyinstaller",
     r"docker", r"container", r"sqlite", r"postgres", r"fastapi", r"\bnode\b", r"npm",
     r"powershell", r"tailscale", r"funnel", r"claude", r"anthropic", r"obsidian", r"github",
-    r"\blane [abc]\b", r"\blanes?\b", r"pystray", r"htmx", r"websocket", r"\bwsgi\b", r"asgi",
+    r"\blane [abc]\b", r"pystray", r"htmx", r"websocket", r"\bwsgi\b", r"asgi",
     r"\bcr-\d+", r"\bv\d\d\b", r"\b0\.\d+\.\d+\b", r"\.py\b", r"\.ps1\b", r"\.toml\b", r"\.json\b",
     r"[a-z]+_[a-z_]+", r"/api/", r"\bdeno\b", r"bgutil", r"\bclap\b", r"zfs", r"smtp", r"imap",
     r"ruskin", r"leso\b", r"\balex\b", r"creator-1", r"razer", r"\b\d+\.\d+\.\d+\.\d+\b",

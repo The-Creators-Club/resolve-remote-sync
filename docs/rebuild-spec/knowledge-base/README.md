@@ -92,14 +92,34 @@ Not yet in the register, and owed:
 
 ## Progress
 
-Updated as parts are checked in.
+Run `python docs/rebuild-spec/tools/check_parts.py` for the truth; this
+table is a note of where it stood at 2026-11-12 15:00 UTC (24 of 59 parts,
+about 1,870 lessons before merging).
 
-| Slices | Written and passing the count |
-|---|---|
-| P01 to P19 | none yet |
-| L01 to L11 | none yet |
-| G01 | no |
-| H01 to H08 | none yet |
-| D01 to D07 | none yet |
-| M01 to M06 | none yet |
-| C01 to C07 | none yet |
+| Slices | Written and passing the count | Still to read |
+|---|---|---|
+| P01 to P19 | P10 to P16 | P01 to P09, P17 (running), P18, P19 |
+| L01 to L11 | L01 to L05 | L06 (running), L07 to L11 |
+| G01 | yes | |
+| H01 to H08 | H01 to H04 | H05 (running), H06 to H08 |
+| D01 to D07 | none | D01 (running), D02 to D07 |
+| M01 to M06 | all | |
+| C01 to C07 | C01 | C02 to C07 |
+
+What each kind of slice needs said in its reader's prompt, beyond the
+standard paragraph above:
+
+- **P** (the owner's messages): each session's messages are together; some
+  carry Claude's closing answer under a dashed line; the rest are followed
+  to their outcome through the day files.
+- **L** (the ledger): written by the builders, so full of the old build's
+  names and tools; get the lesson out and leave those behind.
+- **H** (hunts): found by reading the code; most findings are slips of the
+  old build (kind 4); write a repeated pattern once, citing every item.
+- **D** (plans and investigations): the plan's own design stays behind;
+  what matters is what the owner asked for, what was measured, what went
+  wrong. Lessons only about things he has cut get one entry each.
+- **M** (memory notes): many are about running the live system or how the
+  work is done; the rulings and root causes are the point.
+- **C** (commits): most are machinery or "shipped" notes; a run of commits
+  about one problem is one entry.

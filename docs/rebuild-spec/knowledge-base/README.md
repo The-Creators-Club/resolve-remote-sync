@@ -93,18 +93,22 @@ Not yet in the register, and owed:
 ## Progress
 
 Run `python docs/rebuild-spec/tools/check_parts.py` for the truth; this
-table is a note of where it stood at 2026-11-12 15:00 UTC (24 of 59 parts,
-about 1,870 lessons before merging).
+table is a note of where it stood at 2026-11-12 15:22 UTC, when the readers
+were paused for the usage window (37 of 59 parts, about 2,860 lessons before
+merging). No reader was left running or half-finished.
 
 | Slices | Written and passing the count | Still to read |
 |---|---|---|
-| P01 to P19 | P10 to P16 | P01 to P09, P17 (running), P18, P19 |
-| L01 to L11 | L01 to L05 | L06 (running), L07 to L11 |
+| P01 to P19 | P10 to P19 | P01 to P09 |
+| L01 to L11 | L01 to L08 | L09, L10, L11 |
 | G01 | yes | |
-| H01 to H08 | H01 to H04 | H05 (running), H06 to H08 |
-| D01 to D07 | none | D01 (running), D02 to D07 |
+| H01 to H08 | H01 to H07 | H08 |
+| D01 to D07 | D01 to D03 | D04 to D07 |
 | M01 to M06 | all | |
-| C01 to C07 | C01 | C02 to C07 |
+| C01 to C07 | C01, C02 | C03 to C07 |
+
+Measured: a part costs about 2.2 % of a five-hour window and takes four to
+ten minutes. The 22 parts left are about half a window, then the mergers.
 
 What each kind of slice needs said in its reader's prompt, beyond the
 standard paragraph above:

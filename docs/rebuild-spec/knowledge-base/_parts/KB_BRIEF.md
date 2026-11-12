@@ -90,6 +90,18 @@ One item that teaches two different things becomes two entries.
 | 4 | A mistake only the old build could make: a slip in its own code or wiring, with nothing a different build would need to know. | Stays behind, one line. BUT if it hides something a person needs ("a safety stop is still in force after a restart"), ALSO write that need as a kind 3 entry with no trace of the mechanism. |
 | 5 | Running the live system: how to reach a machine, a deploy trap, where a secret lives, what was shipped when. | Stays behind, one line. |
 
+**The rule says what must hold, never how.** "Other programs' clicks in
+Resolve are never held up for more than half a second" is a rule. "Read the
+project library instead of asking Resolve" is the old build's remedy, and it
+does not belong in a kind 1a, 2 or 3 entry. Where the lesson IS a technique
+for dealing with a given (for example what is found where when Resolve's own
+project library is read directly, or how a particular file format is
+decoded), write it as kind 1b and put the technique in the `Tool:` line
+(`Tool: reading Resolve's project library directly`). It is released only if
+the fresh team chooses that technique. The plain fact about the given that
+made the technique necessary (how slow, how wrong, with the numbers) is its
+own kind 1a entry.
+
 When you are unsure between 3 and 4, ask: would a completely different build,
 made by people who never saw this one, be able to hit this? If yes, it is 3
 (or 1a). Most items that look like 4 hide a 3. Look for it.

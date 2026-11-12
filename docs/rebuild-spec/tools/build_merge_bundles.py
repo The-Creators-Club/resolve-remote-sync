@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SPEC = os.path.abspath(os.path.join(HERE, ".."))
 PARTS = os.path.join(SPEC, "knowledge-base", "_parts")
 OUT = os.path.join(SPEC, "_raw", "merge")
-PIECE = 150_000          # bytes of bundle text one merger reads
+PIECE = 165_000          # bytes of bundle text one merger reads
 
 STOP = set("""a an the and or of to in on for with from by at as is are was were be been it its
 this that these those not no never must may can could should would will when while if then than

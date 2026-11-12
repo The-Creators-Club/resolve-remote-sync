@@ -5,8 +5,13 @@ Step 2 of [`../../REBUILD_PLAN.md`](../../REBUILD_PLAN.md). The owner,
 the rebuild document so that none of those bugs have to be re-discovered and
 re-fixed. It should be like a knowledge base."
 
-**State: being gathered, started 2026-11-12. The register is built (7,855
-items in 59 slices); the readers are running. See "Progress" below.**
+**State at 2026-11-12 20:00 UTC: every slice is read. All 59 parts are
+written and the count passes: each of the register's 7,855 items is in an
+entry, in a "Stays behind" list or in a "No entry" list with a reason. The
+parts hold 4,442 lessons before merging (774 facts about givens, 331 facts
+about chosen tools, 1,045 rulings of the owner, 2,292 situations to
+survive). The merge is next: 20 bundles, one per capability (three for the
+Timeline Cards editor). See "Progress".**
 
 **Terse is the point.** The owner, 2026-11-12: "the point of this knowledge
 base should ultimately be for it to be terse." A finished entry is three
@@ -92,23 +97,49 @@ Not yet in the register, and owed:
 
 ## Progress
 
-Run `python docs/rebuild-spec/tools/check_parts.py` for the truth; this
-table is a note of where it stood at 2026-11-12 15:22 UTC, when the readers
-were paused for the usage window (37 of 59 parts, about 2,860 lessons before
-merging). No reader was left running or half-finished.
+**Readers: done.** `python docs/rebuild-spec/tools/check_parts.py` prints
+`OK` for all 59 parts. A part cost about 2.2 % of a five-hour usage window.
 
-| Slices | Written and passing the count | Still to read |
+**Mergers: starting.** `python docs/rebuild-spec/tools/build_merge_bundles.py`
+gathers the parts' entries into one bundle per capability under
+`../_raw/merge/` (rebuild it only before any merger has run, or after all
+have). Each merger follows [`_parts/KB_MERGE_BRIEF.md`](_parts/KB_MERGE_BRIEF.md)
+and writes `_merged/<bundle>.md`. `python docs/rebuild-spec/tools/check_merge.py`
+with no arguments shows which bundles are merged and passing.
+
+A merger's prompt is: "First read the brief at
+`E:\Projects\Editing\ccsync\docsebuild-spec\knowledge-base\_parts\KB_MERGE_BRIEF.md`
+and follow it exactly. Do NOT start sub-agents of your own. Your bundle is
+`<name>`: read `...\_raw\merge\<name>.md` completely." Then the output path
+`...\knowledge-base\_merged\<name>.md`, the id prefix (below), and the
+temporary-file prefix `kbm<name>-`.
+
+| Bundle | Entries in | Prefix |
 |---|---|---|
-| P01 to P19 | P10 to P19 | P01 to P09 |
-| L01 to L11 | L01 to L08 | L09, L10, L11 |
-| G01 | yes | |
-| H01 to H08 | H01 to H07 | H08 |
-| D01 to D07 | D01 to D03 | D04 to D07 |
-| M01 to M06 | all | |
-| C01 to C07 | C01, C02 | C03 to C07 |
+| accounts-privacy-legal | 122 | ACC |
+| broll | 244 | BRO |
+| cards-board | 95 | BRD |
+| cards-editor-1, -2, -3 | 860 | CE1, CE2, CE3 (then one pass folds the three into CED) |
+| cards-footage-in | 291 | CFI |
+| cards-to-resolve-and-exports | 205 | CRX |
+| dashboard | 273 | DSH |
+| editor-app | 316 | APP |
+| fleet-jobs | 66 | JOB |
+| footage-sorter-and-camera-cards | 317 | SRT |
+| music | 84 | MUS |
+| proxies-and-file-moves | 177 | PRX |
+| releases-and-updates | 173 | REL |
+| resolve-on-the-editors-computer | 284 | RSV |
+| server-install-and-running | 226 | SRV |
+| sync | 312 | SYN |
+| whole-product | 167 | ALL |
+| youtube | 230 | YTD |
 
-Measured: a part costs about 2.2 % of a five-hour window and takes four to
-ten minutes. The 22 parts left are about half a window, then the mergers.
+After the mergers: a pass across capabilities for the same rule filed in
+two places; a script that splits each merged file into the text that
+crosses, the sealed per-tool notes and the trace; the list of lessons still
+open or with no outcome found, for the owner; and the owner's test (twenty
+things he remembers going wrong, each must be findable).
 
 What each kind of slice needs said in its reader's prompt, beyond the
 standard paragraph above:

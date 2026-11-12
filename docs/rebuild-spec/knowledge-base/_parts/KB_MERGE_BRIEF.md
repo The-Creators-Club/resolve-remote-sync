@@ -121,6 +121,13 @@ keep that part as its own entry and drop the rest.
   written as his) is not kind 2.
 - An entry filed under the wrong capability stays in your output (do not
   drop it); add `Move to: <capability>` under it.
+- An entry that carries a second lesson belonging to another capability
+  must not lose it: write that second lesson as its own finished entry, with
+  the same id in its `From:` line and `Move to: <capability>` under it. (The
+  rule "every bundle id in exactly one `From:` line" is relaxed for this
+  one case; the checker will report the id as placed twice, and you say so
+  in your final reply.) Never drop half a lesson because it "probably
+  appears" elsewhere.
 
 ## Your output file
 

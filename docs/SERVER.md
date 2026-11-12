@@ -575,8 +575,12 @@ schema error naming it, drop it and restrict the port at the firewall plus
    `docs/EDITOR_SETUP.md`) and sends you their Syncthing device ID.
 6. Approve their device **once**, and give it their TrueNAS username. No
    `--folder-id`, no per-project step:
+   (The Syncthing key is read from `SYNCTHING_API_KEY` in the environment,
+   which `. .\tools\load_secrets.ps1` sets on the base rig. Do not pass it
+   as `--api-key`: a command line ends up in the shell's history file. The
+   scripts still accept the flag and warn when it is used.)
    ```
-   python server/accept_device.py --device-id <their-id> --device-name <their-username> --gui-url <syncthing-gui-url> --api-key <syncthing-api-key>
+   python server/accept_device.py --device-id <their-id> --device-name <their-username> --gui-url <syncthing-gui-url>
    ```
    That accepts and names the device and touches no folders. Which projects
    reach the editor is decided by what they tick on the dashboard: the
@@ -666,7 +670,7 @@ starts moving for whoever ticks it.
 
    Manual fallback (dashboard not deployed, or a nonstandard folder):
    ```
-   python server/setup_syncthing_folder.py --project-rel-path "2026/Creator Profiles/Season 1" --gui-url <url> --api-key <key>
+   python server/setup_syncthing_folder.py --project-rel-path "2026/Creator Profiles/Season 1" --gui-url <url>
    ```
    Only when the dashboard is **not** deployed does sharing need doing by
    hand (`accept_device.py --folder-id …`); with the dashboard running,
@@ -730,7 +734,7 @@ not built yet.
 ## Health check
 
 ```
-python server/check_health.py --gui-url <syncthing-gui-url> --api-key <syncthing-api-key>
+python server/check_health.py --gui-url <syncthing-gui-url>
 ```
 
 Prints plain PASS/FAIL lines for: Postgres reachable on `:5432`, the

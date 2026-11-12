@@ -148,7 +148,10 @@ every old path.
 
 ## Housekeeping
 
-* Journals and exports older than 60 days are swept on the next write.
+* Journals and exports older than 60 days are swept on the next write to
+  that project, and for every project once a day (and two minutes after the
+  companion starts), so a project nobody edits any more does not keep its
+  last exports for ever. A project folder left empty is removed a day later.
 * Nothing here syncs: `~/.ccsync` is outside the tree, so an editor's journal
   never reaches the NAS or another machine.
 * The log line to look for when something went wrong:

@@ -1865,6 +1865,15 @@ def terminate_bootstrap() -> bool:
     return True
 
 
+# Manifest keys the bootstrap scripts take from the environment, ahead of their
+# own fetch of /api/v1/site (audit 2026-11-10 ops-install-1; see run_bootstrap).
+BOOTSTRAP_SITE_ENV = {
+    "rclone_remote": "CCSYNC_RCLONE_REMOTE",
+    "sftp_shell_type": "CCSYNC_SFTP_SHELL_TYPE",
+    "sftp_hostkey": "CCSYNC_SFTP_HOSTKEY",
+}
+
+
 def run_bootstrap(
     editor_name: str,
     dashboard_token: str,
@@ -2016,6 +2025,25 @@ def run_bootstrap(
         # CCSYNC_NAS_SYNCTHING_ID); the .ps1 takes -NasSyncthingId above and
         # is given it here too so a hand-edited script sees the same value.
         child_env["CCSYNC_NAS_SYNCTHING_ID"] = nas_device_id
+    # THE LAST THREE KEYS THE BOOTSTRAP COULD ONLY GET BY FETCHING AGAIN
+    # (audit 2026-11-10 ops-install-1, the class install-onboard-2 closed for
+    # canonical_prefix and tree_name). The rclone remote's NAME, the SFTP
+    # shell type and the NAS host-key pin had no flag and no variable, so a
+    # second fetch that failed (the dashboard restarting, a tailnet blip: it
+    # is explicitly non-fatal there) wrote `[ccsync_sftp]` into rclone.conf
+    # while ensure_config wrote the site's real remote name into config.toml
+    # (every lane A/B pass: "didn't find section in config file", on an
+    # install that reported green), and wrote the stanza with no
+    # known_hosts_file, i.e. lanes that trust any host key. Both scripts read
+    # these ahead of their own fetch. Same rule as above: only a value the
+    # manifest really published, never a fallback of ours.
+    for key, env_name in BOOTSTRAP_SITE_ENV.items():
+        value = site_manifest_value(site, key, dashboard_url=dashboard_url)
+        if value:
+            child_env[env_name] = value
+        else:
+            # ...and never one inherited from whatever launched the wizard
+            child_env.pop(env_name, None)
     if _is_mac(platform):
         child_env["DASHBOARD_TOKEN"] = str(dashboard_token or "")
         child_env["DASHBOARD_URL"] = str(dashboard_url or "")

@@ -1052,6 +1052,73 @@ def test_relink_moved_repoints_the_pool_through_replace_clip(tmp_path, monkeypat
     assert replaced[0][1] == "file_move"
 
 
+def test_a_run_of_pending_moves_walks_the_media_pool_once(tmp_path, monkeypatch):
+    """audit 2026-11-10 comp-resolve-4: a project switch re-ran the relink for
+    every pending move, and each one walked the whole pool: K moves, K walks
+    of the same pool, on the watcher thread."""
+    import os
+
+    from ccsync_companion import resolve_bridge
+
+    sep = chr(92)
+    prefix = "P:" + sep
+    root = str(tmp_path)
+    pool = {"items": [{"file_path": prefix + "Projects" + sep + "A" + sep + "one.mov"}]}
+    walks: list[int] = []
+    replaced: list[str] = []
+
+    def walk():
+        walks.append(1)
+        return {"ok": True, "items": [dict(i) for i in pool["items"]]}
+
+    def replace(clip, path, source=None):
+        replaced.append(path)
+        pool["items"][0]["file_path"] = path          # the pool really changes
+        return {"ok": True}
+
+    monkeypatch.setattr(resolve_bridge, "get_media_pool_items", walk)
+    monkeypatch.setattr(resolve_bridge, "resolve_media_pool_item", lambda item: object())
+    monkeypatch.setattr(resolve_bridge, "replace_clip", replace)
+
+    def local(*parts):
+        return os.path.join(root, *parts)
+
+    # ten moves that match nothing in the open project: ONE walk between them
+    with file_moves.shared_pool_walk():
+        for n in range(10):
+            assert file_moves.relink_moved(local("Projects", f"Other{n}"), local("Projects", f"New{n}"),
+                                           root, prefix) == (False, "")
+    assert len(walks) == 1
+
+    # a chain, A to B then B to C: the second move must see what the first did
+    del walks[:]
+    with file_moves.shared_pool_walk():
+        first = file_moves.relink_moved(local("Projects", "A"), local("Projects", "B"), root, prefix)
+        second = file_moves.relink_moved(local("Projects", "B"), local("Projects", "C"), root, prefix)
+    assert first[0] is True and second[0] is True
+    assert len(walks) == 2                             # the walk was thrown away when the pool changed
+    assert replaced[-1].endswith(sep.join(["Projects", "C", "one.mov"]))
+
+    # outside a run every call walks for itself, as it always did
+    del walks[:]
+    file_moves.relink_moved(local("Projects", "X"), local("Projects", "Y"), root, prefix)
+    file_moves.relink_moved(local("Projects", "X"), local("Projects", "Y"), root, prefix)
+    assert len(walks) == 2
+
+
+def test_a_closed_resolve_is_asked_once_for_a_run_of_moves(tmp_path, monkeypatch):
+    from ccsync_companion import resolve_bridge
+
+    asked: list[int] = []
+    monkeypatch.setattr(resolve_bridge, "get_media_pool_items",
+                        lambda: asked.append(1) or {"ok": False, "message": "not open"})
+    with file_moves.shared_pool_walk():
+        for _ in range(5):
+            matched, text = file_moves.relink_moved("a", "b", str(tmp_path), "P:" + chr(92))
+            assert matched is False and "not open" in text
+    assert len(asked) == 1
+
+
 def test_relink_moved_says_so_when_resolve_is_not_open(tmp_path, monkeypatch):
     from ccsync_companion import resolve_bridge
 

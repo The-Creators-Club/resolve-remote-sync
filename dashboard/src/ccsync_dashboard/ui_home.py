@@ -129,7 +129,8 @@ def _is_silent(e: Mapping[str, Any]) -> bool:
     return str(_mapping(e.get("headline")).get("reason") or "") == "not_reporting"
 
 
-def plan_facts(conn: sqlite3.Connection, editor: str | None) -> dict[str, Any]:
+def plan_facts(conn: sqlite3.Connection, editor: str | None,
+               transfers: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """What the "moving" and "in sync" readouts count, from the same sources
     the transfers window and sync_queue draw (home-project-5, UI port review
     2026-09-25): the transfers view (lanes A, B and C, live and queued) and
@@ -137,8 +138,14 @@ def plan_facts(conn: sqlite3.Connection, editor: str | None) -> dict[str, Any]:
     read Syncthing folder completion alone, so the page said "moving 0 B,
     nothing waiting" and "no project is ticked anywhere" beside a transfers
     window full of moving files. `editor` is the viewer's scope (None: the
-    whole fleet, an admin's view)."""
-    transfers = build_transfers_view(conn, editor=editor)
+    whole fleet, an admin's view).
+
+    `transfers` is the transfers view for that SAME scope when the caller
+    already built it (the home page does, for its transfers window): this
+    function built it a second time for every page render (audit 2026-11-10
+    dash-web-2)."""
+    if transfers is None:
+        transfers = build_transfers_view(conn, editor=editor)
     owed = 0
     moving_files = 0
     behind: set[str] = set()
@@ -167,13 +174,14 @@ def plan_facts(conn: sqlite3.Connection, editor: str | None) -> dict[str, Any]:
             "getting_ready": getting_ready, "ticked": ticked}
 
 
-def _plan_facts_for(request: Request | None) -> dict[str, Any] | None:
+def _plan_facts_for(request: Request | None,
+                    transfers: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
     if request is None:
         return None
     try:
         conn = db.connect(request.app.state.settings.db_path)
         try:
-            return plan_facts(conn, auth.scope_for(request).editor)
+            return plan_facts(conn, auth.scope_for(request).editor, transfers)
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 - the readouts fall back to the project view
@@ -184,7 +192,8 @@ def _plan_facts_for(request: Request | None) -> dict[str, Any] | None:
 def home_readouts(request: Request | None, fleet: Mapping[str, Any] | None,
                   view: Mapping[str, Any] | None,
                   counts: Mapping[str, Any] | None = None,
-                  facts: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                  facts: Mapping[str, Any] | None = None,
+                  transfers: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """The four readouts and the computers bar's meta, from what the grid
     already loads (5.1). Problems is the HUD's own count (errors, with the
     warnings as the foot), so the two can never disagree. A full page passes
@@ -195,7 +204,10 @@ def home_readouts(request: Request | None, fleet: Mapping[str, Any] | None,
     fleet = fleet or {}
     view = view or {}
     if facts is None:
-        facts = _plan_facts_for(request)
+        # `transfers`: the page's own transfers view, when it has one (the
+        # home page does), so the readouts and the window beside them are one
+        # snapshot and one build (audit 2026-11-10 dash-web-2)
+        facts = _plan_facts_for(request, transfers)
     editors = [e for e in (fleet.get("editors") or []) if isinstance(e, Mapping)]
     counted = [e for e in editors if _owes(e)]
     silent = [e for e in counted if _is_silent(e)]
@@ -350,14 +362,22 @@ def tree_context(request: Request, conn: sqlite3.Connection, current: str | None
     }
 
 
-def home_tree(request: Request, current: str | None = None) -> dict[str, Any]:
+def home_tree(request: Request, current: str | None = None,
+              projects_view: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """First-paint tree context for the two terminal pages (a Jinja global,
     so ui.py's page handlers are untouched). Best-effort: a read that fails
-    draws an empty tree rather than breaking the page."""
+    draws an empty tree rather than breaking the page.
+
+    `projects_view` is the page's own projects view (its `view`). Without it
+    this built the whole thing a second time, on a second connection, for
+    every render of the home page: 2 builds and about 1,170 SQL statements a
+    page at 100 projects (audit 2026-11-10 dash-web-2), and a tree that could
+    disagree with the grid beside it, which is what DASH-6 was about."""
     try:
         conn = db.connect(request.app.state.settings.db_path)
         try:
-            return tree_context(request, conn, current)
+            return tree_context(request, conn, current,
+                                projects_view=dict(projects_view) if projects_view else None)
         finally:
             conn.close()
     except Exception:  # noqa: BLE001

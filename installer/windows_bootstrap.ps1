@@ -2151,14 +2151,20 @@ Ensure-Dir $RcloneConfDir
 # must match this stanza exactly, and onboarding/steps.py writes it from the
 # same manifest key). "ccsync_sftp" is the neutral fallback both halves share
 # -- it used to be one customer's name, compiled into three files (WP0).
-$RemoteName = Get-SiteValue "rclone_remote"
+# From the wizard first (audit 2026-11-10 ops-install-1): it already holds the
+# manifest and writes config.toml's `remote` from it, and this script's own
+# fetch above is allowed to fail. A hand-run has no such variable and reads
+# the manifest it fetched, as before. The same for the two keys below.
+$RemoteName = "$env:CCSYNC_RCLONE_REMOTE".Trim()
+if (-not $RemoteName) { $RemoteName = Get-SiteValue "rclone_remote" }
 if (-not $RemoteName) { $RemoteName = "ccsync_sftp" }
 $KeyFilePath = "$env:USERPROFILE\.ssh\ccsync_ed25519"
 # shell_type: "unix" lets rclone verify a transfer by running `md5sum` over
 # SSH -- which needs a shell. A DSM editor's shell is /sbin/nologin, so every
 # hash check fails there and the site publishes "none" instead (Synology
 # spike 6, 2026-08-17).
-$ShellType = Get-SiteValue "sftp_shell_type"
+$ShellType = "$env:CCSYNC_SFTP_SHELL_TYPE".Trim()
+if (-not $ShellType) { $ShellType = Get-SiteValue "sftp_shell_type" }
 if (-not $ShellType) { $ShellType = "unix" }
 # port: 22 unless the site says otherwise. DSM commonly runs sshd elsewhere,
 # and rclone's sftp backend silently assumes 22 when the key is absent.
@@ -2170,7 +2176,8 @@ if (-not $ShellType) { $ShellType = "unix" }
 # point the stanza at it; a CHANGED key is then a refusal in rclone, never a
 # re-trust. A site that publishes none (the studio's legacy) leaves the stanza
 # exactly as it always was.
-$SftpHostKey = Get-SiteValue "sftp_hostkey"
+$SftpHostKey = "$env:CCSYNC_SFTP_HOSTKEY".Trim()
+if (-not $SftpHostKey) { $SftpHostKey = Get-SiteValue "sftp_hostkey" }
 $KnownHostsPath = ""
 $KnownHostsAlgo = ""
 if ($SftpHostKey -match '^(ssh-|ecdsa-|sk-)\S+\s+\S+') {

@@ -439,7 +439,12 @@ KEY_FILE_PATH="$HOME/.ssh/ccsync_ed25519"
 # from the same manifest key. Overwritten from the site manifest below;
 # "ccsync_sftp" is the neutral fallback both halves share (it used to be one
 # customer's name, compiled into three files -- WP0, 2026-08-17).
-REMOTE_NAME="$(site_value rclone_remote)"
+# From the wizard first (audit 2026-11-10 ops-install-1): it already holds the
+# manifest and writes config.toml's `remote` from it, and this script's own
+# fetch above is allowed to fail. A hand-run has no such variable and reads
+# the manifest it fetched, as before. The same for SHELL_TYPE and SFTP_HOSTKEY.
+REMOTE_NAME="${CCSYNC_RCLONE_REMOTE:-}"
+[ -n "$REMOTE_NAME" ] || REMOTE_NAME="$(site_value rclone_remote)"
 [ -n "$REMOTE_NAME" ] || REMOTE_NAME="ccsync_sftp"
 CCSYNC_CONFIG_DIR="$HOME/.ccsync"
 CCSYNC_CONFIG_PATH="$CCSYNC_CONFIG_DIR/config.toml"
@@ -2291,7 +2296,8 @@ ensure_dir "$RCLONE_CONF_DIR"
 # SSH -- which needs a shell. A DSM editor's shell is /sbin/nologin, so every
 # hash check fails there and the site publishes "none" instead (Synology
 # spike 6, 2026-08-17).
-SHELL_TYPE="$(site_value sftp_shell_type)"
+SHELL_TYPE="${CCSYNC_SFTP_SHELL_TYPE:-}"
+[ -n "$SHELL_TYPE" ] || SHELL_TYPE="$(site_value sftp_shell_type)"
 [ -n "$SHELL_TYPE" ] || SHELL_TYPE="unix"
 
 # GL-19 (CR-368, 2026-10-07): "editor lanes trust any NAS host key". rclone's
@@ -2300,7 +2306,8 @@ SHELL_TYPE="$(site_value sftp_shell_type)"
 # known_hosts file of our own and point the stanza at it: a CHANGED key is then
 # a refusal in rclone, never a re-trust. No published key (the studio's
 # legacy) leaves the stanza exactly as it always was.
-SFTP_HOSTKEY="$(site_value sftp_hostkey)"
+SFTP_HOSTKEY="${CCSYNC_SFTP_HOSTKEY:-}"
+[ -n "$SFTP_HOSTKEY" ] || SFTP_HOSTKEY="$(site_value sftp_hostkey)"
 KNOWN_HOSTS_PATH=""
 KNOWN_HOSTS_ALGO=""
 KH_LINE=""

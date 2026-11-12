@@ -93,6 +93,7 @@ import argparse
 import os
 import sys
 
+from common import warn_secret_on_argv as common_warn
 from common import (
     DEFAULT_PROJECTS_ROOT,
     MARKER_FILENAME,
@@ -350,6 +351,7 @@ def main():
     add_site_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    common_warn("--api-key", "SYNCTHING_API_KEY")
     set_host_key_pin(args.host_key)
     args.projects_root = require_site_value(
         args.projects_root, "[tree] pool_root/tree_name", "--projects-root")

@@ -492,3 +492,49 @@ def test_a_drive_being_written_to_is_not_listed_again_while_the_copy_runs(tmp_pa
     clock.now += 10
     loop.tick()                                     # the copy is over: read once, as it now is
     assert len(walks) == 2 and sorter_cards.dest_busy_roots() == set()
+
+
+# ---------------------------------------------------------------------------
+# audit 2026-11-10 lens-longrun-companion-2: diskutil is not spawned per volume, per loop, every 10 s
+# ---------------------------------------------------------------------------
+
+
+def test_diskutil_is_asked_once_for_both_loops_and_never_again_for_the_startup_disk(tmp_path, monkeypatch):
+    """Both sorter loops list the volumes every 10 s, and on a Mac each listing
+    spawned one diskutil per mounted volume: up to 2,880 an hour, on battery."""
+    import plistlib
+
+    from ccsync_companion import sorter_cards as SC
+
+    spawned = []
+
+    class _Done:
+        def __init__(self, uuid):
+            self.stdout = plistlib.dumps({"VolumeUUID": uuid, "Ejectable": True})
+
+    def fake_run(argv, **kw):
+        spawned.append(argv[-1])
+        return _Done("AAAA-%d" % len(spawned))
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(SC.subprocess, "run", fake_run)
+    monkeypatch.setattr(SC.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(SC, "_MAC_INFO", {})
+    card = str(tmp_path)
+
+    first = SC._mac_info("/Volumes/CARD", card)
+    again = SC._mac_info("/Volumes/CARD", card)                # the other loop, a moment later
+    assert first == again and len(spawned) == 1
+    clock["t"] += SC.MAC_INFO_SECONDS + 0.1                    # the next tick: asked again, so a swapped card is seen
+    assert SC._mac_info("/Volumes/CARD", card)["VolumeUUID"] == "AAAA-2" and len(spawned) == 2
+    # the startup disk cannot be swapped: once
+    SC._mac_info("/System/Volumes/Data", card, system_disk=True)
+    clock["t"] += 3600
+    SC._mac_info("/System/Volumes/Data", card, system_disk=True)
+    assert spawned.count("/System/Volumes/Data") == 1
+    # an ejected volume is forgotten at once, the startup disk is not
+    SC._mac_info_forget(set())
+    assert "/Volumes/CARD" not in SC._MAC_INFO and "/System/Volumes/Data" in SC._MAC_INFO
+    # and a diskutil that will not answer is no answer, not a stale one
+    monkeypatch.setattr(SC.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("no diskutil")))
+    assert SC._mac_info("/Volumes/OTHER", card) is None

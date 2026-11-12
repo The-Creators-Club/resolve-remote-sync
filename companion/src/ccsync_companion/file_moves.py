@@ -24,6 +24,7 @@ must survive the process that learned it.
 """
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import logging
@@ -929,6 +930,30 @@ def _apply_4b_partial(move: dict[str, Any], src: Path, trash: Path,
         kept=len(kept), sample=sample, trashed=trashed), None
 
 
+# ONE WALK FOR A RUN OF MOVES (audit 2026-11-10 comp-resolve-4). A project
+# switch re-runs the relink for every applied move that has not matched yet
+# (RES-10), and each run walked the WHOLE media pool for its one old path: ten
+# pending moves on a 1,300-clip project were ten walks of the same pool, 55 to
+# 94 s in which the watcher did not poll, on every switch, because a move in a
+# project the editor rarely opens stays pending for 30 days. Inside
+# `shared_pool_walk()` the runs on this thread share one walk. It is thrown
+# away the moment a run changes the pool (a clip relinked, or refused), so two
+# moves in a chain (A to B, then B to C) still see each other's result exactly
+# as they did; and "Resolve is not open" is kept too, so a closed Resolve is
+# asked once rather than once per move.
+_walk_local = threading.local()
+
+
+@contextlib.contextmanager
+def shared_pool_walk():
+    prior = getattr(_walk_local, "holder", None)
+    _walk_local.holder = {"result": None}
+    try:
+        yield
+    finally:
+        _walk_local.holder = prior
+
+
 def relink_moved(old_local: str, new_local: str, local_root: str,
                  canonical_prefix: str, is_dir: bool = True) -> tuple[bool, str]:
     """Repoint every media pool clip under `old_local` to `new_local`.
@@ -950,7 +975,12 @@ def relink_moved(old_local: str, new_local: str, local_root: str,
     try:
         from . import canon, resolve_bridge, ui_copy
 
-        result = resolve_bridge.get_media_pool_items()
+        holder = getattr(_walk_local, "holder", None)
+        result = holder.get("result") if holder is not None else None
+        if result is None:
+            result = resolve_bridge.get_media_pool_items()
+            if holder is not None:
+                holder["result"] = result
         if not result.get("ok"):
             return False, f"Resolve not relinked ({result.get('message') or 'not open'})"
         # comp-sync-11 (2026-09-11): through _cmp_key, like every other
@@ -996,6 +1026,8 @@ def relink_moved(old_local: str, new_local: str, local_root: str,
                             file_path, canonical, outcome.get("message"))
         if not relinked and not failed:
             return False, ""
+        if holder is not None:
+            holder["result"] = None        # the pool is not what the walk saw any more
         # regression-19 hand-off (2026-09-11b): this string is editor-visible
         # now. app.py used to build its own sentence and comp-sync-11 folded
         # the two halves into this one, so the developer plural rides out to

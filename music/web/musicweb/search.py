@@ -2,6 +2,8 @@
 397 tracks x 512 floats is under a megabyte, so brute-force cosine beats any
 index structure here.
 """
+import gc
+import os
 import threading
 import time
 
@@ -179,13 +181,60 @@ _clap = None
 _clap_lock = threading.Lock()
 
 
+# THE ENCODER IS LET GO WHEN NOBODY IS SEARCHING (audit 2026-11-10 web-music-3).
+# It is lazy, so a dashboard nobody searches music on never loads it; but one
+# text search loaded the ~500 MB session and it then stayed for the life of
+# the process: measured 31 MB before, 592 MB after, in the one process that
+# is also the fleet dashboard. Music search comes in bursts. After
+# ENCODER_IDLE_SECONDS with no query the reference is dropped (a request that
+# already holds the object keeps it, so nothing is pulled from under a search)
+# and the next query loads it again: 0.67 s measured with the file cached.
+# MUSIC_ENCODER_IDLE_SECONDS=0 keeps it for ever, as before.
+def _idle_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get('MUSIC_ENCODER_IDLE_SECONDS', '600') or 0))
+    except ValueError:
+        return 600.0
+
+
+_encoder_used = 0.0
+_encoder_reaper = None
+
+
 def shared_encoder():
-    """The process-wide query-text embedder. Built once, on first use."""
-    global _encoder
+    """The process-wide query-text embedder. Built on first use, and again after it has been let go for idleness."""
+    global _encoder, _encoder_used, _encoder_reaper
     with _encoder_lock:
         if _encoder is None:
             _encoder = text_encoder.load()
+        _encoder_used = time.monotonic()
+        if _encoder_reaper is None and _idle_seconds() > 0:
+            _encoder_reaper = threading.Thread(target=_reap_encoder, name='music-encoder-idle', daemon=True)
+            _encoder_reaper.start()
         return _encoder
+
+
+def drop_idle_encoder(now=None) -> bool:
+    """Let the encoder go if no query has asked for it for the idle time. True when it was dropped."""
+    global _encoder
+    idle = _idle_seconds()
+    with _encoder_lock:
+        if _encoder is None or idle <= 0:
+            return False
+        if (time.monotonic() if now is None else now) - _encoder_used < idle:
+            return False
+        _encoder = None
+    gc.collect()                           # the session's memory goes back now, not at some later collection
+    return True
+
+
+def _reap_encoder():
+    while True:
+        time.sleep(min(60.0, max(1.0, (_idle_seconds() or 600.0) / 4)))
+        try:
+            drop_idle_encoder()
+        except Exception:                  # noqa: BLE001 - a housekeeping thread must not die
+            pass
 
 
 def shared_clap():

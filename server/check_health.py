@@ -42,6 +42,7 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
+from common import warn_secret_on_argv as common_warn
 from common import (  # noqa: F401 - synology_api/truenas_api/run_ssh are also
     # the names ScriptCalls resolves the backend's NAS access through, and the
     # offline suite patches them HERE (see common.ScriptCalls).
@@ -622,6 +623,7 @@ def main():
     add_nas_kind_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    common_warn("--api-key", "SYNCTHING_API_KEY")
     set_host_key_pin(args.host_key)
     global _ARGS
     _ARGS = args

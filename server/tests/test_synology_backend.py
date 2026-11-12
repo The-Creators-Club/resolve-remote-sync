@@ -854,3 +854,38 @@ def test_a_dry_run_call_opens_nothing_and_hides_the_password(monkeypatch, capsys
                                dry_run=True, name="x", passwd="hunter2") == {}
     out = capsys.readouterr().out
     assert "hunter2" not in out and "<redacted>" in out
+
+
+# ---------------------------------------------------------------------------
+# ops-server-3 (audit 2026-11-10): publish_db's swap and rollback on DSM
+# ---------------------------------------------------------------------------
+
+
+def test_publish_db_runs_its_privileged_scripts_through_the_backend_that_has_a_root_cmd():
+    """The swap built its own `sudo -S sh -c`: on DSM docker and synoacltool
+    are not on sudo's PATH, so the integrity check exited 11 on every publish."""
+    import publish_db
+
+    class _Dsm:
+        def root_cmd(self, cmd):
+            return "ROOT[" + cmd + "]"
+
+    class _TrueNas:
+        pass
+
+    script = "docker exec ctr python3 -c 'print(1)'"
+    assert publish_db.privileged(_Dsm(), script) == "ROOT[" + script + "]"
+    # TrueNAS has no root_cmd: the line it always got, byte for byte
+    assert publish_db.privileged(_TrueNas(), script) == (
+        'echo "$SUDO_PW" | sudo -S sh -c ' + publish_db.shell_quote(script))
+
+
+def test_the_synology_form_puts_the_dsm_path_in_front_of_docker():
+    import publish_db
+    from backends import synology
+
+    b = synology.SynologyBackend.__new__(synology.SynologyBackend)
+    line = publish_db.privileged(b, "docker exec ctr true")
+    assert synology.PATH_EXPORT in line
+    assert line.index(synology.PATH_EXPORT) < line.index("docker exec")
+    assert "sudo -S" in line and "$SUDO_PW" in line

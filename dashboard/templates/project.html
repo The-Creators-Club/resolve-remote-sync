@@ -20,7 +20,7 @@
   <script src="{{ asset_url('cc/home.js') }}" defer></script>
 {% endblock %}
 {% block layout %}
-{% set tree = home_tree(request, project.slug) %}
+{% set tree = home_tree(request, project.slug, view if view is defined else none) %}
 {% set roots_ctx = home_roots(request) %}
 <div class="page home-page project-page">
   <div class="head">

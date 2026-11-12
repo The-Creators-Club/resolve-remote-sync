@@ -720,3 +720,22 @@ def test_run_all_tests_macos_row_passes_when_all_pass(tmp_path):
 def test_run_all_tests_macos_row_with_no_bash_tests_is_a_failure(tmp_path):
     _sh_tree(tmp_path, {})
     assert _run_macos_row(tmp_path).startswith("ROW installer/macos FAIL")
+
+
+def test_run_all_tests_runs_the_two_big_suites_in_parallel():
+    """audit 2026-11-10 tests-ci-4: CLAUDE.md says the companion and dashboard
+    suites take -n auto (the dashboard --dist loadfile) and CI does it, but
+    the one script it names for everything at once passed no -n: about 29
+    minutes for the two instead of about 3.5."""
+    text = (TOOLS / "run_all_tests.ps1").read_text(encoding="utf-8")
+    rows = {m.group(1): m.group(0) for m in re.finditer(
+        r'@\{ Name = "([a-z/]+)";[^}]*\}', text)}
+    assert 'Extra = @("-n", "auto") }' in rows["companion"]
+    assert 'Extra = @("-n", "auto", "--dist", "loadfile") }' in rows["dashboard"]
+    # the small suites, and server/ (which goes through bash), stay serial
+    for name, row in rows.items():
+        if name not in ("companion", "dashboard"):
+            assert "Extra" not in row, name
+    assert "-m pytest @targets -q @extra" in text
+    # ...and an interpreter without xdist still runs the suite, serially
+    assert '-c "import xdist"' in text

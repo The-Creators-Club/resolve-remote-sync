@@ -178,6 +178,43 @@ def test_prefix_probe_is_cached_so_it_costs_one_realpath_per_poll():
     assert calls == ["P:\\"]  # the PREFIX is probed, never the per-clip path
 
 
+def test_a_clip_that_is_there_under_a_healthy_prefix_costs_no_realpath_of_its_own():
+    """audit 2026-11-10 comp-resolve-3: every clip that EXISTS on the prefix was
+    resolved by itself on every poll, before the cached prefix verdict that
+    would have answered for all of them."""
+    calls = []
+
+    def counting_realpath(p):
+        calls.append(p)
+        return p.replace("P:\\", "C:\\Creators_Club\\")
+
+    for i in range(50):
+        assert classify_path(
+            rf"P:\Projects\clip{i}.mov",
+            local_root=r"C:\Creators_Club",
+            canonical_prefix="P:\\",
+            exists_fn=_always_true,
+            is_windows=True,
+            realpath_fn=counting_realpath,
+        ) == OK
+    assert calls == ["P:\\"]  # the prefix, once; never a clip
+
+
+def test_a_clip_under_an_unhealthy_prefix_is_still_resolved_by_itself():
+    """...and when the prefix does NOT land under the root, the file's own
+    path is still the second chance it always was."""
+    def realpath(p):
+        if p == "P:\\":
+            return "P:\\"                                   # the prefix resolves to itself: not under the root
+        return r"C:\Creators_Club\Projects\clip.mov"      # but this file does
+    assert classify_path(
+        r"P:\Projects\clip.mov", local_root=r"C:\Creators_Club", canonical_prefix="P:\\",
+        exists_fn=_always_true, is_windows=True, realpath_fn=realpath) == OK
+    assert classify_path(
+        r"P:\Projects\clip.mov", local_root=r"C:\Creators_Club", canonical_prefix="P:\\",
+        exists_fn=_always_true, is_windows=True, realpath_fn=lambda p: p) == BAD_PREFIX
+
+
 def test_windows_bad_prefix_takes_priority_even_if_file_exists():
     # If P: happens to be mapped to something else entirely (not local_root)
     # and a file really does exist there, it's still a mapping-health

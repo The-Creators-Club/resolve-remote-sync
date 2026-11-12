@@ -322,3 +322,25 @@ def test_the_staleness_check_is_rate_limited(tmp_path, monkeypatch):
 
     monkeypatch.setattr(search, '_last_stale_check', time.monotonic())
     assert search.index() is first
+
+
+def test_the_encoder_is_let_go_after_an_idle_spell_and_loaded_again_on_the_next_search(no_models, monkeypatch):
+    """audit 2026-11-10 web-music-3: one text search loaded the ~500 MB session
+    and it stayed in the dashboard process until the next restart."""
+    loads = []
+    monkeypatch.setattr(search.text_encoder, 'load',
+                        lambda directory=None: loads.append(1) or FakeEncoder())
+    monkeypatch.setenv('MUSIC_ENCODER_IDLE_SECONDS', '600')
+    monkeypatch.setattr(search, '_encoder_reaper', object())       # no thread in a test: the drop is called by hand
+    held = search.shared_encoder()
+    used = search._encoder_used
+    assert search.drop_idle_encoder(now=used + 599) is False        # somebody searched under ten minutes ago
+    assert search.shared_encoder() is held and len(loads) == 1
+    assert search.drop_idle_encoder(now=search._encoder_used + 601) is True
+    assert search._encoder is None
+    assert held is not None                                         # a request that held it still has it
+    again = search.shared_encoder()
+    assert again is not held and len(loads) == 2
+    # 0 keeps it for ever, as it always was
+    monkeypatch.setenv('MUSIC_ENCODER_IDLE_SECONDS', '0')
+    assert search.drop_idle_encoder(now=search._encoder_used + 10 ** 6) is False

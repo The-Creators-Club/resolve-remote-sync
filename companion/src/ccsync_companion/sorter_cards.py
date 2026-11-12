@@ -235,10 +235,55 @@ def _windows_volumes(scope: str, skip: set[str]) -> list[dict[str, Any]]:
     return out
 
 
-def _mac_volumes(scope: str, skip: set[str]) -> list[dict[str, Any]]:
+# WHAT diskutil SAID ABOUT A VOLUME, KEPT BRIEFLY (audit 2026-11-10 lens-longrun-companion-2). The card loop and the
+# ledger's volume loop each list the volumes every 10 s, and on a Mac each listing spawned one `diskutil` per mounted
+# volume, the startup disk included: 1,440 to 2,880 spawns an hour on a typical editor's Mac, on battery, whether or
+# not the studio uses the sorter. Two rules, both chosen so that a card is never taken for the one before it:
+#   * the startup disk cannot be swapped while the machine is up: its answer stands for the life of the process;
+#   * any other volume's answer is shared for MAC_INFO_SECONDS, under the loops' own period, so the two loops spawn
+#     once between them and what either reads is no staler than it already was. It is NOT kept by mount path and
+#     device number alone for longer: a second card of the same model pushed into the same reader mounts at the same
+#     path with the same numbers, and its serial is what the "safe to format" verdict is read against.
+MAC_INFO_SECONDS = 8.0
+_MAC_INFO: dict[str, tuple[float, int, dict]] = {}
+_MAC_INFO_LOCK = threading.Lock()
+
+
+def _mac_info(probe: str, root: str, system_disk: bool = False) -> Optional[dict]:
+    """`diskutil info -plist` for a volume, from the short cache when it holds it. None when diskutil would not say."""
     import plistlib
 
+    try:
+        dev = os.stat(root).st_dev
+    except OSError:
+        dev = -1
+    now = time.monotonic()
+    with _MAC_INFO_LOCK:
+        hit = _MAC_INFO.get(probe)
+    if hit is not None and hit[1] == dev and (system_disk or now - hit[0] < MAC_INFO_SECONDS):
+        return hit[2]
+    try:
+        raw = subprocess.run(["diskutil", "info", "-plist", probe],
+                             capture_output=True, timeout=10).stdout
+        info = plistlib.loads(raw)
+    except Exception:                                         # noqa: BLE001
+        return None
+    with _MAC_INFO_LOCK:
+        _MAC_INFO[probe] = (now, dev, info)
+    return info
+
+
+def _mac_info_forget(seen: set[str]) -> None:
+    """Drop what is kept for a volume that was not in this listing (it was ejected), the startup disk aside: a
+    listing for card readers never looks at that one."""
+    with _MAC_INFO_LOCK:
+        for probe in [k for k in _MAC_INFO if k not in seen and k not in ("/", "/System/Volumes/Data")]:
+            _MAC_INFO.pop(probe, None)
+
+
+def _mac_volumes(scope: str, skip: set[str]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    seen: set[str] = set()
     base = Path("/Volumes")
     try:
         entries = sorted(base.iterdir())
@@ -258,11 +303,9 @@ def _mac_volumes(scope: str, skip: set[str]) -> list[dict[str, Any]]:
                 continue
             root = "/"
             probe = "/System/Volumes/Data" if os.path.isdir("/System/Volumes/Data") else "/"
-        try:
-            raw = subprocess.run(["diskutil", "info", "-plist", probe],
-                                 capture_output=True, timeout=10).stdout
-            info = plistlib.loads(raw)
-        except Exception:                                     # noqa: BLE001
+        seen.add(probe)
+        info = _mac_info(probe, root, system_disk=(root == "/"))
+        if info is None:
             continue
         removable = bool(info.get("RemovableMediaOrExternal")
                          or info.get("Removable") or info.get("Ejectable"))
@@ -280,6 +323,7 @@ def _mac_volumes(scope: str, skip: set[str]) -> list[dict[str, Any]]:
                     "fs": str(info.get("FilesystemName") or info.get("FilesystemType") or ""),
                     "drive_type": "removable" if removable else "fixed",
                     "system": bool(info.get("SystemImage")) or system})
+    _mac_info_forget(seen)
     return out
 
 

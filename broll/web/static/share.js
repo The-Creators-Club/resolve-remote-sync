@@ -237,8 +237,8 @@ function shareCard(video, idx) {
   });
   thumb.appendChild(poster);
 
+  // No background-image here: sprite.js fetches the sheet on the first pointer.
   const overlay = el("div", { className: "sprite-overlay" });
-  overlay.style.backgroundImage = `url(media/sprite/${video.id}.jpg)`;
   thumb.appendChild(overlay);
 
   if (video.duration_s != null) {

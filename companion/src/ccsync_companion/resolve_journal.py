@@ -746,11 +746,12 @@ def describe_latest(project_name: Any = None) -> str:
 SWEPT_SUFFIXES = ("*.json", "*.drp", "*.json.tmp.*")
 
 
-def _sweep(slug: str, now: float) -> None:
+def _sweep(slug: str, now: float) -> int:
     """Delete journals and rollback exports past RETENTION_DAYS for this
-    project. Best effort: the sweep runs on the write path, so a failure must
-    cost nothing."""
+    project; how many went. Best effort: the sweep runs on the write path, so
+    a failure must cost nothing."""
     cutoff = now - (RETENTION_DAYS * 86400.0)
+    removed = 0
     try:
         directory = journal_root() / slug
         for pattern in SWEPT_SUFFIXES:
@@ -758,7 +759,59 @@ def _sweep(slug: str, now: float) -> None:
                 try:
                     if path.stat().st_mtime < cutoff:
                         path.unlink()
+                        removed += 1
                 except OSError:
                     continue
     except Exception:
-        return
+        return removed
+    return removed
+
+
+# EVERY PROJECT, ONCE A DAY (audit 2026-11-10 lens-disk-1). _sweep above runs
+# on the write path and only in the folder of the project being journalled,
+# so a project that stopped being edited (finished, delivered, unticked) kept
+# its last 60 days of exports for ever: tens of MB each, an estimated 0.4 to
+# 5 GB per finished project, in the editor's HOME on the system disk, seen by
+# no report. This walks every project folder with the SAME rule (60 days,
+# the same suffixes), so undo and the documented retention are untouched.
+SWEEP_ALL_SECONDS = 24 * 3600.0
+SWEEP_ALL_FIRST_DELAY_SECONDS = 120.0
+
+
+def sweep_all(now: Optional[float] = None) -> dict[str, int]:
+    """Sweep every project's folder; {"projects", "files", "folders"}.
+
+    A folder that is empty AND has not changed for a day is removed: the day
+    is what keeps this from taking a folder a save point made a moment ago
+    and is about to export into (resolve_bridge makes the folder, then asks
+    Resolve to write the file). Never raises."""
+    now = time.time() if now is None else now
+    out = {"projects": 0, "files": 0, "folders": 0}
+    try:
+        folders = [d for d in journal_root().iterdir() if d.is_dir()]
+    except OSError:
+        return out
+    for folder in folders:
+        out["projects"] += 1
+        out["files"] += _sweep(folder.name, now)
+        try:
+            if now - folder.stat().st_mtime > 86400.0 and not any(folder.iterdir()):
+                folder.rmdir()
+                out["folders"] += 1
+        except OSError:
+            continue
+    return out
+
+
+def sweep_loop(stop_event: threading.Event) -> None:
+    """Soon after start, then daily, until `stop_event` is set. A thread target."""
+    delay = SWEEP_ALL_FIRST_DELAY_SECONDS
+    while not stop_event.wait(delay):
+        delay = SWEEP_ALL_SECONDS
+        try:
+            done = sweep_all()
+            if done["files"] or done["folders"]:
+                log.info("resolve journal: swept %d file(s) past %d days and %d empty folder(s) across %d project(s)",
+                         done["files"], RETENTION_DAYS, done["folders"], done["projects"])
+        except Exception:                                    # noqa: BLE001 - housekeeping must not die
+            log.debug("resolve journal: the daily sweep failed", exc_info=True)

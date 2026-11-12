@@ -83,9 +83,19 @@ if ($gitCmd) {
     }
 }
 
+# Extra: more pytest arguments for one suite. The two big suites run in
+# PARALLEL (audit 2026-11-10 tests-ci-4): CLAUDE.md has said so since
+# 2026-11-10 and CI does it, but this script, the one it names for
+# "everything at once", passed no -n: about 29 minutes for these two instead
+# of about 3.5. The dashboard takes --dist loadfile because some of its files
+# hold a live child process per module. The small suites stay serial (each is
+# under 70 s and xdist's start-up would eat the gain), and server/ stays
+# serial and through bash.
 $Suites = @(
-    @{ Name = "companion";     Dir = "$repo\companion";     Py = "$repo\companion\.venv\Scripts\python.exe" },
-    @{ Name = "dashboard";     Dir = "$repo\dashboard";     Py = "$repo\dashboard\.venv\Scripts\python.exe" },
+    @{ Name = "companion";     Dir = "$repo\companion";     Py = "$repo\companion\.venv\Scripts\python.exe";
+       Extra = @("-n", "auto") },
+    @{ Name = "dashboard";     Dir = "$repo\dashboard";     Py = "$repo\dashboard\.venv\Scripts\python.exe";
+       Extra = @("-n", "auto", "--dist", "loadfile") },
     @{ Name = "server";        Dir = "$repo\server";        Py = "$repo\dashboard\.venv\Scripts\python.exe"; Bash = $true },
     @{ Name = "onboarding";    Dir = "$repo\onboarding";    Py = "python" },
     @{ Name = "bench";         Dir = "$repo\bench";         Py = "$repo\bench\.venv\Scripts\python.exe" },
@@ -209,7 +219,15 @@ foreach ($s in $Suites) {
         }
         Push-Location $s.Dir
         $global:LASTEXITCODE = 9999
-        & $py -m pytest @targets -q 2>&1 | Tee-Object -Variable suiteOut
+        $extra = @()
+        if ($s.Extra) {
+            # only where the interpreter really has xdist: a fallback venv without it must still run, serially
+            & $py -c "import xdist" 2>$null
+            if ($LASTEXITCODE -eq 0) { $extra = @($s.Extra) }
+            else { Write-Host "  (no pytest-xdist in $py -- running this suite serially)" -ForegroundColor Yellow }
+            $global:LASTEXITCODE = 9999
+        }
+        & $py -m pytest @targets -q @extra 2>&1 | Tee-Object -Variable suiteOut
         $outcome = $(if ($LASTEXITCODE -ne 0) { "FAIL (exit $LASTEXITCODE)" }
                      elseif ($s.Bash) { "PASS* (no Git bash: the remote-script tests SKIPPED, not passed)" }
                      else { "PASS" })

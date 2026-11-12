@@ -334,17 +334,25 @@ def classify_path(
             # "P:\" at all).
             return OK
         if norm_root:
+            # THE PREFIX FIRST, THE FILE ONLY IF IT HAS TO BE (audit 2026-11-10
+            # comp-resolve-3). The clip exists on the canonical prefix; if the
+            # PREFIX itself is healthy (loopback share / subst landing on
+            # local_root) that is the designed steady state and the answer is
+            # OK whatever the file's own realpath says. That verdict is cached
+            # (_prefix_resolves_under_root); the per-file realpath that used to
+            # run BEFORE it is a CreateFile + GetFinalPathNameByHandle per clip
+            # per poll, through the SMB redirector on a remote rig: measured
+            # 102 ms per 2,000 clips on local NTFS, every 3 s, on the thread
+            # the popup's latency depends on. The outcomes are the ones they
+            # were: OK if either test passes, BAD_PREFIX if neither does.
+            if _prefix_resolves_under_root(canonical_prefix, norm_root, plat, sep, resolve,
+                                           posix_drive_prefix, root_present_fn):
+                return OK
             try:
                 real = _norm(_delooped(resolve(path)), plat)
             except Exception:
                 real = norm_path
             if _is_under(real, norm_root, sep):
-                return OK
-            # The clip exists on the canonical prefix and the PREFIX itself
-            # is healthy (loopback share / subst landing on local_root):
-            # this is the designed steady state, not a broken mapping.
-            if _prefix_resolves_under_root(canonical_prefix, norm_root, plat, sep, resolve,
-                                           posix_drive_prefix, root_present_fn):
                 return OK
         # Exists (the mapping resolves to something real) but not under
         # local_root -- a genuinely broken mapping (wrong subst/mount

@@ -1104,3 +1104,32 @@ def test_the_injected_drawer_close_meets_aa_on_bg():
     rule = re.search(r"\.drawer-close\s*\{[^}]*?color:\s*var\(--([a-z-]+)\)", css)
     assert rule, "no .drawer-close colour rule"
     assert _contrast(tok[rule.group(1)], tok["bg"]) >= 4.5, rule.group(1)
+
+
+# --- audit 2026-11-10 web-broll-1 -------------------------------------------------------
+
+def test_reading_a_folder_after_a_rebuild_stores_each_item_under_its_current_id(as_editor, renumbered):
+    """The public page asks for media by the CURRENT id and the gate's fast
+    path looks an item up by its STORED id: after a renumbering rebuild the
+    two never agreed again, and every poster, sprite and Range request
+    re-resolved the whole folder (9 ms a card against 0.01 ms), for ever."""
+    folder = renumbered
+    first = _panel(as_editor, folder["id"])
+    # what this read answers is what it always answered: the ids as stored when it started
+    assert [(i["name"], i["id"], i["video_id"]) for i in first] == [("A", 7, 5), ("B", 5, 9)]
+    # ...and it left each item under the id its clip has now. A 5->7 frees 5, then B 9->5.
+    healed = _panel(as_editor, folder["id"])
+    assert [(i["name"], i["id"], i["video_id"]) for i in healed] == [("A", 7, 7), ("B", 5, 5)]
+    # the client's page is the same two clips, by the same ids
+    theirs = TestClient(broll_app).get(f"/share/{folder['token']}/api/folder").json()
+    assert [(i["name"], i["id"]) for i in theirs["items"]] == [("A", 7), ("B", 5)]
+    # and the buttons still name the right clip
+    r = as_editor.delete(f"api/client-folders/{folder['id']}/items/7")
+    assert r.status_code == 204, r.text
+    assert [i["name"] for i in _panel(as_editor, folder["id"])] == ["B"]
+
+
+def test_the_public_page_heals_the_ids_too(as_editor, renumbered):
+    folder = renumbered
+    TestClient(broll_app).get(f"/share/{folder['token']}/api/folder")
+    assert [(i["name"], i["video_id"]) for i in _panel(as_editor, folder["id"])] == [("A", 7), ("B", 5)]

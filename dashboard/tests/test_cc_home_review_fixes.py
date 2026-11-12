@@ -392,3 +392,51 @@ def test_hp11_read_the_answer_is_brought_on_screen(env):
     assert re.search(r'if \(!isPoll\(evt\) && target\.hasAttribute && target\.hasAttribute\("data-reveal"\)\) reveal\(target\);', js)
     reveal = re.search(r"function reveal\(target\) \{(.*?)\n  \}", js, re.S).group(1)
     assert "scrollIntoView" in reveal and "focus(" in reveal
+
+
+# ------------------------------------------------------------ audit 2026-11-10 dash-web-2 (a)
+
+
+def test_the_home_page_builds_each_view_once(env, monkeypatch):
+    """The page handler builds the projects view and the transfers view and
+    shares them (DASH-6); the terminal template then called home_tree and
+    home_readouts, which each opened a connection and built their own again:
+    2 builds of each per page, and a tree that could disagree with the grid."""
+    from ccsync_dashboard import api, ui
+
+    client, _conn = env
+    built = {"projects": 0, "transfers": 0}
+    real_projects, real_transfers = api.build_projects_view, api.build_transfers_view
+
+    def projects(*a, **k):
+        built["projects"] += 1
+        return real_projects(*a, **k)
+
+    def transfers(*a, **k):
+        built["transfers"] += 1
+        return real_transfers(*a, **k)
+
+    for mod in (api, ui, ui_home):
+        if hasattr(mod, "build_projects_view"):
+            monkeypatch.setattr(mod, "build_projects_view", projects)
+        if hasattr(mod, "build_transfers_view"):
+            monkeypatch.setattr(mod, "build_transfers_view", transfers)
+    page = client.get("/")
+    assert page.status_code == 200
+    assert built == {"projects": 1, "transfers": 1}, built
+    # and it is still the page it was: the project is in the tree and the readouts are drawn
+    assert SLUG in page.text and "in sync" in page.text
+
+
+def test_plan_facts_from_the_pages_own_transfers_is_the_same_answer(env):
+    from ccsync_dashboard import api
+
+    _client, conn = env
+    db.replace_active_transfers(conn, "jsmith", "JSMITH-STUDIO", [{
+        "lane": "lane_a_rclone", "name": "A001.mov", "direction": "up",
+        "bytes_done": 10 * 2**20, "bytes_total": 50 * 2**20, "percentage": 20.0,
+        "speed_bps": 40 * 2**20, "eta_seconds": 1, "project_slug": SLUG}], db.utcnow_iso())
+    conn.commit()
+    own = ui_home.plan_facts(conn, None)
+    given = ui_home.plan_facts(conn, None, api.build_transfers_view(conn, editor=None))
+    assert given == own and given["moving_files"] == 1

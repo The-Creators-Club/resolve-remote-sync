@@ -9472,18 +9472,21 @@ class CompanionApp:
         next time anyone opened B. Called on every project change; never
         raises (watcher thread)."""
         try:
-            for entry in self.file_moves.pending_relinks():
-                if not _moved_destination_is_there(entry):
-                    continue
-                matched, text = self._relink_moved_result(
-                    entry.get("old_local", ""), entry.get("new_local", ""),
-                    bool(entry.get("is_dir")))
-                if matched:
-                    self.file_moves.clear_relink_pending(entry["id"])
-                    log.info("file move #%s: %s after the project changed",
-                             entry["id"], text)
-                    self._queue_file_move_answer(
-                        entry["id"], True, f"{entry.get('detail', 'moved')}; {text}")
+            # One media pool walk for the whole run, not one per move (audit
+            # 2026-11-10 comp-resolve-4): file_moves.shared_pool_walk.
+            with file_moves_mod.shared_pool_walk():
+                for entry in self.file_moves.pending_relinks():
+                    if not _moved_destination_is_there(entry):
+                        continue
+                    matched, text = self._relink_moved_result(
+                        entry.get("old_local", ""), entry.get("new_local", ""),
+                        bool(entry.get("is_dir")))
+                    if matched:
+                        self.file_moves.clear_relink_pending(entry["id"])
+                        log.info("file move #%s: %s after the project changed",
+                                 entry["id"], text)
+                        self._queue_file_move_answer(
+                            entry["id"], True, f"{entry.get('detail', 'moved')}; {text}")
         except Exception:
             log.exception("could not re-run the pending file-move relinks")
 
@@ -10617,6 +10620,16 @@ class CompanionApp:
             ).start()
         except Exception:
             log.exception("failed to start stale-tmp sweep")
+        # Rollback exports of projects nobody edits any more (audit 2026-11-10
+        # lens-disk-1): the 60-day sweep only ever ran in the folder of the
+        # project being written to, so a finished project's exports stayed.
+        try:
+            threading.Thread(
+                target=resolve_journal.sweep_loop, args=(self._stop_event,),
+                name="ccsync-journal-sweep", daemon=True
+            ).start()
+        except Exception:
+            log.exception("failed to start the resolve journal sweep")
         try:
             self._identity_stop_event.clear()
             self._identity_thread = threading.Thread(

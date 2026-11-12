@@ -139,5 +139,6 @@ def test_index_and_static_are_revalidated(tmp_path):
             r = c.get(path)
             assert r.status_code == 200, path
             assert r.headers.get("cache-control") == "no-cache", path
-        # the client share page's asset mount is not changed
+        # the client share page's SHEET is not changed (its scripts are
+        # revalidated since the audit of 2026-11-10, web-broll-2: they are a set)
         assert c.get("/share/assets/style.css").headers.get("cache-control") != "no-cache"

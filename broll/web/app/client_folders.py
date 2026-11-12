@@ -928,10 +928,15 @@ def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
     # look like. The first item wins, so the curator's order and note are the
     # ones they set; removing it from the panel reveals the other.
     seen: set[int] = set()
+    stored: dict[int, int] = {}            # ledger row -> the id it is stored under
+    moved: dict[int, int] = {}             # ledger row -> the id its clip has NOW, where that differs
     for item in list_items(conn, folder_id):
+        stored[item["id"]] = item["video_id"]
         video, via_hash = _resolve_item(index_conn, item)
         if via_hash:
             _refresh_item_path(conn, item["id"], video["rel_path"])
+        if video is not None and video["id"] not in seen and video["id"] != item["video_id"]:
+            moved[item["id"]] = video["id"]
         if video is None:
             if not public:
                 out.append({"video_id": item["video_id"], "item_id": item["id"],
@@ -960,7 +965,53 @@ def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
             entry["category"] = v.get("category") or v.get("category_hint")
             entry["missing"] = False
         out.append(entry)
+    _heal_item_ids(conn, stored, moved)
     return out
+
+
+def _heal_item_ids(conn: sqlite3.Connection, stored: dict[int, int], moved: dict[int, int]) -> None:
+    """Store each item under the id its clip has NOW, so the next media request
+    finds it with one lookup.
+
+    Audit 2026-11-10 web-broll-1. The public page asks for its media by the
+    CURRENT index id (resolve_items puts that in each card), and the gate's
+    fast path (member_video_id) looks the item up by its STORED id. After a
+    rebuild that renumbers videos.id the two never agreed again, so every
+    poster, sprite, detail and proxy Range request fell through to a
+    re-resolution of the whole folder: measured 9.0 ms per card against
+    0.01 ms, i.e. ~9 s of the one dashboard process per open of a 500-clip
+    folder, on the anonymous, Funnel-published door, for ever. Nothing on the
+    read path rewrote the id (only add_items did, for the one it collided
+    with).
+
+    An item moves only to a number no other item of the folder is stored
+    under, in whatever order makes that possible (A 5->7 frees 5 for B 9->5);
+    what is left in a ring stays as it was and keeps the slow path. Best
+    effort, like _refresh_item_path: this runs on the public read path, and a
+    client viewing a link must never see a 500 because the ledger was busy.
+    """
+    if not moved:
+        return
+    taken = set(stored.values())
+    try:
+        progress = True
+        while moved and progress:
+            progress = False
+            for item_id, target in list(moved.items()):
+                if target in taken:
+                    continue
+                conn.execute("UPDATE client_folder_items SET video_id = ? WHERE id = ?", (target, item_id))
+                taken.discard(stored[item_id])
+                taken.add(target)
+                stored[item_id] = target
+                del moved[item_id]
+                progress = True
+        conn.commit()
+    except sqlite3.Error:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
 
 
 def _display_name(rel_path: str) -> str:

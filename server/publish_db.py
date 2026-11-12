@@ -510,6 +510,25 @@ def drain_applied_line(report: dict) -> str:
             f"{report.get('embeddings', 0)} embeddings")
 
 
+def privileged(backend, script: str) -> str:
+    """`script` as one root shell command on this NAS.
+
+    Audit 2026-11-10 ops-server-3. The swap and the rollback built their own
+    `sudo -S sh -c`, which is right on TrueNAS and wrong on DSM: docker
+    (/usr/local/bin) and the syno CLIs (/usr/syno/bin) are not on sudo's PATH
+    there, which is why every other privileged DSM command goes through the
+    backend's root_cmd. So on a Synology site the swap's integrity step could
+    not find `docker`, exited 11 every time, and the index could never be
+    published; with --no-integrity-check the ACL copy (synoacltool) was not
+    found either. A backend with a root_cmd of its own is asked for it;
+    TrueNAS, which has none, gets the line it always got, byte for byte.
+    """
+    wrap = getattr(backend, "root_cmd", None)
+    if callable(wrap):
+        return wrap(script)
+    return 'echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(script)
+
+
 def build_rollback_script(target: str, prev: str, aside: str) -> str:
     """Put `prev` back, keeping what is live now as `aside`.
 
@@ -672,8 +691,7 @@ def do_rollback(args, backend, spec) -> int:
         print("[dry-run] remote script that would run:")
         print(script)
         return 0
-    rc, out, err = ida.run_ssh_guarded(
-        'echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(script), False, 300)
+    rc, out, err = ida.run_ssh_guarded(privileged(backend, script), False, 300)
     sys.stdout.write(out or "")
     if rc != 0:
         print(f"FAILED to roll back (remote exit {rc}): {err.strip()[:400]}",
@@ -943,8 +961,7 @@ def main():
             print(swap)
             print("\n[dry-run] nothing was changed. Re-run with --apply.")
             return 0
-        rc, out, err = ida.run_ssh_guarded(
-            'echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(swap), False, timeout)
+        rc, out, err = ida.run_ssh_guarded(privileged(backend, swap), False, timeout)
         sys.stdout.write(out or "")
         if rc != 0:
             print(f"FAILED to install {spec['filename']} (remote exit {rc}): "

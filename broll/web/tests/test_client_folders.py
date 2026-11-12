@@ -657,8 +657,12 @@ def test_the_viewer_page_and_script_use_only_document_relative_urls():
         assert not origins, f"{name} names an absolute origin: {origins}"
     share_js = (STATIC / "share.js").read_text(encoding="utf-8")
     for needle in ('fetchJson("api/folder")', "`api/videos/${", "`media/poster/${",
-                   "url(media/sprite/${", "`media/proxy/${"):
+                   "`media/proxy/${"):
         assert needle in share_js, needle
+    # The sprite sheet's URL lives in sprite.js since the audit of 2026-11-10
+    # (web-broll-2: it is fetched on the first pointer, by the script both
+    # pages share), and it is the same document-relative URL it was.
+    assert "url(media/sprite/${" in (STATIC / "sprite.js").read_text(encoding="utf-8")
     html = (STATIC / "share.html").read_text(encoding="utf-8")
     assert 'href="../assets/style.css"' in html and 'src="../assets/sprite.js"' in html
 
@@ -936,3 +940,15 @@ def test_the_viewer_says_when_a_clip_left_the_folder_mid_session():
     # Document-relative, like everything else the viewer fetches
     # (test_mounted_prefix.py pins the rule).
     assert "/api/videos/" not in js.replace("`api/videos/", "")
+
+
+def test_the_viewers_scripts_are_revalidated_so_they_are_always_a_matching_set():
+    """audit 2026-11-10 web-broll-2: share.js leaves fetching the sprite sheet
+    to sprite.js, so a heuristically cached old sprite.js beside a new
+    share.js would be a viewer with no hover preview."""
+    anon = TestClient(broll_app)
+    for name in ("sprite.js", "share.js"):
+        r = anon.get(f"/share/assets/{name}")
+        assert r.status_code == 200, name
+        assert r.headers["cache-control"] == "no-cache"
+        assert r.headers.get("etag") or r.headers.get("last-modified")

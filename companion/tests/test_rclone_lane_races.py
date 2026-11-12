@@ -833,9 +833,38 @@ def test_a_genuinely_failing_run_is_still_an_error(tmp_path):
 # ===========================================================================
 
 
+class _HeldProc(_FakeProc):
+    """A child that has SPAWNED and is RUNNING until `release` is set."""
+
+    def __init__(self, release: threading.Event) -> None:
+        super().__init__()
+        self._release = release
+
+    def wait(self, timeout=None) -> int:
+        if timeout is None:
+            assert self._release.wait(30), "the periodic child was never released"
+        elif not self._release.wait(timeout):
+            raise subprocess.TimeoutExpired(cmd="rclone", timeout=timeout)
+        return self._returncode
+
+    def poll(self):
+        return self._returncode if self._release.is_set() else None
+
+
 def _periodic_run_in_flight(lane, subpath, release, express_cmds):
     """Start a periodic run whose child does not exit until `release` is set,
-    and return the thread. Express commands land in `express_cmds`."""
+    and return the thread. Express commands land in `express_cmds`.
+
+    THE CHILD IS RUNNING, NOT BEING SPAWNED (audit 2026-11-10 tests-ci-3).
+    This used to block INSIDE the Popen factory, which runs under the lane's
+    spawn-and-publish lock (KNOWN_BUGS B13). Since the 2026-09-26 handoff
+    work an express flush takes that lock too (handoff_inflight_paths), so
+    every flush in these tests sat for the factory's whole ten seconds, the
+    factory's assert then failed in the background thread, and the tests
+    passed against a periodic run that had FAILED rather than one in flight:
+    30 s of every companion run, and not the scenario their names describe.
+    The factory now returns at once with a child whose wait() is what holds.
+    """
     spawned = threading.Event()
 
     def factory(cmd, **kwargs):
@@ -843,13 +872,18 @@ def _periodic_run_in_flight(lane, subpath, release, express_cmds):
             express_cmds.append(list(cmd))
             return _FakeProc()
         spawned.set()
-        assert release.wait(10), "the periodic child was never released"
-        return _FakeProc()
+        return _HeldProc(release)
 
     lane.popen_factory = factory
     thread = threading.Thread(target=lambda: lane.run_once(subpath=subpath))
     thread.start()
     assert spawned.wait(10)
+    # ...and the run has said which project it is copying (a deadline a
+    # healthy run never reaches, not a count of polls)
+    deadline = time.monotonic() + 30
+    while lane.periodic_inflight_subpath() != subpath and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert lane.periodic_inflight_subpath() == subpath
     return thread
 
 

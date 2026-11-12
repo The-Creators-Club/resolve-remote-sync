@@ -50,6 +50,7 @@ import string
 import sys
 from pathlib import Path
 
+from common import warn_secret_on_argv as common_warn
 from common import (
     add_site_arg, cli, ok, require_env, require_site_value, site_value,
     syncthing_api,
@@ -174,7 +175,7 @@ def main():
     ap.add_argument("--api-key", default="", help="defaults to $SYNCTHING_API_KEY")
     ap.add_argument("--user", default=DEFAULT_GUI_USER)
     ap.add_argument("--password", default="",
-                    help="defaults to a generated one, printed once")
+                    help="defaults to $SYNCTHING_GUI_PASSWORD, then a generated one, printed once")
     ap.add_argument("--bind", default="",
                     help="set gui.address, e.g. 127.0.0.1:8384. Leave unset to keep "
                          "whatever the GUI is bound to now.")
@@ -183,6 +184,8 @@ def main():
     add_site_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    common_warn("--api-key", "SYNCTHING_API_KEY")
+    common_warn("--password", "SYNCTHING_GUI_PASSWORD")
 
     gui_url = require_site_value(
         args.gui_url or os.environ.get("SYNCTHING_GUI_URL", "") or site_value("syncthing", "gui_url"),
@@ -210,7 +213,7 @@ def main():
                   file=sys.stderr)
         return 0 if has_user else 1
 
-    password = args.password or generate_password()
+    password = args.password or os.environ.get("SYNCTHING_GUI_PASSWORD", "") or generate_password()
     wanted = dict(current)
     wanted["user"] = args.user
     wanted["password"] = password

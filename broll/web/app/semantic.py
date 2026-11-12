@@ -226,23 +226,43 @@ class SemanticSearch:
         if self._index is not None and self._index_key == key:
             return self._index
 
-        rows = conn.execute(
+        # ONE MATRIX IN MEMORY, NOT THREE (audit 2026-11-10 web-broll-3). This
+        # used to fetchall() every row (every vector held as Python bytes),
+        # then build the matrix beside them, while self._index still held the
+        # previous one: measured 951 MB peak for a 422 MB matrix at 50k clips,
+        # plus the old matrix on a rebuild, in the one dashboard process, on
+        # every write that bumps search_generation. The old index is let go
+        # first (a query cannot be using it: the caller holds the lock), the
+        # matrix is allocated once from the count the key already has, and
+        # each vector is copied in straight off the cursor.
+        self._index = None
+        self._index_key = None
+        cursor = conn.execute(
             "SELECT source, source_id, video_id, dim, vec FROM embeddings WHERE model = ?",
             (self.model,),
-        ).fetchall()
-        dim = rows[0]["dim"]
-        matrix = np.zeros((len(rows), dim), dtype=np.float32)
+        )
+        dim = 0
+        matrix = None
         sources: list[tuple[str, int, int]] = []
         write_i = 0
-        for row in rows:
+        for row in cursor:
+            if matrix is None:
+                dim = row["dim"]
+                matrix = np.empty((count, dim), dtype=np.float32)
             vec = np.frombuffer(row["vec"], dtype="<f4")
             if vec.shape[0] != dim:
                 # Corrupt/mismatched-dim row -- skip rather than crash the
                 # whole index; one bad embedding shouldn't take out search.
                 continue
+            if write_i >= matrix.shape[0]:
+                # a row landed between the count and this read: room for it
+                # (and a few more) rather than an IndexError on the last one
+                matrix = np.concatenate([matrix, np.empty((max(64, matrix.shape[0] // 8), dim), dtype=np.float32)])
             matrix[write_i, :] = vec
             sources.append((row["source"], row["source_id"], row["video_id"]))
             write_i += 1
+        if matrix is None:
+            return None
         matrix = matrix[:write_i]
 
         self._index = _ModelIndex(dim=dim, matrix=matrix, rows=sources)

@@ -95,7 +95,18 @@ class ShareAssets(StaticFiles):
         # traversal-shaped request cannot match a bare filename here.
         if path not in SHARE_ASSETS:
             raise StarletteHTTPException(status_code=404)
-        return await super().get_response(path, scope)
+        response = await super().get_response(path, scope)
+        # The viewer's scripts are a SET (audit 2026-11-10 web-broll-2: share.js
+        # now leaves fetching the sprite sheet to sprite.js). Plain StaticFiles
+        # sends Last-Modified and no Cache-Control, so a returning client could
+        # hold an old sprite.js beside a new share.js for as long as its
+        # browser guessed, and get no hover preview at all. no-cache keeps the
+        # validators: an unchanged file still costs only a 304. The SCRIPTS
+        # only: the viewer's sheet stays as it was (test_hud_common pins that
+        # R16 left this mount's style.css alone).
+        if path.endswith(".js"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 app.mount("/share/assets", ShareAssets(directory=config.STATIC_DIR), name="share-assets")

@@ -219,6 +219,27 @@ def derive_sftp_transport(kind: str, chunk_size, concurrency) -> tuple[str, int]
     return chunk, conc
 
 
+def warn_secret_on_argv(flag: str, env: str, argv=None) -> bool:
+    """Say so, once, when a secret was typed on the command line. True when it was.
+
+    Audit 2026-11-10 ops-server-4. The rule everywhere else in this tree is
+    that a secret never goes on a command line (TRUENAS_PW, the sudo password
+    on stdin, the .env kept out of argv), and tools/load_secrets.ps1 already
+    puts SYNCTHING_API_KEY in the environment. Four scripts still took the key
+    as `--api-key`, and the runbook's copy-paste lines put it there: into
+    PowerShell's history file, in plaintext, kept indefinitely, and into the
+    process list for the run. The flag still works (an old habit must not
+    break a deploy); it now says where the value belongs.
+    """
+    args = sys.argv[1:] if argv is None else list(argv)
+    if not any(a == flag or a.startswith(flag + "=") for a in args):
+        return False
+    print(f"WARNING: {flag} puts a secret on the command line (shell history, the process list). "
+          f"Leave it off and set {env} in the environment instead: "
+          f"`. .\\tools\\load_secrets.ps1` does that on the base rig.", file=sys.stderr)
+    return True
+
+
 def add_site_arg(ap) -> None:
     """Add the shared --site flag (see site_path_from_argv for why the value
     is also read straight out of argv at import time)."""

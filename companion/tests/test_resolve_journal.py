@@ -362,3 +362,53 @@ class TestConcurrentRecording:
         thread.start()
         thread.join(10)
         assert seen and seen[0] != first
+
+
+def test_a_project_nobody_edits_any_more_is_swept_by_the_daily_pass():
+    """audit 2026-11-10 lens-disk-1: the sweep ran only in the folder of the
+    project being written to, so a finished project kept its last 60 days of
+    rollback exports (tens of MB each) in the editor's home for ever."""
+    import os
+    import time
+
+    now = time.time()
+    old = now - (resolve_journal.RETENTION_DAYS + 1) * 86400
+    root = resolve_journal.journal_root()
+    done = root / "Finished"
+    done.mkdir(parents=True)
+    for name in ("20260101-000000.drp", "20260101-000000.json"):
+        (done / name).write_bytes(b"x")
+        os.utime(done / name, (old, old))
+    live = root / "Live"
+    live.mkdir()
+    (live / "20261110-000000.drp").write_bytes(b"x")
+    (root / "notes.txt").write_text("not a project folder", encoding="utf-8")
+
+    # (not the exact count of files: an app another test started in this
+    # worker may have a sweep thread of its own, and it reads the same HOME)
+    first = resolve_journal.sweep_all(now)
+    assert first["projects"] == 2 and first["folders"] == 0
+    assert done.is_dir() and list(done.iterdir()) == []      # emptied today: the folder stays for a day
+    assert (live / "20261110-000000.drp").exists()
+
+    second = resolve_journal.sweep_all(now + 2 * 86400)
+    assert second["folders"] == 1 and not done.exists()
+    assert live.is_dir() and (root / "notes.txt").exists()
+
+
+def test_the_daily_pass_never_raises_and_stops_when_told(monkeypatch):
+    import threading
+
+    assert resolve_journal.sweep_all() == {"projects": 0, "files": 0, "folders": 0}   # no folder at all yet
+    stop = threading.Event()
+    calls = []
+
+    def boom():
+        calls.append(1)
+        stop.set()
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(resolve_journal, "SWEEP_ALL_FIRST_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(resolve_journal, "sweep_all", boom)
+    resolve_journal.sweep_loop(stop)                         # returns: the failure is swallowed, the stop is honoured
+    assert calls == [1]

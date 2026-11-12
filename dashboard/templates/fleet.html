@@ -24,8 +24,8 @@
   <script src="{{ asset_url('cc/home.js') }}" defer></script>
 {% endblock %}
 {% block layout %}
-{% set ro = home_readouts(request, fleet, view, notice_counts if notice_counts is defined else none) %}
-{% set tree = home_tree(request, None) %}
+{% set ro = home_readouts(request, fleet, view, notice_counts if notice_counts is defined else none, none, transfers if transfers is defined else none) %}
+{% set tree = home_tree(request, None, view if view is defined else none) %}
 {# home-project-8 (UI port review 2026-09-25): the grid and transfers polls
    carry the page's own ?as= (auth.scope_for reads exactly this key), or the
    first 15 s beat swapped an admin's "as jsmith" page to the whole fleet

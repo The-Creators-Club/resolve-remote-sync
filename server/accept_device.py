@@ -39,6 +39,7 @@ import os
 import re
 import sys
 
+from common import warn_secret_on_argv as common_warn
 from common import add_site_arg, cli, ok, syncthing_api
 
 # A Syncthing device ID is 8 dash-separated groups of 7 base32 characters
@@ -120,6 +121,7 @@ def main():
     add_site_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    common_warn("--api-key", "SYNCTHING_API_KEY")
 
     try:
         args.device_id = normalize_device_id(args.device_id)

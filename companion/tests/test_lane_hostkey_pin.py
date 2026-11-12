@@ -59,7 +59,7 @@ def _rewrite_helper() -> str:
 
 
 def _run_mac_step5(tmp_path: Path, site_json: str, conf_text: str = "", port: str = "22",
-                   dry: str = "0"):
+                   dry: str = "0", env: dict | None = None):
     home = tmp_path / "home"
     (home / ".ccsync").mkdir(parents=True, exist_ok=True)
     conf = tmp_path / "rclone.conf"
@@ -82,8 +82,11 @@ def _run_mac_step5(tmp_path: Path, site_json: str, conf_text: str = "", port: st
         + _mac_section(),
         encoding="utf-8",
     )
+    import os
+    child_env = {k: v for k, v in os.environ.items() if not k.startswith("CCSYNC_SFTP_")}
+    child_env.update(env or {})
     result = subprocess.run([_BASH, str(harness)], capture_output=True, encoding="utf-8",
-                            errors="replace", timeout=60)
+                            errors="replace", timeout=60, env=child_env)
     return result, conf, home / ".ccsync" / "nas_known_hosts"
 
 
@@ -181,3 +184,47 @@ def test_an_rsa_pin_negotiates_as_rsa_sha2_not_sha1_ssh_rsa(tmp_path):
 def test_the_windows_bootstrap_maps_an_rsa_pin_the_same_way():
     text = WIN.read_text(encoding="utf-8")
     assert "'rsa-sha2-512 rsa-sha2-256'" in text and "-eq 'ssh-rsa'" in text
+
+
+# -- audit 2026-11-10 ops-install-1: the wizard hands these over; the script's own fetch may fail --
+
+@needs_bash
+def test_the_wizards_host_key_and_shell_type_are_used_when_the_scripts_own_fetch_failed(tmp_path):
+    """The bootstrap fetches the manifest itself and that fetch is allowed to
+    fail. With no manifest it wrote a stanza with NO known_hosts_file, i.e.
+    lanes that trust any host key, on an install the wizard reported green."""
+    result, conf, known = _run_mac_step5(
+        tmp_path, "", env={"CCSYNC_SFTP_HOSTKEY": KEY, "CCSYNC_SFTP_SHELL_TYPE": "none"})
+    assert result.returncode == 0, result.stderr
+    assert known.read_text(encoding="utf-8") == f"nas.example.ts.net {KEY}\n"
+    text = conf.read_text(encoding="utf-8")
+    assert f"known_hosts_file = {known.as_posix()}" in text
+    assert "shell_type = none" in text
+
+
+@needs_bash
+def test_a_hand_run_with_no_such_variables_reads_the_manifest_as_before(tmp_path):
+    result, conf, known = _run_mac_step5(
+        tmp_path, f'{{"sftp_hostkey": "{KEY}", "sftp_shell_type": "none"}}')
+    assert result.returncode == 0, result.stderr
+    assert known.exists() and "shell_type = none" in conf.read_text(encoding="utf-8")
+
+
+def test_both_scripts_read_the_three_keys_from_the_wizard_before_their_own_fetch():
+    mac = MAC.read_text(encoding="utf-8")
+    win = WIN.read_text(encoding="utf-8")
+    for name, key in (("CCSYNC_RCLONE_REMOTE", "rclone_remote"),
+                      ("CCSYNC_SFTP_SHELL_TYPE", "sftp_shell_type"),
+                      ("CCSYNC_SFTP_HOSTKEY", "sftp_hostkey")):
+        assert mac.index("${" + name + ":-}") < mac.index(f'"$(site_value {key})"'), name
+        assert win.index(f'"$env:{name}".Trim()') < win.index(f'Get-SiteValue "{key}"'), name
+        # and the manifest is still the fallback, so a hand-run is unchanged
+        assert mac.count(f'"$(site_value {key})"') == 1 and win.count(f'Get-SiteValue "{key}"') == 1
+
+
+def test_the_manifest_the_wizard_holds_keeps_the_host_key():
+    from ccsync_companion import site as site_mod
+
+    got = site_mod.normalise({"schema": site_mod.SCHEMA, "sftp_hostkey": f"  {KEY} "})
+    assert got["sftp_hostkey"] == KEY
+    assert site_mod.normalise({"schema": site_mod.SCHEMA})["sftp_hostkey"] == ""

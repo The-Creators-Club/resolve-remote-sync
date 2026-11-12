@@ -953,8 +953,9 @@ function buildCard(row) {
   });
   thumb.appendChild(poster);
 
+  // No background-image here: sprite.js fetches the sheet on the first
+  // pointer (or, for a search hit, when the card nears the screen).
   const spriteOverlay = el("div", { className: "sprite-overlay" });
-  spriteOverlay.style.backgroundImage = `url(media/sprite/${video.id}.jpg)`;
   thumb.appendChild(spriteOverlay);
 
   if (video.duration_s != null) {
@@ -973,6 +974,7 @@ function buildCard(row) {
   // paints nothing and the poster/placeholder underneath shows through.
   if (hits.length && video.duration_s) {
     spriteOverlay.classList.add("sprite-static");
+    loadSpriteWhenSeen(spriteOverlay, video);
     positionSprite(spriteOverlay, video, hits[0].t_start);
     thumb.addEventListener("mouseleave", () => {
       positionSprite(spriteOverlay, video, hits[0].t_start);

@@ -131,3 +131,21 @@ def test_a_missing_environment_is_still_cli_s_to_report(monkeypatch):
     with pytest.raises(common.EnvError):
         check_health.run_check("postgres", no_env, False)
     assert check_health.RESULTS == []
+
+
+# ---------------------------------------------------------------------------
+# ops-server-4 (audit 2026-11-10): a secret typed on the command line is said so
+# ---------------------------------------------------------------------------
+
+
+def test_a_secret_on_the_command_line_is_warned_about_and_still_works(capsys):
+    import common as C
+    assert C.warn_secret_on_argv("--api-key", "SYNCTHING_API_KEY", ["--gui-url", "http://nas:8384"]) is False
+    assert capsys.readouterr().err == ""
+    assert C.warn_secret_on_argv("--api-key", "SYNCTHING_API_KEY", ["--api-key", "abc"]) is True
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "SYNCTHING_API_KEY" in err and "abc" not in err      # never the value itself
+    assert C.warn_secret_on_argv("--api-key", "SYNCTHING_API_KEY", ["--api-key=abc"]) is True
+    assert "abc" not in capsys.readouterr().err
+    # a flag that only starts the same way is not it
+    assert C.warn_secret_on_argv("--api-key", "SYNCTHING_API_KEY", ["--api-key-file", "x"]) is False

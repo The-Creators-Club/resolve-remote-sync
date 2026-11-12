@@ -142,3 +142,25 @@ def test_the_documented_interval_rule(duration_s, expected_interval):
     base = _js_const("SPRITE_SECONDS_PER_FRAME")
     interval = duration_s / max_cells if duration_s / base > max_cells else base
     assert interval == pytest.approx(expected_interval)
+
+
+def test_no_card_fetches_its_sprite_sheet_until_it_is_wanted():
+    """audit 2026-11-10 web-broll-2: both pages set the overlay's
+    background-image as each card was built, and opacity 0 does not stop a
+    browser fetching it: ~5.2 MB of sheets per 24-card page, ~107 MB for a
+    500-clip client folder. Only sprite.js may name the sheet, and only from
+    a pointer or (for a search hit, which shows a cell unhovered) on nearing
+    the screen."""
+    static = APP_JS.parent
+    for name in ("app.js", "share.js"):
+        text = (static / name).read_text(encoding="utf-8")
+        assert "backgroundImage" not in text, f"{name} sets a sprite sheet as it builds the card"
+        assert "media/sprite/" not in text, f"{name} names the sprite sheet itself"
+    js = APP_JS.read_text(encoding="utf-8")
+    assert js.count("style.backgroundImage") == 1
+    body = js[js.index("function wireSpriteScrub"):]
+    assert '"pointerenter", () => loadSprite(overlay, video)' in body
+    # the search card is the one caller that may not wait for a pointer
+    app = (static / "app.js").read_text(encoding="utf-8")
+    assert app.count("loadSpriteWhenSeen(") == 1
+    assert app.index("sprite-static") < app.index("loadSpriteWhenSeen(") < app.index("card.title")

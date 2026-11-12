@@ -143,3 +143,32 @@ def test_empty_query_is_safe(conn):
     s = semantic.SemanticSearch(model="test-model")
     assert s.search(conn, "") == []
     assert s.search(conn, "   ") == []
+
+
+def test_the_index_is_built_straight_off_the_cursor_and_is_the_same_index(conn):
+    """audit 2026-11-10 web-broll-3: the rebuild held every vector as bytes,
+    the new matrix AND the old matrix at once (951 MB peak for a 422 MB
+    matrix). It is now one allocation filled row by row."""
+    v = insert_video(conn, share="broll", rel_path="a.mov")
+    vecs = [_unit([1, 0, 0, 0]), _unit([0, 1, 0, 0]), _unit([1, 1, 0, 0])]
+    for i, vec in enumerate(vecs, start=1):
+        insert_embedding(conn, source="segment", source_id=i, video_id=v, vec=vec, model="test-model")
+    s = semantic.SemanticSearch(model="test-model")
+    idx = s._ensure_index(conn)
+    assert idx.matrix.shape == (3, DIM) and idx.matrix.dtype == np.float32
+    assert np.allclose(idx.matrix, np.array(vecs, dtype=np.float32))
+    assert [r[1] for r in idx.rows] == [1, 2, 3]
+    assert s._ensure_index(conn) is idx                      # unchanged: the same index, not a rebuild
+
+
+def test_a_row_that_lands_after_the_count_still_has_room(conn, monkeypatch):
+    """The matrix is sized from the count read a moment earlier; a row
+    written in between must not be an IndexError on the last one."""
+    v = insert_video(conn, share="broll", rel_path="a.mov")
+    for i in range(1, 6):
+        insert_embedding(conn, source="segment", source_id=i, video_id=v, vec=_unit([i, 1, 0, 0]), model="test-model")
+    s = semantic.SemanticSearch(model="test-model")
+    monkeypatch.setattr(s, "_count_for_model", lambda c: 2)  # three more arrived since
+    idx = s._ensure_index(conn)
+    assert idx.matrix.shape == (5, DIM) and len(idx.rows) == 5
+    assert np.allclose(idx.matrix[4], np.array(_unit([5, 1, 0, 0]), dtype=np.float32))

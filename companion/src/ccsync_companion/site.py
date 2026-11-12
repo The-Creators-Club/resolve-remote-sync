@@ -13,7 +13,8 @@ So the identity moved to the server and the defaults went blank.
      "remote_root": "", "smb_unc": "", "sftp_host": "", "sftp_port": 22,
      "rclone_remote": "", "nas_syncthing_id": "", "dashboard_url": "",
      "template_folders": [], "shared_asset_folders": [], "nas_kind": "truenas",
-     "sftp_chunk_size": "", "sftp_concurrency": 0, "sftp_shell_type": ""}
+     "sftp_chunk_size": "", "sftp_concurrency": 0, "sftp_shell_type": "",
+     "sftp_hostkey": ""}
 
 Any string may be "" (unset on the server), and a dashboard older than this
 answers **404**. Every consumer therefore degrades: manifest -> its own
@@ -93,6 +94,14 @@ STRING_KEYS = (
     # spike 6, 2026-08-17). Read by both bootstrap scripts when they write
     # the stanza; "" = keep their built-in "unix".
     "sftp_shell_type",
+    # The NAS sshd's host key, as one known_hosts-style "<type> <base64>"
+    # (GL-19 / CR-368). The dashboard has published it since 2026-10-07 and
+    # both bootstraps pin it in the rclone stanza, but it was not a key HERE,
+    # so normalise() dropped it and the wizard could not hand its bootstrap
+    # the key it had just been given (audit 2026-11-10 ops-install-1): a
+    # failed second fetch then wrote a stanza that trusts any host. A PUBLIC
+    # key, nothing secret. "" = the site publishes none.
+    "sftp_hostkey",
     # WHERE THIS FLEET'S VENDOR ARTEFACTS LIVE (2026-08-18,
     # docs/MUSIC_INGEST_PLAN.md step 3): the dashboard's release-feed URL minus
     # its `channel.json`, and the only thing that tells this machine where to

@@ -283,3 +283,45 @@ class TestForbiddenDriveOnMacOS:
         monkeypatch.setattr(steps.sys, "executable", r"C:\Users\me\Desktop\onboard.exe")
         assert steps.installer_on_forbidden_drive(
             {"canonical_prefix": "Q:\\"}, platform="win32") is False
+
+
+class TestTheLastThreeKeysTravelInTheEnvironment:
+    """audit 2026-11-10 ops-install-1: the rclone remote's name, the SFTP
+    shell type and the NAS host-key pin had no flag and no variable, so they
+    came only from the bootstrap's OWN fetch of the manifest, which is
+    allowed to fail. config.toml then named one remote and rclone.conf held
+    another, and the stanza trusted any host key."""
+
+    SITE = {"rclone_remote": "studio_sftp", "sftp_shell_type": "none",
+            "sftp_hostkey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPINNED"}
+    NAMES = {"rclone_remote": "CCSYNC_RCLONE_REMOTE", "sftp_shell_type": "CCSYNC_SFTP_SHELL_TYPE",
+             "sftp_hostkey": "CCSYNC_SFTP_HOSTKEY"}
+
+    @pytest.mark.parametrize("platform,script", [("win32", "windows_bootstrap.ps1"),
+                                                 ("darwin", "macos_bootstrap.sh")])
+    def test_both_platforms_get_all_three(self, tmp_path, platform, script):
+        env = _run_bootstrap(tmp_path, platform, dict(self.SITE), script)["kwargs"]["env"]
+        for key, name in self.NAMES.items():
+            assert env[name] == self.SITE[key]
+        assert steps.BOOTSTRAP_SITE_ENV == self.NAMES
+
+    def test_nothing_is_invented_and_nothing_is_inherited(self, tmp_path, monkeypatch):
+        """No manifest and no cache: the script's own fetch must decide. And a
+        variable left in whatever launched the wizard must not beat it."""
+        monkeypatch.setattr(site_mod, "cached_site", lambda **kw: {})
+        monkeypatch.setenv("CCSYNC_RCLONE_REMOTE", "left_over")
+        env = _run_bootstrap(tmp_path, "win32", None, "windows_bootstrap.ps1")["kwargs"]["env"]
+        for name in self.NAMES.values():
+            assert name not in env
+
+    def test_a_manifest_that_publishes_no_host_key_sends_none(self, tmp_path):
+        env = _run_bootstrap(tmp_path, "darwin", {"rclone_remote": "studio_sftp"},
+                             "macos_bootstrap.sh")["kwargs"]["env"]
+        assert env["CCSYNC_RCLONE_REMOTE"] == "studio_sftp"
+        assert "CCSYNC_SFTP_HOSTKEY" not in env and "CCSYNC_SFTP_SHELL_TYPE" not in env
+
+    def test_the_wizards_fetch_keeps_the_host_key(self):
+        got = steps.fetch_site(
+            "http://dash.example:8480", cache=False,
+            http_get=lambda url, timeout: {"schema": site_mod.SCHEMA, **self.SITE})
+        assert got["sftp_hostkey"] == self.SITE["sftp_hostkey"]

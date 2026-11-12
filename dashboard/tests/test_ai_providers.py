@@ -969,3 +969,97 @@ def test_a_dead_credential_file_is_not_a_sign_in_after_a_restart(env, monkeypatc
     assert row["available"] is False
     assert row["signin_state"] == "failed"
     assert ai_providers.resolved(conn, settings, probe=False).ok is False
+
+
+# ------------------------------------- audit 2026-11-10 dash-ops-1: what a resolve spends
+# A probe is two subprocesses of the customer's CLI, the second a real
+# subscription-billed one-token call.
+
+
+def _counting_cli(monkeypatch, *, signed_in=("claude", "codex"), hold=None):
+    """Both CLIs on the PATH; `spawns` records every start as (binary, what)."""
+    spawns: list[tuple[str, str]] = []
+    monkeypatch.setattr(ai_providers.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def run(argv, stdin, timeout, env=None):
+        binary = argv[0].rsplit("/", 1)[-1]
+        what = "version" if argv[1:] == ["--version"] else "login"
+        spawns.append((binary, what))
+        if hold is not None:
+            hold.wait(10)
+        if what == "version":
+            return FakeProc(0, "2.1.0")
+        return FakeProc(0, "ok") if binary in signed_in else FakeProc(1, "", "not signed in")
+
+    monkeypatch.setattr(ai_providers, "_run", run)
+    return spawns
+
+
+def test_a_resolve_does_not_probe_a_cli_below_the_one_it_chose(env, monkeypatch):
+    """The chain takes the FIRST available provider, so with Claude Code
+    answering, a Codex probe could only change the wording of the reason."""
+    _client, conn, settings = env
+    enable_cli(conn)
+    spawns = _counting_cli(monkeypatch)
+    choice = ai_providers.resolved(conn, settings)
+    assert choice.ok and choice.name == "claude_code"
+    assert spawns == [("claude", "version"), ("claude", "login")]
+
+
+def test_a_resolve_still_walks_down_the_chain_when_the_first_cli_cannot_answer(env, monkeypatch):
+    _client, conn, settings = env
+    enable_cli(conn)
+    spawns = _counting_cli(monkeypatch, signed_in=("codex",))
+    choice = ai_providers.resolved(conn, settings)
+    assert choice.ok and choice.name == "codex"
+    assert [s[0] for s in spawns] == ["claude", "claude", "codex", "codex"]
+
+
+def test_the_settings_table_still_asks_every_cli_for_itself(env, monkeypatch):
+    _client, conn, settings = env
+    enable_cli(conn)
+    spawns = _counting_cli(monkeypatch)
+    rows = {r["name"]: r for r in ai_providers.provider_states(conn, settings)}
+    assert rows["claude_code"]["status"] == "available" and rows["codex"]["status"] == "available"
+    assert {s[0] for s in spawns} == {"claude", "codex"} and len(spawns) == 4
+
+
+def test_callers_that_arrive_together_share_one_probe(env, monkeypatch):
+    """Eight Timeline Cards calls at the ten-minute mark were sixteen starts of
+    the CLI and eight billed calls, to learn one answer."""
+    import threading
+    import time
+
+    _client, _conn, settings = env
+    enable_cli(_conn)
+    hold = threading.Event()
+    spawns = _counting_cli(monkeypatch, hold=hold)
+    got: list = []
+
+    def one():
+        c = dbmod.connect(settings.db_path)
+        try:
+            got.append(ai_providers.probe_cli(c, "claude_code", settings=settings))
+        finally:
+            c.close()
+
+    threads = [threading.Thread(target=one) for _ in range(8)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + 20
+    while not spawns and time.monotonic() < deadline:
+        time.sleep(0.005)
+    time.sleep(0.2)                      # every other caller has had its chance to start a probe of its own
+    assert spawns == [("claude", "version")]
+    hold.set()
+    for t in threads:
+        t.join(20)
+    assert spawns == [("claude", "version"), ("claude", "login")]
+    assert len(got) == 8 and all(g["installed"] and g["signed_in"] for g in got)
+    # the Test button still gets a fresh answer of its own
+    c = dbmod.connect(settings.db_path)
+    try:
+        ai_providers.probe_cli(c, "claude_code", force=True, settings=settings)
+    finally:
+        c.close()
+    assert len(spawns) == 4

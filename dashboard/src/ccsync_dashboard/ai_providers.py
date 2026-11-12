@@ -638,6 +638,37 @@ def probe_cli(conn: sqlite3.Connection, name: str, *, force: bool = False,
         cached = _cached_probe(name)
         if cached is not None:
             return cached
+    # ONE PROBE IN FLIGHT PER CLI (audit 2026-11-10 dash-ops-1). Nothing was
+    # held across the two spawns below, so every caller that arrived while the
+    # cache entry was expired spawned its own pair: eight Timeline Cards calls
+    # at the ten-minute mark were sixteen starts of a 238 MB binary and eight
+    # subscription-billed one-token calls, to learn one answer. The callers
+    # behind the first now wait for it and read what it stored. A forced probe
+    # (the Test button) still probes for itself: it asked for a fresh answer.
+    with _probe_flight(name):
+        if not force:
+            cached = _cached_probe(name)
+            if cached is not None:
+                return cached
+        return _probe_cli_now(conn, name, force=force, settings=settings)
+
+
+_flight_guard = threading.Lock()
+_flight_locks: dict[str, threading.Lock] = {}
+
+
+def _probe_flight(name: str) -> threading.Lock:
+    with _flight_guard:
+        lock = _flight_locks.get(name)
+        if lock is None:
+            lock = _flight_locks[name] = threading.Lock()
+        return lock
+
+
+def _probe_cli_now(conn: sqlite3.Connection, name: str, *, force: bool,
+                   settings: Any) -> dict:
+    """The probe itself; `probe_cli` is the only caller (it holds the CLI's
+    in-flight lock)."""
     provider = spec(name)
     path = cli_path(conn, name, settings)
     if not path and settings is None:
@@ -844,6 +875,7 @@ def unprobed_cli_state(conn: sqlite3.Connection, name: str, settings: Any,
 def provider_states(
     conn: sqlite3.Connection, settings: Any, *, probe: bool = True,
     force: bool = False, only: Sequence[str] | None = None,
+    stop_at_first: bool = False,
 ) -> list[dict]:
     """One row per provider, in chain order, for the API and the page.
 
@@ -858,9 +890,18 @@ def provider_states(
     RANK. It exists for `resolved()` (ytdl-web-5, 2026-08-21): probing a CLI
     is a real billed/subscription call, and the resolver has no business
     spending one on a provider the admin has pinned away from.
+
+    `stop_at_first` is the same economy for the unpinned resolver (audit
+    2026-11-10 dash-ops-1): the chain takes the FIRST available provider, so
+    once one is, a CLI further down can only change the wording of the reason,
+    never the choice. Those rows are answered as `probe=False` answers them
+    (the last probe, then the wizard's snapshot), so the reason still reads.
+    The Settings page does not pass it: an admin looking at the table wants
+    every row's own answer.
     """
     allow_cli = cli_enabled(conn, settings)
     rows: list[dict] = []
+    chosen = False
     for rank, name in enumerate(PROVIDER_ORDER, start=1):
         if only is not None and name not in only:
             continue
@@ -933,7 +974,7 @@ def provider_states(
                     else "CLI providers are off for this site. Tick "
                          "'Allow CLI providers (Claude Code, Codex)' "
                          "below to enable them")
-            elif not probe:
+            elif not probe or (stop_at_first and chosen):
                 # NOT "no" (CR-121). See unprobed_cli_state: the last probe,
                 # then the wizard's snapshot, then ST_UNKNOWN.
                 known = unprobed_cli_state(conn, name, settings, wizard)
@@ -955,6 +996,7 @@ def provider_states(
                     row["status"] = ST_AVAILABLE
                     row["available"] = True
         row["status_label"] = STATUS_LABELS[row["status"]]
+        chosen = chosen or bool(row["available"])
         rows.append(row)
     return rows
 
@@ -983,7 +1025,7 @@ def resolved(conn: sqlite3.Connection, settings: Any, *, probe: bool = True) -> 
     if pref != AUTO:
         rows = provider_states(conn, settings, probe=probe, only=(pref,))
         return _say_why_none(resolve_provider(availability(rows), pref), rows)
-    rows = provider_states(conn, settings, probe=probe)
+    rows = provider_states(conn, settings, probe=probe, stop_at_first=True)
     return _say_why_none(resolve_provider(availability(rows), pref), rows)
 
 

@@ -98,8 +98,51 @@ function positionSprite(overlay, video, seconds) {
   overlay.style.backgroundPosition = `-${col * geo.cellWidth}px -${row * geo.cellHeight}px`;
 }
 
+/* THE SHEET IS FETCHED WHEN IT IS FIRST WANTED, NOT WHEN THE CARD IS BUILT
+ * (audit 2026-11-10 web-broll-2). Both pages used to set the overlay's
+ * background-image as they built each card. The overlay sits at opacity 0
+ * until a pointer arrives, but opacity does not stop a browser fetching a
+ * background image and a CSS background has no loading="lazy", so every card
+ * pulled its whole sheet at once: median 58 KB, mean 215 KB, up to 4.2 MB,
+ * against a 23 KB poster. A 24-card browse page was ~5.2 MB of sheets nobody
+ * had hovered, and the client share page, which draws a whole folder at once,
+ * ~107 MB for 500 clips through the public door. Until the sheet arrives the
+ * overlay paints nothing and the poster underneath shows through, which is
+ * what a sheet that 404s has always looked like. */
+function loadSprite(overlay, video) {
+  if (overlay.dataset.spriteLoaded) return;
+  overlay.dataset.spriteLoaded = "1";
+  overlay.style.backgroundImage = `url(media/sprite/${video.id}.jpg)`;
+}
+
+/* A search result SHOWS a cell of its sheet without being hovered (the frame
+ * that matched), so it cannot wait for a pointer; it waits to be near the
+ * screen instead. One observer for the page. */
+let spriteSeenObserver = null;
+function loadSpriteWhenSeen(overlay, video) {
+  if (typeof IntersectionObserver !== "function") {
+    loadSprite(overlay, video);
+    return;
+  }
+  if (!spriteSeenObserver) {
+    spriteSeenObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        spriteSeenObserver.unobserve(entry.target);
+        if (entry.target.spriteLoad) entry.target.spriteLoad();
+      }
+    }, { rootMargin: "400px" });
+  }
+  overlay.spriteLoad = () => loadSprite(overlay, video);
+  spriteSeenObserver.observe(overlay);
+}
+
 function wireSpriteScrub(thumb, overlay, video) {
+  // pointerenter is the first thing a mouse, a pen or a tap sends; mousemove
+  // also asks, for a pointer that was already over the card when it was drawn
+  thumb.addEventListener("pointerenter", () => loadSprite(overlay, video));
   thumb.addEventListener("mousemove", (e) => {
+    loadSprite(overlay, video);
     const rect = thumb.getBoundingClientRect();
     const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
     positionSprite(overlay, video, frac * (video.duration_s || 0));

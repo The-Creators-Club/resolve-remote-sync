@@ -5,7 +5,7 @@ list of all the features that this project has, without discussing the
 architecture at all. Do not trust the documentation or notes throughout the
 code ... to create a briefing doc for a full rebuild of the whole project."
 
-**Status: 40 sections written as of 2026-11-12. Open again the same day: the owner brought the pipeline before the Timeline Cards editor into the rebuild, so sections 41 and 42 are being read, and the canvas tools and Story Deck wait on his answer. The plan this belongs to is [`../REBUILD_PLAN.md`](../REBUILD_PLAN.md). This inventory stays behind: under that plan's purge rule it is never shown to the session that rebuilds the product.**
+**Status: 42 sections written as of 2026-11-12. Sections 41 and 42 were added the same day, when the owner brought the pipeline before the Timeline Cards editor into the rebuild. Still open: whether the canvas tools and Story Deck are in the rebuild (asked, not answered); two more sections if so. The plan this belongs to is [`../REBUILD_PLAN.md`](../REBUILD_PLAN.md). This inventory stays behind: under that plan's purge rule it is never shown to the session that rebuilds the product.**
 
 Known to be behind already: sections 01 to 30 were read at ccsync `7a81073`,
 and ten companion commits about camera cards landed the same day (0.9.92 to
@@ -131,6 +131,24 @@ describe what actually happens.
 
 Not read: `handler.py`, `server.py`, `page.py` and the `page` folder, which
 are the old Timeline Cards page's own server, retired 2026-11-12.
+
+### The pipeline before the editor (brought into scope 2026-11-12)
+
+How a recorded interview becomes what the editor reads. Today these are
+stages a person runs one at a time. Section 41 says, for every stage, what
+it needs from Resolve, a GPU, Claude and the notes program. Read at Editing
+`94cbab7`.
+
+| | Section |
+|---|---|
+| 41 | [From recorded interview to transcript, translation and word timing; the stage page; the one command line](41-interview-pipeline-transcripts-translation-word-timing.md) |
+| 42 | [The tools that read and write Resolve's project library directly; interview preparation as the assistant's instruction file; the old stand-alone NAS install](42-project-library-tools-and-interview-prep.md) |
+
+Section 42's interview preparation is read from an instruction file an AI
+assistant follows (`~/.claude/skills/canvas-sorter`), not from code: it is
+what actually runs, so it is the one exception to "the code is the only
+source of truth". Section 41 could not settle what a prepared transcript
+looks like for that reason; section 42 answers it.
 
 ### The Footage Sorter (`E:\Projects\Editing\footage-sorter`, read as its working tree stood on 2026-11-12)
 

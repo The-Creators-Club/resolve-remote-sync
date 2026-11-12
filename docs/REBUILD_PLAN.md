@@ -344,7 +344,7 @@ read the current code.
 
 | Step | What | State |
 |---|---|---|
-| 1 | **Finish the inventory**: a list of everything the software does, read from the code alone, in `docs/feature-inventory/`. | **40 sections written 2026-11-12**, the Footage Sorter (35 to 38) and the engine behind Timeline Cards (39, 40) included. **Open again the same day:** the owner brought the pipeline before the editor into the rebuild, so sections 41 and 42 are being read, and the canvas tools and Story Deck wait on his answer. Two top-ups also owed before it is used: sections 06 and 10 (ten companion commits about camera cards landed after they were read), and section 36's audio sync (read while another session was still building it). |
+| 1 | **Finish the inventory**: a list of everything the software does, read from the code alone, in `docs/feature-inventory/`. | **40 sections written 2026-11-12**, the Footage Sorter (35 to 38) and the engine behind Timeline Cards (39, 40) included. **Sections 41 and 42 added the same day**, when the owner brought the pipeline before the editor into the rebuild. **Still open:** the canvas tools and Story Deck wait on his answer (two more sections if they are in). Two top-ups also owed before it is used: sections 06 and 10 (ten companion commits about camera cards landed after they were read), and section 36's audio sync (read while another session was still building it). |
 | 2 | **The knowledge base**: everything real use taught, gathered from every place it was written down (the owner's own messages, the bug ledger, the gotchas, the hunts, the memory notes, the commits), one entry per lesson, each ending in a rule the rebuild can be tested against. In `docs/rebuild-spec/knowledge-base/`. | Not started. Sources measured, method below. |
 | 3 | **Rewrite the inventory as one specification organised by what people do** (sync a project, make proxies, find b-roll, cut in Timeline Cards, and so on). No source-file tags, no route or config-key names, each capability described once, each capability linked to the knowledge-base entries that apply to it. | Not started. |
 | 4 | **A decision list for the owner**: every overlap in what a person can do, every several-ways-in, every dormant or dead feature, each as a keep / cut / merge question with a recommendation. Only questions about WHAT the product does; never an engineering question. A question he has already answered in a past session is shown with his answer, not asked cold. The list itself stays behind; only his answers, restated as what the product does, reach the specification. | Not started. |
@@ -659,9 +659,28 @@ Skip the `cards\page` folder, `tests` and `__pycache__`.
 
 Left out on purpose until the owner asked for the whole path, from dropping
 clips in to a transcript with word timing, to be automatic and part of the
-rebuild. In `E:\Projects\Editing\Resolve\MulticamPipeline`. Readers started
-2026-11-12; each is told to say, for every stage, what it needs from Resolve
-and from the notes program.
+rebuild. In `E:\Projects\Editing\Resolve\MulticamPipeline`. Both sections
+were written and committed 2026-11-12; section 41 says, for every stage,
+what it needs from Resolve and from the notes program.
+
+What the two readers found that bears on the owner's requirement:
+
+- Most stages already need neither Resolve nor the notes program. The ones
+  that need Resolve are the first transcript export, rendering each
+  multicam's sound, and the checks that police Resolve's own transcript.
+  A later stage that adopts the speech-to-text result directly makes those
+  checks unnecessary for new interviews.
+- Paragraphing, question marking and translating an interview are done by
+  an AI assistant following an instruction file, started by a person. This
+  is the largest hand-run step.
+- There are three separate translation routes today and two separate
+  speech-to-text set-ups. (For the preparing sessions only.)
+- Likely defects in the live tools, not confirmed by running anything: the
+  in-place library editor stops with an error whenever it is given markers;
+  two stages match a clip to an interviewee's folder by different rules, so
+  one clip could in rare cases land in two folders.
+- `deploy\site.toml` in that repo holds two live credentials in plain text
+  (kept out of git). Told to the owner 2026-11-12.
 
 | | Files | Write to |
 |---|---|---|
@@ -913,10 +932,10 @@ Paste this into a new Claude Code session opened in
 `E:\Projects\Editing\ccsync`:
 
 > Read `docs/REBUILD_PLAN.md` and `docs/feature-inventory/README.md`, then
-> carry on with the plan. Step 1, the inventory, has 40 sections written;
-> check that sections 41 and 42 (the pipeline before the editor) are written
-> and listed, and ask me whether the canvas tools and Story Deck are in the
-> rebuild. Then step 2, the knowledge base. Read "The guiding principle" and "The purge rule"
+> carry on with the plan. Step 1, the inventory, has 42 sections written;
+> first ask me the open questions under "Timeline Cards in the rebuild"
+> (whether the canvas tools and Story Deck are in decides if two more
+> sections are read). Then step 2, the knowledge base. Read "The guiding principle" and "The purge rule"
 > before anything else: nothing about how the old product was built may
 > reach the pack. Arm the usage watcher at 70 % first
 > (`E:\Projects\Utilities\claude-usage\usage.mjs`), run at most four readers

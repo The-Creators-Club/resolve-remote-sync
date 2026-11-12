@@ -5,7 +5,7 @@ list of all the features that this project has, without discussing the
 architecture at all. Do not trust the documentation or notes throughout the
 code ... to create a briefing doc for a full rebuild of the whole project."
 
-**Status: complete, 40 sections, as of 2026-11-12. Nothing is owed. The plan this belongs to is [`../REBUILD_PLAN.md`](../REBUILD_PLAN.md). This inventory stays behind: under that plan's purge rule it is never shown to the session that rebuilds the product.**
+**Status: 40 sections written as of 2026-11-12. Open again the same day: the owner brought the pipeline before the Timeline Cards editor into the rebuild, so sections 41 and 42 are being read, and the canvas tools and Story Deck wait on his answer. The plan this belongs to is [`../REBUILD_PLAN.md`](../REBUILD_PLAN.md). This inventory stays behind: under that plan's purge rule it is never shown to the session that rebuilds the product.**
 
 Known to be behind already: sections 01 to 30 were read at ccsync `7a81073`,
 and ten companion commits about camera cards landed the same day (0.9.92 to
@@ -148,8 +148,11 @@ are the old Timeline Cards page's own server, retired 2026-11-12.
   dashboard's and the companion's sides of it are in sections 10 and 19.
 - **The old Timeline Cards page** (`multicam_pipeline/cards/page`). It was
   retired on 2026-11-12. What the dashboard still does for it is in section 19.
-- **The rest of the MulticamPipeline repo** (the transcript and canvas
-  pipeline, Story Deck). It is not part of CC Sync.
+- **The canvas tools and Story Deck** in the MulticamPipeline repo
+  (`multicam_pipeline/canvas`, `multicam_pipeline/storydeck`). Not read
+  unless the owner wants them in the rebuild; asked 2026-11-12. The
+  transcript pipeline in the same repo is NOT left out any more: sections 41
+  and 42.
 
 ## Where the overlap is, across sections
 

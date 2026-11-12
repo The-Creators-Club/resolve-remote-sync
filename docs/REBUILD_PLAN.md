@@ -27,6 +27,15 @@ In his words, 2026-11-12:
   to be a module which lives inside its own codebase and slots into the
   dashboard, so each one can be maintained, updated, enabled and disabled
   individually."
+- Also 2026-11-12, about Timeline Cards: "Timeline cards doesn't need Google
+  translate or Claude translate any more because it does the translation and
+  word matching and then auto picks the English from the Span. The workflow
+  should support no obsidian, so just dragging clips in and they auto
+  process, this is for potential clients down the line so it's NLE-agnostic.
+  They should also thus be able to make multicams and with automation. The
+  whole pipeline should be automated, from dragging in to transcription to
+  translation and word timing etc." See "Timeline Cards in the rebuild:
+  footage in, ready to cut", below.
 
 ## The guiding principle: elegance
 
@@ -85,7 +94,11 @@ This is absolute. It is the reason the whole operation exists.
 3. **Givens**: the things the product has to live with because the people
    who use it have them. DaVinci Resolve, Windows and macOS, the cameras and
    their cards, the kinds of NAS a studio owns, YouTube, the network a
-   studio really has. Facts about these cross, stated plainly.
+   studio really has. Facts about these cross, stated plainly. Since the
+   owner's requirement of 2026-11-12 that Timeline Cards must not depend on
+   one editing program, Resolve is a given only as "the editing program this
+   studio uses, and the first one supported", never as something the
+   pipeline before the hand-over may lean on.
 4. What real use taught, stated as what must hold for a person (the
    knowledge base, with the split below).
 5. What information the live studio holds that must still be there
@@ -148,6 +161,14 @@ dashboard's shape in the rebuild", below). So for the dashboard the pack
 carries what can be done and what each setting is, never where the old build
 put it. Timeline Cards is unchanged: its screens, keys and gestures cross
 exactly.
+
+**AMENDED again the same day, for Timeline Cards' translation only:** the
+editor's translate controls do NOT cross ("Timeline cards doesn't need
+Google translate or Claude translate any more"). A card's English is picked
+from the part of the transcript the card covers, on its own. Everything else
+a person sees and touches in the editor still crosses exactly. And the
+editor gains a front door it does not have today: dropping clips in (next
+section but one).
 
 **DECIDED the same day: the look is kept exactly.** "I also want to keep the
 exact same visual style, I really like the way the timeline cards rebuild
@@ -231,8 +252,91 @@ Points still open:
 - Ticking a project exists in several places today. The Projects page is
   its home; whether any other place keeps a tick is a step 4 question.
 
+## Timeline Cards in the rebuild: footage in, ready to cut (owner's requirements, 2026-11-12)
+
+His words are quoted in full under "What the owner wants". Restated as
+requirements for the new build, in words that name no tool the old build
+chose. These cross to the fresh instance:
+
+- **Drop clips in and they process themselves.** A person drops an
+  interview's clips into the product and does nothing more. The product
+  works out which clips are the same interview seen by different cameras and
+  recorders, lines them up by their sound, makes the multicam, transcribes
+  the speech, translates it, and times every word, so that any part of the
+  English stands for exact words of the original. When it finishes, the
+  interview is ready to cut in Timeline Cards.
+- **Every step runs on its own.** "The whole pipeline should be automated,
+  from dragging in to transcription to translation and word timing." No
+  step waits for a person to start it.
+- **Nothing outside the product is needed.** No separate notes program, no
+  folder of notes a person must keep in a certain shape, and no editing
+  program open while the footage is processed.
+- **It is not tied to one editing program.** "This is for potential clients
+  down the line so it's NLE-agnostic." Everything up to the finished cut
+  works with no editing program at all. Handing over to an editing program
+  (the multicams, and the cut as a timeline) is the only part that belongs
+  to one program.
+- **Multicams are made automatically**, as part of the first point.
+- **No translate controls in the editor.** A card's English is picked from
+  the part of the transcript it covers. The translate button and the draft
+  translations go.
+
+What this changes in the plan (for the preparing sessions; none of this
+crosses):
+
+- **The inventory's scope grew, so step 1 is open again.** The pipeline
+  before the editor was left out on purpose ("not part of CC Sync"). It is
+  in now: sections 41 and 42, started 2026-11-12. Today it is a row of
+  stages a person runs by hand, several of them through Resolve and through
+  an assistant working in a notes program, which is exactly what he wants
+  gone. The inventory records what each stage ACHIEVES and what it needs
+  from outside; the specification then describes one capability, "footage
+  in, ready to cut", with no stages in it.
+- **That capability runs through two of today's products.** The Footage
+  Sorter already takes footage in, groups it and (being built now) matches
+  sound; Timeline Cards' pipeline lines up angles by sound too. In step 3
+  this is written once. Which of today's two behaviours survives where they
+  differ is a step 4 question.
+- **The word "Obsidian" does not cross**, and neither does anything shaped
+  by it (block links, embeds, a vault, a canvas file). The requirement
+  crosses; the tool does not. This studio's existing transcripts and cut
+  lists are information that must survive, so they go in the old-data
+  drawer.
+- **Translation still happens**, once, when the footage is processed. What
+  goes is translating again, on request, inside the editor. Which translator
+  is used is the fresh instance's choice and is never put to the owner.
+
+Put to the owner 2026-11-12, not yet answered:
+
+1. **Which editing programs at the start?** "Not tied to one" can be built
+   honestly: nothing before the hand-over touches an editing program. But
+   the hand-over itself has to be written and tested once per program, on
+   that program, and a multicam is among the hardest things to hand over.
+   Recommended: Resolve at the start, each further program as its own module
+   when a client needs it. Assumed until he says otherwise: this is about
+   Timeline Cards only, and the syncing product's Resolve features (relink,
+   proxies, the project watcher) stay Resolve features.
+2. **Is the notes program gone for his own studio too, or only no longer
+   required?** Today the editor accepts pasted block links, copies cards out
+   as embeds, and keeps the cut list as a file a person can edit outside;
+   the planning canvas and Story Deck live there entirely. Recommended: not
+   required by anything, and what this studio still uses becomes one
+   optional module, off unless switched on. The canvas tools and Story Deck
+   (about 13,500 lines, not inventoried) are read only if he wants them in
+   the rebuild.
+3. **Where is a wrong guess put right?** Today a wrong word or a wrong
+   translation is fixed by editing the note, and a person chooses which
+   clips make an interview. With the notes program gone and the grouping
+   automatic, the product needs its own place to correct a word, a
+   translation, a speaker, and which clips belong together. Recommended:
+   every automatic guess is shown and can be corrected in the product.
+4. **The join check stays?** The editor reads a join between two cuts afresh
+   and warns when the meaning or the grammar broke. It is not the translate
+   button, so it is assumed kept.
+
 So the product of this work is **a briefing pack a fresh Claude can rebuild
-from**, covering CC Sync, the Timeline Cards editor and the Footage Sorter.
+from**, covering CC Sync, the Timeline Cards editor with the pipeline that
+feeds it, and the Footage Sorter.
 The rebuild itself is a later job, done by a different session that must not
 read the current code.
 
@@ -240,7 +344,7 @@ read the current code.
 
 | Step | What | State |
 |---|---|---|
-| 1 | **Finish the inventory**: a list of everything the software does, read from the code alone, in `docs/feature-inventory/`. | **DONE 2026-11-12: 40 sections**, the Footage Sorter (35 to 38) and the engine behind Timeline Cards (39, 40) included. Two top-ups owed before it is used: sections 06 and 10 (ten companion commits about camera cards landed after they were read), and section 36's audio sync (read while another session was still building it). |
+| 1 | **Finish the inventory**: a list of everything the software does, read from the code alone, in `docs/feature-inventory/`. | **40 sections written 2026-11-12**, the Footage Sorter (35 to 38) and the engine behind Timeline Cards (39, 40) included. **Open again the same day:** the owner brought the pipeline before the editor into the rebuild, so sections 41 and 42 are being read, and the canvas tools and Story Deck wait on his answer. Two top-ups also owed before it is used: sections 06 and 10 (ten companion commits about camera cards landed after they were read), and section 36's audio sync (read while another session was still building it). |
 | 2 | **The knowledge base**: everything real use taught, gathered from every place it was written down (the owner's own messages, the bug ledger, the gotchas, the hunts, the memory notes, the commits), one entry per lesson, each ending in a rule the rebuild can be tested against. In `docs/rebuild-spec/knowledge-base/`. | Not started. Sources measured, method below. |
 | 3 | **Rewrite the inventory as one specification organised by what people do** (sync a project, make proxies, find b-roll, cut in Timeline Cards, and so on). No source-file tags, no route or config-key names, each capability described once, each capability linked to the knowledge-base entries that apply to it. | Not started. |
 | 4 | **A decision list for the owner**: every overlap in what a person can do, every several-ways-in, every dormant or dead feature, each as a keep / cut / merge question with a recommendation. Only questions about WHAT the product does; never an engineering question. A question he has already answered in a past session is shown with his answer, not asked cold. The list itself stays behind; only his answers, restated as what the product does, reach the specification. | Not started. |
@@ -551,6 +655,24 @@ because of that. Two more sections:
 
 Skip the `cards\page` folder, `tests` and `__pycache__`.
 
+### The pipeline before the editor (brought into scope 2026-11-12)
+
+Left out on purpose until the owner asked for the whole path, from dropping
+clips in to a transcript with word timing, to be automatic and part of the
+rebuild. In `E:\Projects\Editing\Resolve\MulticamPipeline`. Readers started
+2026-11-12; each is told to say, for every stage, what it needs from Resolve
+and from the notes program.
+
+| | Files | Write to |
+|---|---|---|
+| 41 | `multicam_pipeline\transcripts`, `pipeline.py`, `pipeline_web.py`, `zh_fold.py`, `zh_fold_table.py`, `paths.py`, `webtheme.py`, `tools\gen_zh_fold.py` (about 10,300 lines) | `41-interview-pipeline-transcripts-translation-word-timing.md` |
+| 42 | `multicam_pipeline\library` (about 4,800 lines), the interview-preparation instruction file `~\.claude\skills\canvas-sorter` (not code, but it is what runs), and `deploy` | `42-project-library-tools-and-interview-prep.md` |
+
+Waiting on the owner (question 2 under "Timeline Cards in the rebuild"):
+`multicam_pipeline\canvas` (about 4,800 lines) and
+`multicam_pipeline\storydeck` with its tools (about 8,700). Two more
+sections if he wants them in.
+
 ### The Footage Sorter (`E:\Projects\Editing\footage-sorter`, not started)
 
 Check out nothing: read the working tree as it is (branch
@@ -791,8 +913,10 @@ Paste this into a new Claude Code session opened in
 `E:\Projects\Editing\ccsync`:
 
 > Read `docs/REBUILD_PLAN.md` and `docs/feature-inventory/README.md`, then
-> carry on with the plan. Step 1, the inventory, is done; start with step 2,
-> the knowledge base. Read "The guiding principle" and "The purge rule"
+> carry on with the plan. Step 1, the inventory, has 40 sections written;
+> check that sections 41 and 42 (the pipeline before the editor) are written
+> and listed, and ask me whether the canvas tools and Story Deck are in the
+> rebuild. Then step 2, the knowledge base. Read "The guiding principle" and "The purge rule"
 > before anything else: nothing about how the old product was built may
 > reach the pack. Arm the usage watcher at 70 % first
 > (`E:\Projects\Utilities\claude-usage\usage.mjs`), run at most four readers

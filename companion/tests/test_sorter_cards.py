@@ -614,3 +614,35 @@ def test_a_path_that_leaves_the_card_is_never_opened():
     assert sorter_cards.safe_join(root, "Proxy/a.mp4") == root / "Proxy" / "a.mp4"
     for bad in ("../x.mp4", "Proxy/../../x", "C:/Windows/x", "", "/"):
         assert sorter_cards.safe_join(root, bad) is None
+
+
+def test_thumbnails_go_in_batches_in_the_order_asked(tmp_path):
+    """2026-11-12, Alex: "thumbnails need to load faster": 48 a report, four made at once, the next report at once."""
+    rels = [f"Proxy/C{i:03d}.mp4" for i in range(60)]
+    for r in rels:
+        touch(tmp_path, r)
+    touch(tmp_path, "G013_C000.braw")                   # a Blackmagic SSD: loose BRAWs in the root
+    posts = []
+
+    def request(method, url, body, headers, timeout):
+        posts.append(body)
+        sent = {t["rel"] for c in body["cards"] for t in c.get("thumbs") or []}
+        done = {t["rel"] for p in posts for c in p["cards"] for t in c.get("thumbs") or []}
+        left = [r for r in rels if r not in done]
+        return 200, {"ok": True, "needThumbs": {"S1": [{"rel": r, "kind": "video"} for r in left]} if left else {}}
+
+    vol = {"serial": "S1", "label": "G013", "drive": "H:", "root": str(tmp_path), "removable": False,
+           "drive_type": "fixed", "system": False, "capacity": 1, "free": 1}
+    rep = sorter_cards.SorterCards({"dashboard_url": "https://dash", "dashboard_token": "t"}, request_fn=request,
+                                   volumes_fn=lambda scope, skip: [vol], identity_token_fn=lambda: "id")
+    rep._thumb_fn = lambda ffmpeg, src, kind: (b"\xff\xd8\xffL", b"\xff\xd8\xffS")
+    import ccsync_companion.sorter_cards as sc
+    real_root = sc.card_root
+    sc.card_root = lambda drive: tmp_path
+    try:
+        rep.tick(); rep.tick(); rep.tick()
+    finally:
+        sc.card_root = real_root
+    batches = [[t["rel"] for t in p["cards"][0].get("thumbs") or []] for p in posts]
+    assert batches[0] == [] and batches[1] == rels[:48] and batches[2] == rels[48:]
+    assert rep._need_thumbs == {}

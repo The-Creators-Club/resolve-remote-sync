@@ -191,8 +191,13 @@ def _now_iso() -> str:
 # computer is not one of them: G013's BRAWs showed a blank grid. The reply to a report names the files to make them
 # from (the camera's own proxy for a BRAW); they ride in the next reports, a few at a time, so the report stays
 # small and the reader stays free for a copy.
-THUMBS_PER_REPORT = 8
+# 2026-11-12, Alex: "thumbnails need to load faster". 8 per report, one at a time, every 10 s took minutes for a
+# card; a proxy frame is ~0.15 s of ffmpeg, so four at once and 48 per report fill a card in a few reports, sent
+# back to back (THUMBS_FOLLOW_UP_SECONDS) while more are wanted. ~10 KB a thumbnail: a report stays under 1 MB.
+THUMBS_PER_REPORT = 48
+THUMBS_WORKERS = 4
 THUMBS_SECONDS = 20.0
+THUMBS_FOLLOW_UP_SECONDS = 1.0
 THUMB_TIMEOUT_SECONDS = 15.0
 THUMB_MAX_BYTES = 256 * 1024            # the sorter's own cap per size (Thumbnailer.SUPPLIED_MAX_BYTES)
 
@@ -793,7 +798,8 @@ class SorterCards:
                 self.tick()
             except Exception:                                 # noqa: BLE001
                 log.exception("sorter cards: the tick failed")
-            self._stop.wait(max(1.0, float(self.scan_seconds)))
+            # thumbnails still wanted: the next batch now, not a scan period from now
+            self._stop.wait(THUMBS_FOLLOW_UP_SECONDS if self._need_thumbs else max(1.0, float(self.scan_seconds)))
 
     def current_cards(self) -> list[dict[str, Any]]:
         """Look at the readers; -> the card objects, re-reading only what
@@ -858,39 +864,49 @@ class SorterCards:
         return self._post(cards, digest, now)
 
     def _with_thumbs(self, cards: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
-        """The cards, with a few of the thumbnails the sorter asked for attached (2026-11-12: the NAS cannot read a
-        card in this computer, so G013's BRAWs had no picture). At most THUMBS_PER_REPORT per report, each made
-        from the file the sorter named on that card; one that cannot be made is not asked again this run."""
+        """The cards, with the next thumbnails the sorter asked for attached (2026-11-12: the NAS cannot read a
+        card in this computer, so G013's BRAWs had no picture). Up to THUMBS_PER_REPORT per report, made
+        THUMBS_WORKERS at a time from the file the sorter named on that card, in the order it asked (the grid's);
+        one that cannot be made is not asked again this run."""
         if not self._need_thumbs:
             return cards, False
+        from concurrent.futures import ThreadPoolExecutor
         ffmpeg = str(self.cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
-        budget, deadline, out, any_sent = THUMBS_PER_REPORT, time.monotonic() + THUMBS_SECONDS, [], False
-        for card in cards:
-            want = self._need_thumbs.get(str(card.get("serial")))
-            made: list[dict[str, str]] = []
+        jobs: list[tuple[int, str, tuple[str, str], Path, str]] = []       # (card index, rel, key, src, kind)
+        for n, card in enumerate(cards):
             root = card_root(card.get("drive"))
-            for item in want or []:
-                if budget <= 0 or time.monotonic() > deadline or root is None:
+            if root is None:
+                continue
+            for item in self._need_thumbs.get(str(card.get("serial"))) or []:
+                if len(jobs) >= THUMBS_PER_REPORT:
                     break
                 rel = str(item.get("rel") or "")
                 key = (str(card.get("serial")), rel)
                 src = safe_join(root, rel)
                 if key in self._thumb_failed or src is None:
                     continue
-                pics = self._thumb_fn(ffmpeg, src, str(item.get("kind") or "video"))
-                budget -= 1
-                if not pics:
-                    self._thumb_failed.add(key)
+                jobs.append((n, rel, key, src, str(item.get("kind") or "video")))
+        deadline = time.monotonic() + THUMBS_SECONDS
+
+        def make(job):
+            if time.monotonic() > deadline:
+                return job, None, False                       # out of time: asked for again next report
+            return job, self._thumb_fn(ffmpeg, job[3], job[4]), True
+
+        made: dict[int, list[dict[str, str]]] = {}
+        with ThreadPoolExecutor(max_workers=THUMBS_WORKERS, thread_name_prefix="ccsync-card-thumb") as pool:
+            for job, pics, tried in pool.map(make, jobs):
+                if not tried:
                     continue
-                made.append({"rel": rel, "l": base64.b64encode(pics[0]).decode("ascii"),
-                             "s": base64.b64encode(pics[1]).decode("ascii")})
-            if made:
-                card = {**card, "thumbs": made}
-                any_sent = True
-            out.append(card)
-        if not any_sent:
+                if not pics:
+                    self._thumb_failed.add(job[2])
+                    continue
+                made.setdefault(job[0], []).append({"rel": job[1], "l": base64.b64encode(pics[0]).decode("ascii"),
+                                                    "s": base64.b64encode(pics[1]).decode("ascii")})
+        out = [{**card, "thumbs": made[n]} if n in made else card for n, card in enumerate(cards)]
+        if not made:
             self._need_thumbs = {}                 # nothing more this computer can make: wait for the next reply
-        return out, any_sent
+        return out, bool(made)
 
     def _post(self, cards: list[dict[str, Any]], digest: str, now: float) -> Optional[int]:
         request = self._request

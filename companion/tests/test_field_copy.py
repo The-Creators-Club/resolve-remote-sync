@@ -271,7 +271,7 @@ def test_destinations_on_different_drives_copy_at_the_same_time_and_on_one_drive
     spans: dict[str, tuple[float, float]] = {}
     orig = card_copy.copy_file
 
-    def slow(src, dst, size, stop, on_bytes):
+    def slow(src, dst, size, stop, on_bytes, **_k):
         t0 = time.monotonic()
         time.sleep(0.25)
         out = orig(src, dst, size, stop, on_bytes)
@@ -356,7 +356,7 @@ def test_a_drive_pulled_in_the_middle_stops_its_lane_and_keeps_what_landed(tmp_p
     gone = {"A": False}
     orig = card_copy.copy_file
 
-    def after_one(src, dst, size, stop, on_bytes):
+    def after_one(src, dst, size, stop, on_bytes, **_k):
         out = orig(src, dst, size, stop, on_bytes)
         if "driveA" in str(dst):
             gone["A"] = True
@@ -381,7 +381,7 @@ def test_a_drive_that_fills_up_stops_its_lane_in_words(tmp_path, monkeypatch):
     state = {"full": False}
     orig = card_copy.copy_file
 
-    def after_one(src, dst, size, stop, on_bytes):
+    def after_one(src, dst, size, stop, on_bytes, **_k):
         out = orig(src, dst, size, stop, on_bytes)
         state["full"] = True
         return out
@@ -446,7 +446,7 @@ def test_a_pulled_card_stops_the_copy_with_the_cards_name_not_a_failure_per_file
     orig = card_copy.copy_file
     calls = {"n": 0}
 
-    def card_leaves(src, dst, size, stop, on_bytes):
+    def card_leaves(src, dst, size, stop, on_bytes, **_k):
         calls["n"] += 1
         if calls["n"] == 2:
             w.volumes = lambda scope="removable", skip=None: []            # the reader is empty now

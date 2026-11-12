@@ -36,9 +36,12 @@ Rules, each with its reason:
     (TeraCopy's skip path verifies nothing with `TestSkippedFiles=0`, which is
     why this compare is done here, in both copiers.)
   * **A FILE APPEARS ONLY WHEN IT IS WHOLE AND VERIFIED** (Python copier).
-    Bytes go to `<dst>.partial`, are fsynced, read back IN FULL against a
-    hash taken while copying (not first and last MiB: the fallback is the slow
-    path anyway and correctness wins), and only then renamed into place. A
+    Bytes go to `<dst>.partial`, are fsynced, CHECKED, and only then renamed
+    into place. The check is the job's `verify`: "quick" (the sorter's, and the
+    default since 2026-11-12, Alex's rule) is field_mode.quick_compare -- size,
+    first and last MiB, the moov -- and "full" reads it back IN FULL against a
+    hash taken while copying. The same choice decides whether a same-size file
+    already at the destination is the card's file. A
     halt, a verify mismatch or an error deletes the `.partial`. The rename
     cannot clobber (Windows `rename` refuses an existing name; elsewhere a
     hard link is made and the partial unlinked). A resume builds its own
@@ -384,8 +387,16 @@ def _write_past_the_cache(fh: Any) -> None:
         pass
 
 
+def _quick_check(src: Path, partial: Path, dst: Path) -> str:
+    """Alex's simple verification (field_mode.quick_compare): size, first and last MiB, and for QuickTime-family
+    files the moov box. -> "" when it passes, else why not. Never a full read-back."""
+    from .field_mode import quick_compare
+    res = quick_compare(src, partial, ext=dst.suffix)
+    return "" if res.get("ok") else str(res.get("error") or "the quick check failed")
+
+
 def copy_file(src: Path, dst: Path, size: int, should_stop: Callable[[], str],
-              on_bytes: Callable[[int], None]) -> str:
+              on_bytes: Callable[[int], None], quick: bool = False) -> str:
     """Copy `src` to `<dst>.partial`, fsync, read it all back against the hash
     taken while copying, publish. -> "" on success, else the reason it failed
     (the `.partial` is gone either way). Raises _Stopped when `should_stop`
@@ -416,7 +427,7 @@ def copy_file(src: Path, dst: Path, size: int, should_stop: Callable[[], str],
         if written != size:
             raise OSError(f"read {written} bytes but the source is {size}")
         _stamp(src, partial)
-        why = verify_whole(partial, size, h.digest(), should_stop)
+        why = _quick_check(src, partial, dst) if quick else verify_whole(partial, size, h.digest(), should_stop)
         if why:
             _discard(partial)
             return f"verify failed: {why}"
@@ -428,7 +439,7 @@ def copy_file(src: Path, dst: Path, size: int, should_stop: Callable[[], str],
 
 
 def resume_file(src: Path, dst: Path, size: int, have: int, should_stop: Callable[[], str],
-                on_bytes: Callable[[int], None]) -> str:
+                on_bytes: Callable[[int], None], quick: bool = False) -> str:
     """Finish a partial `dst` of `have` bytes WITHOUT touching it until the
     result is proven: build `<dst>.partial` from `dst`'s bytes (each compared with
     the card's, so a file that is not the start of `src` is a _Conflict) plus
@@ -476,7 +487,7 @@ def resume_file(src: Path, dst: Path, size: int, have: int, should_stop: Callabl
         if written != size:
             raise OSError(f"read {written} bytes but the source is {size}")
         _stamp(src, partial)
-        why = verify_whole(partial, size, h.digest(), should_stop)
+        why = _quick_check(src, partial, dst) if quick else verify_whole(partial, size, h.digest(), should_stop)
         if why:
             _discard(partial)
             return f"verify failed: {why}"
@@ -557,6 +568,7 @@ class CardJob:
         self._volumes = volumes_fn or sorter_cards.list_volumes
         self.progress = progress or Progress()
         self.stopped = ""
+        self.quick = True                    # set per job from its "verify" (run)
         # whether a stop is worth retrying (a cancel is decided by the caller)
         self.stop_retryable = True
         # which copier ran, for the receipt; `teracopy_fn` -> (TeraCopy | None, why not)
@@ -631,6 +643,14 @@ class CardJob:
         return root, str(src or "")
 
     # -- the run ---------------------------------------------------------
+    def _same(self, card_file: Path, there: Path, size: int) -> str:
+        """Is the file already at the destination this card file? "" when it is, else why not."""
+        if self.quick:
+            from .field_mode import quick_compare
+            res = quick_compare(card_file, there)
+            return "" if res.get("ok") else str(res.get("error") or "the quick check failed")
+        return files_identical(card_file, there, size, self._should_stop)
+
     def run(self, kind: str, inputs: dict[str, Any]) -> dict[str, Any]:
         """-> the protocol's result {copied, skipped, conflicts, failed, copier}.
         `self.stopped` holds the reason when a halt/cancel/lost card ended it
@@ -640,6 +660,11 @@ class CardJob:
         copies = inputs.get("copies")
         if not isinstance(copies, list):
             raise CardJobError("the job has no copies list")
+        # THE QUICK CHECK, NOT A FULL READ-BACK, unless the job asks for "full" (2026-11-12). The sorter sends
+        # verify "quick", and this copier used to ignore it and read every file back in full: Alex's rule since
+        # 2026-10-18 is "headers and byte size. Don't run the full verification" (doubles the time), and since
+        # 2026-10-30 "everywhere" the end of the recording and its moov too (field_mode.quick_compare).
+        self.quick = str(inputs.get("verify") or "quick").lower() != "full"
         folders = inputs.get("folders") or []
         if kind == KIND_DRIVE_COPY and inputs.get("homeOnly"):
             # an automatic backup copies only at home (footage-sorter docs/AUTO-BACKUP-PLAN.md): over a slow link
@@ -795,22 +820,20 @@ class CardJob:
             if w.mode == "collision":
                 # An earlier, interrupted run may already have made the copy:
                 # the plain name, then `name (2)` ... that is byte-identical.
-                if is_file and have == w.size and not files_identical(
-                        w.src, dst, w.size, self._should_stop):
+                if is_file and have == w.size and not self._same(w.src, dst, w.size):
                     return _Decision("skipped", dst)
                 for n in range(2, MAX_RENAMES + 1):
                     cand = renamed(dst, n)
                     if not os.path.lexists(cand):
                         return _Decision("write", dst if tc_names else cand, renamed=True)
-                    if cand.is_file() and cand.stat().st_size == w.size and not files_identical(
-                            w.src, cand, w.size, self._should_stop):
+                    if cand.is_file() and cand.stat().st_size == w.size and not self._same(w.src, cand, w.size):
                         return _Decision("skipped", cand)
                 return _Decision("conflict", why=f"{MAX_RENAMES} renamed copies of it are already there")
             if not is_file:
                 return _Decision("conflict", why="a folder or link is already there; it was left alone")
             if have == w.size:
-                # NOT assumed identical: read it back against the card.
-                why = files_identical(w.src, dst, w.size, self._should_stop)
+                # NOT assumed identical: checked against the card (the quick check unless the job asked "full")
+                why = self._same(w.src, dst, w.size)
                 if not why:
                     return _Decision("skipped", dst)
                 return _Decision("conflict", why=f"a different file of the same size is already "
@@ -861,9 +884,9 @@ class CardJob:
 
         try:
             if d.resume_from:
-                why = resume_file(w.src, dst, w.size, d.resume_from, self._should_stop, on_bytes)
+                why = resume_file(w.src, dst, w.size, d.resume_from, self._should_stop, on_bytes, quick=self.quick)
             else:
-                why = copy_file(w.src, dst, w.size, self._should_stop, on_bytes)
+                why = copy_file(w.src, dst, w.size, self._should_stop, on_bytes, quick=self.quick)
         except _Stopped:
             self.progress.bytes = before
             raise

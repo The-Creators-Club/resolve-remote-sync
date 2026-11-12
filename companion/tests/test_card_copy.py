@@ -31,6 +31,7 @@ class IngestDash(FakeDashboard):
                 if key in inputs:
                     self.plan[key] = inputs.pop(key)
             inputs.setdefault("files", len(self.plan.get("copies", [])))
+            self.plan["verify"] = inputs.get("verify", "quick")     # the sorter's copy list says it too
         self.receipts: list[dict] = []
         self.plan_status = 200
         self.receipt_statuses: list = []       # popped per receipt attempt
@@ -48,8 +49,7 @@ class IngestDash(FakeDashboard):
                 return status, {"ok": True}
             if self.plan_status != 200:
                 return self.plan_status, {"detail": "no"}
-            return 200, {"serial": SERIAL, "label": "SD-3", "mode": "final",
-                         "verify": "quick", **self.plan}
+            return 200, {"serial": SERIAL, "label": "SD-3", "mode": "final", **self.plan}
         return super().request(method, url, body, headers, timeout)
 
 
@@ -211,12 +211,13 @@ def test_a_same_size_destination_with_other_bytes_is_a_conflict_not_assumed_iden
 
 
 def test_a_difference_deep_inside_a_same_size_destination_is_still_a_conflict(tmp_path):
+    """In FULL mode. The quick check (the default since 2026-11-12) does not read the middle of a file."""
     w = World(tmp_path)
     data = bytearray(os.urandom(5 * MIB))
     w.write(w.card, "a.MP4", bytes(data))
     data[2 * MIB + 7] ^= 0xFF               # not in the first or last MiB
     w.write(w.pool, "Footage/Day1/a.MP4", bytes(data))
-    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5 * MIB)]))
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5 * MIB)], verify="full"))
     assert len(res["result"]["conflicts"]) == 1 and res["result"]["skipped"] == []
 
 
@@ -293,7 +294,7 @@ def test_a_verify_mismatch_is_reported_failed_and_nothing_is_left(tmp_path, monk
     w.write(w.card, "a.MP4", b"12345")
     monkeypatch.setattr(card_copy, "verify_whole",
                         lambda *a, **k: "the copy read back differs from the source")
-    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)]))
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)], verify="full"))
     failed = res["result"]["failed"]
     assert failed == [{"src": "a.MP4", "dst": pool_ref("Footage/Day1/a.MP4"),
                        "why": "verify failed: the copy read back differs from the source"}]
@@ -313,7 +314,7 @@ def test_a_file_that_appears_mid_copy_is_not_overwritten(tmp_path, monkeypatch):
         return real(path, size, digest, should_stop)
 
     monkeypatch.setattr(card_copy, "verify_whole", verify)
-    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)]))
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 5)], verify="full"))
     assert len(res["result"]["conflicts"]) == 1
     assert (w.pool / "Footage/Day1/a.MP4").read_bytes() == b"theirs!"
     assert not partials(w.pool)
@@ -375,7 +376,7 @@ def test_a_halt_mid_copy_stops_it_and_discards_the_partial(tmp_path, monkeypatch
     halted = {"now": False}
     real = card_copy.copy_file
 
-    def copy_then_halt(src, dst, size, should_stop, on_bytes):
+    def copy_then_halt(src, dst, size, should_stop, on_bytes, **_k):
         count = {"n": 0}
 
         def stop():
@@ -485,7 +486,7 @@ def test_the_heartbeat_carries_done_of_and_bytes(tmp_path, monkeypatch):
     real = card_copy.copy_file
     import time
 
-    def slow(src, dst, size, should_stop, on_bytes):
+    def slow(src, dst, size, should_stop, on_bytes, **_k):
         out = real(src, dst, size, should_stop, on_bytes)
         time.sleep(0.4)
         return out
@@ -766,7 +767,7 @@ def test_a_resume_that_fails_its_verify_leaves_the_short_file_as_it_was(tmp_path
     w.write(w.card, "a.MP4", data)
     part = w.write(w.pool, "Footage/Day1/a.MP4", data[:MIB])
     monkeypatch.setattr(card_copy, "verify_whole", lambda *a, **k: "the copy read back differs from the source")
-    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", len(data)), "resume")]))
+    _, res = run_job(w, card_job([with_mode(copy_item("a.MP4", "Footage/Day1/a.MP4", len(data)), "resume")], verify="full"))
     assert res["result"]["failed"][0]["why"].startswith("verify failed")
     assert part.read_bytes() == data[:MIB] and not partials(w.pool)
 
@@ -780,7 +781,7 @@ def test_a_halt_during_a_resume_leaves_the_short_file_alone_and_no_full_length_f
     halted = {"now": False}
     real = card_copy.resume_file
 
-    def resume_then_halt(src, dst, size, have, should_stop, on_bytes):
+    def resume_then_halt(src, dst, size, have, should_stop, on_bytes, **_k):
         n = {"n": 0}
 
         def stop():
@@ -856,7 +857,7 @@ def test_a_card_pulled_mid_copy_stops_the_job_and_posts_what_landed(tmp_path, mo
     w.write(w.card, "c.MP4", b"ccc")
     real = card_copy.copy_file
 
-    def pull_the_card(src, dst, size, should_stop, on_bytes):
+    def pull_the_card(src, dst, size, should_stop, on_bytes, **_k):
         if src.name == "b.MP4":
             w.card_serial = None                         # out of the reader
             raise OSError(22, "The device is not ready")
@@ -1270,3 +1271,32 @@ def test_a_system_with_no_uncached_read_verifies_the_old_way(tmp_path, monkeypat
     assert card_copy.verify_whole(f, 5000, h.digest(), lambda: "") == ""
     f.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
     assert "differs" in card_copy.verify_whole(f, 5000, h.digest(), lambda: "")
+
+
+# ------------------------------------------------------------ the quick check (2026-11-12)
+def test_the_quick_check_is_the_default_and_never_reads_a_copy_back_in_full(tmp_path, monkeypatch):
+    """Alex: "headers and byte size. Don't run the full verification" (2026-10-18), and the end of the recording
+    and its moov too (2026-10-30). The sorter sent verify "quick" and this copier read every file back anyway."""
+    w = World(tmp_path)
+    data = os.urandom(3 * MIB)
+    w.write(w.card, "a.MP4", data)
+    monkeypatch.setattr(card_copy, "verify_whole", lambda *a, **k: pytest.fail("a full read-back in quick mode"))
+    monkeypatch.setattr(card_copy, "files_identical", lambda *a, **k: pytest.fail("a full compare in quick mode"))
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", len(data))]))
+    assert [c["src"] for c in res["result"]["copied"]] == ["a.MP4"]
+    assert (w.pool / "Footage/Day1/a.MP4").read_bytes() == data and not partials(w.pool)
+    # run again: the same-size file there passes the quick check and is skipped, not read in full
+    _, again = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", len(data))], job_id=22))
+    assert [c["src"] for c in again["result"]["skipped"]] == ["a.MP4"]
+
+
+def test_the_quick_check_still_catches_a_bad_end_of_the_recording(tmp_path):
+    """The tail (where Sony and BMCC write the moov) is part of the quick check: a same-size file whose last MiB
+    differs is a conflict, never skipped as the same file."""
+    w = World(tmp_path)
+    data = bytearray(os.urandom(3 * MIB))
+    w.write(w.card, "a.MP4", bytes(data))
+    data[-100] ^= 0xFF
+    w.write(w.pool, "Footage/Day1/a.MP4", bytes(data))
+    _, res = run_job(w, card_job([copy_item("a.MP4", "Footage/Day1/a.MP4", 3 * MIB)]))
+    assert len(res["result"]["conflicts"]) == 1 and res["result"]["skipped"] == []

@@ -933,9 +933,10 @@ at most), what was going on (one sentence, 30 words at most, the fact and
 not the story of finding it), and what the product must do (one sentence,
 30 words at most, that could be turned into a test). Numbers that matter
 stay; history, hedging and second examples go. The mergers cut harder than
-the readers: one rule appears once, however many times it was reported, and
-the test of the finished thing is that a capability's lessons fit on a page
-or two. Everything longer (the sources, the old build's account of the
+the readers: one rule appears once, however many times it was reported.
+There is no limit on how many pages a capability's lessons run to ("no hard
+rule on how many pages", the owner, same day): the limit is on each entry,
+not on how many there are. Everything longer (the sources, the old build's account of the
 cause) is in the trace that stays behind.
 
 Written in plain words under the purge rule: no file, function, route or

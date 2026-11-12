@@ -11,8 +11,9 @@ items in 59 slices); the readers are running. See "Progress" below.**
 **Terse is the point.** The owner, 2026-11-12: "the point of this knowledge
 base should ultimately be for it to be terse." A finished entry is three
 short sentences at most (what a person saw, what was going on, what the
-product must do), one rule appears once however many times it was reported,
-and a capability's lessons should fit on a page or two. The readers are held
+product must do), and one rule appears once however many times it was
+reported. There is no limit on how many pages a capability's lessons run
+to: the limit is on each entry, not on how many there are. The readers are held
 to it by the brief; the mergers cut harder.
 
 Nothing in this folder crosses to the rebuild as it stands. The parts in

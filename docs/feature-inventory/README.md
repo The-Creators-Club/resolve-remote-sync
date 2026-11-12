@@ -99,7 +99,7 @@ Every section ends with three lists:
 | 31 | [Search across transcripts, auto-shorten, the edit chat, translation](31-timeline-cards-search-shorten-chat-translate.md) |
 | 32 | [Sending to Resolve, the projects sheet and keep-on-this-device, the video window, the montage builder, markers](32-timeline-cards-resolve-projects-video-montage-markers.md) |
 | 33 | **OWED.** The shelf, gap notes, keep, looks, the lane feature, audio, the Windows and Android apps (`features/shelf`, `gapnotes`, `keep`, `looks`, `lane`, `audio`, `adapters`, `apps`) |
-| 34 | **OWED.** The editor's server, the cut-list model and the `.cut.md` file format as a user and other tools meet them (`server`, `core`, `cutmd`) |
+| 34 | [The editor's server, the cut-list model and the `.cut.md` file format](34-timeline-cards-server-and-cut-list-format.md) |
 
 ### The engine behind Timeline Cards (found owed 2026-11-12)
 

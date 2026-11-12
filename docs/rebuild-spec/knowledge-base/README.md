@@ -100,7 +100,7 @@ Not yet in the register, and owed:
 **Readers: done.** `python docs/rebuild-spec/tools/check_parts.py` prints
 `OK` for all 59 parts. A part cost about 2.2 % of a five-hour usage window.
 
-**Mergers: starting.** `python docs/rebuild-spec/tools/build_merge_bundles.py`
+**Mergers: 17 of 20 bundles merged at 2026-11-12 20:15 UTC, paused for the usage window. Still to merge: `cards-editor-1`, `cards-editor-2`, `footage-sorter-and-camera-cards`. Then the fold of the three editor pieces, the pass across capabilities, and the split into what crosses, what is sealed and the trace.** `python docs/rebuild-spec/tools/build_merge_bundles.py`
 gathers the parts' entries into one bundle per capability under
 `../_raw/merge/` (rebuild it only before any merger has run, or after all
 have). Each merger follows [`_parts/KB_MERGE_BRIEF.md`](_parts/KB_MERGE_BRIEF.md)

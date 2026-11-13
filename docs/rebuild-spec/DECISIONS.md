@@ -60,3 +60,30 @@ does, for the specification:
   of the always-on part.
 - A part that is switched off is visible to nobody except an admin, in
   settings, listed with its switch.
+
+## Page 2: where you ruled two ways at different times (asked 2026-11-13, not yet answered)
+
+These come from the knowledge base. In each, an earlier ruling of yours and
+a later one (or a later report) point different ways, and the dates alone
+did not settle which you want. The recommendation is the later position
+unless something argues against it.
+
+| # | Question | Earlier | Later | Recommendation |
+|---|---|---|---|---|
+| 1 | Inserting a music cue at a point where a music clip is already playing: make room for it, or refuse? | Insert was to make room | Making room cut clips in half, so it was changed to refuse before touching anything | **Refuse, and offer "place it on the track below" in the same message.** Nothing on the timeline is ever cut by a music insert |
+| 2 | A project ticked "upload only" on a computer: does its empty folder structure come down, so the editor can see where originals go? | You wanted the folders, as places to put originals | A report that upload-only filled the local folder with empty folders, fixed so that nothing comes down | **Nothing comes down.** The editor's own folders go up as they are made. Say if you want the structure after all |
+| 3 | Quitting or updating the app while a file is uploading: stop the upload, or let it finish? | Not ruled; the app sometimes left the old upload running beside a new one | The rule became "never two uploads of one file" | **Quitting stops it and it picks up where it left off next time. An update waits for the file in flight, up to a limit, then does the same.** No progress is thrown away |
+| 4 | The sync drive comes back under a different name (macOS sometimes adds a number): carry on, or pause with instructions? | The same drive should resume under any name | A numbered remount pauses, with instructions | **Carry on when it is provably the same drive**, whatever it is called; pause only when the product cannot tell. Fewer manual steps, same safety |
+| 5 | The Footage Sorter moving originals into their final folders: does each move still wait for an admin's approval? | Yes: a dry run, then one clip, then everything, each approved | Clips dropped in should now process on their own, with a manual override | **Keep the approval for moves of originals.** Sorting is proposed on its own, and one approval sends it. "Runs on its own" was about preparing interviews for Timeline Cards, not about moving originals |
+| 6 | Montages: may they use the studio news anchors' link lines? | No: an early montage excluded them | "Montages are always and ONLY downloaded material - newsreaders, coverage, etc." | **Yes, newsreaders' lines are in.** Only the film's own interviews are out |
+| 7 | A cut sent to Resolve: are markers placed on the timeline? | No markers | Later you asked for section markers and gap-note markers | **Yes: sections and gap notes become markers.** Nothing else is marked |
+
+Reply with the numbers you disagree with; anything not mentioned is taken
+as the recommendation.
+
+Not asked, because the rule holds either way: about 385 lessons marked
+still open, outcome not found, or fixed but never shipped (listed in
+`knowledge-base/_owner/QUESTIONS.md`). Each stands as a rule the rebuild
+must meet unless you say one is no longer wanted. Sixteen factual
+disagreements were settled from the code and the record
+(`knowledge-base/_owner/SETTLED_BY_EVIDENCE.md`).

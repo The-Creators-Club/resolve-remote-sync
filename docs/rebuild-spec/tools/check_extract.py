@@ -34,7 +34,10 @@ QKINDS = ("several ways in", "built twice", "dormant", "either-or", "other")
 
 
 def section_path(nn: str):
-    hits = glob.glob(os.path.join(INV, nn + "-*.md"))
+    # Section 21 has four companion files under _parts/ (21a to 21d); each is
+    # extracted as a section of its own.
+    hits = (glob.glob(os.path.join(INV, nn + "-*.md"))
+            + glob.glob(os.path.join(INV, "_parts", nn + "-*.md")))
     return hits[0] if hits else None
 
 
@@ -50,8 +53,10 @@ def headings(nn: str):
 
 
 def sections():
-    return sorted(os.path.basename(p)[:2] for p in glob.glob(os.path.join(INV, "[0-9][0-9]-*.md"))
-                  if os.path.basename(p)[:2] not in SKIP)
+    paths = (glob.glob(os.path.join(INV, "[0-9][0-9]-*.md"))
+             + glob.glob(os.path.join(INV, "_parts", "[0-9][0-9][a-z]-*.md")))
+    names = [os.path.basename(p).split("-")[0] for p in paths]
+    return sorted(n for n in names if n not in SKIP)
 
 
 def parse(nn: str):

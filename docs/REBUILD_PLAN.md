@@ -473,8 +473,8 @@ read the current code.
 |---|---|---|
 | 1 | **Finish the inventory**: a list of everything the software does, read from the code alone, in `docs/feature-inventory/`. | **40 sections written 2026-11-12**, the Footage Sorter (35 to 38) and the engine behind Timeline Cards (39, 40) included. **Sections 41 to 43 added the same day**, when the owner brought the pipeline before the editor, and the planning step, into the rebuild; section 44 (Story Deck) is a partial record only, because he cut Story Deck. **Complete at 43.** Two top-ups owed before it is used: sections 06 and 10 (ten companion commits about camera cards landed after they were read), and section 36's audio sync (read while another session was still building it). |
 | 2 | **The knowledge base**: everything real use taught, gathered from every place it was written down (the owner's own messages, the bug ledger, the gotchas, the hunts, the memory notes, the commits), one entry per lesson, each ending in a rule the rebuild can be tested against. In `docs/rebuild-spec/knowledge-base/`. | **Written 2026-11-13; the owner's part is open.** 7,855 register items, read in 59 slices into 4,442 lessons, merged per capability, repeats across capabilities folded: **2,230 lessons cross, in 18 files** (`docs/rebuild-spec/knowledge-base/<capability>.md`), and **209 sealed tool notes** wait in `docs/rebuild-spec/sealed/`. Every count closes (`check_parts.py`, `check_merge.py`, `check_cross.py`, `assemble_kb.py`, all `OK`). Still owed: the owner's answers to `knowledge-base/_owner/QUESTIONS.md` (lessons still open, outcomes not found, fixes never shipped, disagreements), his test of twenty remembered problems, razer's history, and the top-up before hand-over. Method and state: `docs/rebuild-spec/knowledge-base/README.md`. |
-| 3 | **Rewrite the inventory as one specification organised by what people do** (sync a project, make proxies, find b-roll, cut in Timeline Cards, and so on). No source-file tags, no route or config-key names, each capability described once, each capability linked to the knowledge-base entries that apply to it. | Not started. |
-| 4 | **A decision list for the owner**: every overlap in what a person can do, every several-ways-in, every dormant or dead feature, each as a keep / cut / merge question with a recommendation. Only questions about WHAT the product does; never an engineering question. A question he has already answered in a past session is shown with his answer, not asked cold. The list itself stays behind; only his answers, restated as what the product does, reach the specification. | Not started. |
+| 3 | **Rewrite the inventory as one specification organised by what people do** (sync a project, make proxies, find b-roll, cut in Timeline Cards, and so on). No source-file tags, no route or config-key names, each capability described once, each capability linked to the knowledge-base entries that apply to it. | **Started 2026-11-13**, after the owner answered page 1 of the decision list. Method under "Step 3 as it is being done". Extracts: see `python docs/rebuild-spec/tools/check_extract.py`. |
+| 4 | **A decision list for the owner**: every overlap in what a person can do, every several-ways-in, every dormant or dead feature, each as a keep / cut / merge question with a recommendation. Only questions about WHAT the product does; never an engineering question. A question he has already answered in a past session is shown with his answer, not asked cold. The list itself stays behind; only his answers, restated as what the product does, reach the specification. | Page 1 (what can be switched on and off) asked and answered 2026-11-13: every recommendation accepted. `docs/rebuild-spec/DECISIONS.md`. Later pages come from step 3. |
 | 5 | **Three companions**: (a) the givens the rebuild must live with, taken from the knowledge base; (b) what information must still be there afterwards; (c) the look book: screenshots of every screen plus the look written as plain values. Plus the two sealed drawers: notes per chosen tool, and the old data's real formats. | Not started. |
 | 6 | **The purge check and the clean room**: the word scan, the blind reader, and a place for the rebuild session to run where the old build cannot be seen. | Not started. |
 
@@ -1056,6 +1056,42 @@ matters to a person, and every refusal. Write it from the inventory and the
 knowledge base; settle each "could not determine" by reading the other
 section that answers it, or the code. End each capability with "what real
 use taught", linking its knowledge-base entries.
+
+**Step 3 as it is being done (started 2026-11-13).** The same shape as step
+2, because it worked: readers who each see one slice, then writers who each
+see one capability, with a script that proves nothing was skipped.
+
+1. **The capabilities.** `docs/rebuild-spec/spec/CAPABILITIES.md`: the same
+   18 the knowledge base is filed under, each with the knowledge base's own
+   sub-topics, so a behaviour and the lessons about it end up side by side.
+   The six switchable parts are marked (decision list, page 1).
+2. **The extracts (one reader per inventory section, 43 of them, four at a
+   time).** Each follows `docs/rebuild-spec/spec/_extracts/EXTRACT_BRIEF.md`
+   and writes `spec/_extracts/<NN>.md`: the section restated as what a
+   person gets, each item filed under a capability and sub-topic, with the
+   insides left behind. Three things are copied exactly (`Exact: yes`): the
+   Timeline Cards editor's keys, gestures, controls and wording; the
+   `.cut.md` file; and the named export formats. Each extract also lists
+   the questions for the owner (several ways in, built twice, dormant), the
+   kinds of information the live studio holds (for the carry-over list of
+   step 5) and what the inventory left unsettled. Section 44, Story Deck,
+   is not extracted.
+3. **The count.** `python docs/rebuild-spec/tools/check_extract.py`: every
+   `##` and `###` heading of every inventory section is accounted for, by
+   the items drawn from it or by the reason it was left behind, and the
+   giveaway-word net passes. A reader's prompt is the brief line, "Your
+   inventory section is `<NN>`: read `<path>` completely", one sentence on
+   what it holds, the output path, and the temporary-file prefix `spx<NN>-`.
+4. **The writers (one per capability, more for a large one).** A script
+   gathers each capability's items with the knowledge-base lessons of the
+   same sub-topics; a writer turns them into that capability's document:
+   each behaviour once, every way in, every automatic decision with its
+   manual override, what a person sees when a part is switched off, a plain
+   name and search words for each page, part and setting, and at the end of
+   each sub-topic the lessons it must meet and any lesson no behaviour yet
+   covers. Not started; its brief is written after the extracts are in.
+5. **The questions** gathered by the readers and the writers become the
+   later pages of the decision list (step 4).
 
 **Step 4, the decision list.** `docs/rebuild-spec/DECISIONS.md`. One numbered
 question per overlap, in plain words, each with: what exists today, the

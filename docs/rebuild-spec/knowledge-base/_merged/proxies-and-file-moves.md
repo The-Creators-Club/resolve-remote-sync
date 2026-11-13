@@ -27,7 +27,6 @@ A proxy is a small copy of a camera original that editors cut with; Resolve play
 - What the product must do: A proxy's timecode names the same frame in the same drop-frame form Resolve reads from the original, verified on the value and form written and by Resolve accepting it.
 - Kind: 1a
 - From: H01-052, C01-096, L03-058, M02-036, L09-037
-- Check: Should Sony colon timecode at 29.97 and 59.94 always be written drop-frame, or only when Resolve reads the original as drop-frame?
 
 ### PRX-005: Resolve refused proxies only one or two frames short.
 - What was going on: Resolve rejects a proxy whose frame count differs from the original's by even one frame, though it plays fine; a check with two frames of slack let them through.
@@ -576,7 +575,7 @@ A proxy is a small copy of a camera original that editors cut with; Resolve play
 
 ### PRX-090: When several copies of a missing clip exist, the largest is the right one.
 - What was going on: The owner ruled "1.mov should be the largest": same-named duplicates were full-resolution files beside proxies, and backups were byte-identical across drives.
-- What the product must do: Among same-named candidates the largest file, the original, beats a proxy, and identical backups do not count as a conflict.
+- What the product must do: Among same-named candidates the closest matching folder path wins; only when that leaves a tie does the largest file, the original, beat a proxy; identical backups are no conflict.
 - Kind: 2
 - From: P01-008
 

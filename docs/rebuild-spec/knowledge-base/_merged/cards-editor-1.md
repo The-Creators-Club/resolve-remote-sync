@@ -519,8 +519,6 @@
 - What was going on: The owner: the pop "ruins my ability to hear if a cut is smooth"; same-recording joins jumped position with no ramp, clicks up to 7.5 times the normal sample step.
 - What the product must do: Across any join, at 1x and 2x and several in a row, no click is louder than the audio around it, and any smoothing stays a few milliseconds.
 - Kind: 3
-- State: fixed, never shipped
-- Check: Sources from the same day disagree on whether click-free joins were shipped; were they?
 - From: D01-011, P11-051, M01-024
 
 ### CE1-084: Cuts play back to back with no pause at the join.

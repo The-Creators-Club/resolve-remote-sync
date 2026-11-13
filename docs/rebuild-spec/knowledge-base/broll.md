@@ -51,7 +51,7 @@
 
 ### BRO-011: Changing a folder name's capitals made the whole folder be indexed again.
 - Why: Windows drives and NAS shares treat "Youtube" and "YouTube" as one folder, but an exclusion rule compared letter case exactly.
-- Must: Path comparisons on these drives and shares ignore letter case, so a capitals-only rename changes nothing.
+- Must: Path comparisons follow each volume's own case rule: editors' Windows and Mac disks ignore case, the NAS itself does not, so a capitals-only rename there is a real rename.
 - Kind: given
 
 ### BRO-012: Two archive names differing only in case land in one folder.

@@ -48,7 +48,7 @@
 155 | distinct
 156 | same | RSV-097 | PRX-078
 157 | same | PRX-089 | RSV-095
-158 | conflict | PRX-090 | RSV-096 | When several same-named files could relink a missing clip, does the largest file always win, or does the longest matching folder path rank ahead of size?
+158 | distinct
 159 | same | PRX-096 | RSV-072
 160 | distinct
 161 | distinct
@@ -56,7 +56,7 @@
 163 | distinct
 164 | distinct
 165 | same | SRV-012 | RSV-039
-166 | conflict | RSV-115 | YTD-037 | Does Resolve 21 decode and render AV1 originals reliably, or must AV1 be kept away from Resolve like VP9?
+166 | distinct
 167 | distinct
 168 | distinct
 169 | distinct

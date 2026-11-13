@@ -473,7 +473,7 @@ See also, filed under another capability:
 
 ### PRX-090: When several copies of a missing clip exist, the largest is the right one.
 - Why: The owner ruled "1.mov should be the largest": same-named duplicates were full-resolution files beside proxies, and backups were byte-identical across drives.
-- Must: Among same-named candidates the largest file, the original, beats a proxy, and identical backups do not count as a conflict.
+- Must: Among same-named candidates the closest matching folder path wins; only when that leaves a tie does the largest file, the original, beat a proxy; identical backups are no conflict.
 - Kind: ruling
 
 ### PRX-091: Uncertain relink matches are reviewed one by one before anything changes.

@@ -138,7 +138,7 @@
 - What was going on: Holding the trim key while the lane played repeated the edit 350 times in 90 seconds, each on the next clip, until every clip was 1 to 7 frames.
 - What the product must do: Holding an editing key never repeats the edit; one press is one edit; every cut-list revision is kept so a damaged list can be restored.
 - Kind: 3
-- Check: is every cut-list revision now kept so a damaged list can be restored?
+- State: still open
 - From: P14-005, M01-049
 
 ### CE3-023: Undo steps back through saved versions of the cut.

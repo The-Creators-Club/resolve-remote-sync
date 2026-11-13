@@ -430,7 +430,6 @@
 - What was going on: Deaths before the app finished starting were not counted as failed starts, so sync stopped until someone restored the old build by hand on each machine.
 - What the product must do: After two failed starts of a new build, the app restores the previous build by itself and syncing resumes with no one touching the machine.
 - Kind: 3
-- State: fixed, never shipped
 - From: L11-032
 - Move to: releases-and-updates
 

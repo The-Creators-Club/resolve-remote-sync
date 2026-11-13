@@ -2,32 +2,11 @@
 
 Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not edit by hand.
 
-- 124 lessons the old product never solved (**still open**). Each is a rule the rebuild must meet; say if any is no longer wanted.
-- 154 reports whose outcome could not be found (**outcome not found**). Say whether it was fixed, still happens, or no longer matters.
+- 123 lessons the old product never solved (**still open**). Each is a rule the rebuild must meet; say if any is no longer wanted.
+- 152 reports whose outcome could not be found (**outcome not found**). Say whether it was fixed, still happens, or no longer matters.
 - 109 fixes written but never released to the editors (**fixed, never shipped**), so nobody has used them.
-- 19 questions where two sources disagreed and the dates did not settle it.
-- 6 pairs of lessons that cannot both hold.
-
-## Lessons that cannot both hold
-
-- **Should path comparisons always ignore letter case on the studio's drives and shares, or follow each volume's own case rule, given the NAS can hold "youtube" and "Youtube" side by side?**
-  - BRO-011: Path comparisons on these drives and shares ignore letter case, so a capitals-only rename changes nothing.
-  - PRX-086: Path comparisons follow the real volume's case rule, and file operations use the path's own spelling.
-- **Should every placement into Resolve name a media type, given that pinning a clip to one media type loses its sound?**
-  - CRX-016: Every placement names its track and media type and counts only after its track and start are read back; missing picture or sound is reported by track.
-  - RSV-110: After adding a clip to a timeline, the product confirms it is there at the expected start, without pinning it to one media type and losing its sound.
-- **Is a cut's gain to be carried into Resolve at the level set (proven by reading it back), or is it a given that Resolve's scripting cannot set clip volume, so every send only names the gains it dropped?**
-  - CRX-038: Every send and export carries fades, gain and levelling where it can, and names each one it dropped, with a count in words.
-  - CRX-042: A cut's gain reaches Resolve at the level set, proven by reading back a known level; until then every send says gain was not carried.
-- **When several same-named files could relink a missing clip, does the largest file always win, or does the longest matching folder path rank ahead of size?**
-  - PRX-090: Among same-named candidates the largest file, the original, beats a proxy, and identical backups do not count as a conflict.
-  - RSV-096: Candidates are ranked by longest matching path tail, then the root most other clips resolved to, then larger file, and ambiguous picks are shown first.
-- **Does Resolve 21 decode and render AV1 originals reliably, or must AV1 be kept away from Resolve like VP9?**
-  - RSV-115: The editor is warned as soon as a timeline uses VP9 originals, naming each clip and the fix, and is warned again for any newly added one.
-  - YTD-037: No downloaded clip reaches any editor's Resolve in VP9, AV1 or Opus.
-- **How many failed starts, within what time, should make an editor's computer restore the previous build on its own?**
-  - APP-068: After two failed starts of a new build, the app restores the previous build by itself and syncing resumes with no one touching the machine.
-  - REL-048: The previous build is kept until the new one proves healthy, and three crashing starts within 10 minutes restore it, never below the signed minimum, and tell the editor.
+- 9 questions where two sources disagreed and the dates did not settle it.
+- 0 pairs of lessons that cannot both hold.
 
 ## Accounts, privacy and the legal paperwork
 
@@ -76,11 +55,6 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 ## Proxies and file moves
 
-### Question only
-
-- **PRX-004** Sony footage at 29.97 or 59.94 got proxies Resolve refused on drop-frame form. Must: A proxy's timecode names the same frame in the same drop-frame form Resolve reads from the original, verified on the value and form written and by Resolve accepting it.
-  - **Question:** Should Sony colon timecode at 29.97 and 59.94 always be written drop-frame, or only when Resolve reads the original as drop-frame?
-
 ### Still open
 
 - **PRX-027** 148 ordinary clips were sent to the external proxy generator. Must: Clips the product can decode get proxies from its own encoder; only formats it cannot decode, such as Blackmagic RAW, go elsewhere.
@@ -117,13 +91,11 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 - **REL-022** One version number meant two different programs. Must: A version always means one set of bytes everywhere; republishing identical bytes changes nothing, different bytes are refused as a conflict, and the studio tests exactly what customers receive.
 - **REL-038** The builds list must show the newest first and hide old versions. Must: Each product and platform shows its newest build first, older ones only in a rollback picker, one place updates everything, and only truly modified builds are marked so.
-- **REL-048** An update that crashed minutes after starting left the editor with no app. Must: The previous build is kept until the new one proves healthy, and three crashing starts within 10 minutes restore it, never below the signed minimum, and tell the editor.
 - **REL-050** An update killed midway left nothing to start at sign-in. Must: An update interrupted at any point leaves a program that starts at sign-in, recovered without a person renaming files.
 - **REL-077** The update address written into every install can never move. Must: Every install fetches updates from a vendor-owned address that can be redirected without touching any installed site.
 
 ### Fixed, never shipped
 
-- **APP-068** A new build that died on start was never rolled back. Must: After two failed starts of a new build, the app restores the previous build by itself and syncing resumes with no one touching the machine.
 - **REL-012** The key the whole fleet trusts sat unprotected, with no backup. Must: Signing asks for the passphrase every time, the key restores from either backup, missing backups are reminded each release, and a written plan exists for a stolen key.
 - **REL-018** An old or wrongly dated release list could lock computers out. Must: Computers refuse a release list older than one already seen, and list dates never go backwards because a publisher's wrong clock is caught and named.
 - **REL-021** A release failed twenty minutes in, or halfway, for something known at the start. Must: Every refusal a release can meet is checked before its first long or irreversible step.
@@ -358,13 +330,6 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 ## The dashboard
 
-### Question only
-
-- **DSH-106** Settings saved on the dashboard were ignored by the server itself. Must: A saved setting takes effect everywhere, server included, within seconds and without restart, from one source; core features never depend on an optional feature's switch.
-  - **Question:** One same-day source says this was still open; does any setting still need a restart, or have a second source?
-- **DSH-142** An error page showed data store host, user and server paths to any user. Must: Pages show only the kind of error and that the server log has the detail, never raw internal error text, admins included.
-  - **Question:** Should the problem notice for a server error still carry its message and code locations (DSH-092), given pages never show raw error text?
-
 ### Still open
 
 - **DSH-001** The home page is an Overview, not the sync page. Must: Home shows problems, health, a sync summary, each module's status, the version, and quick links to commonly used settings.
@@ -411,8 +376,6 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 ### Outcome not found
 
-- **SRV-015** The owner: a customer installs two things, then a browser wizard does the rest. Must: A new studio is set up from a browser wizard after those installs, with no commands, builds, signing keys or manual steps on the customer's side.
-  - **Question:** was the two-installs-then-wizard setup ever shipped to a customer, or only built?
 - **SRV-020** Nobody but its makers had ever installed the product on a clean NAS. Must: On a clean NAS, following only the published guide, a newcomer reaches first sync, first update and first rollback on one Windows and one Mac editor.
 - **SRV-041** Settings the operator changed did nothing, or reverted at an update. Must: Every setting takes effect when changed or the dashboard says why not, and updates and reinstalls keep every setting, secret and saved choice, showing any change first.
 - **SRV-042** The owner: updating the server must not take the dashboard away. Must: A server update keeps the dashboard and open editor pages answering throughout, with no gap a person or an editor's app can notice.
@@ -428,6 +391,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **SRV-006** A TrueNAS API key was refused when presented as the admin. Must: The server signs in to the NAS as the key's own account, and a refused sign-in names the account that was presented.
 - **SRV-007** Synology and TrueNAS number users differently, so a fixed account number fails. Must: Install uses the real NAS account the server runs as, and every start warns, naming account and owner, when that account does not own its data folder.
 - **SRV-013** Resolve's project database server ships with a well-known superuser password. Must: Any Resolve project database the product sets up gets a random password, accepts only the studio's LAN and private network, and is backed up.
+- **SRV-015** The owner: a customer installs two things, then a browser wizard does the rest. Must: A new studio is set up from a browser wizard after those installs, with no commands, builds, signing keys or manual steps on the customer's side.
 - **SRV-021** The admin could see setup problems but had no way to fix them. Must: Every value setup checks can be entered in setup itself, and every finding's next action is doable from the product's pages, never by editing files or redeploying.
 - **SRV-026** A fresh install's sync service restart-looped because it could not write its folders. Must: On a fresh install every server service starts once and stays up, and every folder it writes exists and is writable by the account it runs as.
 - **SRV-027** Re-running the install with the build already running tore the app down. Must: Re-running the install with the build already running leaves the running server untouched.
@@ -518,19 +482,12 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 ## Timeline Cards: the editor
 
-### Question only
-
-- **CE3-022** A held trim key during playback shrank a whole cut to frame-long pieces. Must: Holding an editing key never repeats the edit; one press is one edit; every cut-list revision is kept so a damaged list can be restored.
-  - **Question:** is every cut-list revision now kept so a damaged list can be restored?
-
 ### Still open
 
 - **CE1-066** One cut list saved from two places at once can lose one side's change. Must: When one cut list is saved from two places at once, both changes are kept or the second is refused, with the conflict shown to both people.
 - **CE1-090** Zoomed in, the playing playhead jumped and the strip did not follow. Must: A playing playhead moves smoothly at every zoom, and the strip pages forward when the head reaches its edge unless the person is panning.
 - **CE1-137** Any cut list of any episode can be kept offline. Must: Any cut list of any episode can be downloaded and listed offline, and its queued edits replay without it being opened first.
 - **CE1-144** Updating one episode's offline copy deleted every other episode's. Must: Each episode's offline copy survives updates to the others, and downloaded media is removed when no longer needed or space runs low.
-- **CE2-037** An empty section could not be dragged and shared its fold with the next. Must: Each section is told apart by its own identity, not position, for dragging, dropping, tap-to-place and folding, including sections with no cuts.
-  - **Question:** Does an empty section now fold, drag and take tap-to-place independently of its neighbour?
 - **CE2-062** A multicam clip in Resolve has no file path of its own. Must: Previewing a cut from a multicam clip shows picture taken from its angles' source files.
 - **CE2-084** Finding words stays instant at hundreds of transcripts. Must: Find across 500 transcripts answers within a second, a newer keystroke cancels the older search, and the transcript panel redraws within 60 ms.
 - **CE2-096** Closing a tab must stop the assistant work it started. Must: Closing the tab cancels its assistant work within seconds, and interactive requests never wait behind background ones.
@@ -541,6 +498,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **CE2-172** The cut view must stay smooth on a phone at 500 cards. Must: At 500 cards one change updates the edit view on a mid-range phone within one frame (16 ms).
 - **CE2-175** Closing an episode leaked about 128 MB until memory ran out. Must: Closing an episode frees everything it used, so opening and closing episodes for days never exhausts the server.
 - **CE3-017** "Fit" showed only the first quarter of a 2.5-hour cut. Must: Fit shows a 2.5-hour cut whole, or says its limit and keeps the head in view.
+- **CE3-022** A held trim key during playback shrank a whole cut to frame-long pieces. Must: Holding an editing key never repeats the edit; one press is one edit; every cut-list revision is kept so a damaged list can be restored.
 - **CE3-047** The picture drifted 0.13 s behind the sound during playback. Must: During playback the picture stays within three frames of the sound, on the local network and over a slow remote link.
 - **CE3-052** Dropping one search result onto a cut wiped the rest of the results. Must: Dropping one result never silently loses the others; results stay until the person runs a new search or closes them.
   - **Question:** should transcript search results survive every refresh of the page's state?
@@ -562,8 +520,6 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 ### Fixed, never shipped
 
-- **CE1-083** Playback popped at splices, ruining the judgement of each cut. Must: Across any join, at 1x and 2x and several in a row, no click is louder than the audio around it, and any smoothing stays a few milliseconds.
-  - **Question:** Sources from the same day disagree on whether click-free joins were shipped; were they?
 - **CE1-110** The controller drives the transcript like the timeline. Must: The pad acts on the focused pane; in the transcript the right stick steps word by word, LT plus stick selects, and LT plus X inserts after the selected card.
 - **CE2-067** An abandoned video request kept streaming the whole file. Must: When a browser abandons a media request, the server stops reading and sending it within a second.
 - **CE2-105** Retiring or updating a page wiped other pages' offline copies. Must: Retiring or updating a page never deletes anything a device saved; installed pages keep working offline, and unsent edits survive a rollback.
@@ -580,8 +536,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 ### Still open
 
 - **CRX-005** Mixed-rate clips land in Resolve at a length Resolve decides. Must: Each cut starts at the previous item's read-back end, with no gaps or overlaps, and its placed length matches the clip's real rate within 0.04 seconds.
-  - **Question:** Does Resolve rate-conform mixed-rate clips or lay them frame for frame, and does a project setting decide which?
-- **CRX-042** A per-cut gain was asked for but never reached Resolve. Must: A cut's gain reaches Resolve at the level set, proven by reading back a known level; until then every send says gain was not carried.
+- **CRX-042** A per-cut gain was asked for but never reached Resolve. Must: A cut's gain reaches Resolve at the level set, proven by reading back a known level; until proven, every send and export says plainly whether gain was carried.
 - **CRX-073** A build stopped early left 54 cuts with no audio or markers. Must: A send reports done only when picture, sound and markers are all placed, flags any partial timeline, and keeps a steady status while Resolve is idle.
 - **CRX-106** A TV network delivery needs two-language subtitles and a name-strap list per episode. Must: Each delivered episode gets English and Chinese subtitle files in its own folder, and a list of every speaker with a screenshot and name.
 
@@ -631,11 +586,6 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 ## sealed notes
 
-### Question only
-
-- **SRV-S01** The private-network tool's packaged start-up gives up and keeps minting login links. Must: A first sign-in to the private network on the NAS shows one stable login link until completed from setup, and publishing is set only afterwards.
-  - **Question:** one source says this was fixed and live, a same-day one says outcome not found; which holds?
-
 ### Still open
 
 - **BRO-S03** Fixed instructions after the images never hit the cache, and answers were cut off. Must: Repeated fixed text is cached, no answer is cut off by the output limit, and a long session's input does not grow with every earlier image.
@@ -643,8 +593,6 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **CFI-S13** Singing and chanting come out as gaps with no text. Must: Long stretches of sound with no text are marked, so the editor can find sung or chanted material.
 - **CFI-S28** Writing corrected transcripts back into Resolve's library was never proven. Must: No transcript is written into Resolve's library until a sandbox test shows Resolve reading it back correctly.
 - **CRX-S06** Reading Resolve's live library must not hold it open or bypass its locks. Must: Reads never stay open between uses, writes always check Resolve's lock, and every real library is protected whatever its name.
-- **SRV-S07** Snapshots mounted on demand do not reach a program behind a default mount. Must: The snapshot folder is mounted with propagation from the host and setup prints the host-side check, or snapshots are read another way.
-  - **Question:** one same-day source calls this fixed and live, the other still open; which holds?
 - **SYN-S12** The folder sync tool upgrades itself and reports crashes to its makers. Must: Helper tools on editors' computers stay at the pinned version and send nothing to their makers.
 
 ### Outcome not found
@@ -662,6 +610,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **APP-S11** The app trusted expired Windows store certificates that Windows itself ignores. Must: Expired store certificates are filtered out before any secure connection object is created.
 - **RSV-S07** Resolve's list of project libraries can miss the shared database libraries. Must: Every project library is found from the scripting list, Resolve's log and the disk library folders, and each is read read-only, once per library.
 - **RSV-S10** Resolve's scripting switch lives in both preference files, which must agree. Must: The setting is written to both files while Resolve is closed, and reported as set only when both say Local.
+- **SRV-S01** The private-network tool's packaged start-up gives up and keeps minting login links. Must: A first sign-in to the private network on the NAS shows one stable login link until completed from setup, and publishing is set only afterwards.
 - **SRV-S02** An empty private-network member answers "nothing published" with a null body. Must: Read a null answer as "nothing published", and refuse to publish, naming the admin page to fix, while the network's certificates are off.
 - **SRV-S03** The server's private-network sign-in expires after 180 days by default. Must: The server watches its own network connection, warns 14 days before expiry, and raises one alert when most computers go silent together.
 - **SRV-S11** A new database password was announced but the existing database kept the old one. Must: Changing the password on an existing database actually changes it, or the server refuses to start and says so.

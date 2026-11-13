@@ -16,7 +16,7 @@
 16 | distinct
 17 | same | BRO-009 | APP-107
 18 | same | SYN-066 | BRO-010
-19 | conflict | BRO-011 | PRX-086 | Should path comparisons always ignore letter case on the studio's drives and shares, or follow each volume's own case rule, given the NAS can hold "youtube" and "Youtube" side by side?
+19 | distinct
 20 | distinct
 21 | distinct
 22 | distinct
@@ -24,7 +24,7 @@
 24 | distinct
 25 | distinct
 26 | same | BRO-106 | MUS-050
-27 | conflict | CRX-016 | RSV-110 | Should every placement into Resolve name a media type, given that pinning a clip to one media type loses its sound?
+27 | distinct
 28 | same | ALL-051 | BRO-119
 29 | distinct
 30 | distinct
@@ -58,7 +58,6 @@
 58 | same | CE2-045 | CE3-037
 59 | distinct
 60 | same | CRX-038 | CE2-060
-60 | conflict | CRX-038 | CRX-042 | Is a cut's gain to be carried into Resolve at the level set (proven by reading it back), or is it a given that Resolve's scripting cannot set clip volume, so every send only names the gains it dropped?
 61 | distinct
 62 | same | CFI-099 | CE2-076
 63 | same | CFI-106 | CE2-079

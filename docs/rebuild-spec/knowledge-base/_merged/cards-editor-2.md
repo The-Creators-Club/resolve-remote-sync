@@ -227,8 +227,6 @@
 - What was going on: A section with no cuts takes the next section's position, so a drag read as "dropped on itself" and folding one folded both.
 - What the product must do: Each section is told apart by its own identity, not position, for dragging, dropping, tap-to-place and folding, including sections with no cuts.
 - Kind: 3
-- State: still open
-- Check: Does an empty section now fold, drag and take tap-to-place independently of its neighbour?
 - From: D03-017, L04-017, D07-018
 
 ### CE2-038: A paid section summary vanished after any trim above it.

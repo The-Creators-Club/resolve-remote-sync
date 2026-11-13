@@ -230,9 +230,9 @@
 
 ## Files Resolve can decode
 
-### YTD-037: Resolve shows YouTube's VP9, AV1 and Opus downloads as Media Offline.
-- What was going on: Resolve fails to decode the VP9 ("Failed to decode the video frame"), AV1 and Opus files YouTube commonly serves, though the files are sound; about 1,495 studio files were affected.
-- What the product must do: No downloaded clip reaches any editor's Resolve in VP9, AV1 or Opus.
+### YTD-037: Resolve shows YouTube's VP9 and Opus downloads as Media Offline.
+- What was going on: Resolve fails to decode the VP9 ("Failed to decode the video frame") and Opus files YouTube commonly serves, though the files are sound; AV1 rendered fine when tested; about 1,495 studio files were affected.
+- What the product must do: No downloaded clip reaches an editor's Resolve in anything but H.264 picture with AAC sound: VP9 fails to decode and Opus sound drops offline.
 - Kind: 1a
 - From: M02-060, P05-037
 

@@ -311,7 +311,6 @@
 - What was going on: The previous build was deleted a minute after updating, and a macOS login item never restarts a crashed app.
 - What the product must do: The previous build is kept until the new one proves healthy, and three crashing starts within 10 minutes restore it, never below the signed minimum, and tell the editor.
 - Kind: 3
-- State: outcome not found
 - From: C03-014, L02-052, H07-023, H08-020
 
 ### REL-049: A computer reinstalled the crashing build it had just rolled back from.

@@ -32,7 +32,6 @@
 - Kind: 1a
 - State: still open
 - From: M05-025, M03-026, P09-044, M01-026
-- Check: Does Resolve rate-conform mixed-rate clips or lay them frame for frame, and does a project setting decide which?
 
 ### CRX-006: A Resolve timeline's frame rate can be set only while it is empty.
 - What was going on: Once a clip is placed the rate is fixed, so a build that does not set it first inherits the project default.
@@ -100,7 +99,7 @@
 
 ### CRX-016: With no track named, Resolve's append follows the destination-track buttons.
 - What was going on: With V1's destination toggle off nothing lands and no error comes back, a rollback done the same way restores nothing, and some audio-only positions place nothing.
-- What the product must do: Every placement names its track and media type and counts only after its track and start are read back; missing picture or sound is reported by track.
+- What the product must do: Every placement names its track; naming a media type means placing picture and sound separately and linking them; it counts only after read-back, and missing picture or sound is reported by track.
 - Kind: 1a
 - From: M04-003, M05-048
 
@@ -260,7 +259,7 @@
 
 ### CRX-042: A per-cut gain was asked for but never reached Resolve.
 - What was going on: The owner asked for per-cut gain; how Resolve stores a clip's volume was never confirmed, so a guessed level could put an unseen level into a timeline.
-- What the product must do: A cut's gain reaches Resolve at the level set, proven by reading back a known level; until then every send says gain was not carried.
+- What the product must do: A cut's gain reaches Resolve at the level set, proven by reading back a known level; until proven, every send and export says plainly whether gain was carried.
 - Kind: 2
 - State: still open
 - From: D01-047

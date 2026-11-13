@@ -729,7 +729,7 @@ See also, filed under another capability:
 
 ### DSH-142: An error page showed data store host, user and server paths to any user.
 - Why: A project that failed to open printed the raw internal error, connection details and server folder paths included, to every signed-in browser.
-- Must: Pages show only the kind of error and that the server log has the detail, never raw internal error text, admins included.
+- Must: Pages show only the kind of error and where the detail is kept; only the admin's problem notice carries the error's message, with secrets masked and its size limited.
 - Kind: situation
 
 ## Stopping and resuming the fleet

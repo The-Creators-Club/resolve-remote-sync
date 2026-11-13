@@ -74,7 +74,7 @@ See also, filed under another capability:
 
 ### CRX-016: With no track named, Resolve's append follows the destination-track buttons.
 - Why: With V1's destination toggle off nothing lands and no error comes back, a rollback done the same way restores nothing, and some audio-only positions place nothing.
-- Must: Every placement names its track and media type and counts only after its track and start are read back; missing picture or sound is reported by track.
+- Must: Every placement names its track; naming a media type means placing picture and sound separately and linking them; it counts only after read-back, and missing picture or sound is reported by track.
 - Kind: given
 
 ### CRX-017: Appending to a missing track reports success; a chosen track gets no linked audio.
@@ -206,7 +206,7 @@ See also, filed under another capability:
 
 ### CRX-042: A per-cut gain was asked for but never reached Resolve.
 - Why: The owner asked for per-cut gain; how Resolve stores a clip's volume was never confirmed, so a guessed level could put an unseen level into a timeline.
-- Must: A cut's gain reaches Resolve at the level set, proven by reading back a known level; until then every send says gain was not carried.
+- Must: A cut's gain reaches Resolve at the level set, proven by reading back a known level; until proven, every send and export says plainly whether gain was carried.
 - Kind: ruling
 
 ### CRX-043: A note on a gap becomes on-screen text in the Resolve timeline.

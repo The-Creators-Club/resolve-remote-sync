@@ -28,4 +28,3 @@ M27 | move | Settings, records and background work
 M28 | same | YTD-026 | SYN-061
 M29 | move | Windows, text and names
 M30 | move | Version numbers
-M16 | conflict | APP-068 | REL-048 | How many failed starts, within what time, should make an editor's computer restore the previous build on its own?

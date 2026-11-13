@@ -672,7 +672,6 @@
 - What was going on: Brand, project folder templates, shared folders, NAS kind and a feature switch reached computers while the server kept its install-time values.
 - What the product must do: A saved setting takes effect everywhere, server included, within seconds and without restart, from one source; core features never depend on an optional feature's switch.
 - Kind: 3
-- Check: One same-day source says this was still open; does any setting still need a restart, or have a second source?
 - From: L01-071, H04-047, H03-028
 
 ### DSH-107: The owner could not change the dashboard address in settings.
@@ -898,9 +897,8 @@
 
 ### DSH-142: An error page showed data store host, user and server paths to any user.
 - What was going on: A project that failed to open printed the raw internal error, connection details and server folder paths included, to every signed-in browser.
-- What the product must do: Pages show only the kind of error and that the server log has the detail, never raw internal error text, admins included.
+- What the product must do: Pages show only the kind of error and where the detail is kept; only the admin's problem notice carries the error's message, with secrets masked and its size limited.
 - Kind: 3
-- Check: Should the problem notice for a server error still carry its message and code locations (DSH-092), given pages never show raw error text?
 - From: L09-023
 
 ## Stopping and resuming the fleet

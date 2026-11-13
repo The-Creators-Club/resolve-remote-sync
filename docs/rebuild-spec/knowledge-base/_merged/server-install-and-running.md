@@ -94,8 +94,7 @@
 - What was going on: The admin should "do nothing except install" the private network and the server; "Only us as the issuers of the product should ever be building anything."
 - What the product must do: A new studio is set up from a browser wizard after those installs, with no commands, builds, signing keys or manual steps on the customer's side.
 - Kind: 2
-- State: outcome not found
-- Check: was the two-installs-then-wizard setup ever shipped to a customer, or only built?
+- State: fixed, never shipped
 - From: P06-006, M03-021
 
 ### SRV-016: The owner: the dashboard is reached only over the studio's private network.
@@ -840,7 +839,7 @@
 - What the product must do: A first sign-in to the private network on the NAS shows one stable login link until completed from setup, and publishing is set only afterwards.
 - Kind: 1b
 - Tool: Tailscale container image (containerboot, LocalAPI, Serve)
-- Check: one source says this was fixed and live, a same-day one says outcome not found; which holds?
+- State: fixed, never shipped
 - From: C02-002, M03-022
 
 ### SRV-S02: An empty private-network member answers "nothing published" with a null body.
@@ -886,8 +885,6 @@
 - What the product must do: The snapshot folder is mounted with propagation from the host and setup prints the host-side check, or snapshots are read another way.
 - Kind: 1b
 - Tool: Docker bind mount of a ZFS .zfs/snapshot directory (slave propagation)
-- State: still open
-- Check: one same-day source calls this fixed and live, the other still open; which holds?
 - From: L06-076, H05-088
 
 ### SRV-S08: The packaged install's settings file alters passwords with "$" or " #".

@@ -10,7 +10,7 @@ today, the options, a recommendation and what the choice changes for a
 person. An answer he gave in a past session is shown with its date, not
 asked again.
 
-## Page 1: what can be switched on and off (asked 2026-11-13, not yet answered)
+## Page 1: what can be switched on and off (asked and ANSWERED 2026-11-13)
 
 This page comes first because the specification's shape hangs on it: each
 thing that can be switched on and off becomes its own document.
@@ -40,5 +40,23 @@ thing that can be switched on and off becomes its own document.
 | 8 | Are alerts by mail, the weekly report and the daily health report switches? | Settings, off for customers by default | **Settings of the always-on part, not separate parts** | Nothing changes |
 | 9 | When a part is off, who can see that it exists? | Mixed: some show a greyed tab, some vanish | **Nobody sees it except an admin in settings**, where it is listed with its switch | Editors never meet a dead tab |
 
-Reply with the numbers you disagree with; anything not mentioned is taken
-as the recommendation.
+**The owner, 2026-11-13: "I'll accept all the recommendations."** So every
+recommendation in the table is his decision. Restated as what the product
+does, for the specification:
+
+- A site can switch five things on and off, each by itself: the b-roll
+  archive (client folders included), music, YouTube downloads, Timeline
+  Cards (footage in, the board, the editor and the hand-over, as one), and
+  camera cards with the Footage Sorter.
+- The help for the editing program is a sixth switch, on by default. With
+  it off nothing mentions that program, and b-roll, music and Timeline
+  Cards offer exports instead of sending to it.
+- Making proxies on editors' computers and sharing heavy work across the
+  computers are always available, each with its per-computer setting
+  (and, for shared work, its per-kind setting).
+- One site-wide switch turns the assistant off. Everything else still
+  works, and no assistant control is left on screen.
+- Mail alerts, the weekly report and the daily health report are settings
+  of the always-on part.
+- A part that is switched off is visible to nobody except an admin, in
+  settings, listed with its switch.

@@ -578,6 +578,20 @@ full of the old build and none of it crosses.
   - **Each module owns its own records**, so updating, switching off or
     removing one can never damage another's. Switching a module off hides it
     and stops its work; it deletes nothing.
+  - **DECIDED by the owner 2026-11-13 (decision list, page 1, "I'll accept
+    all the recommendations"):** a site can switch on and off, each by
+    itself: the b-roll archive (client folders included), music, YouTube
+    downloads, Timeline Cards (footage in, the board, the editor and the
+    hand-over as ONE switch), camera cards with the Footage Sorter, and the
+    help for the editing program (on by default; with it off nothing
+    mentions Resolve and the others offer exports instead). Always
+    available, with their per-computer settings: making proxies on editors'
+    computers, and sharing heavy work across the computers. One site-wide
+    switch turns the assistant off, leaving everything else working and no
+    assistant control on screen. Mail alerts and the health reports are
+    settings of the always-on part. A part that is off is seen by nobody
+    but an admin, in settings. The full page is in
+    `docs/rebuild-spec/DECISIONS.md`.
   - **Where the module lines fall is the fresh instance's to draw**, from
     what people do. The owner is asked only which things he wants to be able
     to switch on and off separately (for example b-roll, music, YouTube

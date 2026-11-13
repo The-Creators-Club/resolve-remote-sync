@@ -82,6 +82,17 @@ Translating, by example:
 | "Reads `X_TIMEOUT` (default 900)" for a wait nobody sees | left behind |
 | "The tray menu has ten items: ..." | each item, by what it does, in the order shown |
 
+Three habits of the inventory to translate every time:
+
+- **Rounds, passes, turns, cycles.** These are how the present build paces
+  itself. Say how soon and how often in clock time ("within about a
+  minute", "about every two hours"), never "one round in ten".
+- **Log lines.** What the product writes to its log is behind the glass. Do
+  not quote log lines. If something is ONLY logged, the item says that
+  nobody is told (that is itself worth knowing), in those words.
+- **Lists of internal states.** Carry the states a person is shown, in the
+  words they are shown. A state nobody sees is behind the glass.
+
 A setting that only tunes the present build's machinery (how many
 connections, how big a chunk) is behind the glass. A setting whose effect a
 person feels (a speed limit, a pause, how long something is kept) crosses,
@@ -222,7 +233,11 @@ about WHAT the product does for a person, never an engineering question.
 Kinds: `several ways in` (keep which?), `built twice` (which behaviour
 wins?), `dormant` (can it go?), `either-or` (two tools for one job),
 `other`. A duplication with no difference a person could notice is not a
-question: describe the behaviour once and move on.
+question: describe the behaviour once and move on. **In the Timeline Cards
+editor, several keys, buttons or gestures for one action is NOT a
+question**: the owner has already said all of them are kept. There, ask
+only where two controls for the same job BEHAVE differently, or where
+something is dormant, dev-only or unreachable.
 
 **Old data.** Information the live studio already holds that a rebuild must
 be able to bring across (people, their computers, what each syncs, cut

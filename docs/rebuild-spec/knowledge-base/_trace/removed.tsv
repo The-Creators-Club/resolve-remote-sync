@@ -1,0 +1,54 @@
+reader's entry	bundle	reason	register ids
+L08-070	broll	old build only	L-0880
+M04-045	cards-board	no longer applies: cards are tied to transcript words directly, not found by matching text	M-ed-sidecar-opencc-per-token
+D05-016	cards-board	no longer applies: the notes program and its board files are cut	D-tc-reorder-plan-002 D-tc-reorder-plan-010
+P11-052	cards-board	no longer applies: the notes program's canvas is cut	P-02696
+M03-070	cards-board	no longer applies: card sizing on the notes program's canvas is cut	M-ed-card-heights-render-not-autosize
+M03-069	cards-board	no longer applies: canvas layout tidying is cut	M-ed-canvases-written-reflowed
+P04-040	cards-board	no longer applies: column heights on the canvas; board columns are now themes	P-00851
+P03-016	cards-board	no longer applies: building a canvas file from theme assignments is cut	P-00544 P-00545
+D07-025	cards-board	no longer applies: the notes program's block links are cut	D-tc-whats-new-2026-09-03-001
+P13-043	cards-board	no longer applies: Story Deck is cut	P-03188 P-03189
+D05-062	cards-board	no longer applies: Story Deck is cut	D-tc-story-deck-juice-plan-001
+P13-044	cards-board	no longer applies: Story Deck is cut	P-03190 P-03193 P-03198 D-tc-story-deck-juice-plan-001
+P13-033	cards-board	superseded by BRD-005	P-03007 P-03010 P-03012 D-tc-story-deck-plan-011
+D06-001	cards-board	superseded by BRD-005	D-tc-story-deck-plan-001 D-tc-story-deck-plan-002 D-tc-story-deck-plan-008 D-tc-story-deck-plan-011 D-tc-story-deck-juice-plan-008
+P04-042	cards-editor-2	no longer applies: nothing before the hand-over may depend on Resolve, so the cards no longer mirror a live Resolve timeline	P-00852 P-00854
+P04-052	cards-editor-2	no longer applies: the translate button and draft translations in the editor are cut	P-00923
+C04-090	cards-editor-2	superseded by CE2-086	C-ed-6e000b5dd
+D05-074	cards-editor-2	no longer applies: paragraph links pasted from the notes program are cut with it	D-tc-staged-and-bins-plan-010
+P09-062	cards-editor-2	no longer applies: paragraph links pasted from the notes program are cut with it	P-02249
+D03-018	cards-editor-2	no longer applies: finding a paragraph by the notes program's block id is cut with it	D-tc-layout-011
+D02-034	cards-editor-3	superseded by CE3-081	D-tc-lag-investigation-004
+P04-049	cards-editor-3	superseded by CE3-065	P-00856 P-00860 P-00905 P-00906
+P09-023	cards-footage-in	superseded by CFI-049	P-02086 P-02089
+C05-044	cards-footage-in	superseded by CFI-049	C-ed-7f6dc5b9d
+D03-001	cards-footage-in	superseded by CFI-049	D-tc-layout-007
+D04-018	cards-footage-in	superseded by CFI-049	D-tc-montage-builder-plan-014
+P06-002	cards-footage-in	superseded by CFI-049	P-01263 D-tc-transcript-audit-004
+C04-087	cards-footage-in	superseded by CFI-069	C-ed-a724b3bc5
+M04-046	cards-footage-in	superseded by CFI-006	M-ed-sidecar-opencc-per-token
+P06-001	cards-footage-in	no longer applies: interviews are cut from the product's own transcripts, not by searching Resolve's	P-01260 P-01261 D-tc-transcript-audit-005
+P03-015	cards-footage-in	no longer applies: hand-run stages are gone; footage processing runs on its own	P-00557 P-00610
+D05-042	cards-footage-in	no longer applies: the notes program's canvas and its links are gone	D-tc-project-format-plan-024
+P08-048	cards-footage-in	no longer applies: the notes program's folder layout is gone	P-01974
+P04-064	cards-footage-in	no longer applies: a transcript is tied to its recording directly, not found by name	P-00882 P-00885 P-00886 P-00892 P-00895
+M05-026	cards-footage-in	no longer applies: transcripts are no longer found by matching text	M-home-canvas-timeline-tool
+D03-035	cards-footage-in	no longer applies: transcripts are no longer found by matching text	D-tc-layout-015
+P09-024	cards-footage-in	no longer applies: transcripts stored beside a canvas are gone; one transcript file per recording	P-02076 P-02183 P-02184 P-02185
+P04-053	cards-footage-in	no longer applies: the translate button and editor draft translations are gone	P-00868 P-00896 D-tc-reorder-plan-006
+P07-060	cards-footage-in	no longer applies: the translate button and editor draft translations are gone	P-01545 P-01546 P-01691
+P13-017	cards-footage-in	no longer applies: the translate button and editor draft translations are gone	P-03209
+P07-054	cards-footage-in	no longer applies: the translate button is gone; translation happens once per transcript	P-01627
+P04-002	cards-to-resolve-and-exports	no longer applies: planned lines were found in Resolve's transcriptions by matching text, and transcripts found by matching text are gone	P-00769 P-00771
+C02-048	dashboard	no longer applies: about where the old dashboard's menu put updates and admin pages, which is being redrawn	C-cc-d07ab62b6 C-cc-b8cdabc0c
+P06-037	dashboard	no longer applies: the old menu and gear layout is being redrawn	P-01399
+C02-049	dashboard	superseded by DSH-001	C-cc-d150e2820 C-cc-de3825da2
+P06-038	dashboard	superseded by DSH-001	P-01409
+P06-035	dashboard	no longer applies: the bracket-label button style is gone	P-01384 C-cc-757d5358b
+C01-005	resolve-on-the-editors-computer	superseded by RSV-053	C-cc-624116df5
+P01-030	sync	no longer applies: the studio's projects live on its NAS; keeping cloud-drive files offline is not part of the product	P-00090 M-rr-drivefs-pin-mechanism
+P01-048	whole-product	superseded by ALL-015	P-00236
+P12-027	whole-product	superseded by ALL-015	P-02817 P-02819 P-02822
+C05-001	whole-product	superseded by ALL-015	C-ed-52bc05196 C-ed-2f490c154 C-ed-9522bae62
+D03-060	whole-product	superseded by ALL-020	D-tc-looks-002

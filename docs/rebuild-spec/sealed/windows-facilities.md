@@ -1,0 +1,33 @@
+# Sealed notes: windows-facilities
+
+SEALED. Not part of the pack. Released to the rebuild only after its own committed design names this tool. 5 notes.
+
+### SRT-S04: The copy tool gives a file its full size the moment it starts writing.
+- Why: A progress view counting files by size alone would call unfinished files done, because the tool pre-sizes each file.
+- Must: A file counts as done only when its size and timestamp both match the source, or a check proves its contents.
+- Tool: robocopy
+- Where it bit: The Footage Sorter and camera cards
+
+### SRT-S13: The script language turns lists of one or none into something else.
+- Why: Returning a one-item list gave a single item and an empty list read as missing, so a one-file card silently stopped card detection.
+- Must: Card detection works for cards holding zero, one or many files, and a failure in detection is reported, never swallowed.
+- Tool: PowerShell array unrolling
+- Where it bit: The Footage Sorter and camera cards
+
+### REL-S01: Install and release scripts died on harmless error-stream text.
+- Why: With stop-on-error, a native command's redirected error output becomes fatal, and a script with no explicit exit returns the last command's code.
+- Must: Scripts judge each external command by its exit code only and always exit with their own explicit status.
+- Tool: Windows PowerShell 5.1
+- Where it bit: Releases and updates
+
+### RSV-S13: Resolve's windows expose little to automation.
+- Why: The main window has no child windows; the menu bar is exposed with submenus under their items; dialogs are hidden, reused top-level windows; buttons are named, fields anonymous.
+- Must: A Resolve dialog is judged open only by whether it is visible, never by its window existing.
+- Tool: Windows UI Automation on Resolve
+- Where it bit: Resolve on the editor's computer
+
+### SYN-S34: Keeping Windows awake silently failed after a single nudge.
+- Why: A Windows keep-awake request belongs to the thread that made it and vanishes with it; without the continuous flag it resets the idle timer only once.
+- Must: Sleep is held off exactly as long as work is moving and always released afterwards.
+- Tool: Windows SetThreadExecutionState (ES_CONTINUOUS, per-thread)
+- Where it bit: Sync

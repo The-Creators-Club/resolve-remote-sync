@@ -9,7 +9,7 @@
 - From: P01-045
 
 ### SYN-002: Syncing is part of the product's core, never an optional module.
-- What was going on: The owner ruled "sync is core to dashboard and the companion", so it can never be switched off like an optional module.
+- What was going on: The owner ruled "sync is core to dashboard and the [app on each editor's computer]", so it can never be switched off like an optional module.
 - What the product must do: Syncing and its status are always present on the dashboard and on every editor's computer, whatever modules are enabled.
 - Kind: 2
 - From: P19-006

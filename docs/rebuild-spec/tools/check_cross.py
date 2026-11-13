@@ -87,7 +87,7 @@ def rulings(name: str, entries_by_id=None):
                     problems.append(f"{where}: {d} is already dropped ({dropped[d]})")
                 dropped[d] = where
             out.append({"group": g, "verb": verb, "keep": keep, "drop": drops})
-        elif verb == "conflict" and len(cols) >= 5 and not is_move:
+        elif verb == "conflict" and len(cols) >= 5:
             a, b = cols[2], cols[3]
             for i in (a, b):
                 if i not in members:

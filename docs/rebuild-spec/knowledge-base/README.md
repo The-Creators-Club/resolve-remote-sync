@@ -5,13 +5,29 @@ Step 2 of [`../../REBUILD_PLAN.md`](../../REBUILD_PLAN.md). The owner,
 the rebuild document so that none of those bugs have to be re-discovered and
 re-fixed. It should be like a knowledge base."
 
-**State at 2026-11-12 20:00 UTC: every slice is read. All 59 parts are
-written and the count passes: each of the register's 7,855 items is in an
-entry, in a "Stays behind" list or in a "No entry" list with a reason. The
-parts hold 4,442 lessons before merging (774 facts about givens, 331 facts
-about chosen tools, 1,045 rulings of the owner, 2,292 situations to
-survive). The merge is next: 20 bundles, one per capability (three for the
-Timeline Cards editor). See "Progress".**
+**State at 2026-11-13 00:30 UTC: written, and every count closes.** Each of
+the register's 7,855 items is in a reader's entry, in a "Stays behind" list
+or in a "No entry" list with a reason. The readers wrote 4,442 lessons. The
+mergers made them 2,278 finished entries and 213 sealed notes and removed
+53 (superseded, or about something the owner has cut). The pass across
+capabilities folded 52 more repeats and moved 17 entries to the capability
+they belong to. **What crosses: 2,230 lessons in 18 files** (445 facts about
+givens, 583 rulings of the owner, 1,202 situations to survive). **Sealed:
+209 notes in 57 tool files.**
+
+| Where | What | Crosses? |
+|---|---|---|
+| `<capability>.md` in this folder (18 files) | The finished lessons: what a person saw, why, what the product must do, the kind | **Yes.** This is the knowledge base the rebuild reads. |
+| `../sealed/` | Notes about tools and techniques the old build chose, one file per tool | Not until the rebuild's own design names the tool |
+| `_owner/QUESTIONS.md` | 124 lessons still open, 154 with no outcome found, 109 fixed but never shipped, 19 questions, 6 conflicts | No. For the owner. |
+| `_trace/` | Finished id to merged ids to readers' entries to register ids; what was removed and why | No |
+| `_parts/`, `_merged/`, `_cross/`, this README | The working files and the briefs | No |
+
+Still owed: the owner's answers to the questions; his test of twenty
+remembered problems; razer's own history (see below); the top-up pass
+before hand-over; and the fuller purge check of step 6 (the word scan built
+from the code, and the blind reader). The purge net run so far is the
+readers' and mergers' lint (`../tools/lint_parts.py`), not that check.
 
 **Terse is the point.** The owner, 2026-11-12: "the point of this knowledge
 base should ultimately be for it to be terse." A finished entry is three
@@ -43,7 +59,8 @@ released later, and the trace file that stays behind.
    from the rebuild, or made impossible by a decision of his). What is
    removed goes to the trace that stays behind, with the reason, so the
    count still closes. The list of what he has cut is in the plan, under
-   "Timeline Cards in the rebuild" and the step 4 answers. Not started.
+   "Timeline Cards in the rebuild" and the step 4 answers. Then one pass
+   across capabilities and the split (see "Progress").
 4. **The count.** `../tools/check_parts.py` with no arguments. Step 2 is not
    finished until it prints `OK`: every one of the register's ids is in an
    entry's sources, in a "Stays behind" list, or in a "No entry" list with a
@@ -100,10 +117,11 @@ Not yet in the register, and owed:
 **Readers: done.** `python docs/rebuild-spec/tools/check_parts.py` prints
 `OK` for all 59 parts. A part cost about 2.2 % of a five-hour usage window.
 
-**Mergers: 17 of 20 bundles merged at 2026-11-12 20:15 UTC, paused for the usage window. Still to merge: `cards-editor-1`, `cards-editor-2`, `footage-sorter-and-camera-cards`. Then the fold of the three editor pieces, the pass across capabilities, and the split into what crosses, what is sealed and the trace.** `python docs/rebuild-spec/tools/build_merge_bundles.py`
+**Mergers: done, all 20 bundles (2026-11-13).** A merger cost about 1.5 to
+3 % of a five-hour window. `python docs/rebuild-spec/tools/build_merge_bundles.py`
 gathers the parts' entries into one bundle per capability under
-`../_raw/merge/` (rebuild it only before any merger has run, or after all
-have). Each merger follows [`_parts/KB_MERGE_BRIEF.md`](_parts/KB_MERGE_BRIEF.md)
+`../_raw/merge/`. **Do not run it again:** the merged files are keyed to
+those bundles (a re-run after new parts means re-merging). Each merger follows [`_parts/KB_MERGE_BRIEF.md`](_parts/KB_MERGE_BRIEF.md)
 and writes `_merged/<bundle>.md`. `python docs/rebuild-spec/tools/check_merge.py`
 with no arguments shows which bundles are merged and passing.
 
@@ -135,8 +153,13 @@ temporary-file prefix `kbm<name>-`.
 | whole-product | 167 | ALL |
 | youtube | 230 | YTD |
 
-After the mergers, in this order (tools written 2026-11-12, not yet run on
-all 20 bundles):
+After the mergers, in this order (all run 2026-11-13: 174 groups ruled with 52
+`same`, 118 `distinct` and 5 `conflict` lines; of 30 marked entries 17
+moved, 9 stayed, 4 were already in the target, and one more conflict was
+found among them). **Do not run
+`build_cross_candidates.py` again**: it renumbers the groups the rulings
+name. A lesson added later is placed by hand in a merged file and the split
+is re-run.
 
 1. **The pass across capabilities.** `python docs/rebuild-spec/tools/build_cross_candidates.py`
    lays side by side, under `_cross/`, the finished entries from different

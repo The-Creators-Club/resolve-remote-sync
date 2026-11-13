@@ -65,7 +65,7 @@
 - From: P03-046
 
 ### APP-011: There is one app on each editor's computer, not several.
-- What was going on: The owner refused a separate b-roll helper beside the sync app: "I don't want to have to maintain multiple companions".
+- What was going on: The owner refused a separate b-roll helper beside the sync app: "I don't want to have to maintain multiple [apps on the editor's computer]".
 - What the product must do: Every editor-side feature (sync, Resolve help, sending b-roll or music to Resolve) lives in one app on the editor's computer.
 - Kind: 2
 - From: P04-024
@@ -132,7 +132,7 @@
 - State: outcome not found
 - From: H08-034
 
-### APP-022: A dashboard address typed without a scheme, or on port 8443, never connected.
+### APP-022: A dashboard address typed without a scheme, or on an unusual port, never connected.
 - What was going on: Editors type the bare name the admin gave them; setup rejected it silently, or guessed http or https from the port and saved the wrong guess.
 - What the product must do: A typed scheme is always kept; without one, secure is tried first, a guess is never saved silently, and the check says "not reachable" or "not a dashboard".
 - Kind: 3

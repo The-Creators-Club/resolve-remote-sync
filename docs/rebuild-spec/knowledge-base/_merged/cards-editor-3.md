@@ -664,7 +664,7 @@
 - From: H06-070, L09-003
 
 ### CE3-106: A trial or read-only editor must never write to the real projects.
-- What was going on: The owner: "let me test it on a live vault, don't replace the current timeline cards"; a read-only copy nearly wrote an empty word file over the real one on close.
+- What was going on: The owner: "let me test it on a live [project], don't replace the current [editor]"; a read-only copy nearly wrote an empty word file over the real one on close.
 - What the product must do: A trial or read-only editor reads the real projects but writes nothing to them unless switched, and two versions never drop each other's data.
 - Kind: 2
 - From: P15-019, C06-082

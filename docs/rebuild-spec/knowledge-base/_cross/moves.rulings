@@ -1,0 +1,31 @@
+M1 | same | BRO-133 | ACC-038
+M2 | move | What syncs where
+M3 | move | Could not check, refusals and nothing silent
+M4 | same | CRX-041 | CE1-086
+M5 | stay
+M6 | stay
+M7 | move | Multicams, frame rates and timelines
+M8 | stay
+M9 | stay
+M10 | stay
+M11 | stay
+M12 | stay
+M13 | stay
+M14 | move | Edit speed and answering the editor
+M15 | move | Installing an update on an editor's computer
+M16 | move | Installing an update on an editor's computer
+M17 | move | Installing an update on an editor's computer
+M18 | move | Clip paths and media outside the shared tree
+M19 | move | Clip paths and media outside the shared tree
+M20 | move | Setting Resolve up: edition, scripting switch, preferences
+M21 | move | Making proxies on editors' computers
+M22 | same | SYN-124 | SRT-184
+M23 | move | Uploads that cannot resume, shutdown and sleep
+M24 | move | Bins, clip sorting and imports
+M25 | stay
+M26 | move | Settings, records and background work
+M27 | move | Settings, records and background work
+M28 | same | YTD-026 | SYN-061
+M29 | move | Windows, text and names
+M30 | move | Version numbers
+M16 | conflict | APP-068 | REL-048 | How many failed starts, within what time, should make an editor's computer restore the previous build on its own?

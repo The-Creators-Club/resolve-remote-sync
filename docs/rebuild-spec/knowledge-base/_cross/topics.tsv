@@ -1,0 +1,45 @@
+# The three merged pieces of the Timeline Cards editor, one list of sub-topics.
+# bundle <tab> the piece's heading <tab> the heading in the finished file. Order here is the order there.
+cards-editor-3	The lane: how clips look and read	The lane: how clips look and read
+cards-editor-2	Colours	Colours
+cards-editor-2	Sections and the overview	Sections and the overview
+cards-editor-3	The lane: zoom, scrolling and dragging	The lane: clicking, trimming, zooming and dragging
+cards-editor-2	The lane: clicking, trimming and dragging	The lane: clicking, trimming, zooming and dragging
+cards-editor-1	Lane clicks and keys	The lane: clicking, trimming, zooming and dragging
+cards-editor-2	Cards, selection and keys	Selecting, deleting, inserting and keys
+cards-editor-1	Editing: selecting, deleting, inserting	Selecting, deleting, inserting and keys
+cards-editor-3	Editing, undo and the cut list	Editing, undo and the cut list
+cards-editor-1	The cut list, undo and saving	Editing, undo and the cut list
+cards-editor-1	Notes and the staged shelf	Notes and the staged shelf
+cards-editor-1	Playback and audio	Playback and audio
+cards-editor-2	Playback and audio	Playback and audio
+cards-editor-3	Playback and audio	Playback and audio
+cards-editor-2	Media the browser gets	Media the browser gets
+cards-editor-1	Search and the transcript panel	Search and the transcript panel
+cards-editor-2	Search and the transcript panel	Search and the transcript panel
+cards-editor-3	Search and the transcript panel	Search and the transcript panel
+cards-editor-1	Chinese text and matching	Chinese text and matching
+cards-editor-1	The English a cut shows	The English a cut shows
+cards-editor-2	The English a cut shows	The English a cut shows
+cards-editor-3	The English a cut shows	The English a cut shows
+cards-editor-1	Shortening	Shortening, the edit chat and the assistant
+cards-editor-1	House style and the assistant	Shortening, the edit chat and the assistant
+cards-editor-2	Shortening and the assistant	Shortening, the edit chat and the assistant
+cards-editor-3	Shortening and the edit chat	Shortening, the edit chat and the assistant
+cards-editor-1	Offline and several devices	Working offline, connections and several devices
+cards-editor-1	Connections	Working offline, connections and several devices
+cards-editor-2	Working offline	Working offline, connections and several devices
+cards-editor-2	Several people and devices	Working offline, connections and several devices
+cards-editor-3	Working offline and on several devices	Working offline, connections and several devices
+cards-editor-1	Phone	Phone and game controller
+cards-editor-1	Game controller	Phone and game controller
+cards-editor-2	Phones, installing and the controller	Phone and game controller
+cards-editor-3	Phone and game controller	Phone and game controller
+cards-editor-2	Speed and smoothness	Speed and smoothness
+cards-editor-1	Edit speed and answering the editor	Speed and smoothness
+cards-editor-3	The page: header, warnings and redrawing	The page: panels, header, warnings and redrawing
+cards-editor-1	Panels and layout	The page: panels, header, warnings and redrawing
+cards-editor-1	Opening episodes, restarts and Resolve	Opening episodes and keeping the editor running
+cards-editor-2	Opening episodes and keeping the editor running	Opening episodes and keeping the editor running
+cards-editor-3	Opening episodes	Opening episodes and keeping the editor running
+cards-editor-3	Resolve is optional	Resolve is optional

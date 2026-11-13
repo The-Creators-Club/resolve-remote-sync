@@ -29,6 +29,7 @@ BANNED = [
     r"[a-z]+_[a-z_]+", r"/api/", r"\bdeno\b", r"bgutil", r"\bclap\b", r"zfs", r"smtp", r"imap",
     r"ruskin", r"leso\b", r"\balex\b", r"creator-1", r"razer", r"\b\d+\.\d+\.\d+\.\d+\b",
     r"breaker", r"enforce cycle", r"collector", r"pin(ned)? job", r"sidecar",
+    r"companions", r"the companion", r"vault",
 ]
 RX = re.compile("|".join(f"(?:{b})" for b in BANNED), re.I)
 

@@ -412,7 +412,7 @@
 - From: P09-041, M03-052
 
 ### CRX-066: A person may drive Resolve only on computers signed in to their own account.
-- What was going on: The owner: "users can only use companions which are also signed in to their own account".
+- What was going on: The owner: "users can only use [the app on computers] which are also signed in to their own account".
 - What the product must do: A cut sent to Resolve reaches only computers signed in to the sender's account, never another person's.
 - Kind: 2
 - From: P11-024

@@ -1,0 +1,108 @@
+1 | distinct
+2 | distinct
+3 | same | ACC-009 | CE2-109
+4 | distinct
+5 | distinct
+6 | same | DSH-137 | ACC-032
+7 | same | DSH-138 | ACC-033
+8 | same | BRO-133 | ACC-038
+9 | same | ACC-039 | CE2-178
+10 | distinct
+11 | same | ACC-064 | REL-074
+12 | same | ALL-089 | ACC-066
+13 | same | ACC-072 | YTD-098
+14 | distinct
+15 | distinct
+16 | distinct
+17 | same | BRO-009 | APP-107
+18 | same | SYN-066 | BRO-010
+19 | conflict | BRO-011 | PRX-086 | Should path comparisons always ignore letter case on the studio's drives and shares, or follow each volume's own case rule, given the NAS can hold "youtube" and "Youtube" side by side?
+20 | distinct
+21 | distinct
+22 | distinct
+23 | distinct
+24 | distinct
+25 | distinct
+26 | same | BRO-106 | MUS-050
+27 | conflict | CRX-016 | RSV-110 | Should every placement into Resolve name a media type, given that pinning a clip to one media type loses its sound?
+28 | same | ALL-051 | BRO-119
+29 | distinct
+30 | distinct
+31 | distinct
+32 | distinct
+33 | distinct
+34 | same | CE2-090 | BRD-049
+35 | distinct
+36 | distinct
+37 | distinct
+38 | distinct
+39 | distinct
+40 | distinct
+41 | distinct
+42 | distinct
+43 | distinct
+44 | distinct
+45 | distinct
+46 | distinct
+47 | same | CRX-041 | CE1-086
+48 | distinct
+49 | same | CE3-088 | CE1-106
+50 | distinct
+51 | distinct
+52 | distinct
+53 | distinct
+54 | distinct
+55 | distinct
+56 | distinct
+57 | distinct
+58 | same | CE2-045 | CE3-037
+59 | distinct
+60 | same | CRX-038 | CE2-060
+60 | conflict | CRX-038 | CRX-042 | Is a cut's gain to be carried into Resolve at the level set (proven by reading it back), or is it a given that Resolve's scripting cannot set clip volume, so every send only names the gains it dropped?
+61 | distinct
+62 | same | CFI-099 | CE2-076
+63 | same | CFI-106 | CE2-079
+64 | distinct
+65 | distinct
+66 | distinct
+67 | distinct
+68 | distinct
+69 | distinct
+70 | distinct
+71 | same | CE3-092 | APP-095
+72 | same | ALL-026 | CE3-099
+73 | distinct
+74 | same | RSV-106 | CRX-008
+75 | same | RSV-111 | CFI-019
+76 | distinct
+77 | distinct
+78 | distinct
+79 | distinct
+80 | same | RSV-125 | CFI-039
+81 | distinct
+82 | same | JOB-037 | CFI-103
+83 | distinct
+84 | same | SRT-S15 | CFI-S16
+85 | same | JOB-S02 | CFI-S30
+86 | same | RSV-109 | CRX-002
+87 | same | RSV-114 | CRX-004
+88 | distinct
+89 | distinct
+90 | distinct
+91 | distinct
+92 | distinct
+93 | distinct
+94 | distinct
+95 | distinct
+96 | distinct
+97 | distinct
+98 | distinct
+99 | same | SYN-110 | DSH-039
+100 | distinct
+101 | distinct
+102 | same | PRX-039 | DSH-050
+103 | distinct
+104 | distinct
+105 | same | ALL-080 | SRV-033
+106 | distinct
+107 | distinct

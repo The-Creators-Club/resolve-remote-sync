@@ -85,7 +85,12 @@ FAMILIES = [
     ("python", "python-standard-library"),
     ("trusted web activity", "android-web-app-wrapper"), ("bubblewrap", "android-web-app-wrapper"),
     ("hetzner", "offsite-storage-providers"), ("backblaze", "offsite-storage-providers"),
-    ("powershell", "windows-powershell"),
+    ("claude models", "anthropic-api-and-models"),
+    ("powershell", "windows-facilities"), ("setthreadexecutionstate", "windows-facilities"),
+    ("ui automation", "windows-facilities"), ("robocopy", "windows-facilities"),
+    ("lsof", "macos-facilities"), ("awk on macos", "macos-facilities"),
+    ("applescript", "macos-facilities"),
+    ("teracopy", "teracopy"), ("restic", "restic"),
     ("browser", "browser-features"),
 ]
 
@@ -271,6 +276,20 @@ def main():
                     f"- Tool: {f.get('Tool', '')}",
                     f"- Where it bit: {ml.NAMES.get(e['capability'], e['capability'])}", ""]
         files[os.path.join(SEALED_DIR, fam + ".md")] = "\n".join(out).rstrip() + "\n"
+
+    idx = ["# The sealed drawer", "",
+           "NOT part of the pack. These are lessons about tools and techniques the old "
+           "build chose. The rebuild must choose its own, so it is shown none of this up "
+           "front. Once its design is committed in writing and names a tool, it is given "
+           "the one file for that tool, and never learns what else is here. A file named "
+           "for two tools (`a+b`) is released only when both are named. The two "
+           "`-facilities` files hold notes on parts of Windows and macOS themselves; each "
+           "is released when the design reaches that platform.", "",
+           "Written by `tools/assemble_kb.py`; do not edit by hand.", "",
+           "| File | Notes |", "|---|---|"]
+    for fam in sorted(sealed):
+        idx.append(f"| `{fam}.md` | {len(sealed[fam])} |")
+    files[os.path.join(SEALED_DIR, "README.md")] = "\n".join(idx) + "\n"
 
     # 5. The trace and the owner's list (both stay behind).
     def sources(part_ids):

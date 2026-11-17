@@ -213,3 +213,78 @@ def test_the_darwin_probe_asks_lsof_not_to_truncate(monkeypatch):
     assert "+c" in seen["argv"]
     assert seen["argv"][seen["argv"].index("+c") + 1] == "0"
     assert ss.classify(rows, procs, 999)[0] == ss.READY
+
+
+# CR-385 (2026-11-17): an editor's Windows reported fuscript's listener with
+# state 0, sshd's with 1 and others with 6, while all of them were listening.
+# These rows are the measured ones (ports and states), with the test's pids.
+def _cr346_tables(fuscript_state=0, host_state=ss._ESTABLISHED):
+    listeners = [
+        (fuscript_state, 1144, 0, FUSCRIPT),
+        (1, 22, 0, OTHER),          # sshd, serving the session that measured it
+        (6, 135, 0, OTHER),
+        (2, 15000, 0, RESOLVE),
+    ]
+    connections = [
+        (ss._ESTABLISHED, 1144, 59459, FUSCRIPT),
+        (host_state, 59459, 1144, RESOLVE),
+        (11, 50413, 1144, 0),       # TIME_WAIT from a past poll, owner pid 0
+    ]
+    return listeners, connections
+
+
+def test_a_listener_with_a_wrong_state_still_counts_as_listening():
+    """CR-385: the old reader filtered on state == LISTEN and answered ABSENT
+    for a script server with Resolve registered; the companion then never
+    connected again ("isn't accepting scripting connections")."""
+    rows, odd = ss.normalize_windows_rows(*_cr346_tables())
+    assert odd == {0: 1, 1: 1, 6: 1}
+    phase, why = ss.classify(rows, PROCS, ME)
+    assert phase == ss.READY, why
+
+
+def test_unreliable_states_still_hold_off_in_the_launch_window():
+    """CR-68 must survive CR-385: server up, Resolve's registration still a
+    handshake in flight (or absent) is STARTING, never READY."""
+    for host_state in (3, 4):   # SYN_SENT, SYN_RCVD
+        rows, _ = ss.normalize_windows_rows(*_cr346_tables(host_state=host_state))
+        assert ss.classify(rows, PROCS, ME)[0] == ss.STARTING
+    listeners, connections = _cr346_tables()
+    rows, _ = ss.normalize_windows_rows(listeners, connections[:1])
+    assert ss.classify(rows, PROCS, ME)[0] == ss.STARTING
+
+
+def test_unreliable_states_take_a_misread_registration_as_established():
+    """On the measured machine connection states read right, but a machine
+    that mislabels listeners has shown its state field cannot be trusted;
+    a non-handshake value on Resolve's own row to 1144 is its registration."""
+    rows, _ = ss.normalize_windows_rows(*_cr346_tables(host_state=0))
+    assert ss.classify(rows, PROCS, ME)[0] == ss.READY
+
+
+def test_a_healthy_machine_classifies_exactly_as_before():
+    """Every listener reads LISTEN: nothing is reinterpreted, so a Resolve
+    row in SYN_SENT or an odd state is still not a registration."""
+    listeners = [(ss._LISTEN, 1144, 0, FUSCRIPT), (ss._LISTEN, 22, 0, OTHER)]
+    for host_state, expected in ((ss._ESTABLISHED, ss.READY), (3, ss.STARTING), (6, ss.STARTING)):
+        rows, odd = ss.normalize_windows_rows(listeners, [(host_state, 59459, 1144, RESOLVE)])
+        assert odd == {}
+        assert ss.classify(rows, PROCS, ME)[0] == expected
+
+
+def test_no_listener_is_still_absent_with_unreliable_states():
+    listeners, connections = _cr346_tables()
+    rows, odd = ss.normalize_windows_rows(listeners[1:], [])
+    assert odd and ss.classify(rows, PROCS, ME)[0] == ss.ABSENT
+
+
+def test_an_unreadable_windows_table_fails_open(monkeypatch):
+    """The reader used to skip a failed GetExtendedTcpTable and answer ABSENT,
+    contradicting the documented fail-open; now it raises into UNKNOWN."""
+    monkeypatch.setattr(ss.platform, "system", lambda: "Windows")
+
+    def boom(_cls):
+        raise OSError("GetExtendedTcpTable(class 3, af 2) failed: 122")
+
+    monkeypatch.setattr(ss, "_windows_table", boom)
+    assert ss._probe_uncached()[0] == ss.UNKNOWN

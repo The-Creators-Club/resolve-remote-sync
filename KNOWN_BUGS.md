@@ -34421,3 +34421,72 @@ Not fixed, and listed in `FIXES.md`: most mediums and every low, the two
 highs in the rebuilt editor (another session's worktree), and the signature
 that the Timeline Cards Windows app's update still needs (cards-storydeck-1
 is only half done: an update with no checksum is refused now).
+
+
+### CR-385 - the companion called Resolve's scripting dead on a machine whose kernel mislabels listening sockets; it was up the whole time - FIXED 2026-11-17 (companion 0.9.97)
+
+Reported 2026-11-17: an interview showed Media Offline for a remote editor
+(Ruskin, DESKTOP-LQQ41TC) although its proxies had synced. The proxies were
+on his disk; five of the clip's BRAWs had never had a proxy attached in the
+FF5 library, and his companion could not attach them because it had decided
+Resolve's scripting was dead ("isn't accepting scripting connections", every
+3 s since 12:20 that day, after a Resolve restart at 12:11).
+
+**It was not dead.** A fuscript Lua client connected first time and read the
+open project. Resolve's log had one `Started script server` and no `Failed to
+connect`; fuscript had Resolve registered. What failed was the CR-68 probe:
+on that machine `GetExtendedTcpTable` reports wrong states for LISTENING
+sockets - of 40 listeners, 7 read LISTEN (2), 21 read 0, 7 read 1 (CLOSED)
+and 5 read 6, sshd among the wrong ones while serving the SSH session that
+measured it. `netstat` hides them all, because it filters on the same field.
+fuscript's listener read 0, so `classify()` saw "no listener", answered
+ABSENT, and the companion held off forever. Before the restart the values
+moved, and the bridge flapped connected / not-available for at least two
+days (6,184 cycles in the retained logs, none longer than 39 s). The machine
+runs Windows 11 26H2 (build 26300) with NordVPN Threat Protection; creator-1
+(25H2, 26200, no NordVPN) reads all 41 listeners as LISTEN. Which of the two
+is responsible is NOT established.
+
+Fix (`script_server.py`): listeners come from the LISTENER table
+(`TCP_TABLE_OWNER_PID_LISTENER`) and membership is the answer, whatever the
+state field says; connections come from the CONNECTIONS table. When any
+listener reads other than LISTEN, the machine's states are untrusted: a
+connection to 1144 counts as established unless it reads as a handshake in
+flight (SYN_SENT / SYN_RCVD) or TIME_WAIT, so CR-68's launch-window hold-off
+still holds there. A machine whose listeners all read LISTEN classifies
+exactly as before. The condition is logged once per process as a WARNING
+naming the counts, and the probe's reason carries a CR-385 note. Also fixed
+on the way: a failed table read used to skip the family and answer ABSENT,
+contradicting the documented fail-open; it now raises into UNKNOWN (with
+slack and retries for a table that grows between the size and fetch calls).
+
+Ruled out on the way: the TCP-table read racing (0 failures in 300 reads on
+either machine), the stale-fusionscript wedge (Resolve had not restarted
+under that companion before the 12:11 relaunch), Resolve and Fusion
+scripting/network prefs (identical to creator-1's), third-party Fusion
+scripts or workflow plugins.
+
+Not done here: the guard's copies in `Resolve\Resolve_MCP\src\utils\script_server.py`
+and `Resolve\MulticamPipeline\...\resolve_script_server.py` (and the
+playground checkout) still filter on the state field; they run on creator-1,
+which is unaffected today.
+
+**Also fixed here: the stale-bridge self-restart missed a quick Resolve
+relaunch.** It ran only on the 120 s media-tree tick and only when Resolve was
+fully gone at that instant, so the 10 s quit-and-reopen at 12:10:53-12:11:03
+never triggered it, and that companion (up since 9 Nov) carried the old
+Resolve's fusionscript state into the new session. Now the bridge records
+Resolve's pids when it goes from not-connected to connected
+(`resolve_prefs.resolve_pids`, `session_state()["resolve_pids"]`), and
+`_maybe_recover_stale_bridge` also restarts when the Resolve running now is a
+disjoint set of pids (both snapshots read, neither "cannot tell"), whatever the
+last poll's connected flag says. A dedicated `ccsync-stale-bridge` thread asks
+every 5 s (`STALE_BRIDGE_CHECK_SECONDS`); a non-blocking lock keeps it and the
+media-tree tick from deciding twice. Every older guard stands (config flag,
+once per process, never mid-consolidate or mid-popup).
+
+Tests: `companion/tests/test_app.py` (relaunch between checks, same or
+unknown pids, transition-only recording, the watch loop) and
+`companion/tests/test_script_server.py` (the measured rows; CR-68
+still holds with untrusted states; a healthy machine unchanged; an
+unreadable table fails open).

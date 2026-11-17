@@ -4559,7 +4559,8 @@ def test_the_bridge_state_read_is_cached_not_a_probe(tmp_path, monkeypatch):
     monkeypatch.setattr(resolve_bridge, "connect",
                         lambda: pytest.fail("the tray probed Resolve"))
     assert app.resolve_bridge_state() == {
-        "connected": None, "ever_connected": False, "reason": ""}
+        "connected": None, "ever_connected": False, "reason": "",
+        "resolve_pids": None}
 
 
 def test_a_broken_bridge_state_read_degrades_to_unknown(tmp_path, monkeypatch):
@@ -5536,6 +5537,99 @@ def test_stale_bridge_restart_respects_the_config_flag(tmp_path, monkeypatch):
     app._maybe_recover_stale_bridge()
     assert calls == []
 
+
+
+def _arm_with_pids(app, monkeypatch, *, at_connect, now, connected=True,
+                   resolve_running=True):
+    """CR-385: connect while `at_connect` Resolve pids run, then report `now`."""
+    pids = {"value": at_connect}
+    monkeypatch.setattr(app_mod.resolve_prefs_mod, "resolve_pids", lambda: pids["value"])
+    resolve_bridge.reset_session_state()
+    resolve_bridge.note_connection(True)
+    if not connected:
+        resolve_bridge.note_connection(False, "no server")
+    pids["value"] = now
+    monkeypatch.setattr(
+        app_mod.resolve_prefs_mod, "resolve_is_running", lambda: resolve_running,
+    )
+    calls = []
+    monkeypatch.setattr(app_mod.upgrade_mod, "restart_self",
+                        lambda request_shutdown: calls.append(1))
+    return calls
+
+
+@pytest.mark.parametrize("connected", [True, False])
+def test_stale_bridge_restarts_when_resolve_was_relaunched_between_checks(
+    tmp_path, monkeypatch, connected
+):
+    """CR-385 (2026-11-17): Resolve quit and reopened in 10 s, inside the old
+    120 s tick, so "Resolve is gone" was never true when anyone looked. A
+    different Resolve pid is a replaced Resolve, whatever the last poll's
+    connected flag still says."""
+    app = _make_app(tmp_path)
+    calls = _arm_with_pids(app, monkeypatch, at_connect=frozenset({32832}),
+                           now=frozenset({40001}), connected=connected)
+    app._maybe_recover_stale_bridge()
+    assert calls == [1]
+
+
+@pytest.mark.parametrize("now", [
+    frozenset({32832}),            # the same Resolve: nothing stale
+    frozenset({32832, 40001}),     # ours is still there beside another
+    None,                          # snapshot cannot tell: act on nothing
+])
+def test_stale_bridge_does_not_restart_while_its_resolve_is_still_there(
+    tmp_path, monkeypatch, now
+):
+    app = _make_app(tmp_path)
+    calls = _arm_with_pids(app, monkeypatch, at_connect=frozenset({32832}), now=now)
+    app._maybe_recover_stale_bridge()
+    assert calls == []
+
+
+def test_stale_bridge_pid_check_needs_a_recorded_connect(tmp_path, monkeypatch):
+    """No pids recorded at connect (snapshot failed, or no Resolve seen):
+    only the old "connected once, Resolve now gone" rule applies."""
+    app = _make_app(tmp_path)
+    calls = _arm_with_pids(app, monkeypatch, at_connect=None, now=frozenset({40001}))
+    app._maybe_recover_stale_bridge()
+    assert calls == []
+
+
+def test_the_connect_pids_are_recorded_on_the_transition_only(monkeypatch):
+    """The bridge reconnects every poll; the snapshot is taken when it goes
+    from not-connected to connected, and kept while the connection holds."""
+    seen = []
+
+    def pids():
+        seen.append(1)
+        return frozenset({100 + len(seen)})
+
+    monkeypatch.setattr(app_mod.resolve_prefs_mod, "resolve_pids", pids)
+    resolve_bridge.reset_session_state()
+    resolve_bridge.note_connection(True)
+    resolve_bridge.note_connection(True)
+    resolve_bridge.note_connection(True)
+    assert len(seen) == 1
+    assert resolve_bridge.session_state()["resolve_pids"] == [101]
+    resolve_bridge.note_connection(False, "gone")
+    resolve_bridge.note_connection(True)
+    assert resolve_bridge.session_state()["resolve_pids"] == [102]
+
+
+def test_the_stale_bridge_watch_loop_checks_until_stopped(tmp_path, monkeypatch):
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(app, "STALE_BRIDGE_CHECK_SECONDS", 0.01)
+    passes = []
+
+    def fake():
+        passes.append(1)
+        if len(passes) >= 3:
+            app._stop_event.set()
+
+    monkeypatch.setattr(app, "_maybe_recover_stale_bridge", fake)
+    app._stale_bridge_watch_loop()
+    assert len(passes) == 3
 
 # -- the recurring "Resolve is up but scripting is dead" warning -------------
 #

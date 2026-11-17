@@ -170,7 +170,76 @@ def classify(
 
 # -- Windows: GetExtendedTcpTable + Toolhelp32, no subprocess ----------------
 
-def _windows_tcp_rows() -> list[tuple[int, int, int, int]]:
+# CR-385 (2026-11-17): on some Windows machines the kernel reports NONSENSE in
+# the state field of listening sockets. Measured on an editor's PC (Windows
+# 11 26H2 build 26300, NordVPN Threat Protection installed -- which of the two
+# is to blame is not established): of 40 listeners only 7 read
+# MIB_TCP_STATE_LISTEN (2); 21 read 0, 7 read 1 (CLOSED), 5 read 6 -- sshd
+# among them, while serving the SSH session that measured it. `netstat` hides
+# every one of them too, because it filters on the same field. fuscript's
+# listener read 0, so the old reader (TCP_TABLE_OWNER_PID_ALL, state == LISTEN)
+# answered ABSENT for a script server that was up with Resolve registered, and
+# the companion never connected again: "isn't accepting scripting
+# connections" for a Resolve whose API answered a fuscript client first time.
+# Earlier the same machine's values moved, and the bridge flapped connected /
+# not-available every few seconds for days (6,184 cycles, none over 39 s).
+#
+# The fix: ask the kernel for its LISTENER table (TCP_TABLE_OWNER_PID_LISTENER)
+# and take membership as the answer -- every row in it is listening by
+# definition, whatever its state field says. Connections come from the
+# CONNECTIONS table. A machine where any listener reads other than LISTEN has
+# shown its states cannot be trusted, so there a connection to 1144 counts as
+# established unless it reads as a handshake still in flight (SYN_SENT /
+# SYN_RCVD) -- the one state that matters for CR-68, and a registration row
+# that is mis-read as anything else is, by the measurements, ESTABLISHED.
+# A machine whose listeners all read LISTEN classifies exactly as before.
+_TCP_TABLE_OWNER_PID_LISTENER = 3
+_TCP_TABLE_OWNER_PID_CONNECTIONS = 4
+_SYN_STATES = frozenset({3, 4})       # SYN_SENT, SYN_RCVD
+_TIME_WAIT = 11
+
+# The read is size-then-fetch; a table that grew in between returns
+# ERROR_INSUFFICIENT_BUFFER. Slack plus a few retries, and a read that still
+# fails RAISES, so _probe_uncached answers UNKNOWN (fail open) as documented --
+# it used to skip the family silently and answer ABSENT.
+_TABLE_SLACK_BYTES = 4096
+_TABLE_READ_ATTEMPTS = 4
+
+# What the last Windows read found about the state field: {state: count} of
+# listeners NOT reading LISTEN. Empty on a healthy machine. Read by
+# _probe_uncached for the reason text; logged once per process when first seen.
+_odd_listener_states: dict[int, int] = {}
+_odd_states_logged = False
+
+
+def normalize_windows_rows(
+    listener_rows: Iterable[tuple[int, int, int, int]],
+    connection_rows: Iterable[tuple[int, int, int, int]],
+) -> tuple[list[tuple[int, int, int, int]], dict[int, int]]:
+    """Listener + connection tables -> (rows for classify(), odd listener states).
+
+    Pure; unit-tested. Rows are (state, local_port, remote_port, pid) as read.
+    Every listener-table row comes out as LISTEN. The second value counts the
+    listeners whose own state field said otherwise; when it is non-empty,
+    connection rows to the script-server port are taken as ESTABLISHED unless
+    they read as a handshake in flight or TIME_WAIT.
+    """
+    rows: list[tuple[int, int, int, int]] = []
+    odd: dict[int, int] = {}
+    for state, lport, _rport, pid in listener_rows:
+        if state != _LISTEN:
+            odd[state] = odd.get(state, 0) + 1
+        rows.append((_LISTEN, lport, 0, pid))
+    for state, lport, rport, pid in connection_rows:
+        if (odd and rport == SCRIPT_SERVER_PORT
+                and state not in _SYN_STATES and state != _TIME_WAIT):
+            state = _ESTABLISHED
+        rows.append((state, lport, rport, pid))
+    return rows, odd
+
+
+def _windows_table(table_class: int) -> list[tuple[int, int, int, int]]:
+    """One GetExtendedTcpTable class, IPv4 + IPv6. Raises if unreadable."""
     import ctypes
     import ctypes.wintypes as wt
     import socket
@@ -189,13 +258,25 @@ def _windows_tcp_rows() -> list[tuple[int, int, int, int]]:
         (2, "IIIIII", (2, 4, 0, 5)),
         (23, "16sII16sIIII", (2, 5, 6, 7)),
     ):
-        size = wt.DWORD(0)
-        iphlp.GetExtendedTcpTable(None, ctypes.byref(size), False, family, 5, 0)
-        if size.value == 0:
-            continue
-        buf = ctypes.create_string_buffer(size.value)
-        if iphlp.GetExtendedTcpTable(buf, ctypes.byref(size), False, family, 5, 0) != 0:
-            continue
+        buf = None
+        rc = 0
+        for _attempt in range(_TABLE_READ_ATTEMPTS):
+            size = wt.DWORD(0)
+            iphlp.GetExtendedTcpTable(None, ctypes.byref(size), False, family, table_class, 0)
+            if size.value == 0:
+                break
+            size = wt.DWORD(size.value + _TABLE_SLACK_BYTES)
+            candidate = ctypes.create_string_buffer(size.value)
+            rc = iphlp.GetExtendedTcpTable(
+                candidate, ctypes.byref(size), False, family, table_class, 0)
+            if rc == 0:
+                buf = candidate
+                break
+        if buf is None:
+            if rc:
+                raise OSError("GetExtendedTcpTable(class %d, af %d) failed: %d"
+                              % (table_class, family, rc))
+            continue  # size 0: no table for this family (e.g. IPv6 off)
         count = struct.unpack_from("I", buf, 0)[0]
         rowsize = struct.calcsize(fmt)
         for i in range(count):
@@ -203,6 +284,25 @@ def _windows_tcp_rows() -> list[tuple[int, int, int, int]]:
             lport = socket.ntohs(fields[idx[0]] & 0xFFFF)
             rport = socket.ntohs(fields[idx[1]] & 0xFFFF)
             rows.append((int(fields[idx[2]]), lport, rport, int(fields[idx[3]])))
+    return rows
+
+
+def _windows_tcp_rows() -> list[tuple[int, int, int, int]]:
+    global _odd_listener_states, _odd_states_logged
+    rows, odd = normalize_windows_rows(
+        _windows_table(_TCP_TABLE_OWNER_PID_LISTENER),
+        _windows_table(_TCP_TABLE_OWNER_PID_CONNECTIONS),
+    )
+    _odd_listener_states = odd
+    if odd and not _odd_states_logged:
+        _odd_states_logged = True
+        log.warning(
+            "script server probe: this machine's kernel reports wrong TCP "
+            "states for listening sockets (%s of them not LISTEN: %s); "
+            "reading listeners by table membership instead (CR-385)",
+            sum(odd.values()),
+            ", ".join("state %d x%d" % (s, n) for s, n in sorted(odd.items())),
+        )
     return rows
 
 
@@ -333,7 +433,10 @@ def _probe_uncached() -> tuple[str, str]:
     except Exception as exc:
         log.debug("script server probe failed (%s) -- failing open", exc)
         return UNKNOWN, "probe failed: %s" % exc
-    return classify(rows, procs, os.getpid())
+    phase, why = classify(rows, procs, os.getpid())
+    if system == "Windows" and _odd_listener_states:
+        why += " (listener states unreliable here, read by table membership -- CR-385)"
+    return phase, why
 
 
 def state() -> tuple[str, str]:

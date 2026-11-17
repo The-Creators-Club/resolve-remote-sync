@@ -215,6 +215,39 @@ def resolve_process_state() -> Optional[bool]:
     return None
 
 
+def resolve_pids() -> Optional[frozenset[int]]:
+    """The pid of every running Resolve, or None when it cannot be told.
+
+    CR-385 (2026-11-17): the stale-bridge recovery has to tell "the Resolve I
+    connected to is still here" from "a DIFFERENT Resolve is here now", which
+    a yes/no "is Resolve running" cannot. An empty set is a positive
+    "none running"; None is "cannot tell" and callers must act on neither.
+    Windows reads the same in-process Toolhelp snapshot as
+    windows_process_names (~8 ms, no subprocess); macOS asks pgrep.
+    """
+    system = platform.system()
+    try:
+        if system == "Windows":
+            from . import script_server
+            procs = script_server._windows_processes()
+            if not procs:
+                return None               # an empty snapshot is a failed one
+            return frozenset(pid for pid, (name, _parent) in procs.items()
+                             if str(name).lower() == "resolve.exe")
+        if system == "Darwin":
+            out = subprocess.run(
+                ["pgrep", "-x", "DaVinci Resolve"], capture_output=True, text=True, timeout=20
+            )
+            if out.returncode == 1:
+                return frozenset()
+            if out.returncode != 0:
+                return None
+            return frozenset(int(tok) for tok in (out.stdout or "").split() if tok.isdigit())
+    except Exception:
+        return None
+    return None
+
+
 def resolve_is_running() -> bool:
     """Whether DaVinci Resolve is running. Fails CLOSED -- an inconclusive
     check reports True, because writing prefs under a running Resolve loses

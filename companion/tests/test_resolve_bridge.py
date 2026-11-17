@@ -839,9 +839,12 @@ def test_the_session_starts_out_never_polled():
 
 def test_a_successful_enumeration_records_a_connection(monkeypatch):
     monkeypatch.setattr(resolve_bridge, "connect", _connected_resolve)
+    monkeypatch.setattr(resolve_bridge.resolve_prefs, "resolve_pids",
+                        lambda: frozenset({4242}))
     resolve_bridge.get_timeline_items()
     assert resolve_bridge.session_state() == {
-        "connected": True, "ever_connected": True, "reason": ""}
+        "connected": True, "ever_connected": True, "reason": "",
+        "resolve_pids": [4242]}   # CR-385: the Resolve it connected to
 
 
 def test_a_bridge_that_has_never_connected_says_so(

@@ -2144,6 +2144,7 @@ class CompanionApp:
         # replacement process starts unlatched, and a second restart from the
         # SAME process could only mean the first one failed to take.
         self._bridge_restart_started = False
+        self._bridge_restart_lock = threading.Lock()
 
         # _maybe_warn_scripting_dead: "Resolve is open but scripting is dead"
         # is the ONE broken state the editor can neither see nor is told
@@ -4986,12 +4987,57 @@ class CompanionApp:
             return
         if self._bridge_restart_started:
             return
+        # Two threads ask now (the 5 s stale-bridge watch and the media-tree
+        # tick); one decision at a time, and a busy lock is "someone is
+        # already deciding", not a reason to wait.
+        if not self._bridge_restart_lock.acquire(blocking=False):
+            return
+        try:
+            self._maybe_recover_stale_bridge_locked()
+        finally:
+            self._bridge_restart_lock.release()
+
+    # CR-385 (2026-11-17): the media-tree tick (120 s) was the only caller, so
+    # a Resolve that was quit and reopened within it -- 10 s on an editor's
+    # machine -- was never seen gone. The check is a process snapshot (~8 ms
+    # on Windows), cheap enough to ask every few seconds.
+    STALE_BRIDGE_CHECK_SECONDS = 5.0
+
+    def _stale_bridge_watch_loop(self) -> None:
+        while not self._stop_event.wait(self.STALE_BRIDGE_CHECK_SECONDS):
+            try:
+                self._maybe_recover_stale_bridge()
+            except Exception:  # pragma: no cover -- it never raises
+                log.debug("stale-bridge watch pass failed", exc_info=True)
+            if self._bridge_restart_started:
+                return
+
+    def _maybe_recover_stale_bridge_locked(self) -> None:
+        if self._bridge_restart_started:
+            return
         try:
             state = resolve_bridge.session_state()
-            if state.get("connected") or not state.get("ever_connected"):
+            if not state.get("ever_connected"):
                 return
-            if resolve_prefs_mod.resolve_is_running():
-                return
+            # CR-385 (2026-11-17): a Resolve relaunched faster than any check
+            # can see it gone (10 s on an editor's machine, against a 120 s
+            # tick) left this process holding the OLD Resolve's fusionscript
+            # state into the new session. So also restart when the Resolve
+            # running now is positively a DIFFERENT process from the one the
+            # bridge connected to -- disjoint pid sets, both read, neither
+            # "cannot tell". The stale "connected" flag from the last poll
+            # does not veto this: the Resolve it describes is gone.
+            replaced = False
+            known = state.get("resolve_pids")
+            if known:
+                now = resolve_prefs_mod.resolve_pids()
+                if now and not (set(now) & set(known)):
+                    replaced = True
+            if not replaced:
+                if state.get("connected"):
+                    return
+                if resolve_prefs_mod.resolve_is_running():
+                    return
         except Exception:
             return
         blocker = self._standing_down_would_kill_work()
@@ -5009,9 +5055,10 @@ class CompanionApp:
             return
         self._bridge_restart_started = True
         log.info(
-            "the Resolve this companion was connected to has exited -- "
+            "the Resolve this companion was connected to has %s -- "
             "restarting the companion so its scripting link starts clean "
-            "(see resolve_bridge.NO_SCRIPTING_MESSAGE's note)"
+            "(see resolve_bridge.NO_SCRIPTING_MESSAGE's note)",
+            "been replaced by a new Resolve process" if replaced else "exited",
         )
         try:
             upgrade_mod.restart_self(request_shutdown=self.shutdown)
@@ -10611,6 +10658,13 @@ class CompanionApp:
             self._start_media_tree_thread()
         except Exception:
             log.exception("failed to start media tree cache thread")
+        try:
+            threading.Thread(
+                target=self._stale_bridge_watch_loop, name="ccsync-stale-bridge",
+                daemon=True,
+            ).start()
+        except Exception:
+            log.exception("failed to start the stale-bridge watch")
         # Report (never delete) partial copies an interrupted FIX ALL left
         # behind -- see fixer.sweep_stale_tmp_files (AUDIT_2 CORE-H5). Off
         # the main thread: it walks local_root.

@@ -791,14 +791,35 @@ def _write_ever_marker() -> None:
         log.debug("could not write the ever-connected marker", exc_info=True)
 
 
+# CR-385 (2026-11-17): which Resolve process(es) were running when the bridge
+# last went from not-connected to connected. app._maybe_recover_stale_bridge
+# compares it with the Resolve running NOW: a disjoint set means the Resolve
+# this process's fusionscript.dll talked to has been replaced, even when it was
+# relaunched too fast (10 s on an editor's machine) for any "is Resolve gone"
+# check to see the gap. None = never recorded, or the snapshot could not tell.
+_connected_resolve_pids: Optional[frozenset[int]] = None
+
+
 def note_connection(connected: bool, reason: str = "") -> None:
     """Record the bridge's connection state. Cheap, and never raises."""
     global _session_connected, _session_ever_connected, _session_reason
+    global _connected_resolve_pids
     with _SESSION_LOCK:
+        newly_connected = bool(connected) and _session_connected is not True
         _session_connected = bool(connected)
         _session_reason = "" if connected else str(reason or "")
         if connected:
             _session_ever_connected = True
+    if newly_connected:
+        # Only on the transition: the bridge reconnects every poll, and the
+        # process snapshot is not worth taking every 3 s for an answer that
+        # cannot change while the connection holds.
+        try:
+            pids = resolve_prefs.resolve_pids()
+        except Exception:  # pragma: no cover -- resolve_pids never raises
+            pids = None
+        with _SESSION_LOCK:
+            _connected_resolve_pids = pids if pids else None
     if connected and not _marker_written:
         _write_ever_marker()
 
@@ -817,6 +838,9 @@ def session_state() -> dict[str, Any]:
             "connected": _session_connected,
             "ever_connected": _session_ever_connected,
             "reason": _session_reason,
+            # CR-385: the Resolve pids at the last connect, sorted, or None.
+            "resolve_pids": (sorted(_connected_resolve_pids)
+                             if _connected_resolve_pids else None),
         }
 
 
@@ -824,11 +848,12 @@ def reset_session_state() -> None:
     """Forget everything recorded above -- for tests only; the companion has
     exactly one session and never calls this."""
     global _session_connected, _session_ever_connected, _session_reason
-    global _marker_written
+    global _marker_written, _connected_resolve_pids
     with _SESSION_LOCK:
         _session_connected = None
         _session_ever_connected = False
         _session_reason = ""
+        _connected_resolve_pids = None
     # The marker FILE survives on purpose: it is what a restart looks like.
     _marker_written = False
 

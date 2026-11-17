@@ -1032,6 +1032,31 @@ description says it "automatically launches Resolve if it is not running" is
 the highest-risk shape there is: it is the client most likely to be calling
 during someone else's launch.
 
+### Some machines mislabel listening sockets, and netstat believes them (CR-385, 2026-11-17)
+
+On one editor's PC (Windows 11 26H2 build 26300, NordVPN Threat Protection;
+which of the two is to blame is not known) `GetExtendedTcpTable` reports
+the wrong STATE for most listening sockets: 0, 1 (CLOSED) or 6 instead of 2
+(LISTEN). `netstat -ano` filters on that field, so it shows **no LISTENING
+row at all**, not for fuscript and not for sshd while you are logged in
+through it. The first version of the probe filtered on it too, answered
+ABSENT, and the companion reported "isn't accepting scripting connections"
+for a Resolve whose API answered first time.
+
+**Diagnosis.** If netstat shows Resolve's ESTABLISHED pair to 1144 but no
+listener, do not conclude the server stopped listening. Check whether ANY
+listener on the machine reads LISTEN (sshd on 22, svchost on 135): read the
+`TCP_TABLE_OWNER_PID_LISTENER` table (class 3) and look at the state values.
+Then prove it with a real client, which is safe once Resolve is registered:
+`fuscript.exe -l lua probe.lua` with `print(Resolve():GetVersionString())`.
+The companion logs `kernel reports wrong TCP states for listening sockets`
+once per process when it sees this.
+
+**The rule for every copy of the guard:** listener = membership in the
+listener table, never `state == LISTEN`. Where any listener reads otherwise,
+treat a connection's state as untrusted except a handshake in flight
+(SYN_SENT/SYN_RCVD) or TIME_WAIT.
+
 ## 16. The project library knows what the API will not tell you (library walk, 2026-08-26)
 
 ### Every click in every Resolve client goes slow while the companion polls

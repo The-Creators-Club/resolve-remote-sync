@@ -35,7 +35,7 @@ import re
 import time
 from typing import Any, Callable, Optional
 
-from . import fixer, manifest, proxy_relink
+from . import fixer, hollow, manifest, proxy_relink
 from .proxy_relink import PROXY_DIR_NAME, PROXY_EXTENSIONS  # noqa: F401 -- re-exported
 from .sync import rclone_lane
 
@@ -359,8 +359,14 @@ def scan_project(
     now: Optional[float] = None,
     stat_fn: Callable[[str], Any] = os.stat,
     skip_fn: Optional[Callable[[dict[str, Any]], bool]] = None,
+    hollow_check: Optional[hollow.Pass] = None,
 ) -> dict[str, Any]:
     """The proxy gap for ONE project dir. Never raises.
+
+    `hollow_check` is the sweep's one grading-frames Pass (a new one when
+    absent): a hollow copy is not a clip to make a proxy of, and never a
+    reason to put its folder on the Blackmagic Proxy Generator's watch list
+    (docs/GRADING_FRAMES.md section 4).
 
     `stat_fn` is the single injectable seam for the filesystem: it answers
     size/mtime for originals AND doubles as the existence probe for candidate
@@ -381,6 +387,7 @@ def scan_project(
     candidates: list[dict[str, Any]] = []
     braw_dirs: list[str] = []
     seen_dirs: set[str] = set()
+    hollow_dirs: set[str] = set()   # folders holding a grading-frame copy; see the BPG note below
     try:
         try:
             stamp = time.time() if now is None else float(now)
@@ -443,6 +450,15 @@ def scan_project(
                     # to encode, and reporting it would send an editor hunting
                     # for a clip that has no bytes.
                     continue
+                if hollow_check is None:
+                    hollow_check = hollow.Pass("proxy scan")
+                if hollow_check.excluded(path, stat):
+                    # Grading frames (docs/GRADING_FRAMES.md section 4, 2026-11-22): a hollow
+                    # copy holds a few frames of the clip and empty space. ffmpeg would fail on
+                    # it (or worse, encode the gaps), and as a BRAW it would add its folder to
+                    # BPG's watch list below. Its proxy is the real one lane B brings down.
+                    hollow_dirs.add(os.path.normcase(dirpath))
+                    continue
                 if mtime > cutoff:
                     continue  # still settling -- a file in flight is not a gap
                 if any(_stat_exists(p, stat_fn) for p in expected_proxies(path)):
@@ -496,6 +512,21 @@ def scan_project(
             gap["truncated"] = True
             candidates = candidates[:MAX_QUEUE_PER_PROJECT]
         gap["clips"] = candidates
+        # A FOLDER HOLDING A GRADING-FRAME COPY IS NEVER HANDED TO BPG (review, 2026-11-22).
+        # BPG watches folders, not files (bpg.py fact 2): given this one for the real BRAW
+        # beside it, it would also try the hollow copy whenever that clip's own `.mov` proxy
+        # is not here yet, and what it writes from a clip that is mostly empty is unobserved;
+        # lane B's twin on the upload side would hand a truncated proxy to the whole fleet.
+        # The real clip stays counted in the gap (it IS one) and is proxied by the machine
+        # that holds its folder without grading frames, normally the base rig. This cannot
+        # take back a folder BPG is already watching: its list is the editor's and is only
+        # ever added to.
+        held_back = [d for d in braw_dirs if os.path.normcase(d) in hollow_dirs]
+        if held_back:
+            braw_dirs = [d for d in braw_dirs if os.path.normcase(d) not in hollow_dirs]
+            log.info("proxy scan: %d folder(s) with clips for the Blackmagic Proxy Generator "
+                     "also hold grading-frame copies and are not handed to it: %s",
+                     len(held_back), "; ".join(held_back[:5]))
         gap["needs_resolve_dirs"] = sorted(braw_dirs)
         if not walked:
             # os.walk's onerror is None on purpose (a vanished sub-directory
@@ -577,13 +608,16 @@ def scan_missing_proxies(
         totals["dropped"] = dropped
         watch_dirs: list[str] = []
         watch_seen: set[str] = set()
+        # One Pass for the sweep: the grading-frames ledger read once, and a
+        # file kept out on the filesystem sign alone named once per sweep.
+        hollow_check = hollow.Pass("proxy scan")
         for project_rel in project_rels:
             project_dir = os.path.join(
                 root, "Projects", project_rel.replace("/", os.sep)
             )
             gap = scan_project(
                 project_dir, min_age_seconds=min_age_seconds, now=now,
-                stat_fn=stat_fn, skip_fn=skip_fn,
+                stat_fn=stat_fn, skip_fn=skip_fn, hollow_check=hollow_check,
             )
             result["projects"][project_rel] = gap
             for key in ("missing", "braw", "needs_resolve", KIND_OWN, KIND_PREVIEW,

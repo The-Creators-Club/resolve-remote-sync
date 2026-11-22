@@ -465,3 +465,43 @@ def test_the_walk_gives_the_paths_pathlib_gave_and_builds_none_of_them(tmp_path,
     assert conflicts["count"] == 1 and conflicts["paths"] == [f"2026/FF5/Show/{conflict_name}"]
     per_file = [c for c in calls if str(c).lower().endswith((".mov", ".mp4", ".braw", ".txt"))]
     assert per_file == [], "the walk went back to building a Path per file"
+
+
+# -- grading frames (docs/GRADING_FRAMES.md section 4, 2026-11-22) --------------
+
+
+def test_a_hollow_copy_is_not_an_original_this_machine_holds(tmp_path):
+    """A planted grading-frame copy is in neither the rollup nor the per-file
+    list: counted, the dashboard would believe this machine holds the clip."""
+    import hollow_fixtures as hf
+    from ccsync_companion import hollow
+
+    led = hollow.configure(tmp_path / "state" / hollow.STATE_FILENAME)
+    project_dir = _make_project(tmp_path, "2026", "FF5", "Nuclear")
+    _touch(project_dir / "A002.mov", size=2000)
+    hf.plant_hollow(project_dir / "A001.braw", source_dir=tmp_path / "nas", led=led)
+
+    result = manifest_mod.scan_local_manifest(str(tmp_path), selected_rels={"2026/FF5/Nuclear"})
+    entry = result["2026/FF5/Nuclear"]
+    assert entry["n_originals"] == 1 and entry["bytes_originals"] == 2000
+    assert [row[0] for row in entry["originals"]] == ["A002.mov"]
+
+
+def test_a_file_that_is_mostly_holes_is_left_out_and_named_but_a_whole_sparse_one_counts(tmp_path, caplog):
+    """Trap 2: a file kept out on the filesystem sign alone (no marker, no
+    ledger row) is named in the log, never silently dropped. Trap 1: a whole
+    file that merely carries the sparse attribute (rclone's multi-thread
+    downloads on Windows) is a real original and is counted."""
+    import hollow_fixtures as hf
+
+    project_dir = _make_project(tmp_path, "2026", "FF5", "Nuclear")
+    hf.plant_holes_only(project_dir / "Cloud.braw")
+    hf.plant_sparse_but_whole(project_dir / "Pulled.braw", size=2 << 20)
+
+    with caplog.at_level(logging.WARNING, logger="ccsync.hollow"):
+        result = manifest_mod.scan_local_manifest(str(tmp_path), selected_rels={"2026/FF5/Nuclear"})
+    entry = result["2026/FF5/Nuclear"]
+    assert [row[0] for row in entry["originals"]] == ["Pulled.braw"]
+    assert entry["bytes_originals"] == 2 << 20
+    named = [r.getMessage() for r in caplog.records if "Cloud.braw" in r.getMessage()]
+    assert len(named) == 1 and "media manifest" in named[0]

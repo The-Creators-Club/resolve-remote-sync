@@ -1207,3 +1207,85 @@ def test_the_app_answers_retrying_when_4b_cannot_list_the_server(tmp_path):
     assert answers[0]["detail"] == file_moves.DETAIL_4B_CANNOT_LIST
     assert (card / "A002.mov").exists()
     assert stub.file_moves.entry(1)["state"] == file_moves.STATE_RETRYABLE
+
+
+
+# -- grading frames (docs/GRADING_FRAMES.md section 3.5, 2026-11-22) ----------
+
+
+def _hollow_tree(tmp_path):
+    import hollow_fixtures as hf
+    from ccsync_companion import hollow
+
+    led = hollow.configure(tmp_path / "state" / hollow.STATE_FILENAME)
+    root = tmp_path / "Creators_Club"
+    src = root / "Projects" / DRONE / "B-roll" / "A001_0512.braw"
+    hf.plant_hollow(src, source_dir=tmp_path / "nas", led=led)
+    return root, src, led
+
+
+def test_a_path_that_is_a_hollow_copy_here_is_dropped_not_moved(tmp_path):
+    root, src, led = _hollow_tree(tmp_path)
+    cmd = file_moves.parse_command(_cmd())
+    ok, detail, paths = file_moves.apply_move(cmd, str(root), None, project_rels=_plan(DRONE, ANIMALS))
+    assert ok is True and detail == file_moves.DETAIL_HOLLOW_DROPPED
+    assert paths is None, "nothing moved, so nothing to relink"
+    assert not src.exists()
+    assert not (root / "Projects" / ANIMALS / "Interviewees").exists()
+    assert led.get(src) is None
+
+
+def test_a_hollow_copy_with_a_sign_missing_is_kept_and_the_move_retries(tmp_path):
+    """Any doubt keeps the file, and NOT ok keeps the move `retrying`, so its
+    old path stays out of lane A for as long as it is unresolved."""
+    root, src, led = _hollow_tree(tmp_path)
+    led.forget(src)
+    before = src.read_bytes()
+    cmd = file_moves.parse_command(_cmd())
+    ok, detail, paths = file_moves.apply_move(cmd, str(root), None, project_rels=_plan(DRONE, ANIMALS))
+    assert ok is False and "cannot be confirmed" in detail and "ledger no" in detail
+    assert src.read_bytes() == before
+    assert paths is None
+
+
+def test_a_moved_folder_takes_its_hollow_copies_and_their_rows(tmp_path):
+    root, src, led = _hollow_tree(tmp_path)
+    cmd = file_moves.parse_command(_cmd(from_rel="B-roll", to_rel="Drone B-roll", is_dir=True,
+                                        to_project_rel=DRONE))
+    ok, _detail, paths = file_moves.apply_move(cmd, str(root), None, project_rels=_plan(DRONE))
+    assert ok is True and paths is not None
+    moved = root / "Projects" / DRONE / "Drone B-roll" / "A001_0512.braw"
+    assert moved.exists() and led.get(moved) is not None and led.get(src) is None
+
+
+def test_a_file_only_the_filesystem_calls_hollow_moves_like_any_other(tmp_path):
+    """Review, 2026-11-22. A cloud-drive placeholder, or a sparse file somebody else made, has
+    no marker and no ledger row: it is the editor's own file and moved before grading frames
+    existed. Sent down the drop path it could never be confirmed, and the move would answer
+    not-ok for ever."""
+    import hollow_fixtures as hf
+    from ccsync_companion import hollow
+
+    hollow.configure(tmp_path / "state" / hollow.STATE_FILENAME)
+    root = tmp_path / "Creators_Club"
+    src = hf.plant_holes_only(root / "Projects" / DRONE / "B-roll" / "A001_0512.braw")
+    assert hollow.is_hollow(src), "the fixture must really show the filesystem sign"
+    cmd = file_moves.parse_command(_cmd())
+    ok, detail, paths = file_moves.apply_move(cmd, str(root), None, project_rels=_plan(DRONE, ANIMALS))
+    assert ok is True and detail != file_moves.DETAIL_HOLLOW_DROPPED
+    assert not src.exists() and paths is not None and Path(paths[1]).exists()
+
+
+def test_a_folder_going_to_an_unsynced_project_drops_its_hollow_copies_first(tmp_path):
+    """Review, 2026-11-22. Section 4b bins what the server holds and keeps the rest "for lane A
+    to upload". A hollow copy matches nothing on the server (its marker makes it longer) and
+    lane A never carries it, so left to the triage it would sit in a folder that has otherwise
+    gone, reported as an upload owed."""
+    root, src, led = _hollow_tree(tmp_path)
+    cmd = file_moves.parse_command(_cmd(from_rel="B-roll", to_rel="B-roll", is_dir=True))
+    ok, detail, paths = file_moves.apply_move(cmd, str(root), None, project_rels=_plan(DRONE),
+                                              server_files=lambda rel: set())
+    assert ok is True and paths is None
+    assert detail == file_moves.DETAIL_NOT_SYNCED_HERE, detail
+    assert not src.exists() and led.get(src) is None
+    assert not src.parent.exists(), "the emptied folder goes too"

@@ -2628,3 +2628,37 @@ def test_the_narrow_pool_is_earned_by_a_quiet_pass_and_lost_by_one_that_moves_or
     script["rc"] = 0
     lane.run_once(subpath=sub)
     assert width() == str(lane.tuning.checkers)
+
+
+
+# -- grading frames (docs/GRADING_FRAMES.md section 4, 2026-11-22) -------------
+
+
+def test_lane_a_leaves_every_hollow_copy_out_of_its_run(tmp_path):
+    """Lane A is `copy --ignore-existing` and never deletes: the day the NAS
+    copy is moved or lost by hand, a hollow copy would go up as the fleet's
+    permanent original. The app's exclude hook feeds the ledger AND a walk's
+    filesystem test into the filter file, ahead of the includes."""
+    from types import SimpleNamespace
+
+    import hollow_fixtures as hf
+    from ccsync_companion import hollow
+    from ccsync_companion.app import CompanionApp
+
+    led = hollow.configure(tmp_path / "state" / hollow.STATE_FILENAME)
+    lane = _make_lane(tmp_path)
+    project = Path(lane.local_root) / "Projects" / "2026" / "Show"
+    hf.plant_hollow(project / "Footage" / "A001.braw", source_dir=tmp_path / "nas", led=led)
+    hf.plant_holes_only(project / "Footage" / "Cloud.braw")
+    (project / "Footage" / "Real.braw").write_bytes(b"real" * 1000)
+    app = SimpleNamespace(config={"local_root": lane.local_root},
+                          file_moves=SimpleNamespace(recent_excludes=lambda sub: []),
+                          _originals_lane=None)
+    lane.extra_excludes_fn = lambda sub: CompanionApp._lane_a_extra_excludes(app, sub)
+
+    lane._build_command(subpath="Projects/2026/Show")
+    rules = Path(lane._filter_file).read_text(encoding="utf-8").splitlines()
+    for rel in ("Footage/A001.braw", "Footage/Cloud.braw"):
+        assert f"- /{rel}" in rules
+        assert rules.index(f"- /{rel}") < rules.index("+ *.braw")
+    assert not any("Real.braw" in rule for rule in rules)

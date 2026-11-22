@@ -53,6 +53,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from . import lane_guard
 from . import rclone_lane
+from .. import hollow
 from .base import (
     STATE_ERROR,
     STATE_IDLE,
@@ -248,11 +249,15 @@ class Plan:
     refused: int = 0
     already_here: int = 0
     differs_here: int = 0
+    # Grading frames (docs/GRADING_FRAMES.md section 3.5): wanted files whose local copy is a
+    # hollow copy this feature made. They are in `entries` too: treated as absent.
+    hollow_here: int = 0
 
 
 def plan_project(want: Want, nas_files: dict[str, tuple[int, str]],
                  local_project_dir: Path,
-                 stat_fn: Callable[[Path], Optional[int]]) -> Plan:
+                 stat_fn: Callable[[Path], Optional[int]],
+                 hollow_fn: Optional[Callable[[Path], bool]] = None) -> Plan:
     """What to put in the list for one project.
 
     Every wanted rel is matched against THIS run's NAS listing by NFC key and
@@ -260,7 +265,16 @@ def plan_project(want: Want, nas_files: dict[str, tuple[int, str]],
     never reaches the list. A file already here at the same size is skipped;
     one here at a DIFFERENT size is the editor's own and is left alone
     (`--ignore-existing` would skip it anyway; leaving it out keeps the counts
-    honest)."""
+    honest).
+
+    EXCEPT a grading-frame copy (docs/GRADING_FRAMES.md section 3.5,
+    2026-11-22): `hollow_fn(path)` true means the file here is a hollow copy
+    this feature made, and it is planned as ABSENT so the real original can
+    replace it (the run moves it aside first: `--ignore-existing` would
+    otherwise skip the name for ever, which is the `differs_here` trap the doc
+    describes). Only a size that differs from the NAS's is asked about: the
+    marker makes a hollow copy longer than its original, so a same-size file
+    can never be one, and asking costs a read."""
     by_key: dict[str, tuple[str, int, str]] = {}
     for nas_rel, (size, mtime) in nas_files.items():
         by_key.setdefault(nfc(nas_rel), (nas_rel, size, mtime))
@@ -280,11 +294,50 @@ def plan_project(want: Want, nas_files: dict[str, tuple[int, str]],
         if local_size is not None:
             if local_size == size:
                 plan.already_here += 1
-            else:
+                continue
+            here = local_project_dir.joinpath(*nas_rel.split("/"))
+            if not os.path.lexists(here):
+                here = local_project_dir.joinpath(*rel.split("/"))
+            if hollow_fn is None or not _ask(hollow_fn, here):
                 plan.differs_here += 1
-            continue
+                continue
+            plan.hollow_here += 1
         plan.entries.append(Entry(want.slug, want.project_rel, nas_rel, size, mtime))
     return plan
+
+
+def _ask(fn: Callable[[Path], bool], path: Path) -> bool:
+    """A predicate that cannot answer says no: an editor's own file is left alone."""
+    try:
+        return bool(fn(path))
+    except Exception:
+        log.debug("originals: could not ask whether %s is a grading-frame copy", path,
+                  exc_info=True)
+        return False
+
+
+def is_our_hollow_copy(path: Path) -> bool:
+    """A hollow copy THIS feature made: its ledger row or its own marker says so
+    (hollow.Signs.ours). A file only the filesystem calls hollow (a cloud
+    placeholder, something we did not make) is the editor's and is left alone,
+    as any other file of a different size always was."""
+    return hollow.signs(path, marker=True).ours()
+
+
+def _absent_or_hollow(path: Path) -> bool:
+    """The cheap-first test: nothing here, or a hollow copy by the cheap signs
+    (the ledger and the filesystem; no read). It runs over every wanted file
+    every POLL_SECONDS, so it does not read markers: a copy that ONLY its
+    marker still names (ledger row lost and too many frames for the filesystem
+    sign) reads as present here and is left alone, which is the state before
+    this feature existed, never a download over it."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return True
+    if stat.S_ISDIR(st.st_mode):
+        return True
+    return hollow.is_hollow(path, st)
 
 
 def _stat_size(path: Path) -> Optional[int]:
@@ -503,6 +556,8 @@ class OriginalsDownLane(LaneAdapter):
         self._run_seq = 0
         # Arrivals of this process, (full tree rel, epoch), for lane A's hook.
         self._landed: list[tuple[str, float]] = []
+        # Grading-frame copies set aside and kept, already said so in the log once.
+        self._hollow_doubts: set[str] = set()
 
     # -- LaneAdapter ---------------------------------------------------------
     def start(self) -> None:
@@ -667,6 +722,7 @@ class OriginalsDownLane(LaneAdapter):
         if gate:
             self._stand_down(gate)
             return
+        self._settle_hollow_asides()
         try:
             selection = self._selection_fn()
         except Exception:
@@ -681,7 +737,7 @@ class OriginalsDownLane(LaneAdapter):
         outstanding: list[Want] = []
         for want in wants:
             base = self._local_project_dir(want.project_rel)
-            rels = [r for r in want.rels if _stat_size(base.joinpath(*r.split("/"))) is None]
+            rels = [r for r in want.rels if _absent_or_hollow(base.joinpath(*r.split("/")))]
             if rels:
                 outstanding.append(Want(want.slug, want.project_rel, rels))
         if not outstanding:
@@ -706,12 +762,13 @@ class OriginalsDownLane(LaneAdapter):
                           last_error="could not list the server to find the originals")
                 return
             plan = plan_project(want, listing, self._local_project_dir(want.project_rel),
-                                _stat_size)
+                                _stat_size, hollow_fn=is_our_hollow_copy)
             not_on_server += plan.not_on_server
-            if plan.not_on_server or plan.refused or plan.differs_here:
+            if plan.not_on_server or plan.refused or plan.differs_here or plan.hollow_here:
                 log.info("originals: %s: %d not on the server, %d not originals, %d "
-                         "already here at another size (left alone)", want.slug,
-                         plan.not_on_server, plan.refused, plan.differs_here)
+                         "already here at another size (left alone), %d grading-frame "
+                         "cop(ies) to replace", want.slug, plan.not_on_server, plan.refused,
+                         plan.differs_here, plan.hollow_here)
             entries.extend(plan.entries)
         if not entries:
             self._idle_signature, self._idle_at = signature, self._clock()
@@ -813,6 +870,19 @@ class OriginalsDownLane(LaneAdapter):
     def _run_project(self, project_rel: str, batch: list[Entry], total: int,
                      total_bytes: int, state: dict,
                      stop_event: threading.Event) -> tuple[Optional[int], Optional[str]]:
+        base = self._local_project_dir(project_rel)
+        batch, set_aside = self._clear_hollow_copies(base, batch)
+        if not batch:
+            return 0, None
+        try:
+            return self._run_project_list(project_rel, batch, total, total_bytes, state,
+                                          stop_event)
+        finally:
+            self._finish_hollow_copies(batch, set_aside)
+
+    def _run_project_list(self, project_rel: str, batch: list[Entry], total: int,
+                          total_bytes: int, state: dict,
+                          stop_event: threading.Event) -> tuple[Optional[int], Optional[str]]:
         list_file = self._next_list_file(batch[0].slug)
         try:
             rclone_lane.write_files_from_list([e.rel for e in batch], list_file)
@@ -887,6 +957,95 @@ class OriginalsDownLane(LaneAdapter):
                 os.unlink(list_file)
             except OSError:
                 pass
+
+    # -- grading-frame copies (docs/GRADING_FRAMES.md section 3.5, 2026-11-22) ----------------
+    def _clear_hollow_copies(self, base: Path, batch: list[Entry]
+                             ) -> tuple[list[Entry], dict[str, tuple[str, Path]]]:
+        """Move each hollow copy in this batch's way ASIDE before rclone starts:
+        the run is `--ignore-existing`, so a name that is taken is skipped for
+        ever. Aside, not deleted: the frames are the editor's until the real
+        original is here. -> (the batch that can run, {rel: (aside, home)}). A
+        copy that cannot be moved keeps its original out of this run, with a
+        log line; nothing is ever downloaded over one."""
+        kept: list[Entry] = []
+        set_aside: dict[str, tuple[str, Path]] = {}
+        for entry in batch:
+            home = base.joinpath(*entry.rel.split("/"))
+            if not os.path.lexists(home) or not _ask(is_our_hollow_copy, home):
+                # Absent, or not ours: --ignore-existing leaves the latter alone, as it always did.
+                kept.append(entry)
+                continue
+            aside = hollow.move_aside(home, hollow.ASIDE_ORIGINALS)
+            if aside is None:
+                log.warning("originals: the grading-frame copy at %s could not be moved aside, "
+                            "so its original is not brought down this run", home)
+                continue
+            set_aside[entry.rel] = (aside, home)
+            kept.append(entry)
+        return kept, set_aside
+
+    def _finish_hollow_copies(self, batch: list[Entry],
+                              set_aside: dict[str, tuple[str, Path]]) -> None:
+        """After the run: a copy whose original LANDED (here, at the NAS's
+        size, and not itself hollow) is removed under the all-three-signs rule;
+        one whose original did not arrive goes back where it was. Never raises."""
+        sizes = {e.rel: int(e.size) for e in batch}
+        for rel, (aside, home) in set_aside.items():
+            try:
+                self._settle_one_aside(aside, home, sizes.get(rel))
+            except Exception:
+                log.exception("originals: could not settle the grading-frame copy %s", aside)
+
+    def _settle_one_aside(self, aside: str, home: Path, nas_size: Optional[int]) -> None:
+        if not os.path.lexists(aside):
+            return
+        landed = (nas_size is not None and _stat_size(home) == nas_size
+                  and not hollow.is_hollow(home, deep=True))
+        if landed:
+            ok, why = hollow.may_delete(aside)
+            if ok:
+                if hollow.remove_hollow(aside)[0]:
+                    # Resolve reads the whole clip at the next project open (doc section 2.4
+                    # row j); no replace_clip is needed: the clip's stored length and timecode
+                    # were always the real original's.
+                    log.info("originals: the real original of %s arrived; its grading-frame "
+                             "copy is removed. Reopen the project in Resolve to see the whole "
+                             "clip.", home)
+                return
+            if aside not in self._hollow_doubts:
+                self._hollow_doubts.add(aside)
+                log.warning("originals: the real original of %s arrived, but %s is kept: %s",
+                            home, aside, why)
+            return
+        if not os.path.lexists(home) and hollow.restore_aside(aside, home=home):
+            return
+        if aside not in self._hollow_doubts:
+            self._hollow_doubts.add(aside)
+            log.warning("originals: %s is waiting beside %s for its original to arrive",
+                        aside, home)
+
+    def _settle_hollow_asides(self) -> None:
+        """At the top of every cycle, for a run a restart or a crash cut short:
+        every grading-frame copy this lane set aside (and wrote down) is removed
+        once its original is here at the server's size, or put back while its
+        original is still missing. A copy with no ledger row is settled only by
+        the run that moved it. Never raises."""
+        try:
+            arrived: dict[str, int] = {}
+            for row in self.ledger.entries():
+                path = (Path(self.local_root) / "Projects"
+                        / Path(*str(row.get("project_rel") or "").split("/"))
+                        / Path(*str(row.get("rel") or "").split("/")))
+                arrived[hollow.normalise_key(path)] = int(row.get("size") or -1)
+            for row in hollow.asides(hollow.ASIDE_ORIGINALS):
+                aside = str(row.get("local_path") or "")
+                home = str(row.get("aside_of") or "")
+                if not aside or not home:
+                    continue
+                size = arrived.get(hollow.normalise_key(home), row.get("nas_size"))
+                self._settle_one_aside(aside, Path(home), None if size is None else int(size))
+        except Exception:
+            log.exception("originals: the grading-frame aside sweep failed")
 
     def _feed(self, line: str, by_name: dict, by_key: dict, landed: Callable[[Entry], None],
               errors: list, stats_bytes: list, total: int, total_bytes: int,

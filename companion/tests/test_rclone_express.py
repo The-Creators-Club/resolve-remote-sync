@@ -1178,3 +1178,33 @@ def test_an_exclusion_source_that_raises_does_not_stop_the_upload(tmp_path):
     lane.notify_path_changed(str(_old_file(local, "Projects/2026/FF5/Alpha/clip.mov")))
     _flush_now(lane)
     assert len(calls) == 1
+
+
+
+# -- grading frames (docs/GRADING_FRAMES.md section 4, 2026-11-22) -------------
+
+
+def test_express_drops_a_hollow_copy_however_it_is_marked(tmp_path):
+    """Express is lane A's other door and cannot carry the filter file. A
+    hollow copy lands by a rename: one watchdog event for a .braw sitting
+    still. Dropped (never deferred) by any sign, the marker included."""
+    import hollow_fixtures as hf
+    from ccsync_companion import hollow
+
+    led = hollow.configure(tmp_path / "state" / hollow.STATE_FILENAME)
+    lane = _make_lane(tmp_path)
+    root = Path(lane.local_root)
+    dest, _ = hf.plant_hollow(root / "Projects" / "X" / "A001.braw", source_dir=tmp_path / "nas", led=led)
+    marked_only = root / "Projects" / "X" / "A002.braw"
+    marked_only.write_bytes(b"\x05" * 5000 + hollow.marker_bytes(5000, [0]))
+    real = root / "Projects" / "X" / "A003.braw"
+    real.write_bytes(b"\x06" * 5000)
+    old = time.time() - 3600
+    batch = {}
+    for path in (dest, marked_only, real):
+        os.utime(path, (old, old))
+        batch[path.relative_to(root).as_posix()] = (path.stat().st_size, time.monotonic())
+
+    ready, deferred = lane._express_partition(batch)
+    assert ready == ["Projects/X/A003.braw"]
+    assert deferred == {}

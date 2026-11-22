@@ -604,3 +604,62 @@ def test_the_sweep_counts_unreadable_projects_and_names_the_first(tmp_path,
     # "missing: 0" from a sweep that read nothing is not coverage, and the
     # two keys above are the only thing that says so.
     assert totals["missing"] == 0
+
+
+# -- grading frames (docs/GRADING_FRAMES.md section 4, 2026-11-22) ------------
+
+
+def test_a_hollow_copy_is_no_proxy_gap_and_never_puts_its_folder_on_bpgs_list(tmp_path):
+    """A grading-frame copy holds a few frames and empty space: not a clip to
+    make a proxy of, and as a BRAW it must never be the reason a folder goes
+    on the Blackmagic Proxy Generator's watch list."""
+    import hollow_fixtures as hf
+    from ccsync_companion import hollow
+
+    led = hollow.configure(tmp_path / "state" / hollow.STATE_FILENAME)
+    project = _make_project(tmp_path)
+    dest, _ = hf.plant_hollow(project / "Grading" / "A001.braw", source_dir=tmp_path / "nas", led=led)
+    old = time.time() - SETTLED
+    os.utime(dest, (old, old))
+    _clip(project / "Real" / "B001.braw")
+
+    result = proxy_scan.scan_missing_proxies(str(tmp_path))
+    gap = result["projects"]["2026/FF5/Nuclear"]
+    assert gap["braw"] == 1 and gap["missing"] == 1
+    assert [os.path.basename(d) for d in result["totals"]["needs_resolve_dirs"]] == ["Real"]
+
+
+def test_a_whole_original_with_the_sparse_attribute_is_still_a_gap(tmp_path):
+    """Trap 1: rclone's multi-thread download leaves a whole original sparse."""
+    import hollow_fixtures as hf
+
+    project = _make_project(tmp_path)
+    path = hf.plant_sparse_but_whole(project / "A001.braw", size=2 << 20)
+    old = time.time() - SETTLED
+    os.utime(path, (old, old))
+    assert _scan(project)["braw"] == 1
+
+
+def test_a_folder_holding_a_hollow_copy_is_not_handed_to_bpg_for_the_real_clip_beside_it(tmp_path, caplog):
+    """Review, 2026-11-22. BPG watches FOLDERS (bpg.py fact 2): handed this one for the real
+    BRAW, it would try the hollow copy beside it too. The real clip is still counted as a gap;
+    its folder is simply not this machine's to hand over while grading frames sit in it."""
+    import logging
+
+    import hollow_fixtures as hf
+    from ccsync_companion import hollow
+
+    led = hollow.configure(tmp_path / "state" / hollow.STATE_FILENAME)
+    project = _make_project(tmp_path)
+    dest, _ = hf.plant_hollow(project / "Shared" / "A001.braw", source_dir=tmp_path / "nas", led=led)
+    old = time.time() - SETTLED
+    os.utime(dest, (old, old))
+    _clip(project / "Shared" / "B001.braw")
+    _clip(project / "Clean" / "C001.braw")
+
+    with caplog.at_level(logging.INFO):
+        result = proxy_scan.scan_missing_proxies(str(tmp_path))
+    gap = result["projects"]["2026/FF5/Nuclear"]
+    assert gap["braw"] == 2 and gap["missing"] == 2, "both real clips are still gaps"
+    assert [os.path.basename(d) for d in result["totals"]["needs_resolve_dirs"]] == ["Clean"]
+    assert any("not handed to it" in r.getMessage() for r in caplog.records)

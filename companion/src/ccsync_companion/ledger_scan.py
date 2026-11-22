@@ -37,6 +37,9 @@ RULES OF THE WALK, each with its reason:
   * **LONG PATHS**: on Windows the walk uses the extended-length path prefix, so a path past
     260 characters is listed, not silently dropped.
   * **A SYSTEM VOLUME IS NEVER WALKED FROM ITS ROOT**: only the explicit roots a watch names.
+  * **A GRADING-FRAME COPY IS NEVER LISTED** (docs/GRADING_FRAMES.md section 4, 2026-11-22):
+    the hollow test runs on the stat already held plus the in-memory ledger, and opens nothing
+    (on Windows a file marked sparse costs one attribute query for its allocated size).
   * **A CHUNK IS RETRIED UNDER THE SAME `seq`**, so the server (idempotent on
     seq) applies it once however many times the answer was lost.
   * **BOUNDED MEMORY**: one chunk of rows at a time, whatever the drive holds.
@@ -49,6 +52,8 @@ import re
 import threading
 import time
 from typing import Any, Callable, Iterable, Optional
+
+from . import hollow
 
 log = logging.getLogger("ccsync.ledgerscan")
 
@@ -238,8 +243,10 @@ def walk(volume_root: str, roots: Iterable[str], rules: Rules,
          on_link: Optional[Callable[[str], None]] = None) -> Iterable[list[Any]]:
     """Yield `[path, size, mtimeMs]` for every tracked file under each root, depth first.
     Stops (just returns) when `should_stop()` says anything. Never raises on a bad folder: a folder
-    or entry that cannot be read goes to `on_unreadable(rel, exc)`. Links are not followed."""
+    or entry that cannot be read goes to `on_unreadable(rel, exc)`. Links are not followed.
+    A grading-frame copy (hollow.py) is never yielded."""
     base = str(volume_root)
+    hollow_check = hollow.Pass("ledger scan", read_marker=False)
     for root in roots:
         start = os.path.join(base, *root.split("/")) if root else base
         stack = [(long_path(start), root, False)]
@@ -275,6 +282,15 @@ def walk(volume_root: str, roots: Iterable[str], rules: Rules,
                 except OSError as exc:
                     if on_unreadable is not None:
                         on_unreadable(rel_dir, exc)          # the FOLDER the entry is in: that is what is exempted
+                    continue
+                if hollow_check.excluded(e.path, st):
+                    # Grading frames (docs/GRADING_FRAMES.md section 4, 2026-11-22): a hollow
+                    # copy is NEVER a copy. Its first and last MiB and its index really are the
+                    # original's, which is exactly what the field quick verify samples, so a row
+                    # for it would let a camera card be judged safe to wipe on the strength of a
+                    # file holding three frames. Not listed at all, so the server never records
+                    # it. The walk's read-only rule holds: the Pass reads no marker here, and
+                    # names a file it keeps out on the filesystem sign alone in the log.
                     continue
                 size = int(st.st_size)
                 if progress is not None:

@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from . import config as config_mod
+from . import hollow
 from . import ledger_scan
 from . import sorter_cards
 
@@ -223,7 +224,8 @@ def write_card_marker(folder: "str | Path", serial: str, label: str = "") -> Non
 
 
 def row_is_this_file(row: dict[str, Any], rel: str, card_serial: str, folders: Iterable[str],
-                     on_nas: Optional[Callable[[dict[str, Any]], bool]] = None) -> bool:
+                     on_nas: Optional[Callable[[dict[str, Any]], bool]] = None,
+                     path_of: Optional[Callable[[dict[str, Any]], Optional[str]]] = None) -> bool:
     """Is a copy found by NAME, SIZE and TIME really this card's file? Two recorders at one bitrate
     write take after take of identical length with linked start and stop, so name, size and time
     alone can be somebody else's file. A copy this machine made carries its card's serial and must
@@ -236,7 +238,15 @@ def row_is_this_file(row: dict[str, Any], rel: str, card_serial: str, folders: I
     flattens the card's own tree as it goes, so a sorted clip never keeps its card-relative path.
     A NAS copy therefore counts WHEREVER it sits on the pool, by name, size and time, unless it
     carries a DIFFERENT card's serial. The price, accepted: two linked recorders whose files are
-    identical in name, length and time can stand in for each other on the NAS."""
+    identical in name, length and time can stand in for each other on the NAS.
+
+    NEVER A GRADING-FRAME COPY (docs/GRADING_FRAMES.md section 4, 2026-11-22). `path_of(row)` is
+    where the copy is on this computer right now (LedgerView.local_path_of: an attached volume's
+    root joined with the row's path), and a copy there that is hollow is refused BEFORE any
+    comparison. A camera card must never be judged safe to wipe on the strength of a file that
+    holds three frames: its head, tail and index really are the original's."""
+    if path_of is not None and _is_hollow_row(row, path_of):
+        return False
     path = str(row.get("path") or "").replace("\\", "/").strip("/").lower()
     r = str(rel or "").replace("\\", "/").strip("/").lower()
     owner = str(row.get("card") or "").strip().upper()
@@ -251,6 +261,19 @@ def row_is_this_file(row: dict[str, Any], rel: str, card_serial: str, folders: I
     elif any(path == f"{f.lower()}/{r}" or path.endswith(f"/{f.lower()}/{r}") for f in folders):
         return True
     return nas
+
+
+def _is_hollow_row(row: dict[str, Any], path_of: Callable[[dict[str, Any]], Optional[str]]) -> bool:
+    """Is the copy this row names, where it sits on this computer, a grading-frame copy? A row
+    whose file is not reachable here (a drive that is away) cannot be looked at and is judged as
+    before. Never raises."""
+    try:
+        local = path_of(row)
+    except Exception:                                             # noqa: BLE001
+        return False
+    if not local:
+        return False
+    return hollow.is_hollow(local)
 
 
 # -- kinds ----------------------------------------------------------------------------------------
@@ -506,8 +529,19 @@ def _same_range(a: Any, b: Any, pos: int, length: int, what: str) -> Optional[st
 def quick_compare(src: "str | Path", dst: "str | Path", ext: str = "") -> dict[str, Any]:
     """Alex's simple verification of a copy (2026-10-18): the size, the first and last MiB, and for
     QuickTime-family files the moov box (Sony and BMCC write it AFTER the media, so the head alone
-    never reaches it). -> {ok, error?, warning?, checked, unreadable?}. Never a full read-back."""
+    never reaches it). -> {ok, error?, warning?, checked, unreadable?}. Never a full read-back.
+
+    A GRADING-FRAME COPY ON EITHER SIDE IS REFUSED OUTRIGHT, before any comparison
+    (docs/GRADING_FRAMES.md section 4, 2026-11-22): its first and last MiB and its index are the
+    original's, which is exactly what this check samples. Deep (the marker is read), because this
+    opens both files anyway: a hollow copy that was copied somewhere that filled its holes in,
+    and whose ledger row is on another computer, is still caught."""
     checked: list[str] = []
+    for side, which in ((dst, "copy"), (src, "source")):
+        if hollow.is_hollow(side, deep=True):
+            return {"ok": False, "checked": checked, "hollow": True,
+                    "error": f"the {which} is a grading-frame copy (a few frames of the clip and "
+                             "empty space), not the footage"}
     try:
         with open(src, "rb") as a, open(dst, "rb") as b:
             size_a, size_b = os.fstat(a.fileno()).st_size, os.fstat(b.fileno()).st_size
@@ -843,6 +877,20 @@ class LedgerView:
         self._covered: dict[tuple[str, str], dict[str, Any]] = {}
         self._covered_lock = threading.Lock()
 
+    def local_path_of(self, row: dict[str, Any]) -> Optional[str]:
+        """Where the copy a row names is on this computer right now: its ATTACHED volume's root
+        joined with the row's path, or None when the volume is away or cannot be asked. For
+        row_is_this_file's grading-frame refusal. Never raises."""
+        if self.root_of is None or not row.get("path"):
+            return None
+        try:
+            root = self.root_of(str(row.get("volume_id") or ""))
+        except Exception:                                         # noqa: BLE001
+            return None
+        if not root:
+            return None
+        return str(Path(root).joinpath(*str(row["path"]).split("/")))
+
     def _present(self, row: dict[str, Any]) -> bool:
         if self.root_of is None:
             return True
@@ -852,11 +900,16 @@ class LedgerView:
             root = None
         if not root or not row.get("path"):
             return True
+        where = Path(root).joinpath(*str(row["path"]).split("/"))
         try:
-            st = os.stat(Path(root).joinpath(*str(row["path"]).split("/")))
+            st = os.stat(where)
         except OSError:
             return False
         if st.st_size != int(row.get("size", st.st_size)):
+            return False
+        if hollow.is_hollow(where, st):
+            # A grading-frame copy is not a live copy (docs/GRADING_FRAMES.md section 4): the
+            # verdict and the copier's "already there" both ask this, so neither can count one.
             return False
         if row.get("mtime") is not None and abs(st.st_mtime * 1000.0 - float(row["mtime"])) > TIME_SLACK_MS:
             return False

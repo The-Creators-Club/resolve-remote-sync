@@ -551,3 +551,34 @@ def test_a_delivered_receipt_queues_nothing(tmp_path):
     r.note_report_reply({"commands": {"jobs": {"offered": [33]}}})
     r.tick()
     assert dash.results[-1]["ok"] is True and ledger_outbox.pending(box) == 0
+
+
+# -- grading frames (docs/GRADING_FRAMES.md section 4, 2026-11-22) ------------------------------------
+
+
+def test_a_grading_frame_copy_is_never_listed_as_a_copy(tmp_path):
+    """Its head, tail and index really are the original's, which is what the
+    field quick verify samples: listed, it could make a camera card read safe
+    to wipe. A file only the filesystem calls hollow is left out too; a whole
+    file that merely carries the sparse attribute is listed (trap 1)."""
+    import hollow_fixtures as hf
+    from ccsync_companion import hollow
+
+    led = hollow.configure(tmp_path / "state" / hollow.STATE_FILENAME)
+    vol = tmp_path / "vol"
+    hf.plant_hollow(vol / "FieldBackup" / "Trip" / "A001.braw", source_dir=tmp_path / "nas", led=led)
+    hf.plant_holes_only(vol / "FieldBackup" / "Trip" / "A003.braw")
+    hf.plant_sparse_but_whole(vol / "FieldBackup" / "Trip" / "A002.braw", size=2 << 20)
+
+    rows = list(ledger_scan.walk(str(vol), [""], ledger_scan.Rules()))
+    assert [r[0] for r in rows] == ["FieldBackup/Trip/A002.braw"]
+
+
+def test_the_hollow_test_in_the_scan_opens_nothing(tmp_path, monkeypatch):
+    """The walk's read-only rule: the marker is never read here."""
+    import hollow_fixtures as hf
+    from ccsync_companion import hollow
+
+    hf.plant_holes_only(tmp_path / "vol" / "A003.braw")
+    monkeypatch.setattr(hollow, "read_marker", lambda *a, **k: pytest.fail("the scan opened a file"))
+    assert list(ledger_scan.walk(str(tmp_path / "vol"), [""], ledger_scan.Rules())) == []

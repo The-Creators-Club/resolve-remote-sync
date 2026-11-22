@@ -45,6 +45,7 @@ from .base import (
     LaneStatus,
 )
 from . import lane_guard, server_locate
+from .. import hollow
 
 log = logging.getLogger("ccsync.sync.rclone")
 
@@ -7521,6 +7522,7 @@ class RcloneLane(LaneAdapter):
         # wait for the paths already judged.
         scope = self.periodic_inflight_subpath()
         deferred_to_periodic = 0
+        hollow_dropped = 0
         # ...and the same for a file a handed-off periodic child is still
         # writing (2026-09-26). NFC and case-folded on both sides: the claim
         # is rclone's spelling of the name and `rel` the watcher's, and on a
@@ -7572,12 +7574,26 @@ class RcloneLane(LaneAdapter):
                 # Same gate the periodic pass gets from --min-age.
                 deferred[rel] = (st.st_size, first_seen)
                 continue
+            if hollow.is_hollow(full, st, deep=True):
+                # Grading frames (docs/GRADING_FRAMES.md section 4, 2026-11-22): express is lane
+                # A's OTHER door, and it cannot carry the filter file the periodic pass gets the
+                # hollow copies' excludes through. A hollow copy lands by a rename, i.e. as one
+                # watchdog event for a .braw sitting perfectly still, and `--ignore-existing`
+                # would make it the NAS's permanent copy the day the real one is not there.
+                # Dropped, not deferred: it will never become uploadable. DEEP, so a copy known
+                # only by its marker is caught too; that is one small read per file that has
+                # already cleared every other gate here.
+                hollow_dropped += 1
+                continue
             ready.append(rel)
         if deferred_to_periodic:
             log.info(
                 "%s: express deferred %d path(s) to the periodic run already in "
                 "flight for %s", self.name, deferred_to_periodic, scope or "the whole tree",
             )
+        if hollow_dropped:
+            log.info("%s: express left out %d grading-frame cop%s (not footage)",
+                     self.name, hollow_dropped, "y" if hollow_dropped == 1 else "ies")
         return ready, deferred
 
     def _express_drop_moved_away(self, rels: list[str]) -> list[str]:

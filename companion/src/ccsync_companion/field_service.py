@@ -538,7 +538,8 @@ class FieldService:
                         exclude_volumes=[f"vol:{card['serial']}"], phys_of=self._phys_of,
                         match_fn=lambda row, rel: field_mode.row_is_this_file(
                             row, rel, card["serial"], folders,
-                            on_nas=lambda r: kind_of(str(r.get("volume_id") or "")) == "nas"),
+                            on_nas=lambda r: kind_of(str(r.get("volume_id") or "")) == "nas",
+                            path_of=getattr(self.view, "local_path_of", None)),
                         unreadable=card.get("unreadable") or ())
             finally:
                 # the copies the mirror turned out to hold are dropped from the local file HERE,

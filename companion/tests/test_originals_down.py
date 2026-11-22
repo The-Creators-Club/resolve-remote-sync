@@ -517,3 +517,79 @@ def test_its_status_is_a_lane_status_the_report_can_copy(tmp_path):
     with lane._lock:
         lane._status.detail = "sync disabled"
     assert lane.status().detail == "sync disabled"
+
+
+
+# -- grading frames (docs/GRADING_FRAMES.md section 3.5, 2026-11-22) ----------
+
+
+def _hollow_lane(tmp_path, land=True):
+    """A wanted original whose local copy is a hollow copy, and a NAS listing
+    of the real one. -> (lane, spawned, the hollow copy's path, the ledger, the listing)."""
+    import hollow_fixtures as hf
+    from ccsync_companion import hollow
+
+    led = hollow.configure(tmp_path / "hstate" / hollow.STATE_FILENAME)
+    cfg = _cfg(tmp_path)
+    home = Path(cfg["local_root"]) / "Projects" / "2026" / "Beyond Nights" / "F" / "a.braw"
+    _dest, original = hf.plant_hollow(home, source_dir=tmp_path / "nas", led=led)
+    nas = {"F/a.braw": original.stat().st_size}
+    lane, spawned, _, _ = _lane(tmp_path, [_item(list(nas))], nas,
+                                popen=lambda c: FakeProc(c, nas, land=land))
+    return lane, spawned, home, led, nas
+
+
+def test_a_hollow_copy_is_planned_as_absent_not_left_alone():
+    """`differs_here` used to leave any other-size file alone, and the run is
+    `--ignore-existing`: a hollow copy would block the real download for ever."""
+    want = ol.Want("s", PROJECT, ["F/a.braw", "F/b.braw"])
+    nas = {"F/a.braw": (100, "t"), "F/b.braw": (100, "t")}
+    plan = ol.plan_project(want, nas, Path("/x"), lambda p: 150,
+                           hollow_fn=lambda p: p.name == "a.braw")
+    assert [e.rel for e in plan.entries] == ["F/a.braw"]
+    assert plan.hollow_here == 1 and plan.differs_here == 1
+
+
+def test_bring_originals_replaces_a_hollow_copy_and_removes_it_once_landed(tmp_path):
+    lane, spawned, home, led, nas = _hollow_lane(tmp_path)
+    lane.cycle()
+    assert len(spawned) == 1 and spawned[0].listed == ["F/a.braw"]
+    assert home.stat().st_size == nas["F/a.braw"], "the real original is in place"
+    assert [p.name for p in home.parent.iterdir()] == ["a.braw"], "the hollow copy is gone"
+    assert led.entries() == []
+
+
+def test_a_download_that_does_not_land_puts_the_hollow_copy_back(tmp_path):
+    lane, spawned, home, led, _nas = _hollow_lane(tmp_path, land=False)
+    before = home.read_bytes()
+    lane.cycle()
+    assert len(spawned) == 1
+    assert home.read_bytes() == before
+    assert led.get(home) is not None
+    assert [p.name for p in home.parent.iterdir()] == ["a.braw"]
+
+
+def test_an_aside_left_by_a_crash_is_settled_on_the_next_cycle(tmp_path):
+    from ccsync_companion import hollow
+
+    lane, spawned, home, led, nas = _hollow_lane(tmp_path)
+    aside = hollow.move_aside(home, hollow.ASIDE_ORIGINALS, led)
+    home.write_bytes(b"x" * nas["F/a.braw"])      # the real original landed, then the crash
+    lane.cycle()
+    assert not Path(aside).exists() and led.entries() == []
+    assert spawned == [], "nothing left to bring"
+
+
+def test_a_file_only_the_filesystem_calls_hollow_is_left_alone(tmp_path):
+    """Something we did not make (a cloud placeholder): never renamed, never
+    downloaded over; it reads as the editor's own file, as before."""
+    import hollow_fixtures as hf
+
+    cfg = _cfg(tmp_path)
+    home = Path(cfg["local_root"]) / "Projects" / "2026" / "Beyond Nights" / "F" / "a.braw"
+    hf.plant_holes_only(home)
+    nas = {"F/a.braw": 123}
+    lane, spawned, _, _ = _lane(tmp_path, [_item(list(nas))], nas)
+    lane.cycle()
+    assert spawned == []
+    assert home.exists() and home.stat().st_size == 8 << 20

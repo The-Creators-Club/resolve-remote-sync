@@ -227,6 +227,24 @@ run alongside the tray app — it would hold port 8899.
   every holding machine through `commands.file_moves`; the companion moves
   its copy, relinks Resolve, keeps the old path out of lane A for a day,
   and answers in `file_moves_applied`. Nothing in that path deletes.
+- **A hollow copy is never the footage** (`docs/GRADING_FRAMES.md`,
+  2026-11-22): "Bring grading frame" puts a sparse copy
+  of a `.braw` at the original's OWN path, holding its index and a few real
+  frames, so a remote editor can set the raw controls on the real clip. It
+  has the original's name and nearly its length, so every walk that decides
+  "this is a video file" asks `hollow.is_hollow` (ledger row, trailing marker
+  atom, or less than half allocated: ANY sign) before it counts, uploads,
+  verifies or proxies one, and a new caller of `VIDEO_EXTS` that does not ask
+  fails `test_hollow.py`. The one delete (`hollow.remove_hollow`) needs ALL
+  THREE signs. The sparse attribute alone is not a sign: rclone's own
+  downloads leave whole originals marked sparse. **Two releases, in order**:
+  companion 0.9.98 (on `main`) recognises one and cannot make one; 0.9.99,
+  which can, is PARKED on the branch `grading-frames-release-b` and must not
+  be merged into `main` until every machine runs 0.9.98 or newer, because
+  `publish_latest.py` ships whatever `main` holds (doc section 10.1 has the
+  steps). In that build the menu scripts are under `Scripts/Utility/CC Sync`
+  (every page; `Edit` is invisible on the Color page). The Lua tests of every
+  menu script SKIP without a Lua runtime (`lupa`, or `lua` on PATH).
 - **Wired or remote is the COMPUTER's own setting** (CR-88, companion
   0.9.54): `effective_mode()` reads config `mode` only, set from the tray's
   Settings window (THIS COMPUTER). The `role` the dashboard's `/verify`

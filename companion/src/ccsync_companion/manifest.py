@@ -25,6 +25,7 @@ from typing import Any, Callable, Optional
 
 from . import config as config_mod
 from . import fixer
+from . import hollow
 from .sync import rclone_lane
 
 log = logging.getLogger("ccsync.manifest")
@@ -168,6 +169,13 @@ def scan_local_manifest(
         else:
             log.info("media manifest is no longer truncated (%d project(s))",
                      len(project_rels))
+    # Grading frames (docs/GRADING_FRAMES.md section 4, 2026-11-22): a hollow copy is the
+    # original's name at the original's path and almost its length, holding a few frames. Counted
+    # here, the dashboard would believe this machine holds the clip (file moves follow it, and
+    # its size, which differs from the NAS's, can read as an upload owed for ever). One Pass per
+    # walk: the ledger is read once, and a file kept out on the filesystem sign alone is named
+    # in the log once per walk.
+    hollow_check = hollow.Pass("media manifest")
     for project_rel in project_rels:
         project_dir = Path(local_root) / "Projects" / project_rel.replace("/", os.sep)
         include_files = (
@@ -210,13 +218,24 @@ def scan_local_manifest(
                 if ext not in rclone_lane.VIDEO_EXTS:
                     continue
                 file_path = os.path.join(dirpath, filename)
+                is_proxy = _is_proxy_path(dir_parts + (filename,))
+                st = None
                 try:
-                    size = size_fn(file_path)
+                    if size_fn is os.path.getsize:
+                        # One stat serves the size AND the hollow test (the filesystem sign reads
+                        # its attributes / blocks), rather than getsize and then a second stat.
+                        st = os.stat(file_path)
+                        size = int(st.st_size)
+                    else:
+                        size = size_fn(file_path)
                 except OSError:
+                    continue
+                # Originals only: a hollow copy is never under Proxy/, and proxies are most of
+                # the files on a remote editor's disk.
+                if not is_proxy and hollow_check.excluded(file_path, st):
                     continue
 
                 rel_posix = f"{dir_posix}/{filename}" if dir_posix else filename
-                is_proxy = _is_proxy_path(dir_parts + (filename,))
                 if is_proxy:
                     n_proxies += 1
                     bytes_proxies += size

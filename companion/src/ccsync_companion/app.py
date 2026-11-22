@@ -48,6 +48,7 @@ from . import supervisor
 from . import eula as eula_mod
 from . import telemetry_policy
 from . import file_moves as file_moves_mod
+from . import hollow as hollow_mod
 from . import machine as machine_mod
 from . import machine_settings as machine_settings_mod
 from . import idle as idle_mod
@@ -1976,6 +1977,11 @@ class CompanionApp:
         # right home, beside the other per-machine bookkeeping.
         broll_standins.configure(
             guard_state_dir / broll_standins.STATE_FILENAME)
+        # The grading-frames ledger (docs/GRADING_FRAMES.md section 4, sign 1), beside it for the
+        # same reason (2026-11-22). Losing it costs the ledger sign only: the marker and the
+        # filesystem still keep every hollow copy out of lane A and the manifest, and a copy
+        # with a sign missing is never deleted.
+        hollow_mod.configure(guard_state_dir / hollow_mod.STATE_FILENAME)
         self.lane_b_breaker = lane_guard.LaneBBreaker(
             lane_guard.adopt_legacy_latch(
                 latch_dir / lane_guard.BREAKER_STATE_FILENAME,
@@ -2921,11 +2927,20 @@ class CompanionApp:
 
     def _lane_a_extra_excludes(self, subpath: Optional[str]) -> list[str]:
         """Lane A's exclude hook: the file-move ledger's old paths first, then
-        the originals lane's names. Each source fails on its own."""
+        the originals lane's names, then the grading-frame copies. Each source
+        fails on its own."""
         out = list(self.file_moves.recent_excludes(subpath) or [])
         lane = getattr(self, "_originals_lane", None)
         if lane is not None:
             out += [rel for rel in lane.lane_a_excludes(subpath) if rel not in out]
+        # Grading frames (docs/GRADING_FRAMES.md section 4, first row, 2026-11-22): a hollow
+        # copy is the original's name at the original's path, and lane A is `copy
+        # --ignore-existing` that never deletes, so the day the NAS copy is moved or lost by hand
+        # it would upload a clip of zeros as the fleet's permanent original. The ledger AND a
+        # walk's filesystem test feed this; it never raises.
+        local_root = str((getattr(self, "config", None) or {}).get("local_root") or "")
+        if local_root:
+            out += [rel for rel in hollow_mod.lane_a_excludes(local_root, subpath) if rel not in out]
         return out
 
     def _originals_selection(self) -> Optional[list]:

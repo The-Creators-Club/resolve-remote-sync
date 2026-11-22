@@ -14,6 +14,9 @@ Two safety rules, both the same shape as the removal gate's:
 
 * NOTHING here deletes. A move whose destination already exists on this
   machine is refused and reported, with the local file left where it was.
+  The one exception (docs/GRADING_FRAMES.md section 3.5, 2026-11-22): a
+  path that is a grading-frame copy here is dropped instead of moved, and
+  only when all three of its signs agree (hollow.remove_hollow).
 * Every move this machine has HEARD OF keeps its old path out of lane A for
   a day (`recent_excludes`), applied or refused, so a local copy that could
   not be moved still cannot re-upload itself while the admin sorts it out.
@@ -36,6 +39,8 @@ import time
 import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+from . import hollow
 
 log = logging.getLogger("ccsync.file_moves")
 
@@ -725,6 +730,8 @@ def apply_move(move: dict[str, Any], local_root: str,
                 return True, "proxy download had already moved this folder on this computer", (
                     str(src), str(dest))
         return True, "nothing at the old path on this computer", None
+    if not move.get("is_dir") and src.is_file() and _is_our_hollow_copy(src):
+        return _drop_hollow_copy(move, src)
     if _same_file(src, dest):
         # ...unless the two names differ in bytes and fold to the same key:
         # that is a real rename on the server's case-sensitive filesystem
@@ -775,6 +782,7 @@ def apply_move(move: dict[str, Any], local_root: str,
         # computer had followed. Trashed, never deleted, and said so.
         trash = _trash_destination(local_root, move)
         if src.is_dir():
+            _drop_hollow_copies_under(move, src)
             split = _split_folder_for_4b(src, move, server_files)
             if split is None:
                 log.warning("file move #%s: %s may hold originals the server does "
@@ -835,6 +843,15 @@ def apply_move(move: dict[str, Any], local_root: str,
         src.replace(dest)
     except OSError as exc:
         return False, f"could not move it on this computer: {exc}", None
+    if dest.is_dir():
+        # A folder that held grading-frame copies took them with it, which is right (each still
+        # sits at its original's path); their ledger rows follow so the ledger sign does too
+        # (docs/GRADING_FRAMES.md section 4, 2026-11-22). Never fatal to the move.
+        try:
+            hollow.ledger().relocated(src, dest)
+        except Exception:
+            log.debug("file move #%s: grading-frame rows could not follow the folder",
+                      move.get("id"), exc_info=True)
     # bug-comp-syncthing-1 (2026-09-25): the proxies are OUTSIDE the fatal
     # try. Once the original has moved, the move has happened: answering
     # not-ok here recorded it `retryable`, and the redelivery found src gone
@@ -843,6 +860,70 @@ def apply_move(move: dict[str, Any], local_root: str,
     failed: list[str] = []
     proxies = 0 if src.is_dir() or dest.is_dir() else move_proxy_siblings(src, dest, failed)
     return True, _moved_detail("moved", proxies, failed), (str(src), str(dest))
+
+
+DETAIL_HOLLOW_DROPPED = ("this computer held only grading frames of it (a hollow copy), so that "
+                         "copy was removed instead of moved; frames can be asked for again at "
+                         "the new place")
+DETAIL_HOLLOW_KEPT = ("this computer holds something at the old path that looks like a "
+                      "grading-frame copy but cannot be confirmed as one ({why}); it was left "
+                      "where it is")
+
+
+def _is_our_hollow_copy(path: Path) -> bool:
+    """A grading-frame copy THIS FEATURE made: its ledger row or its own marker says so
+    (hollow.Signs.ours). NOT a file only the filesystem calls hollow (review, 2026-11-22): a
+    cloud-drive placeholder, or a sparse file somebody else made, is the editor's own file. It
+    moved like any other before grading frames existed and it still does; sent down the drop
+    path it could never be confirmed (it has no marker to confirm), so the move would answer
+    not-ok for ever. Never raises."""
+    try:
+        return hollow.signs(path, marker=True).ours()
+    except Exception:
+        log.debug("file moves: could not ask whether %s is a grading-frame copy", path,
+                  exc_info=True)
+        return False
+
+
+def _drop_hollow_copies_under(move: dict[str, Any], folder: Path) -> None:
+    """Section 4b for a FOLDER going to a project this computer does not sync (review,
+    2026-11-22): its grading-frame copies are dropped first, under the same all-three-signs
+    rule as a single file's. Left for the triage they match nothing on the server (the marker
+    makes them a different length), so they would be reported as "may not be on the server, so
+    they stay where lane A will upload them", which is false twice over: lane A never carries
+    one, and nothing would ever clear it out of a folder that has otherwise gone. A copy that
+    cannot be confirmed is kept, as everywhere. Never raises."""
+    try:
+        for path, _rel, _size in _files_under(folder):
+            if _is_our_hollow_copy(path):
+                removed, why = hollow.remove_hollow(path)
+                if not removed:
+                    log.warning("file move #%s: kept the grading-frame copy %s in the moved "
+                                "folder: %s", move.get("id"), path, why)
+    except Exception:
+        log.debug("file move #%s: could not clear grading-frame copies under %s",
+                  move.get("id"), folder, exc_info=True)
+
+
+def _drop_hollow_copy(move: dict[str, Any], src: Path
+                      ) -> tuple[bool, str, Optional[tuple[str, str]]]:
+    """A path that is a grading-frame copy here is DROPPED, not moved (docs/GRADING_FRAMES.md
+    section 3.5, 2026-11-22). Its frames belong to the server's file at its OLD place; moved, it
+    would be a hollow copy at the new path built from an index nobody re-checked.
+
+    The one exception to this module's "nothing here deletes", and only under the all-three-signs
+    rule (hollow.remove_hollow: the ledger row, the marker and the filesystem all agree). Any
+    doubt keeps the file and answers NOT ok, so the move stays `retrying` and its old path stays
+    out of lane A for as long as it is unresolved (RES-1): a kept hollow copy must never be the
+    file lane A puts back at the path the admin cleared. No relink: nothing moved to a path
+    Resolve should be repointed at, exactly as when nothing was here."""
+    removed, why = hollow.remove_hollow(src)
+    if removed:
+        log.info("file move #%s: %s was a grading-frame copy; removed rather than moved",
+                 move.get("id"), src)
+        return True, DETAIL_HOLLOW_DROPPED, None
+    log.warning("file move #%s: kept %s at the old path: %s", move.get("id"), src, why)
+    return False, DETAIL_HOLLOW_KEPT.format(why=why), None
 
 
 def _attempt_moved_it(entry: dict[str, Any], src: Path, dest: Path) -> bool:

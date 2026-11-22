@@ -473,3 +473,63 @@ def test_the_state_file_is_read_again_only_when_it_changed(tmp_path, monkeypatch
     other = fm.FieldStore(p)                                    # and so is somebody else's
     other.set_kind("vol:A", "laptop")
     assert store.kinds()["vol:A"] == "laptop"
+
+
+# -- grading frames (docs/GRADING_FRAMES.md section 4, 2026-11-22) ---------------------------------------
+
+
+def _planted(tmp_path):
+    import hollow_fixtures as hf
+    from ccsync_companion import hollow
+
+    led = hollow.configure(tmp_path / "state" / hollow.STATE_FILENAME)
+    dest, original = hf.plant_hollow(tmp_path / "drive" / "Trip" / "A001.braw",
+                                     source_dir=tmp_path / "card", led=led)
+    return dest, original, led
+
+
+def test_the_quick_verify_refuses_a_hollow_copy_before_any_comparison(tmp_path):
+    dest, original, _led = _planted(tmp_path)
+    r = fm.quick_compare(original, dest)
+    assert r["ok"] is False and r.get("hollow") is True and "grading-frame copy" in r["error"]
+    assert r["checked"] == [], "refused before the size, head or moov were looked at"
+    assert fm.quick_compare(dest, original)["ok"] is False
+
+
+def test_a_hollow_copy_known_only_by_its_marker_is_still_refused(tmp_path):
+    """Copied somewhere that filled its holes, its ledger row on another
+    computer: the quick verify reads the marker itself."""
+    dest, original, led = _planted(tmp_path)
+    plain = tmp_path / "exfat" / "A001.braw"
+    plain.parent.mkdir()
+    plain.write_bytes(dest.read_bytes())
+    led.forget(dest)
+    r = fm.quick_compare(original, plain)
+    # The length alone would already differ (the marker's doing); the point is that it is
+    # refused AS a grading-frame copy, by its marker, before the size is compared.
+    assert r["ok"] is False and r.get("hollow") is True and r["checked"] == []
+
+
+def test_row_is_this_file_refuses_a_copy_that_is_hollow_where_it_sits(tmp_path):
+    dest, _original, _led = _planted(tmp_path)
+    row = {"volume_id": "vol:ABCD", "path": "Trip/A001.braw", "card": ""}
+    where = lambda r: str(tmp_path / "drive" / r["path"])  # noqa: E731
+    assert fm.row_is_this_file(row, "A001.braw", "SER", ["Trip"]) is True
+    assert fm.row_is_this_file(row, "A001.braw", "SER", ["Trip"], path_of=where) is False
+    assert fm.row_is_this_file(row, "A001.braw", "SER", ["Trip"], on_nas=lambda r: True,
+                               path_of=where) is False
+
+
+def test_the_ledger_view_never_counts_a_hollow_copy_as_a_live_copy(tmp_path):
+    dest, _original, _led = _planted(tmp_path)
+    size = dest.stat().st_size
+    row = {"volume_id": "vol:ABCD", "path": "Trip/A001.braw", "size": size}
+
+    class Mirror:
+        def where(self, name, size, mtime):
+            return [dict(row)]
+
+    view = fm.LedgerView(Mirror(), fm.LocalCopies(tmp_path / "copies.jsonl"),
+                         root_of=lambda vid: str(tmp_path / "drive"))
+    assert view.copies("A001.braw", size) == []
+    assert view.local_path_of(row) == str(tmp_path / "drive" / "Trip" / "A001.braw")

@@ -740,6 +740,7 @@ through `rclone_lane.down_route` with Bring originals' flags. Reads less than
 | # | What | Why it matters |
 |---|---|---|
 | 1 | A real click in Resolve: each of the four menu items from the Color page, on a plain clip and on a multicam, with the companion running | everything above drove the script from outside. Whether the items appear, and `Go to grading frame` (`SetCurrentTimeline`, `SetCurrentTimecode`), has only run against a stand-in |
+| 1b | A Mac's disk and holes. The first CI run on GitHub's macOS runner (APFS, 2026-11-22) left every test clip FULLY allocated: holes of a few MB, and one of 8 MiB, were filled in. The suite now measures holes of 4, 32 and 128 MiB on every run and prints the result in the warnings summary (`HOLES ON ...`), and the writer refuses to place any copy that did not come out mostly holes | if a Mac fills in large holes too, a grading frame there would cost the whole clip's size. Read that line in a macOS CI log before flipping `FETCH_ENABLED_ON_MACOS` |
 | 2 | The fetch through a real editor's remote (SFTP, and the tunnel route) | only rclone's local backend was available on this rig (section 2.3) |
 | 3 | Which frame Resolve really shows for a clip at another frame rate or a retimed clip | the wider margin is a guess from one measurement |
 | 4 | What Blackmagic Proxy Generator does when it meets a hollow copy in a folder it already watches | item 6 of 10.3 only stops NEW folders |

@@ -139,15 +139,63 @@ def index_of(path: Path) -> hollow.BrawIndex:
     return hollow.parse_index(head, data[off:off + length], len(data))
 
 
+# The fixtures are ~10 MB clips whose holes are a few MB each, and plant_holes_only's is 8 MiB.
+HOLE_PROBE_BYTES = 4 << 20
+_hole_probe: dict[str, tuple[int, int]] = {}
+
+
+def measure_hole(folder: Path, hole: int = HOLE_PROBE_BYTES) -> tuple[int, int]:
+    """Write 4 KB, leave `hole` bytes unwritten, write one more byte, exactly as the writer does
+    (sparse flag first on Windows, seek, write). -> (length, bytes on the disk)."""
+    probe = Path(folder) / f".hole-probe-{os.getpid()}-{hole}{hollow.TEMP_SUFFIX}"
+    try:
+        with open(probe, "xb") as fh:
+            hollow._set_sparse(fh)
+            fh.write(b"\x01" * 4096)
+            fh.seek(4096 + hole)
+            fh.write(b"\x01")
+            fh.flush()
+            os.fsync(fh.fileno())
+        st = os.stat(probe)
+        allocated = hollow.allocated_bytes(probe, st)
+        return int(st.st_size), int(st.st_size if allocated is None else allocated)
+    finally:
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+
+
 def need_sparse(folder: Path) -> None:
-    """Skip LOUDLY where this folder cannot hold sparse files: the reason names the filesystem,
-    so a run that skipped the writer's tests says so in its summary (`-rs`)."""
+    """Skip LOUDLY where this folder cannot hold the fixtures' sparse files: the reason names
+    the filesystem, so a run that skipped the writer's tests says so in its summary (`-rs`).
+
+    MEASURED, not read off the filesystem's name (2026-11-22). The first CI run on a Mac had
+    `can_hold_sparse` answer yes for APFS by name, and the runner then left every fixture fully
+    allocated: nine tests failed on a property of the runner's disk. A 4 MiB hole is written here
+    the way the writer writes one, and the tests run only where it stays empty."""
+    # The nearest folder that exists: a test names where its hollow copy WILL go.
+    folder = Path(folder)
+    while not folder.exists() and folder.parent != folder:
+        folder = folder.parent
     able, name = hollow.can_hold_sparse(folder)
+    label = name or "a filesystem this machine could not name"
     if not able:
-        pytest.skip(f"SPARSE FILES UNAVAILABLE HERE: {folder} is on "
-                    f"{name or 'a filesystem this machine could not name'}, which "
+        pytest.skip(f"SPARSE FILES UNAVAILABLE HERE: {folder} is on {label}, which "
                     f"{'cannot' if able is False else 'could not be shown to'} hold sparse files, "
                     "so the hollow-copy writer is NOT TESTED on this machine")
+    key = hollow.filesystem_name(folder) + "|" + str(Path(folder).anchor)
+    if key not in _hole_probe:
+        try:
+            _hole_probe[key] = measure_hole(Path(folder))
+        except OSError as exc:
+            pytest.skip(f"SPARSE FILES UNAVAILABLE HERE: {folder} ({label}) could not be probed "
+                        f"({exc}), so the hollow-copy writer is NOT TESTED on this machine")
+    length, allocated = _hole_probe[key]
+    if allocated >= length * hollow.SPARSE_ALLOCATED_FRACTION:
+        pytest.skip(f"SPARSE FILES UNAVAILABLE HERE: {folder} is on {label}, which did NOT keep a "
+                    f"{HOLE_PROBE_BYTES >> 20} MiB hole empty ({allocated} bytes on the disk for a "
+                    f"file of {length}), so the hollow-copy writer is NOT TESTED on this machine")
 
 
 def plant_hollow(dest: Path, *, source_dir: Optional[Path] = None, frames=(20,), led=None,

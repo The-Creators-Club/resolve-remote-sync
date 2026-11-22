@@ -1421,7 +1421,18 @@ def _check_allocation(temp: Path, written: int, n_ranges: int) -> None:
     # volume formatted with large clusters), so each range can round up at both ends. 2 MiB a
     # range is far above that and far below "the holes were filled in", which is the clip's size.
     slack = (2 << 20) * (n_ranges + 1)
-    if allocated > written + MARKER_MAX_BYTES + slack:
+    # ...AND IT MUST SHOW THE FILESYSTEM SIGN (2026-11-22, from the first CI run on a Mac). The
+    # slack above is megabytes, so on a small clip a drive that filled every hole in still
+    # passed: GitHub's macOS runner (APFS) left a 10 MB test clip fully allocated and the copy
+    # was placed. A copy that is not mostly holes is a clip-sized file the predicate's third
+    # sign cannot see and `may_delete` can never remove, so it is never placed, whatever the
+    # reason it came out that way.
+    try:
+        length = int(os.stat(temp).st_size)
+    except OSError:
+        length = 0
+    not_hollow = length > 0 and allocated >= length * SPARSE_ALLOCATED_FRACTION
+    if not_hollow or allocated > written + MARKER_MAX_BYTES + slack:
         name = filesystem_name(temp.parent)
         raise HollowRefused(f"the sync drive{f' ({name})' if name else ''} filled in the empty parts "
                             f"of the grading-frame copy ({allocated} bytes on the disk for {written} "

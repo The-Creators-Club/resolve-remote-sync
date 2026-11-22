@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import sys
 import unicodedata
 from pathlib import Path
 
@@ -192,6 +193,45 @@ def test_a_drive_that_cannot_hold_sparse_files_is_refused_naming_its_format(tmp_
     assert "exFAT" in text
     assert list(dest.parent.iterdir()) == []
     assert led.entries() == []
+
+
+def test_what_this_filesystem_does_with_a_hole_is_on_record(tmp_path):
+    """Doc section 6 item 1 asks what APFS does with a sparse file, and the first Mac CI run
+    (2026-11-22) answered for small files: the runner kept none of the fixtures' holes. This
+    measures holes of three sizes the way the writer writes them and puts the numbers in the
+    run's warnings summary, on every platform, so the answer for each runner is in its log.
+    It asserts nothing about the filesystem: the writer's own check (`_check_allocation`) is
+    what refuses a copy that did not come out hollow."""
+    import warnings
+
+    able, name = hollow.can_hold_sparse(tmp_path)
+    if able is False:
+        pytest.skip(f"SPARSE FILES UNAVAILABLE HERE: {tmp_path} is on {name}, which cannot hold "
+                    "them; nothing to measure without writing the holes out in full")
+    found = []
+    for mib in (4, 32, 128):
+        length, allocated = hf.measure_hole(tmp_path, mib << 20)
+        kept = allocated < length * hollow.SPARSE_ALLOCATED_FRACTION
+        found.append(f"{mib} MiB hole {'KEPT' if kept else 'FILLED IN'} ({allocated} of {length} bytes on disk)")
+    warnings.warn(f"HOLES ON {name or 'this filesystem'} ({sys.platform}): " + "; ".join(found),
+                  stacklevel=1)
+
+
+def test_a_copy_that_did_not_come_out_hollow_is_never_placed(tmp_path, led, monkeypatch):
+    """The first Mac CI run, 2026-11-22: the drive kept no hole of a 10 MB clip and the megabytes
+    of slack in the allocation check let the copy through. A copy the filesystem sign cannot see
+    is never placed, on any drive."""
+    original, _ = hf.write_braw(tmp_path / "nas" / "A001.braw")
+    dest = tmp_path / "tree" / "A001.braw"
+    dest.parent.mkdir()
+    size = original.stat().st_size
+    monkeypatch.setattr(hollow, "sparse_refusal", lambda folder: None)
+    monkeypatch.setattr(hollow, "_set_sparse", lambda fh: None)
+    monkeypatch.setattr(hollow, "allocated_bytes", lambda p, st=None: size)     # every hole filled in
+    text = _refusal(hollow.build_hollow, dest, hf.index_of(original), [20], hf.reader_of(original),
+                    led=led)
+    assert "filled in the empty parts" in text
+    assert not dest.exists() and list(dest.parent.iterdir()) == [] and led.entries() == []
 
 
 def test_trap_1_a_sparse_attribute_on_a_whole_file_is_not_a_sign(sparse_tmp, led):
@@ -439,7 +479,12 @@ def test_the_key_folds_case_and_unicode_form_but_the_stored_path_keeps_its_bytes
     nfc = unicodedata.normalize("NFC", "Šimalčík")
     raw = str(tmp_path / nfd / "A001.braw")
     led.record(raw, 10, 9, "", [0])
-    assert led.get(str(tmp_path / nfc / "A001.BRAW")) is not None
+    # The Unicode form folds everywhere (CR-90). Case folds where the path's own spelling says
+    # it does: a Windows path, here or as a canonical `P:\\...` string on a Mac (canon.norm). A
+    # real posix path keeps its case, which is what the first Mac CI run said of this test.
+    assert led.get(str(tmp_path / nfc / "A001.braw")) is not None
+    if os.name == "nt":
+        assert led.get(str(tmp_path / nfc / "A001.BRAW")) is not None
     assert led.entries()[0]["local_path"] == raw
 
 

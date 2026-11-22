@@ -3028,6 +3028,10 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     ), None)
     # Originals on request: read off the statuses already in hand, no I/O.
     _get("originals_line", lambda: originals_line(statuses), None)
+    # Grading frames (docs/GRADING_FRAMES.md 3.4, 2026-11-22): one line while a batch is fetched.
+    # A read of two ints under the service's lock, no I/O.
+    _get("grading_frames_line",
+         lambda: (getattr(app, "grading_frames_line", None) or (lambda: None))(), None)
     # CYT-15: the browser sign-in this machine is waiting on, if any. The
     # app's own getter where it has one, else this module's record of the
     # flow it is running itself.
@@ -3990,6 +3994,8 @@ def _menu_fingerprint(snap: dict) -> tuple:
         # CMEDIA-13, CMEDIA-10) and, for the download, which clip it is on.
         _ytdl_menu_key(snap.get("ytdl_line")),
         bool(snap.get("ytdl_login_line")),
+        # Grading frames: whether the line is there, and which clip of the batch it is on.
+        str(snap.get("grading_frames_line") or ""),
         str(jobs_forced_line(snap.get("jobs_status")) or ""),
         bool(snap.get("credential_rejected")),
         # CMEDIA-10: the failure count is what makes the line appear, and the
@@ -5113,6 +5119,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         for line in (_sync_line(snap), _two_stops_line(snap),
                      snap.get("resolve_line"),
                      snap.get("originals_line"),
+                     snap.get("grading_frames_line"),
                      snap.get("ytdl_line"), snap.get("ytdl_login_line"),
                      jobs_forced_line(snap.get("jobs_status")),
                      # comp-ytdl-jobs-3 (2026-09-11): here and not only in

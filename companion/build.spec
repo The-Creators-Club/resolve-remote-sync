@@ -298,6 +298,12 @@ a = Analysis(
         (f"src/ccsync_companion/resolve_menu/{_name}", "ccsync_companion/resolve_menu")
         for _name in (
             "_originals_common.lua",
+            # Grading frames (docs/GRADING_FRAMES.md 3.2, 2026-11-22).
+            "_frames_common.lua",
+            "Bring grading frame - clip under the playhead.lua",
+            "Bring grading frames - selected media pool clips.lua",
+            "Bring grading frames - timeline clips between In and Out.lua",
+            "Go to grading frame.lua",
             "Bring originals - selected media pool clips.lua",
             "Bring originals - timeline clips between In and Out.lua",
             "Bring originals - whole timeline.lua",

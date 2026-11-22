@@ -721,6 +721,38 @@ def action_put_project_back(app: "CompanionApp", subpath: str = "") -> None:
     tray_mod._spawn(app, "Put the project folder back", _do)
 
 
+def action_remove_grading_frames(app: "CompanionApp") -> None:
+    """[ REMOVE GRADING FRAMES ] (docs/GRADING_FRAMES.md 3.5, 2026-11-22): every hollow copy on
+    this computer, through hollow.remove_hollow, so a copy whose three signs do not all agree is
+    kept and the balloon says why. Hollow copies cost almost no disk and never expire by
+    themselves (D6); this is how an editor puts the proxies back."""
+    def _do() -> None:
+        try:
+            message = app.remove_grading_frames()
+        except Exception:
+            log.exception("settings: remove_grading_frames failed")
+            message = "CCSync could not remove the grading frames. See the log."
+        tray_mod._notify(app, message)
+    tray_mod._spawn(app, "Remove grading frames", _do)
+
+
+def _grading_frames_items(app: "CompanionApp") -> list:
+    """`Grading frames: N clips`, and while there are any, the render sentence (doc section 4,
+    "Render") and the remove button."""
+    count_fn = getattr(app, "grading_frames_count", None)
+    if count_fn is None:
+        return []
+    from . import grading_frames  # noqa: PLC0415
+
+    count = int(count_fn() or 0)
+    head, render = grading_frames.settings_lines(count)
+    items: list = [Line(head)]
+    if count:
+        items.append(Line(f"  {render}", style="muted"))
+        items.append(Button("REMOVE GRADING FRAMES", lambda: action_remove_grading_frames(app)))
+    return items
+
+
 def action_clear_ingest_staging(app: "CompanionApp") -> None:
     """MEDIA-3: delete every finished ingest staging folder now.
 
@@ -1585,6 +1617,10 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     # restart the companion, and the button that does it used to appear only
     # after a role change nobody has made.
     computer_items.append(Button("RESTART CCSYNC NOW", lambda: action_restart(app)))
+    try:
+        computer_items.extend(_grading_frames_items(app))
+    except Exception:
+        log.exception("settings: could not draw the grading frames line")
     # LG-4 / LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.4, 4.1): the address and
     # what this computer reports, each behind its own try so a fault costs
     # the rows, never the window.

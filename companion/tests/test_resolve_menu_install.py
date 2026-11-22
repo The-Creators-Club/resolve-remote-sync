@@ -29,6 +29,14 @@ SHIPPED = [
     "Stop originals - selected media pool clips.lua",
     "Stop originals - timeline clips between In and Out.lua",
 ]
+# docs/GRADING_FRAMES.md 3.2 (2026-11-22): the four grading-frames items, on their own shared body.
+FRAMES_SHIPPED = [
+    "Bring grading frame - clip under the playhead.lua",
+    "Bring grading frames - selected media pool clips.lua",
+    "Bring grading frames - timeline clips between In and Out.lua",
+    "Go to grading frame.lua",
+]
+ALL_SHIPPED = SHIPPED + FRAMES_SHIPPED
 
 TRICKY_PATH = 'P:\\Projects\\Ep "One"\\Matej Šimalčík\\A001\tC002.braw'
 
@@ -57,13 +65,25 @@ def test_scripts_root_per_platform(monkeypatch, tmp_path):
     assert rmi.scripts_root("win32") is None
 
 
-def test_install_writes_five_self_contained_scripts(resolve_root):
+def test_install_writes_every_script_self_contained(resolve_root):
     res = rmi.install_menu_scripts(resolve_root)
     assert res["ok"] is True, res
-    assert sorted(res["installed"]) == sorted(SHIPPED)
+    assert sorted(res["installed"]) == sorted(ALL_SHIPPED)
     assert res["removed"] == []
     target = resolve_root / "Edit" / "CC Sync"
+    everywhere = resolve_root / "Utility" / "CC Sync"
+    # The originals items on the Edit page, the grading-frame items on EVERY page (a colourist
+    # is on the Color page, where nothing under Edit is listed).
     assert sorted(p.name for p in target.iterdir()) == sorted(SHIPPED)
+    assert sorted(p.name for p in everywhere.iterdir()) == sorted(FRAMES_SHIPPED)
+    assert (Path.home() / ".ccsync" / "requests" / "frames").is_dir()
+    for name in FRAMES_SHIPPED:
+        text = (everywhere / name).read_text(encoding="utf-8")
+        # Each carries ITS OWN shared body and only that one.
+        assert "CCSYNC_FRAMES_LIB" in text and "CCSYNC_ACTION" not in text
+        assert rmi.FRAMES_SPLICE_MARKER not in text
+    for name in SHIPPED:
+        assert "CCSYNC_FRAMES_LIB" not in (target / name).read_text(encoding="utf-8")
     for name in SHIPPED:
         data = (target / name).read_bytes()
         assert b"\r\n" not in data
@@ -152,7 +172,7 @@ def test_crlf_checkout_installs_the_same_bytes(tmp_path):
 
 def test_build_spec_and_pyproject_ship_every_lua_file():
     on_disk = sorted(p.name for p in MENU_DIR.glob("*.lua"))
-    assert sorted(SHIPPED + [rmi.COMMON_NAME]) == on_disk
+    assert sorted(ALL_SHIPPED + [rmi.COMMON_NAME, rmi.FRAMES_COMMON_NAME]) == on_disk
     spec = (COMPANION_ROOT / "build.spec").read_text(encoding="utf-8")
     for name in on_disk:
         assert f'"{name}"' in spec, name
@@ -506,3 +526,422 @@ def test_posix_home_and_separator(runner, tmp_path):
     world, home = _world(tmp_path, selected=[CLIP_C], posix=True)
     _run_lua(runner, _script(SHIPPED[0]), world, tmp_path)
     assert _one_request(home)["clips"] == [_rec(CLIP_C)]
+
+
+# --------------------------------------------------------------------------
+# grading frames (docs/GRADING_FRAMES.md 3.2 and 3.3, 2026-11-22): the arithmetic and the
+# multicam resolution, executed in real Lua against a fake Resolve object tree
+
+
+# Timelines, items and clips with the fields the frames scripts read. Calls that MOVE Resolve
+# (SetCurrentTimeline, SetCurrentTimecode) are recorded in CCSYNC_CALLS instead.
+FRAMES_STUB = r"""
+local W = CCSYNC_WORLD
+CCSYNC_CALLS = {}
+local function note(...) CCSYNC_CALLS[#CCSYNC_CALLS + 1] = table.concat({...}, "|") end
+local function mpi(c)
+  if c == nil then return nil end
+  return {
+    GetClipProperty = function(self, key)
+      if key == "File Path" then return c.path or "" end
+      if key == "FPS" then return c.fps end
+      if key == "Type" then return c.type end
+      return nil
+    end,
+    GetUniqueId = function(self) return c.uid end,
+    GetName = function(self) return c.name end,
+  }
+end
+local function item(it)
+  return {
+    GetMediaPoolItem = function(self) return mpi(it.clip) end,
+    GetStart = function(self) return it.s end,
+    GetEnd = function(self) return it.e end,
+    GetLeftOffset = function(self) return it.left end,
+    -- One frame LOW, as measured in the spike (2.4 row n): never used for a clip at normal
+    -- speed. `src_start` / `src_end` are for the items copied from a live timeline below; with no
+    -- `src_end` the item answers like a Resolve that has no GetSourceEndFrame.
+    GetSourceStartFrame = function(self) return it.src_start or ((it.left or 0) - 1) end,
+    GetSourceEndFrame = function(self) return it.src_end end,
+    GetName = function(self) return it.name end,
+    GetProperty = function(self, key) if key == "Speed" then return it.speed end return nil end,
+  }
+end
+local timelines = {}
+for i, T in ipairs(W.timelines or {}) do
+  local tl = {}
+  tl.GetName = function(self) return T.name end
+  tl.GetStartFrame = function(self) return T.start end
+  tl.GetEndFrame = function(self) return T.last end
+  tl.GetSetting = function(self, key)
+    if key == "timelineFrameRate" then return T.fps end
+    if key == "timelineDropFrameTimecode" then return T.drop and "1" or "0" end
+    return nil
+  end
+  tl.GetCurrentTimecode = function(self) return T.tc end
+  tl.SetCurrentTimecode = function(self, tc) note("SetCurrentTimecode", T.name, tc); T.tc = tc; return true end
+  tl.GetMarkInOut = function(self) return T.marks or {} end
+  tl.GetTrackCount = function(self, kind) return #((T.tracks or {})[kind] or {}) end
+  tl.GetItemListInTrack = function(self, kind, index)
+    local out = {}
+    for j, it in ipairs(T.tracks[kind][index]) do out[j] = item(it) end
+    return out
+  end
+  tl.GetCurrentVideoItem = function(self) if T.current then return item(T.current) end return nil end
+  timelines[i] = tl
+end
+local current = W.current and timelines[W.current] or nil
+local selected = {}
+for i, c in ipairs(W.selected or {}) do selected[i] = mpi(c) end
+local project = {
+  GetName = function(self) return W.project end,
+  GetCurrentTimeline = function(self) return current end,
+  GetTimelineCount = function(self) return #timelines end,
+  GetTimelineByIndex = function(self, i) return timelines[i] end,
+  SetCurrentTimeline = function(self, tl) note("SetCurrentTimeline", tl:GetName()); current = tl; return true end,
+  GetMediaPool = function(self) return { GetSelectedClips = function(self) return selected end } end,
+}
+resolve = { GetProjectManager = function(self) return { GetCurrentProject = function(self) return project end } end }
+bmd = { createdir = function(dir) end }
+local real_getenv = os.getenv
+os.getenv = function(name)
+  if name == "USERPROFILE" or name == "HOME" then return W.home end
+  return real_getenv(name)
+end
+CCSYNC_PRINTED = {}
+local real_print = print
+print = function(...)
+  local parts = {}
+  for i = 1, select("#", ...) do parts[#parts + 1] = tostring((select(i, ...))) end
+  CCSYNC_PRINTED[#CCSYNC_PRINTED + 1] = table.concat(parts, "\t")
+  real_print(...)
+end
+"""
+
+
+def _run_frames(runner, script: str, world: dict, tmp_path: Path) -> tuple[str, list]:
+    kind, impl = runner
+    source = ("CCSYNC_WORLD = " + _lua_table(world) + "\n" + FRAMES_STUB + "\n" + script
+              + "\nfor _, c in ipairs(CCSYNC_CALLS) do print('CALL ' .. c) end\n")
+    if kind == "exe":
+        chunk = tmp_path / "run.lua"
+        chunk.write_text(source, encoding="utf-8")
+        proc = subprocess.run([impl, str(chunk)], capture_output=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        text = proc.stdout.decode("utf-8", "replace")
+    else:
+        lua = impl.LuaRuntime()
+        lua.execute(source)
+        printed = lua.globals().CCSYNC_PRINTED
+        text = "\n".join(str(printed[i]) for i in range(1, len(printed) + 1))
+    calls = [line[5:] for line in text.splitlines() if line.startswith("CALL ")]
+    return text, calls
+
+
+def _frames_common() -> str:
+    return (MENU_DIR / rmi.FRAMES_COMMON_NAME).read_text(encoding="utf-8")
+
+
+def _lib(runner, body: str, tmp_path: Path) -> list[str]:
+    """Run `body` with the shared body loaded as a library (nothing runs), and return what it
+    printed, one value per line."""
+    script = 'CCSYNC_FRAMES_SCOPE = "library"\n' + _frames_common() + "\nlocal L = CCSYNC_FRAMES_LIB\n" + body
+    text, _ = _run_frames(runner, script, {"home": str(tmp_path)}, tmp_path)
+    return [line for line in text.splitlines() if not line.startswith("CALL ")]
+
+
+def _frames_requests(home: Path) -> list[dict]:
+    inbox = home / ".ccsync" / "requests" / "frames"
+    files = sorted(inbox.iterdir()) if inbox.is_dir() else []
+    return [json.loads(p.read_bytes().decode("utf-8")) for p in files]
+
+
+EM = "\u2014"
+G011 = {"path": "P:\\Projects\\2026\\Talk UA\\BMCC\\G011_10211743_C075.braw", "uid": "uid-g011",
+        "name": "G011_10211743_C075.braw", "fps": "29.97", "type": "Video"}
+A007 = {"path": "P:\\Projects\\2026\\Base Drone\\A007_08090854_C137.braw", "uid": "uid-a007",
+        "name": "A007_08090854_C137.braw", "fps": "29.97", "type": "Video"}
+FX3 = {"path": "P:\\Projects\\2026\\Base Drone\\fx3_20261021_2780.braw", "uid": "uid-fx3",
+       "name": "fx3_20261021_2780.braw", "fps": "119.88", "type": "Video"}
+MC_CLIP = {"path": "", "uid": "uid-mc", "name": "Talk UA 10-21 - war stories Multicam",
+           "type": "Multicam"}
+MC_ITEM_NAME = "Talk UA 10-21 - war stories Multicam - Angle 1"
+ANGLE_NAME = f"Talk UA 10-21 - war stories {EM} ANGLE 1 (BMCC)"
+# 01:00:00;00 at 29.97 drop-frame is frame 107892.
+HOUR_DF = 107892
+
+
+def _tl(name, current=None, tc="01:00:00;00", start=HOUR_DF, fps="29.97", drop=True, video=(),
+        marks=None):
+    return {"name": name, "fps": fps, "drop": drop, "start": start, "last": start + 200000,
+            "tc": tc, "current": current, "marks": marks or {},
+            "tracks": {"video": [list(track) for track in video]}}
+
+
+def _frames_world(tmp_path, timelines, current=1, **kw):
+    home = tmp_path / "home"
+    (home / ".ccsync" / "requests" / "frames").mkdir(parents=True)
+    world = {"home": str(home), "project": "Talk UA", "timelines": timelines, "current": current}
+    world.update(kw)
+    return world, home
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_frames_arithmetic_in_lua(runner, tmp_path):
+    out = _lib(runner, r"""
+print(L.source_frame(4147, 107892 + 37, 107892, 29.97, 29.97))
+print(L.source_frame(4759, 200000, 200000, 119.88, 29.97))
+print(L.tc_to_frames("01:00:00;00", 29.97, true))
+print(L.tc_to_frames("00:01:00;02", 29.97, true))
+print(L.tc_to_frames("01:00:00:00", 24, false))
+print(L.frames_to_tc(L.tc_to_frames("01:00:14;29", 29.97, true), 29.97, true))
+print(L.frames_to_tc(L.tc_to_frames("17:46:52;10", 29.97, true), 29.97, true))
+print(L.frames_to_tc(1800, 29.97, true))
+print(L.frames_to_tc(86400 + 25, 24, false))
+print(L.rate("29.97 DF"), L.rate(23.976), L.rate(nil))
+print(L.multicam_parts("Talk UA 10-21 - war stories Multicam - Angle 2"))
+print(L.multicam_parts("A007_08090854_C137.braw"))
+""", tmp_path)
+    tab = "\t"
+    # 2.4 row n: GetLeftOffset 4147 (GetSourceStartFrame said 4146), 37 frames in -> 4184, exact.
+    assert out[0] == f"4184{tab}true"
+    # 2.6: a 119.88 fps clip on a 29.97 timeline plays four source frames to one -> scaled, inexact.
+    assert out[1] == f"19036{tab}false"
+    assert out[2:5] == ["107892", "1800", "86400"]
+    assert out[5:9] == ["01:00:14;29", "17:46:52;10", "00:01:00;02", "01:00:01:01"]
+    assert out[9] == f"29.97{tab}23.976{tab}nil"
+    assert out[10] == f"Talk UA 10-21 - war stories{tab}2"
+    assert out[11] == "nil"
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_frames_angle_timeline_match_is_exact(runner, tmp_path):
+    out = _lib(runner, f"""
+print(L.is_angle_timeline({_lua_literal(ANGLE_NAME)}, "Talk UA 10-21 - war stories", 1))
+print(L.is_angle_timeline({_lua_literal(ANGLE_NAME)}, "Talk UA 10-21 - war stories", 2))
+print(L.is_angle_timeline("Talk UA 10-21 - war stories - ANGLE 1 (BMCC)", "Talk UA 10-21 - war stories", 1))
+print(L.is_angle_timeline({_lua_literal(ANGLE_NAME + " copy")}, "Talk UA 10-21 - war stories", 1))
+""", tmp_path)
+    assert out == ["true", "false", "false", "false"]
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_playhead_on_a_plain_clip_uses_left_offset_never_source_start(runner, tmp_path):
+    """2.4 row n end to end: an item whose GetSourceStartFrame says 4146 and GetLeftOffset 4147,
+    the playhead 37 frames in. The request asks for 4184 (and the item's whole use)."""
+    item = {"clip": A007, "s": HOUR_DF, "e": HOUR_DF + 600, "left": 4147, "name": "A007"}
+    cut = _tl("HMCC Spans", current=item, tc="01:00:01;07", video=[[item]])
+    world, home = _frames_world(tmp_path, [cut])
+    out, calls = _run_frames(runner, _script(FRAMES_SHIPPED[0]), world, tmp_path)
+    assert "asked for grading frames of 1 clip" in out
+    req, = _frames_requests(home)
+    assert req["source"] == "playhead" and req["refused"] == []
+    clip, = req["clips"]
+    assert clip["file_path"] == A007["path"]
+    assert clip["frames"] == [4184]
+    assert clip["uses"] == [[4147, 4147 + 599]]
+    assert clip["exact"] is True and clip["clip_fps"] == 29.97 and clip["timeline_fps"] == 29.97
+    assert clip["timecode"] == "01:00:01;07"
+    assert calls == [], "asking for frames never moves Resolve"
+    # ...and the companion reads exactly what the script wrote.
+    from ccsync_companion import grading_frames
+    parsed = grading_frames.parse_request(json.dumps(req).encode("utf-8"))
+    assert parsed["clips"][0]["frames"] == [4184]
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_a_clip_at_another_frame_rate_is_scaled_and_marked_inexact(runner, tmp_path):
+    """2.6: 119.88 fps on a 29.97 timeline, round((GetLeftOffset + playhead - GetStart) * 4)."""
+    item = {"clip": FX3, "s": HOUR_DF, "e": HOUR_DF + 300, "left": 4759, "name": "fx3"}
+    cut = _tl("Drone cut", current=item, tc="01:00:00;10", video=[[item]])
+    world, home = _frames_world(tmp_path, [cut])
+    _run_frames(runner, _script(FRAMES_SHIPPED[0]), world, tmp_path)
+    clip, = _frames_requests(home)[0]["clips"]
+    assert clip["frames"] == [round((4759 + 10) * 119.88 / 29.97)]
+    assert clip["exact"] is False
+    assert clip["clip_fps"] == 119.88 and clip["timeline_fps"] == 29.97
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_playhead_on_a_multicam_resolves_to_the_angle_clip(runner, tmp_path):
+    """2.4 row o: the multicam item's offset plus the playhead is the frame inside the multicam;
+    the angle timeline (same timebase) at its start plus that frame holds the angle clip."""
+    mc = {"clip": MC_CLIP, "s": HOUR_DF + 1000, "e": HOUR_DF + 5000, "left": 6000, "name": MC_ITEM_NAME}
+    cut = _tl("Talk UA cut", current=mc, tc="01:00:35;10", video=[[mc]])
+    playhead = HOUR_DF + 35 * 30 + 10 - 0      # 01:00:35;10 (no dropped frame inside the first minute)
+    angle_item = {"clip": G011, "s": HOUR_DF, "e": HOUR_DF + 25260, "left": 0, "name": "G011"}
+    angle = _tl(ANGLE_NAME, video=[[angle_item]])
+    other = _tl(f"Talk UA 10-21 - war stories {EM} ANGLE 2 (Sony)",
+                video=[[{"clip": A007, "s": HOUR_DF, "e": HOUR_DF + 25260, "left": 0, "name": "x"}]])
+    world, home = _frames_world(tmp_path, [cut, other, angle])
+    out, calls = _run_frames(runner, _script(FRAMES_SHIPPED[0]), world, tmp_path)
+    assert "asked for grading frames of 1 clip" in out, out
+    clip, = _frames_requests(home)[0]["clips"]
+    m = 6000 + (playhead - (HOUR_DF + 1000))
+    assert clip["file_path"] == G011["path"]
+    assert clip["frames"] == [m]
+    assert clip["angle_timeline"] == ANGLE_NAME
+    assert clip["uses"] == [[6000, 6000 + 3999]]
+    assert calls == []
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+@pytest.mark.parametrize("angle_names", [
+    [f"Talk UA 10-21 - war stories {EM} ANGLE 1 (BMCC) renamed"],      # renamed: no match
+    [ANGLE_NAME, ANGLE_NAME],                                           # two matches: never guessed
+])
+def test_a_multicam_the_script_cannot_resolve_is_refused_not_guessed(runner, tmp_path, angle_names):
+    mc = {"clip": MC_CLIP, "s": HOUR_DF, "e": HOUR_DF + 5000, "left": 0, "name": MC_ITEM_NAME}
+    cut = _tl("Talk UA cut", current=mc, video=[[mc]])
+    angles = [_tl(n, video=[[{"clip": G011, "s": HOUR_DF, "e": HOUR_DF + 9000, "left": 0,
+                              "name": "G011"}]]) for n in angle_names]
+    world, home = _frames_world(tmp_path, [cut, *angles])
+    out, _ = _run_frames(runner, _script(FRAMES_SHIPPED[0]), world, tmp_path)
+    assert "multicam this script cannot follow" in out and "selected media pool clips" in out
+    assert _frames_requests(home) == []
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_go_to_grading_frame_opens_the_angle_timeline_at_the_matching_timecode(runner, tmp_path):
+    mc = {"clip": MC_CLIP, "s": HOUR_DF, "e": HOUR_DF + 5000, "left": 6557, "name": MC_ITEM_NAME}
+    cut = _tl("Talk UA cut", current=mc, tc="01:00:00;00", video=[[mc]])
+    angle = _tl(ANGLE_NAME, video=[[{"clip": G011, "s": HOUR_DF, "e": HOUR_DF + 25260, "left": 0,
+                                    "name": "G011"}]])
+    world, home = _frames_world(tmp_path, [cut, angle])
+    out, calls = _run_frames(runner, _script(FRAMES_SHIPPED[3]), world, tmp_path)
+    expected_tc = _lib(runner, f"print(L.frames_to_tc({HOUR_DF + 6557}, 29.97, true))", tmp_path)[0]
+    assert calls == [f"SetCurrentTimeline|{ANGLE_NAME}", f"SetCurrentTimecode|{ANGLE_NAME}|{expected_tc}"]
+    assert f"opened {ANGLE_NAME} at {expected_tc}" in out
+    assert _frames_requests(home) == [], "going there asks for nothing"
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_go_to_grading_frame_on_a_plain_clip_says_where_the_panel_is(runner, tmp_path):
+    item = {"clip": A007, "s": HOUR_DF, "e": HOUR_DF + 600, "left": 0, "name": "A007"}
+    world, _home = _frames_world(tmp_path, [_tl("Cut", current=item, video=[[item]])])
+    out, calls = _run_frames(runner, _script(FRAMES_SHIPPED[3]), world, tmp_path)
+    assert "not a multicam" in out and calls == []
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_range_request_sends_each_clips_uses_and_a_multicams_angle_frames(runner, tmp_path):
+    a1 = {"clip": A007, "s": HOUR_DF, "e": HOUR_DF + 100, "left": 50, "name": "A007"}
+    a2 = {"clip": A007, "s": HOUR_DF + 300, "e": HOUR_DF + 400, "left": 900, "name": "A007"}
+    outside = {"clip": FX3, "s": HOUR_DF + 5000, "e": HOUR_DF + 5100, "left": 0, "name": "fx3"}
+    mc = {"clip": MC_CLIP, "s": HOUR_DF + 100, "e": HOUR_DF + 300, "left": 1000, "name": MC_ITEM_NAME}
+    cut = _tl("Cut", video=[[a1, mc, a2, outside]], marks={"video": {"in": 0, "out": 450}})
+    angle = _tl(ANGLE_NAME, video=[[{"clip": G011, "s": HOUR_DF, "e": HOUR_DF + 25260, "left": 0,
+                                    "name": "G011"}]])
+    world, home = _frames_world(tmp_path, [cut, angle])
+    _run_frames(runner, _script(FRAMES_SHIPPED[2]), world, tmp_path)
+    req, = _frames_requests(home)
+    assert req["source"] == "timeline_range"
+    by_path = {c["file_path"]: c for c in req["clips"]}
+    assert set(by_path) == {A007["path"], G011["path"]}, "the clip outside the marks is left out"
+    assert by_path[A007["path"]]["uses"] == [[50, 149], [900, 999]]
+    assert by_path[A007["path"]]["frames"] == []
+    # The multicam item's first and middle frames, in the angle clip.
+    assert by_path[G011["path"]]["frames"] == [1000, 1000 + 99]
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_media_pool_request_sends_the_clips_and_refuses_a_multicam(runner, tmp_path):
+    world, home = _frames_world(tmp_path, [_tl("Cut")], selected=[A007, MC_CLIP])
+    _run_frames(runner, _script(FRAMES_SHIPPED[1]), world, tmp_path)
+    req, = _frames_requests(home)
+    assert req["source"] == "media_pool"
+    clip, = req["clips"]
+    assert clip["file_path"] == A007["path"] and clip["frames"] == [] and clip["uses"] == []
+    assert len(req["refused"]) == 1 and "has no file of its own" in req["refused"][0]
+
+
+def test_frames_lua_carries_no_em_dash_and_never_uses_source_start_frame():
+    text = _frames_common()
+    assert "\u2014" not in text
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("--"))
+    # Read in ONE place, to notice and place a retimed item (item_frame); a clip at normal speed
+    # is always worked out from GetLeftOffset.
+    assert code.count("GetSourceStartFrame") == 1
+    assert "retimed_frame(tonumber(call(item, \"GetSourceStartFrame\"))" in code
+    assert "GetLeftOffset" in code
+
+
+# -- retimed items: numbers read off a live Resolve 21.0.1 timeline, 2026-11-22 ----------------
+# (the HMCC Spans timeline of the project the spike was copied from; GetProperty("Speed") was nil
+# on every item, so the source span is the only thing that says "retimed")
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_the_retime_rule_in_lua(runner, tmp_path):
+    out = _lib(runner, r"""
+print(L.retimed_frame(4146, 4302, 109603, 109759, 109603 + 37, 29.97, 29.97))
+print(L.retimed_frame(4477, 4601, 107896, 108021, 107900, 29.97, 29.97))
+print(L.retimed_frame(19038, 20931, 108514, 108987, 108524, 119.88, 29.97))
+print(L.retimed_frame(5621, 5719, 109379, 109501, 109379, 119.88, 29.97))
+print(L.retimed_frame(5621, 5719, 109379, 109501, 109379 + 61, 119.88, 29.97))
+print(L.retimed_frame(nil, nil, 109379, 109501, 109400, 119.88, 29.97))
+""", tmp_path)
+    # Normal speed: the spans agree to a frame or two, so the left-offset rule stands (nil).
+    assert out[0:3] == ["nil", "nil", "nil"]
+    # The slow-motion item: 122 timeline frames over 98 source frames, placed from its own start.
+    assert out[3:5] == ["5621", "5670"]
+    # A Resolve that cannot say is not "retimed".
+    assert out[5] == "nil"
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_playhead_on_a_retimed_item_is_placed_from_its_source_range_and_marked_inexact(runner, tmp_path):
+    """The left-offset rule on this item says round((7027 + 61) * 4) = 28352, on a clip of 6,540
+    frames: the companion would refuse it as outside the clip, or fetch the wrong frame and say
+    it was ready."""
+    slow = {"clip": FX3, "s": 109379, "e": 109501, "left": 7027, "src_start": 5621, "src_end": 5719,
+            "name": "fx3"}
+    cut = _tl("HMCC Spans", current=slow, tc="01:00:51;19", video=[[slow]])
+    assert 107892 + 51 * 30 + 19 == 109379 + 62
+    world, home = _frames_world(tmp_path, [cut])
+    _run_frames(runner, _script(FRAMES_SHIPPED[0]), world, tmp_path)
+    clip, = _frames_requests(home)[0]["clips"]
+    assert clip["frames"] == [5621 + round(62 * 98 / 122)]
+    assert clip["exact"] is False
+    assert clip["uses"] == [[5621, 5621 + round(121 * 98 / 122)]]
+
+
+@needs_lua
+@pytest.mark.parametrize("runner", RUNNERS, ids=runner_ids)
+def test_a_normal_speed_item_with_real_source_numbers_still_uses_the_left_offset(runner, tmp_path):
+    """Row n's own item as the live timeline reports it: left 4147, source 4146..4302 over 156
+    frames. Reading the source range must not change its answer."""
+    item = {"clip": A007, "s": 109603, "e": 109759, "left": 4147, "src_start": 4146,
+            "src_end": 4302, "name": "G008"}
+    cut = _tl("HMCC Spans", current=item, tc="01:00:58;08", video=[[item]])
+    assert 107892 + 58 * 30 + 8 == 109603 + 37
+    world, home = _frames_world(tmp_path, [cut])
+    _run_frames(runner, _script(FRAMES_SHIPPED[0]), world, tmp_path)
+    clip, = _frames_requests(home)[0]["clips"]
+    assert clip["frames"] == [4184] and clip["exact"] is True
+
+
+def test_a_grading_frame_item_left_under_edit_by_an_earlier_install_is_moved_to_utility(resolve_root):
+    """Review, 2026-11-22: under Edit the items are invisible on the Color page. An owned copy
+    there is removed, the Utility one written, and a second run changes nothing."""
+    edit = resolve_root / "Edit" / "CC Sync"
+    edit.mkdir(parents=True)
+    old = edit / FRAMES_SHIPPED[0]
+    old.write_bytes(rmi.render_scripts()[FRAMES_SHIPPED[0]])
+    res = rmi.install_menu_scripts(resolve_root)
+    assert res["ok"], res
+    assert FRAMES_SHIPPED[0] in res["removed"] and not old.exists()
+    assert (resolve_root / "Utility" / "CC Sync" / FRAMES_SHIPPED[0]).is_file()
+    again = rmi.install_menu_scripts(resolve_root)
+    assert again["installed"] == [] and again["removed"] == []

@@ -49,6 +49,7 @@ from . import eula as eula_mod
 from . import telemetry_policy
 from . import file_moves as file_moves_mod
 from . import hollow as hollow_mod
+from . import grading_frames as grading_frames_mod
 from . import machine as machine_mod
 from . import machine_settings as machine_settings_mod
 from . import idle as idle_mod
@@ -2090,6 +2091,18 @@ class CompanionApp:
                     msg, site_mod.notify_title("originals")),
                 memory=self._clip_paths,
                 on_queued=self._originals_lane.wake,
+            )
+
+        # Grading frames (docs/GRADING_FRAMES.md 3.4, 2026-11-22): the menu scripts' second inbox.
+        # Same gate as the originals inbox (a managed machine with a plan to read). Not a lane:
+        # one worker thread, nothing on the sequencer, no power guard.
+        self.grading_frames: Optional[Any] = None
+        if self.selection_client is not None:
+            self.grading_frames = grading_frames_mod.GradingFrames(
+                cfg, selection_fn=self._originals_selection,
+                notify_fn=lambda msg: self._notify_tray(
+                    msg, site_mod.notify_title("grading frames")),
+                halted_fn=lambda: bool(self.halt.active),
             )
 
         # Local disk media manifest (per-project file rollups + per-file
@@ -10791,6 +10804,7 @@ class CompanionApp:
             ("yt-dlp manager", self._start_ytdlp_manager),
             ("Resolve menu scripts", self._start_resolve_menu_install),
             ("originals requests", self._start_originals_inbox),
+            ("grading frames requests", self._start_grading_frames),
             ("unopened-projects sweep", self._start_unopened_scan),
             # LAST: it supervises the threads everything above it started
             # (SYS-2). See _start_lane_watchdog.
@@ -10947,6 +10961,30 @@ class CompanionApp:
             self._resolve_menu_result = result
 
         threading.Thread(target=_install, name="ccsync-resolve-menu", daemon=True).start()
+
+    def _start_grading_frames(self) -> None:
+        """Answer the grading-frames request files (docs/GRADING_FRAMES.md 3.4)."""
+        if getattr(self, "grading_frames", None) is not None:
+            self.grading_frames.start()
+
+    def grading_frames_line(self) -> Optional[str]:
+        """The tray line while a batch of grading frames is fetched, else None. No I/O."""
+        service = getattr(self, "grading_frames", None)
+        return service.tray_line() if service is not None else None
+
+    def grading_frames_count(self) -> int:
+        """How many clips this computer holds grading frames of (Settings > THIS COMPUTER). Reads
+        the ledger and stats each row's file: a handful of files, on Settings' 2 s refresh."""
+        try:
+            return grading_frames_mod.GradingFrames.count()
+        except Exception:
+            log.debug("grading frames: could not count them", exc_info=True)
+            return 0
+
+    def remove_grading_frames(self) -> str:
+        """[ REMOVE GRADING FRAMES ]: every copy, under hollow.remove_hollow's all-three-signs
+        rule. -> the balloon."""
+        return grading_frames_mod.remove_all()
 
     def _start_originals_inbox(self) -> None:
         """Answer the Resolve menu scripts' request files (12.2). Runs whether
@@ -12252,6 +12290,11 @@ class CompanionApp:
                 self.originals_inbox.stop()
         except Exception:
             log.exception("failed to stop the originals request inbox")
+        try:
+            if getattr(self, "grading_frames", None) is not None:
+                self.grading_frames.stop()
+        except Exception:
+            log.exception("failed to stop the grading frames inbox")
         self._stop_lanes()
         try:
             self.reporter.stop()

@@ -36,9 +36,11 @@ def _trust_the_test_key(monkeypatch):
     monkeypatch.setattr(release_pubkey, "RELEASE_PUBKEYS", (TEST_PUBKEY,))
 
 
-# Offers use 0.9.99 so they stay NEWER than config.VERSION across bumps
+# Offers use 0.99.0 so they stay NEWER than config.VERSION across bumps. It was 0.9.99
+# until 2026-11-22, when the companion itself reached 0.9.99 (grading frames release B) and
+# an offer of the running version stopped being an upgrade.
 # (the first run after the 0.9.44 bump found the offer was the running build).
-def _info(version="0.9.99", min_version="0.0.0", body=b"new-exe-bytes"):
+def _info(version="0.99.0", min_version="0.0.0", body=b"new-exe-bytes"):
     record = {
         "kind": "companion",
         # See test_upgrade.py's _info: a foreign-platform record is refused
@@ -78,17 +80,17 @@ def test_a_record_demanding_more_than_it_offers_never_raises_the_floor(tmp_path,
     mgr = UpgradeManager(_cfg(tmp_path), floor_file=floor)
 
     with caplog.at_level("ERROR"):
-        mgr.note_report_response({"upgrade": _info(version="0.9.99",
-                                                   min_version="0.10.5")})
+        mgr.note_report_response({"upgrade": _info(version="0.99.0",
+                                                   min_version="0.99.5")})
     assert mgr.available is None
     assert upgrade_mod.read_floor(floor) == ""
     assert not floor.exists()
 
     # ...and the corrected republish is taken, which is the whole point: the
     # fleet is not frozen until someone visits every machine.
-    mgr.note_report_response({"upgrade": _info(version="0.9.99",
+    mgr.note_report_response({"upgrade": _info(version="0.99.0",
                                                min_version="0.9.0")})
-    assert mgr.available["version"] == "0.9.99"
+    assert mgr.available["version"] == "0.99.0"
     assert upgrade_mod.read_floor(floor) == "0.9.0"
 
 
@@ -96,20 +98,20 @@ def test_a_record_whose_floor_is_its_own_version_is_still_fine(tmp_path):
     """"You may not go below this build" is the ordinary, intended shape."""
     floor = tmp_path / "floor.json"
     mgr = UpgradeManager(_cfg(tmp_path), floor_file=floor)
-    mgr.note_report_response({"upgrade": _info(version="0.9.99",
-                                               min_version="0.9.99")})
-    assert mgr.available["version"] == "0.9.99"
-    assert upgrade_mod.read_floor(floor) == "0.9.99"
+    mgr.note_report_response({"upgrade": _info(version="0.99.0",
+                                               min_version="0.99.0")})
+    assert mgr.available["version"] == "0.99.0"
+    assert upgrade_mod.read_floor(floor) == "0.99.0"
 
 
 def test_an_unrankable_min_version_is_not_this_check(tmp_path):
     """below_floor and note_floor already handle a version string nobody can
     rank; this guard must not start refusing offers on their behalf."""
-    assert upgrade_mod._min_version_above_own({"version": "0.9.99",
+    assert upgrade_mod._min_version_above_own({"version": "0.99.0",
                                                "min_version": "nightly"}) is False
     assert upgrade_mod._min_version_above_own({"version": "nightly",
-                                               "min_version": "0.9.99"}) is False
-    assert upgrade_mod._min_version_above_own({"version": "0.9.99"}) is False
+                                               "min_version": "0.99.0"}) is False
+    assert upgrade_mod._min_version_above_own({"version": "0.99.0"}) is False
     assert upgrade_mod._min_version_above_own(None) is False
 
 

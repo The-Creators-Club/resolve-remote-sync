@@ -728,18 +728,21 @@ def test_no_sentence_an_editor_can_read_carries_an_em_dash():
     assert EM_DASH not in source
 
 
-def test_nothing_in_the_running_app_calls_the_writer():
-    """Companion release A (doc section 7, D5): the build that knows what a hollow copy is ships
-    before any build that can make one. Until phase 3 only tests call the writer."""
+def test_the_fetch_module_is_the_only_caller_of_the_writer():
+    """Release A (doc section 7, D5) shipped a build that knew what a hollow copy is and could not
+    make one. Release B adds exactly ONE door to the writer, the grading-frames fetch
+    (grading_frames.py, 2026-11-22); anything else calling it is a second door nobody reviewed."""
     src = Path(hollow.__file__).parent
     writers = ("build_hollow(", "add_frames(", "_write_ranges(", "_set_sparse(")
-    offenders = []
+    callers: dict[str, list[str]] = {}
     for path in src.rglob("*.py"):
         if path.name == "hollow.py":
             continue
         text = path.read_text(encoding="utf-8")
-        offenders += [f"{path.name}: {w}" for w in writers if w in text]
-    assert offenders == []
+        found = [w for w in writers if w in text]
+        if found:
+            callers[path.relative_to(src).as_posix()] = found
+    assert callers == {"grading_frames.py": ["build_hollow(", "add_frames("]}
 
 
 # =============================================================================================

@@ -730,9 +730,9 @@ def sparse_refusal(folder: Any) -> Optional[str]:
         return ("This computer could not tell whether the sync drive can hold grading frames"
                 + (f" (it is formatted {name})" if name else "")
                 + ", so none were fetched. Nothing large is written by surprise.")
-    return (f"The sync drive is formatted {name or 'in a format'} that cannot keep the empty "
-            "parts of a file empty, so a grading frame would take up the whole clip's size. "
-            "None were fetched.")
+    return (f"The sync drive's format{f' ({name})' if name else ''} cannot keep the empty parts "
+            "of a file empty, so a grading frame would take up the whole clip's size. None were "
+            "fetched.")
 
 
 def _set_sparse(fh: Any) -> None:

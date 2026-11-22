@@ -24,10 +24,22 @@ log = logging.getLogger("ccsync.resolve_menu")
 PACKAGE_DIR_NAME = "resolve_menu"
 COMMON_NAME = "_originals_common.lua"
 SPLICE_MARKER = "--@@CCSYNC_COMMON@@"
+# The grading-frames scripts (docs/GRADING_FRAMES.md 3.2, 2026-11-22) carry their own shared body,
+# spliced the same way at their own marker. Each entry script names exactly ONE of the two.
+FRAMES_COMMON_NAME = "_frames_common.lua"
+FRAMES_SPLICE_MARKER = "--@@CCSYNC_FRAMES_COMMON@@"
+COMMONS = {SPLICE_MARKER: COMMON_NAME, FRAMES_SPLICE_MARKER: FRAMES_COMMON_NAME}
 # First line of every script we install. Removal keys on it, so a script the
 # editor (or another tool) put in our folder by hand is never deleted.
 OWNED_MARKER = "-- CC Sync menu script. Installed and rewritten by the CC Sync companion"
 MENU_SUBDIR = ("Edit", "CC Sync")
+# THE GRADING-FRAME ITEMS GO UNDER Utility, NOT Edit (review, 2026-11-22). Resolve lists a script
+# by the folder it is in (its scripting README: "Place your script under Utility to be listed in
+# all pages ... or under folders for individual pages (Edit, Color or Deliver)"). A colourist
+# asking for a grading frame is on the COLOR page, where nothing under Edit is in the menu at
+# all: the feature would have been installed and invisible exactly where it is used. The
+# originals items stay under Edit, where they have always been.
+FRAMES_MENU_SUBDIR = ("Utility", "CC Sync")
 _TMP_SUFFIX = ".ccsync-tmp"
 
 
@@ -73,25 +85,30 @@ def _read_text(path: Path) -> str:
     return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
 
 
+def _is_frames_script(data: bytes) -> bool:
+    """A rendered grading-frames script: the one thing only their shared body defines."""
+    return b"CCSYNC_FRAMES_LIB" in data
+
+
 def render_scripts(source: Path | None = None) -> dict[str, bytes]:
     """{installed file name: bytes} for every shipped menu script."""
     source = source or _source_dir()
     if source is None:
         raise FileNotFoundError(f"{PACKAGE_DIR_NAME}/{COMMON_NAME} is not in this build")
-    common = _read_text(source / COMMON_NAME)
-    if not common.endswith("\n"):
-        common += "\n"
+    bodies = {marker: _read_text(source / name).rstrip("\n") for marker, name in COMMONS.items()}
     out: dict[str, bytes] = {}
     for entry in sorted(source.glob("*.lua")):
-        if entry.name == COMMON_NAME or entry.name.startswith("_"):
+        if entry.name.startswith("_"):
             continue
         text = _read_text(entry)
         lines = text.split("\n")
-        if SPLICE_MARKER not in (line.strip() for line in lines):
-            raise ValueError(f"{entry.name} has no {SPLICE_MARKER} line")
+        markers = {line.strip() for line in lines} & set(COMMONS)
+        if len(markers) != 1:
+            raise ValueError(f"{entry.name} has no {SPLICE_MARKER} line (or more than one "
+                             f"of {sorted(COMMONS)})")
         if not text.startswith(OWNED_MARKER):
             raise ValueError(f"{entry.name} does not start with the ownership line")
-        spliced = "\n".join(common.rstrip("\n") if line.strip() == SPLICE_MARKER else line
+        spliced = "\n".join(bodies[line.strip()] if line.strip() in COMMONS else line
                             for line in lines)
         if not spliced.endswith("\n"):
             spliced += "\n"
@@ -123,13 +140,15 @@ def _ensure_request_dir() -> None:
     # The scripts can only create a folder through bmd.createdir or a shelled
     # mkdir (a console flash on Windows); having it already there spares them.
     try:
-        (Path.home() / ".ccsync" / "requests" / "originals").mkdir(parents=True, exist_ok=True)
+        for kind in ("originals", "frames"):
+            (Path.home() / ".ccsync" / "requests" / kind).mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         log.info("resolve menu: could not create the request folder: %s", exc)
 
 
 def install_menu_scripts(root: Path | None = None) -> dict:
-    """Write the menu scripts under ``<root>/Edit/CC Sync/``. Never raises.
+    """Write the menu scripts under ``<root>/Edit/CC Sync/`` (originals) and
+    ``<root>/Utility/CC Sync/`` (grading frames, listed on every page). Never raises.
 
     Returns ``{"ok", "installed", "removed", "message"}``; ``installed`` and
     ``removed`` list file names actually written or deleted this call, so an
@@ -149,29 +168,38 @@ def install_menu_scripts(root: Path | None = None) -> dict:
             return result
         scripts = render_scripts()
         target = root.joinpath(*MENU_SUBDIR)
-        target.mkdir(parents=True, exist_ok=True)
-        for name, data in scripts.items():
-            path = target / name
-            try:
-                if path.is_file() and path.read_bytes() == data:
-                    continue
-            except OSError:
-                pass
-            _write_atomic(path, data)
-            result["installed"].append(name)
-        for path in sorted(target.iterdir()):
-            if not path.is_file():
-                continue
-            stale_tmp = path.name.endswith(_TMP_SUFFIX)
-            stale_script = (path.suffix.lower() == ".lua" and path.name not in scripts
-                            and _is_owned(path))
-            if stale_tmp or stale_script:
+        # Two folders, one rule each: what belongs in a folder is written there, and an OWNED
+        # script that does not belong there (an old name, or a grading-frame item an earlier
+        # build put under Edit) is removed from it. A hand-made script is never touched.
+        groups = (
+            (target, {n: d for n, d in scripts.items() if not _is_frames_script(d)}),
+            (root.joinpath(*FRAMES_MENU_SUBDIR),
+             {n: d for n, d in scripts.items() if _is_frames_script(d)}),
+        )
+        for folder, wanted in groups:
+            folder.mkdir(parents=True, exist_ok=True)
+            for name, data in wanted.items():
+                path = folder / name
                 try:
-                    path.unlink()
-                    if stale_script:
-                        result["removed"].append(path.name)
-                except OSError as exc:
-                    log.info("resolve menu: could not remove %s: %s", path, exc)
+                    if path.is_file() and path.read_bytes() == data:
+                        continue
+                except OSError:
+                    pass
+                _write_atomic(path, data)
+                result["installed"].append(name)
+            for path in sorted(folder.iterdir()):
+                if not path.is_file():
+                    continue
+                stale_tmp = path.name.endswith(_TMP_SUFFIX)
+                stale_script = (path.suffix.lower() == ".lua" and path.name not in wanted
+                                and _is_owned(path))
+                if stale_tmp or stale_script:
+                    try:
+                        path.unlink()
+                        if stale_script:
+                            result["removed"].append(path.name)
+                    except OSError as exc:
+                        log.info("resolve menu: could not remove %s: %s", path, exc)
         _ensure_request_dir()
         result["ok"] = True
         if result["installed"] or result["removed"]:

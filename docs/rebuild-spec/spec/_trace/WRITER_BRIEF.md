@@ -350,6 +350,14 @@ the lesson, and list the lesson on a third line:
 Those lessons will be taken out of what crosses, so be sure the promise
 really is in your text.
 
+Two limits on that third line. **A lesson of kind `ruling` is never listed
+there**: if the owner asked for something a person can do or see (a "sync
+now" button, a count on a page), it is what the product does, however much
+it looks like machinery. If you think a ruling only made sense for the
+present build, write it as ruled and ask him in one question. And a lesson
+that is half promise and half arrangement is `Met` on its promise; note the
+half you left behind under "Parts of items left out", by the lesson's id.
+
 ## Leaning on other capabilities
 
 Your piece covers one capability. When a behaviour continues in another

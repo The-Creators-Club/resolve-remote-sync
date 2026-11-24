@@ -87,3 +87,60 @@ still open, outcome not found, or fixed but never shipped (listed in
 must meet unless you say one is no longer wanted. Sixteen factual
 disagreements were settled from the code and the record
 (`knowledge-base/_owner/SETTLED_BY_EVIDENCE.md`).
+
+## Pages 3 to 29: the questions that came out of writing the specification (2026-11-24, not yet asked)
+
+352 questions, gathered from the 27 writers of the specification by
+`python docs/rebuild-spec/tools/build_decisions.py` (it never writes over a
+page that holds answers). Each writer folded the readers' questions on the
+same point into one, so nothing is asked twice within a page; the same
+point can still come up on two pages where two parts of the product share
+it, and those are marked when the pages are put to him. One page per piece
+of the specification, each in two halves: **choices** (two forms of one
+thing that behave differently, an either-or, a change the lessons or his
+requirements ask for) in full, then **tidy-ups** (one thing reachable from
+several places, the same job built twice, things switched off for everyone,
+things nobody can reach, builders' tools) as a table. The specification is
+already written to each recommendation, with a "Pending" mark on the
+passage; where the recommendation is to cut something, the passage is still
+there, ready to delete.
+
+He answers a page by naming the numbers he disagrees with. An answer is
+typed into that page under "Your answers", starting with the word ANSWERED
+and the date, and the passage in the specification is then changed and its
+Pending mark removed.
+
+| Page | About | Choices | Tidy-ups | State |
+|---|---|---|---|---|
+| 3 | [The whole product](decisions/page-03-whole-product.md) | 6 | 4 | not yet answered |
+| 4 | [Sync, part 1](decisions/page-04-sync-1.md) | 17 | 4 | not yet answered |
+| 5 | [Sync, part 2](decisions/page-05-sync-2.md) | 0 | 3 | not yet answered |
+| 6 | [The dashboard, part 1](decisions/page-06-dashboard-1.md) | 4 | 13 | not yet answered |
+| 7 | [The dashboard, part 2](decisions/page-07-dashboard-2.md) | 6 | 5 | not yet answered |
+| 8 | [The app on each editor's computer](decisions/page-08-editor-app.md) | 8 | 11 | not yet answered |
+| 9 | [Accounts, privacy and the legal paperwork](decisions/page-09-accounts-privacy-legal.md) | 9 | 9 | not yet answered |
+| 10 | [Releases and updates](decisions/page-10-releases-and-updates.md) | 4 | 9 | not yet answered |
+| 11 | [The server: installing it and keeping it running, part 1](decisions/page-11-server-install-and-running-1.md) | 8 | 13 | not yet answered |
+| 12 | [The server: installing it and keeping it running, part 2](decisions/page-12-server-install-and-running-2.md) | 4 | 2 | not yet answered |
+| 13 | [Work shared out across the computers](decisions/page-13-fleet-jobs.md) | 4 | 8 | not yet answered |
+| 14 | [Proxies and file moves](decisions/page-14-proxies-and-file-moves.md) | 2 | 1 | not yet answered |
+| 15 | [Resolve on the editor's computer](decisions/page-15-resolve-on-the-editors-computer.md) | 5 | 7 | not yet answered |
+| 16 | [The b-roll archive](decisions/page-16-broll.md) | 16 | 12 | not yet answered |
+| 17 | [Music](decisions/page-17-music.md) | 3 | 4 | not yet answered |
+| 18 | [YouTube downloads](decisions/page-18-youtube.md) | 9 | 12 | not yet answered |
+| 19 | [The Footage Sorter and camera cards, part 1](decisions/page-19-footage-sorter-and-camera-cards-1.md) | 15 | 11 | not yet answered |
+| 20 | [The Footage Sorter and camera cards, part 2](decisions/page-20-footage-sorter-and-camera-cards-2.md) | 7 | 4 | not yet answered |
+| 21 | [The Footage Sorter and camera cards, part 3](decisions/page-21-footage-sorter-and-camera-cards-3.md) | 5 | 1 | not yet answered |
+| 22 | [Timeline Cards: footage in, ready to cut](decisions/page-22-cards-footage-in.md) | 8 | 0 | not yet answered |
+| 23 | [Timeline Cards: the board](decisions/page-23-cards-board.md) | 7 | 1 | not yet answered |
+| 24 | [Timeline Cards: the editor, part 1](decisions/page-24-cards-editor-1.md) | 6 | 6 | not yet answered |
+| 25 | [Timeline Cards: the editor, part 2](decisions/page-25-cards-editor-2.md) | 8 | 6 | not yet answered |
+| 26 | [Timeline Cards: the editor, part 3](decisions/page-26-cards-editor-3.md) | 9 | 1 | not yet answered |
+| 27 | [Timeline Cards: the editor, part 4](decisions/page-27-cards-editor-4.md) | 4 | 9 | not yet answered |
+| 28 | [Timeline Cards: the editor, part 5](decisions/page-28-cards-editor-5.md) | 5 | 8 | not yet answered |
+| 29 | [Timeline Cards: the hand-over to Resolve, and exports](decisions/page-29-cards-to-resolve-and-exports.md) | 4 | 5 | not yet answered |
+
+Still to add before these are put to him: the questions from settling the
+"still unsettled" points that only he can answer (is a thing still used,
+has a thing ever been seen), a page pruning settings nobody would feel, and
+whether the assistant's own name shows on screen.

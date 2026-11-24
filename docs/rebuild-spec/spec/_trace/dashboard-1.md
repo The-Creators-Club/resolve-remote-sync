@@ -332,15 +332,13 @@
 - U-15-4 | settled: an information-level problem is shown in the one list with its severity, after warnings, and is not counted in the problem count (13-028, 13-012)
 - U-15-5 | behind the glass
 - U-16-1 | settled: one hour (13-044, DSH-035)
-- U-16-6 | open: dashboard-1-U1
+- U-16-6 | settled: slow means longer than a minute; the left-out problem's words are written in
 - U-16-10 | behind the glass
 - U-17-2 | settled: a computer's sign-in never expires on its own (DSH-020); a warning before a person's browser sign-in ends belongs with accounts-privacy-legal
 - U-20-5 | behind the glass
 
 ## Still unsettled
 
-- dashboard-1-U1 | the threshold at which the server's own work counts as slow, and the exact words of the slow-work problem and of the "moves were left out" problem | the text names the problems without a number or exact words | 16-004, 16-033
-- dashboard-1-U2 | how far a computer's clock must be from the server's before "clock ahead/behind" is shown | the text says "when the difference reaches the warning amount" without a figure | 11-011, 13-035
 
 ## Conflicts between an item and a lesson
 
@@ -456,3 +454,9 @@
 - dashboard / Stopping and resuming the fleet | The Overview is the home page | the studio-wide stop the shortcut leads to.
 - dashboard / Alerts by mail | The server looks for problems about every ten minutes | sending alerts and reports.
 - dashboard / Settings and setup | The settings search finds settings only | the settings and their groups.
+
+## Settled from the present product
+
+- dashboard-1-U2 | shown from one minute apart, mailed from five
+
+- dashboard-1-U1 | slow means longer than a minute; the left-out problem's words are written in

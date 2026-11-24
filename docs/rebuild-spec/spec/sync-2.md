@@ -56,7 +56,6 @@ When both a stop and a pause are set, a second line warns: "⚠ Two things are s
 
 The same sentences, word for word, are used wherever the app says why syncing is held or that it is waiting for a connection.
 
-- Pending: sync-2-U1
 
 ### The app's window shows what is going up, what is coming down and the originals asked for
 

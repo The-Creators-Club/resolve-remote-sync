@@ -205,7 +205,6 @@ Nothing else ever lowers the quality: a passing refusal never does. A final fail
 
 One clip's failure or time limit fails that clip only: the job carries on with the next, and every clip that finished keeps its file and its credits.
 
-- Pending: youtube-U1
 
 #### Lessons
 

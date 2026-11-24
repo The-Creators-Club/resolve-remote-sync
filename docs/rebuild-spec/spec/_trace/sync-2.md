@@ -134,11 +134,10 @@
 - U-03-6 | settled: what an editor's computer does and says when a project moves on the server is written in full here; the rest belongs to proxies-and-file-moves
 - U-12-6 | settled: a computer time more than 7 days off is not trusted as a time, and an unreadable one is "unknown", never "no difference"
 - U-13-7 | behind the glass
-- U-22-1 | open: sync-2-U1
+- U-22-1 | settled: yes: syncing does not start until the computer's settings are complete and the licence is accepted
 
 ## Still unsettled
 
-- sync-2-U1 | whether a computer whose setting up was left unfinished refuses to sync | it shows "Sync: not set up yet" and does not sync until setting up is finished | 04-012, 04-042
 
 ## Conflicts between an item and a lesson
 
@@ -242,3 +241,7 @@
 - broll / Sending a clip to Resolve | A remote editor's downloads take the studio's fastest path, and an admin can choose it | b-roll fetched when needed
 - server-install-and-running / Installing on a NAS | Downloads from a Synology NAS always arrive whole | kinds of NAS
 - server-install-and-running / NAS speed, load and clock | A change starts syncing within about a minute, and an idle studio barely touches the NAS | the NAS's load
+
+## Settled from the present product
+
+- sync-2-U1 | yes: syncing does not start until the computer's settings are complete and the licence is accepted

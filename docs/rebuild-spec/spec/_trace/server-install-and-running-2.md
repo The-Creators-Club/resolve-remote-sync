@@ -130,7 +130,6 @@
 
 ## Still unsettled
 
-- server-install-and-running-2-U1 | how far the NAS's clock may be off before the admin is told | the text says "when the NAS's clock is wrong" and gives no number | none (from SRV-129)
 - server-install-and-running-2-U2 | whether DSM lets an account that is not an administrator manage users, groups and snapshots, so whether the server's Synology account can be less than an administrator | the text asks for an account made for the server alone, never the person's own administrator sign-in, and does not promise it is not an administrator | 21-004, 21c-018
 
 ## Conflicts between an item and a lesson
@@ -184,3 +183,7 @@
 - accounts-privacy-legal / Suspending, disabling and removing a person | When an editor leaves their computers lose the NAS | removing or suspending a person
 - accounts-privacy-legal / How secrets and keys are kept | The server holds a limited key for a TrueNAS and never its administrator password | the server's secret store
 - server-install-and-running / Snapshots, restoring and the server's disk | Schedules run on the studio's own clock | scheduled snapshots fire at studio time
+
+## Settled from the present product
+
+- server-install-and-running-2-U1 | nothing checks the NAS's clock at present; the text takes the amount used for a computer's clock

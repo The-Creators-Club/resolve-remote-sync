@@ -437,9 +437,8 @@ The warning never covers anything on the page, and it goes by itself the moment 
 
 ### Pages keep themselves current and catch up the moment they are shown again
 
-The parts of a page refresh themselves without anyone pressing anything. On a touch device (a phone or tablet) the liveliest parts refresh less often: a part a desk refreshes every 2 seconds refreshes every 10 seconds, and one a desk refreshes every 5 seconds refreshes every 15 seconds; slower parts are the same everywhere. While the tab or the installed app is hidden, nothing is fetched at all; the moment it is shown again every part refreshes once, at once, so what a person sees on returning is current rather than minutes old.
+The parts of a page refresh themselves without anyone pressing anything. On a touch device (a phone or tablet) the liveliest parts refresh less often: what is moving now (on the Overview and on the Transfers page), which a desk refreshes every 2 seconds, refreshes every 10 seconds, and the list of which computers hold a project's media, which a desk refreshes every 5 seconds, refreshes every 15 seconds; slower parts (between every 10 seconds and every minute) are the same everywhere. While the tab or the installed app is hidden, nothing is fetched at all; the moment it is shown again every part refreshes once, at once, so what a person sees on returning is current rather than minutes old.
 
-- Pending: dashboard-2-U1
 - Phone and desk: touch devices refresh their liveliest parts every 10 or 15 seconds instead of every 2 or 5.
 
 ### The studio's picture on the dashboard stays fresh on its own

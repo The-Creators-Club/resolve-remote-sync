@@ -232,7 +232,6 @@ These were inside items that are otherwise carried; each is behind the glass or 
 ## Still unsettled
 
 - cards-editor-3-U1 | Whether the ten reading aids, their settings rows, the lane's instant English after a trim and the aids' marks in the lane are switched on in the editor as the owner uses it, or have never been seen by him | written as live; the lit word and its English, the word-by-word gloss and the instant English are required by lessons CE1-016, CE1-019 and CE1-020 in any case | 30-038, 30-039, 30-040, 30-041, 30-044, 29-056, 31-054
-- cards-editor-3-U2 | When the transcript panel is ever empty (no transcript and no list), and which key the "Browse transcripts" button carries | written to the lesson: a button, its key, and a line on the other ways in | none (lesson CE3-053)
 
 ## Conflicts between an item and a lesson
 
@@ -246,7 +245,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 
 ## New in this text
 
-- An empty transcript panel shows how to open a transcript | the "Browse transcripts" button, its key and the line on the other ways in (lesson CE3-053)
+- An empty transcript panel shows how to open a transcript | no item carried it; written from lesson CE3-053 and then, as exact text, from the answer to the former unsettled point U2 (a reader of the present code gave when the panel is empty, its exact words, and what the 2 key does)
 - Typing in the transcript find marks hits without moving anything and Enter steps to a hit so Space plays it | the phone's Search key in the find (CE2-070), hits staying marked while playing (CE3-050), each hit from its own first word with older answers ignored (CE2-072), the 500-transcript, one-second, 60 ms figures (CE2-084)
 - Clicking a word puts the transcript playhead on it and clicking beside the words picks the paragraph | held Space at twice speed and Esc clearing the playhead (CE1-009), playback as fast as the lane with failures named (CE1-008)
 - Opening a transcript shows its header, and a person with several recordings can choose which recording's timings are used | the header staying in reach at every scroll position (CE2-073)

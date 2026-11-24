@@ -494,8 +494,6 @@
 
 ## Still unsettled
 
-- broll-U1 | the graphics memory each quality level needs and the size of its download follow from the describing the build uses | the figures the studio knows (8 and 12 GB, 16 and 24 GB on Apple Silicon, about 3.3 and 6.2 GB) | 07-028, 13-082, 24-015, 24-016
-- broll-U2 | whether, when placed at the playhead, a clip's sound lands on the audio track with the same number as its video track | video and stereo sound both go on tracks free over the span | 05-039
 
 ## Conflicts between an item and a lesson
 
@@ -612,3 +610,9 @@
 - The dashboard / Overview, menus and finding things | Search never stops because of an update | a part shown as not working with its reason
 - The whole product / The assistant | The assistant can describe clips instead, for a fee ; Every clip is filed under one subject category | what disappears when the assistant is off
 - Accounts, privacy and the legal paperwork / How secrets and keys are kept | The assistant can describe clips instead, for a fee | the paid key
+
+## Settled from the present product
+
+- broll-U1 | the figures in the text are the ones the product uses
+
+- broll-U2 | the sound goes to the audio track of the same number as the video track

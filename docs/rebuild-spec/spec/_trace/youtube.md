@@ -361,7 +361,6 @@
 
 ## Still unsettled
 
-- youtube-U1 | how long a download may write nothing before it is stopped, and the exact words then | "a set time", "stopped making progress" | 26-031 (lesson YTD-032; no item gives it)
 
 ## Conflicts between an item and a lesson
 
@@ -444,3 +443,7 @@
 - Accounts, privacy and the legal paperwork / What each person may see and reach | Anyone signed in can use YouTube downloads, and each job belongs to the person who started it | jobs private, history shared.
 - Proxies and file moves / Pairing proxies with their originals | Clips already in the studio that Resolve cannot decode are found and fixed | a proxy with the same frame count stands in.
 - The whole product / Could not check, refusals and nothing silent | Downloading keeps working as YouTube changes, with nothing for an editor or admin to do | "not checked", never fine.
+
+## Settled from the present product
+
+- youtube-U1 | nothing stops a download that writes nothing at present; the lesson requires the stop and no time is ruled, so the time is the builder's to choose and to show

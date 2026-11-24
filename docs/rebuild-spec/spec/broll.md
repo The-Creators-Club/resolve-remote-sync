@@ -205,7 +205,6 @@ The site's level is the default for every drop; the person dropping clips may ch
 - "Can't index b-roll: Best needs N GB VRAM, this GPU has M GB - choose Good" (on a Mac: "unified memory", "this Mac has")
 - "Can't index b-roll: Good needs N GB VRAM, this GPU has M GB - indexing needs a bigger GPU: this batch can run on another computer"
 
-- Pending: broll-U1
 - Setting: B-roll describing quality. Does: whether new clips are described at Good or Best unless a drop chooses otherwise; anything else is refused. Default: Good. Who: an admin. Applies to: the site. Search words: describing quality, good, best, model, b-roll indexing, VRAM.
 - Ways in: the site setting, and the choice on each drop.
 - Pending: broll-Q27
@@ -709,13 +708,12 @@ In Resolve:
 - Refusals first: Resolve cannot be reached (see Resolve on the editor's computer: Connecting to Resolve's scripting: launch, stalls and death), "no project open in Resolve", "no timeline open - create one first".
 - The clip goes into the bin "B-Roll/Archive" in the media pool, made if missing. If Resolve will not make it: "Resolve wouldn't create the B-Roll/Archive bin: the project is locked (or open elsewhere in a collaboration). Unlock it and try again." A clip already in that bin for the same file is used again; otherwise it is imported ("failed to import media at <path>"). A newly imported clip is pointed at the path spelling every computer shares (if Resolve refuses, the local spelling is kept).
 - Append: the In to Out range is appended to video track 1 whatever the timeline's destination buttons say, and checked to have landed. Fact about Resolve: with the video destination button (V1/A1, left of the timeline) off, an append is silently dropped. Messages: "failed to append clip to timeline"; "Resolve reported no error but nothing landed on the timeline. Check the destination track buttons (V1/A1) at the left of the timeline; with the video destination off, an append is silently dropped."; "Inserted <clip name> (<N> frames)".
-- Place at Playhead: reads the playhead (drop-frame aware; the timeline start if it cannot be read), works out how long the clip will be on this timeline (24 fps if the clip's rate cannot be read), and picks the lowest track from V2 up whose video and audio are both free over that span, else one above the highest, adding video and stereo audio tracks as needed. Messages: "couldn't read the playhead position from Resolve"; "couldn't read the timeline's tracks"; "couldn't add a <video|audio> track for the overlay - is the timeline locked?"; "placement failed on V<n> at the playhead - something already occupies that span, or the track is locked" (anything that landed in the wrong place is removed); "Placed <clip name> on V<n> at the playhead" plus " (new track)".
+- Place at Playhead: reads the playhead (drop-frame aware; the timeline start if it cannot be read), works out how long the clip will be on this timeline (24 fps if the clip's rate cannot be read), and picks the lowest track from V2 up whose video and audio are both free over that span, else one above the highest, adding video and stereo audio tracks as needed. The clip's sound lands on the audio track with the same number as its video track (V3 and A3, for example). Messages: "couldn't read the playhead position from Resolve"; "couldn't read the timeline's tracks"; "couldn't add a <video|audio> track for the overlay - is the timeline locked?"; "placement failed on V<n> at the playhead - something already occupies that span, or the track is locked" (anything that landed in the wrong place is removed); "Placed <clip name> on V<n> at the playhead" plus " (new track)".
 - Anything unexpected: "Resolve didn't answer. Make sure a project is open, then try again." A Resolve that does not answer within 90 seconds is given up on, so neither the page nor the app ever hangs on it.
 
 Success shows the app's own message, or "Sent to Resolve." Every outcome either places the clip in the open project or says in plain words why not and what to do.
 
 - Who: an editor, at their own computer.
-- Pending: broll-U2
 - When the help for the editing program is off: the two buttons are replaced by one that saves the clip's file, and Enter and Shift+Enter do nothing.
 
 ### Which file lands in Resolve: the original when there is one

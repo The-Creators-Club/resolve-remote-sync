@@ -19,14 +19,13 @@ Telling and making are switched separately for each computer. A computer with bo
 
 ### Which files need a proxy and how soon a new one is noticed
 
-Only video originals count. Never counted: files whose names start with a dot (the hidden companion files macOS writes beside files on shared drives, and folder settings files); the working files of a YouTube download still in progress; 360-degree camera files; empty files; and camera metadata files that sit beside raw footage. Folders named "Proxy" or "proxies" in any letter case, the sync folder's holding place for removed files, and hidden folders are never looked in.
+Only video originals count: files ending .braw, .mov, .mp4, .mxf, .avi, .mts, .m2ts, .mkv, .r3d, .crm, .mpg, .mpeg, .wmv or .webm, in any letter case. Never counted: files whose names start with a dot (the hidden companion files macOS writes beside files on shared drives, and folder settings files); the working files of a YouTube download still in progress; 360-degree camera files; empty files; and camera metadata files that sit beside raw footage. Folders named "Proxy" or "proxies" in any letter case, the sync folder's holding place for removed files, and hidden folders are never looked in.
 
 A clip counts as having a proxy when a QuickTime or MP4 file of the same name sits in the "Proxy" folder beside it. A clip whose proxy Blackmagic Proxy Generator is writing at that moment is counted neither as missing nor as waiting.
 
 The app looks again when it starts, about every 15 minutes after that, at once when the editor asks for proxies to be made now, and at once when the sync folder's drive comes back after being away. It looks only while the sync folder is present, and only in the projects this computer syncs (when that list is known). A newly ticked or newly created project is counted within about a minute; until it has been counted, every view says "counting" for it, never 0.
 
 - Setting: How often to look for clips with no proxy. Does: sets how soon a new original without a proxy is noticed. Default: every 15 minutes. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: proxy scan, look for missing proxies, how often, proxy check interval.
-- Pending: proxies-and-file-moves-U2
 
 ### Clips waiting for a proxy are made newest first, and failures never crowd out the rest
 
@@ -676,7 +675,6 @@ Every comparison of file, folder or project names treats both Unicode spellings 
 About every 2 minutes, for clips in the open Resolve project whose original is in the shared tree (the editor's own local or cloud media is left alone) and whose proxy does not work (Resolve shows it offline or it has none), the app attaches the proxy that sits in the "Proxy" folder beside the original, preferring a QuickTime proxy to an MP4. It never copies, moves or deletes a file. The path written into Resolve keeps the original's own spelling (the shared drive's spelling stays the shared drive's spelling, so the project still opens on other computers), even on a Mac without that drive. Each change is recorded as a proxy that was attached but unreachable, or one that was not attached at all, and can be undone like every other change CC Sync makes in Resolve.
 
 - Setting: Attach synced proxies in Resolve. Does: points clips whose proxy is offline or missing at the proxy synced beside the original. Default: on. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: attach proxies, relink proxies, proxy offline, stale proxy path.
-- Pending: proxies-and-file-moves-U3
 - When the help for the editing program is off: this does not happen.
 
 ### Some clips are deliberately not pointed at a proxy

@@ -436,9 +436,6 @@
 
 ## Still unsettled
 
-- footage-sorter-and-camera-cards-1-U1 | how long a copy may make no progress before it is stopped, and the exact words then | "for a set time", and the copy says which drive stopped answering | 10-021, 38-068 (lesson SRT-076; the one-minute figure in 38-068 is the Sorter waiting on another computer, not a limit a person was given)
-- footage-sorter-and-camera-cards-1-U2 | how often automatic backup looks at the drives marked for it: one account says about every 10 minutes, another about every hour | about every 10 minutes, as a setting | 36-025, 35-064
-- footage-sorter-and-camera-cards-1-U3 | how often the reminder about footage resting only on a laptop is sent | "every few days" | 38-085 (lesson SRT-082; no item gives it)
 
 ## Conflicts between an item and a lesson
 
@@ -565,3 +562,11 @@
 - The Footage Sorter and camera cards / Placing sound recordings (part 2) | A recorder's reset clock is corrected from its neighbouring files | where a sound recording belongs.
 - The Footage Sorter and camera cards / Thumbnails and hover filmstrips (part 3) | Raw clips and raw stills always have a picture to show | how pictures are shown.
 - The Footage Sorter and camera cards / The sorter page (part 3) | Each card is listed under its computer with its state, its health and its copy | where cards, reviews and progress sit on the page.
+
+## Settled from the present product
+
+- footage-sorter-and-camera-cards-1-U1 | nothing stops a stalled copy at present; the lesson requires the stop and no time is ruled, so the time is the builder's to choose and to show
+
+- footage-sorter-and-camera-cards-1-U2 | about every 10 minutes is right; the hourly figure is how often a watched folder is read again
+
+- footage-sorter-and-camera-cards-1-U3 | no separate reminder exists at present (laptop-only footage heads the daily mail); the owner's ruling asks for one every few days, and the text keeps it

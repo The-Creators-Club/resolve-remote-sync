@@ -193,7 +193,7 @@ Whether this computer takes part in music analysis at all is its own choice, set
 
 ### Music analysis needs a one-off download of about 280 MB on a computer that does it
 
-A computer that analyses music for the first time downloads what it needs: about 280 MB, once. Music analysis needs no graphics card. The download comes from wherever the site's updates come from, only over a secure connection (a plain connection only to the same computer), only from places the product trusts, and is checked against a fingerprint the product carries. What fails the check is never used and never replaces a copy that works. A copy already on the computer is found without restarting anything. The download needs its own size plus a safety margin free on the disk; a disk whose free space cannot be measured does not refuse.
+A computer that analyses music for the first time downloads what it needs: about 280 MB, once. Music analysis needs no graphics card. The download comes from wherever the site's updates come from, only over a secure connection (a plain connection only to the same computer), only from places the product trusts, and is checked against a fingerprint the product carries. What fails the check is never used and never replaces a copy that works. A copy already on the computer is found without restarting anything. The download needs its own size plus about 200 MB free on the disk; a disk whose free space cannot be measured does not refuse.
 
 When the person sitting at that computer started the work there with "Foreground", they are asked first: "The music analysis isn't on this computer yet. Running this drop downloads it first (about <size>). Continue?" with Cancel (the default) and "Go ahead". A tray notice appears when the download starts. A progress window names "the music analysis" with percent, rate and time left, and "The music analysis is ready. Indexing starts now." appears when it is done. A stopped download resumes where it left off: "the download was stopped - it will resume where it left off". Refusals and failures:
 
@@ -203,7 +203,6 @@ When the person sitting at that computer started the work there with "Foreground
 - "the music analysis could not be downloaded: <error>";
 - "the music analysis could not be loaded on this computer (<error>)".
 
-- Pending: music-U1
 
 ### An editor is told plainly when their computer must update before music works
 

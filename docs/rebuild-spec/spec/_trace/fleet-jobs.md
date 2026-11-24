@@ -236,7 +236,6 @@
 
 ## Still unsettled
 
-- fleet-jobs-U1 | the tries, studio-wide limit and quiet wait for the b-roll and music analysis kinds, which no item describes | the text gives them the computer's quiet time and says what they need is in their own pieces; tries and limit fall under "every other kind" (4 at once) and are not stated | 19-001, 20-093
 
 ## Conflicts between an item and a lesson
 
@@ -325,3 +324,7 @@
 - The dashboard / Alerts by mail | Admins are warned when work was given up | warnings by mail
 - Accounts, privacy and the legal paperwork / Suspending, disabling and removing a person | A computer whose access is refused says so and takes no work | when access is withdrawn
 - Releases and updates / Pushing updates and seeing who has what | The reasons a computer is passed over for a piece of work | an update waiting to apply, and why a computer was not updated
+
+## Settled from the present product
+
+- fleet-jobs-U1 | quiet time five minutes, two tries; no studio-wide limit of their own exists

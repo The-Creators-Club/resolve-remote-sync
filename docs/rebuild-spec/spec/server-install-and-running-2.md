@@ -309,11 +309,10 @@ A NAS whose storage is nearly full slows every read and every folder listing. Th
 
 ### Schedules run on the studio's own clock
 
-A NAS can declare one time zone while its clock and schedules run on another. Every scheduled scan, snapshot and upload fires at the studio's wall-clock time. The dashboard shows the admin the studio's time zone and the time the NAS's clock actually reads, checked against true time rather than the zone the NAS declares. When the NAS's clock is wrong, the admin is told, as a problem the server found, with the NAS's time, the true time and the step to correct it on the NAS.
+A NAS can declare one time zone while its clock and schedules run on another. Every scheduled scan, snapshot and upload fires at the studio's wall-clock time. The dashboard shows the admin the studio's time zone and the time the NAS's clock actually reads, checked against true time rather than the zone the NAS declares. When the NAS's clock is a minute or more from true time (the amount at which a computer's clock is shown as wrong), the admin is told, as a problem the server found, with the NAS's time, the true time and the step to correct it on the NAS.
 
 - Who: an admin.
 - Setting: the studio's time zone. Does: the wall-clock time every scheduled scan, snapshot, upload and report is set in and shown in. Default: asked at set-up. Who: an admin. Applies to: the site. Search words: time zone, clock, schedule, studio time.
-- Pending: server-install-and-running-2-U1
 
 ### Pages stay quick while big downloads and checks run
 

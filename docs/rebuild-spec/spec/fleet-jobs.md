@@ -10,7 +10,7 @@ A computer is given a piece of shared work only after nobody has touched its key
 
 | Kind of work | Nobody at the keyboard or mouse for |
 |---|---|
-| Transcribing speech, preview copies, analysing b-roll or music | the computer's quiet time, 5 minutes unless changed |
+| Transcribing speech, preview copies, analysing b-roll or music | the computer's quiet time, 5 minutes unless changed. A clip or track whose analysis fails is tried twice in all, then left as failed until a person asks again |
 | Pulling the sound out of a clip, drawing a waveform | 1 minute |
 | Copying a camera card, copying a drive, reading a drive | no wait: a person started it by plugging something in |
 

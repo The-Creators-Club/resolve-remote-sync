@@ -131,11 +131,11 @@
 - U-06-1 | open: proxies-and-file-moves-U1
 - U-06-2 | settled: PRX-053, the tree is looked through when the app starts
 - U-06-3 | settled: the labels the items give are used; where they sit is for the new design of the app and the dashboard
-- U-06-4 | open: proxies-and-file-moves-U3 (the relink after a move is settled: when the open project changes and at most every 5 minutes, for up to 30 days)
+- U-06-4 | settled: about every 2 minutes, from the end of one look to the start of the next
 - U-06-5 | settled: about camera card copies, which belong to the Footage Sorter; nothing in this piece rests on it
 - U-06-6 | behind the glass
 - U-06-7 | behind the glass
-- U-06-8 | open: proxies-and-file-moves-U2
+- U-06-8 | settled: the list of file types is written in
 - U-06-9 | settled: PRX-037 and PRX-012 require them shown to the editor; the text shows them
 - U-07-1 | settled: whether a computer works straight from the NAS is its own wired-or-remote setting (Sync), and the text follows only that setting
 - U-11-5 | settled: a move runs out only after 7 days of silence after the computer was first told; one never told never runs out (PRX-063)
@@ -146,8 +146,6 @@
 ## Still unsettled
 
 - proxies-and-file-moves-U1 | whether making proxies is on by default on every computer, or only on some (today a rule ties it to whether the computer keeps its own copies of proxies) | on, on every computer | 06-001, 09-013
-- proxies-and-file-moves-U2 | the exact list of video file types that count as originals needing a proxy, and which YouTube working files are skipped | "video originals", with no list | 06-002
-- proxies-and-file-moves-U3 | how often clips in the open Resolve project are pointed at their synced proxies (only the notes say about every 2 minutes) | about every 2 minutes | 06-030
 
 ## Conflicts between an item and a lesson
 
@@ -257,3 +255,9 @@
 - The Footage Sorter and camera cards / Moving footage on the NAS | A move made in the Footage Sorter inside a project reaches every editor's copy | the Sorter's own moves
 - The b-roll archive / Previews made for the archive | Some clips are deliberately not pointed at a proxy | the browser preview kept in the Proxy folder
 - The server: installing it and keeping it running / Snapshots, restoring and the server's disk | An admin puts a move back | the snapshot before a folder move is put back
+
+## Settled from the present product
+
+- proxies-and-file-moves-U2 | the list of file types is written in
+
+- proxies-and-file-moves-U3 | about every 2 minutes, from the end of one look to the start of the next

@@ -226,7 +226,7 @@
 - U-11-1 | not a question: no behaviour in this piece rests on those sentences; they belong to each computer's state in the first part of the dashboard
 - U-13-1 | settled: DSH-144 (ends after 24 hours unless kept on); the admin may choose another length up to 720 hours
 - U-13-9 | settled: DSH-128 (no admin action may delay other pages by more than a second), so opening the alerts view is held to that
-- U-14-1 | open: dashboard-2-U1
+- U-14-1 | settled: the two-second parts and the five-second part are named
 - U-15-1 | settled: the alerts view itself says "every M minutes", 10 unless set otherwise, and DSH-099 asks for a person to be told within an hour
 - U-15-2 | settled: written as once a day while the problem lasts
 - U-15-3 | settled: each of those controls is described in this piece from the other items (send a test, the kinds, the open problems, the list of what was sent, run now)
@@ -239,7 +239,6 @@
 
 ## Still unsettled
 
-- dashboard-2-U1 | which parts of which pages refresh every 2 seconds and every 5 seconds on a desk | the text promises only the touch-device slow-down (2 to 10, 5 to 15) and that slower parts are the same everywhere | 14-004
 
 ## Conflicts between an item and a lesson
 
@@ -324,3 +323,7 @@
 - music / Adding tracks to the library | Oversized requests are refused before they are read | the size limit a person meets when adding music
 - cards-editor / Opening episodes and keeping the editor running | A change that did not come from the dashboard's own page is refused | the refusal shown in Timeline Cards
 - resolve-on-the-editors-computer / Colour look-up tables (LUTs) | Every setting of the site | the shared libraries every computer gets
+
+## Settled from the present product
+
+- dashboard-2-U1 | the two-second parts and the five-second part are named

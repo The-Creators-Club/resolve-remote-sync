@@ -23,9 +23,15 @@ This part covers reading and searching the episode's transcripts from inside the
 
 ### An empty transcript panel shows how to open a transcript
 
-When the panel is open with no transcript in it and its list of transcripts is not showing, it shows a "Browse transcripts" button carrying the key that does the same, and one line naming the other ways to open a transcript: double-click a card or a clip, Shift+T on a selected cut, or Open transcript on a search result.
+The panel is empty when the transcript tab is the one showing in its panel group and no transcript is open: none has been opened yet, or the open one was closed with 2 or its close button. It shows:
 
-- Pending: cards-editor-3-U2
+- "No transcript open."
+- a primary "Browse transcripts" button marked with the key 2, which opens the panel on its list of transcripts;
+- "Every interview and montage clip in this episode, with filters and bins. Or double-click a clip in the lane, or press Q on a card, to open its transcript."
+
+The 2 key opens or closes the transcript panel on whichever page it last showed, so it does not always open on the list.
+
+- Exact: yes
 
 ### Double-clicking a card or a clip in the lane opens that cut in its transcript
 

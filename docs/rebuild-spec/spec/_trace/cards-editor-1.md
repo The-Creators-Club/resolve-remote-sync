@@ -222,6 +222,24 @@
 - Text assumes: A
 - Items: 29-044
 
+### cards-editor-1-Q13: Should cards be joinable into stacks again, one collapsible card made of neighbouring cuts, only when you ask?
+- Kind: other
+- Today: the editor you use every day has no stacks at all. Only a page that is gone had them, with these controls: the J key on a card to join it to the stack above or start a new stack there, the small join and split controls on a card, J or a join button to join a whole box selection into one closed stack, W or the chips on a card to open or close one stack, and Shift+W (or a row in the drawer, or the phone's stack icon) to open or close all of them. Your ruling says cards are gathered into a stack only when you ask.
+- Options: A: leave stacks out: every cut stays its own card, and folding a section is the way to gather cards out of sight. B: bring them back, only on request, with the controls listed.
+- Recommend: A, because you already cut every day without them, folded sections already hide a run of cards, and stacks would add a second way of collapsing cards, their own keys and a remembered state for every stack.
+- Changes for a person: with A nothing changes from what you use now; with B the J, W and Shift+W keys and the join, split and stack chips come back on the cards.
+- Text assumes: written in place with its controls and marked pending, to be deleted if you choose A
+- Items: 40-016, 40-017
+
+### cards-editor-1-Q14: After you trim or extend a clip, should the playhead stay on the same spoken moment of its clip, as it does now?
+- Kind: other
+- Today: after any edge edit the playhead stays on the same spoken moment of the clip it was in; it is never carried forward; if the trim removed that very moment it lands on the clip's last frame; in a gap it keeps its distance into the gap; past the end it keeps its time; nothing moves while playing. An older ruling of yours said ripple trims "carry the playhead", which could be read as the playhead moving with the edge.
+- Options: A: yes, as it is: the playhead stays on its spoken moment. B: the playhead is carried with the edge that moved.
+- Recommend: A, because it is how the editor behaves in your daily use, and the word you were listening to stays under the playhead.
+- Changes for a person: with A nothing changes; with B the playhead jumps with each trim.
+- Text assumes: A
+- Items: 28-057, 29-046
+
 ## Readers' questions and unsettled points
 
 - 28-Q1 | not a question: in the Timeline Cards editor every key, button and gesture for one action is kept
@@ -265,12 +283,13 @@
 
 ## Still unsettled
 
-- cards-editor-1-U1 | which control an editor uses to join cards into a stack, split it and open or close it (only a retired page offered it) | the text says what joining does and that any neighbouring cards and a box selection can be joined, and names no control | 40-016, 40-017
-- cards-editor-1-U2 | what "ripple trims carry the playhead" in the ruling on handling like Resolve asks for, beyond what the items show | the text says the lane handles like Resolve's timeline and leaves the playhead where the items put it | 28-057, 29-046
 - cards-editor-1-U3 | whether the faint strike through fillers is one of the hesitation marks the owner declined ("lets ditch all this") | the text keeps the filler strike as one of the language aids | 29-054
 
 
 ## Conflicts between an item and a lesson
+
+- CE2-001 | 28-057, 29-046 | the ruling's words "ripple trims carry the playhead" against the editor's real behaviour, where the playhead stays on its spoken moment after any edge edit and is never carried forward. Wrote the editor's behaviour and asked in cards-editor-1-Q14.
+- CE2-023 | 40-016, 40-017 | the ruling asks for stacks only on request, but the editor in daily use has none. Wrote them in place with their controls, pending cards-editor-1-Q13, which recommends leaving them out.
 
 - CE1-053 | 29-019 | the items let a note or section row in the cards be read and dragged but not deleted in place; the ruling asks for a one-click delete there. Added it.
 - CE1-092 | 29-020, 29-044 | the items mark the playhead's card and clip but do not say they are apart from the selection or how soon they follow; added the ruling's quarter second. The ruling's "distinct from the selection colour" is met by a distinct mark (a dot and a frame against a bar and a wash), since CE2-019 makes both red.

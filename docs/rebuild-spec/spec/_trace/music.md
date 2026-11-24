@@ -156,7 +156,7 @@
 - 25-Q6 | music-Q3
 - 25-Q7 | music-Q4
 - U-07-5 | behind the glass
-- U-08-1 | open: music-U1
+- U-08-1 | settled: the margin is about 200 MB
 - U-08-5 | settled: a track whose work was cut off by a restart is done again from the start of that step; one stopped by cancelling ends as cancelled or "stopped" and counts towards the drop's total (MUS-024)
 - U-25-1 | settled: what the editor's computer does for sending, revealing and Resolve's state is written once from the person's view; what it does for analysis is an arrangement left to Work shared out across the computers
 - U-25-2 | settled: the choice is written as when the person's own computer may give its time to the drop
@@ -164,7 +164,6 @@
 
 ## Still unsettled
 
-- music-U1 | the size of the safety margin of free space added to the music analysis download's own size | "its own size plus a safety margin", with the refusal naming how much is needed | 08-060
 - music-U2 | whether leaving out recorder takes, voiceover, short stings and recordings over 15 minutes applies to a person's own drop or only to looking over the library folder as a whole (a lesson also says music of any length, two hours and more, is indexed) | only to the library-wide look-over; a dropped track is taken whatever its length | 25-023, 25-045
 
 ## Conflicts between an item and a lesson
@@ -225,3 +224,7 @@
 - server-install-and-running / Shares that go away, and checks that cannot run | Nothing is written to the library when its share is not there | judging a share mounted
 - broll / Bringing new footage in | Dropping audio anywhere on the music page adds it to the library | the shared question on free-space floors is written up there
 - whole-product / Could not check, refusals and nothing silent | A failed search or browse says why, and a late answer never replaces a newer one | how failures and unknowns are shown
+
+## Settled from the present product
+
+- music-U1 | the margin is about 200 MB

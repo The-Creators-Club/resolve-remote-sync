@@ -414,7 +414,7 @@
 - U-05-2 | settled: the request is picked up within about 2 seconds, recorded for that computer, starts the download, and the app confirms in a notice
 - U-05-7 | open: sync-1-U2
 - U-11-3 | settled: the limit is 3 or, if larger, the allowance per computer times the number of editors' computers, as two items state
-- U-16-2 | open: sync-1-U3
+- U-16-2 | settled: more than a quarter of the active projects, and at least two
 - U-16-3 | settled: a count that finds fewer than a tenth of the previous files, or no originals where there were some
 - U-16-5 | behind the glass
 - U-20-1 | settled: the fixed limit is 3, as two items state
@@ -424,7 +424,6 @@
 
 - sync-1-U1 | Who may change a computer's own sync settings (the shutdown warning, keeping awake, the recovery folder's size, the download safety limits, the free-space floor, the time for each project), and whether an admin can set them for a computer from the dashboard | the editor on that computer | 03-036, 03-037, 09-021, 09-010, 03-017, 03-018, 02-024
 - sync-1-U2 | Whether the CC Sync entries really appear in Resolve's Scripts menu, and whether In and Out marks are read correctly, were never tried against a running Resolve | written as the items describe | 05-038, 01-043
-- sync-1-U3 | How many projects disappearing at once counts as too many to mark inactive | "many", no number | 16-018, 15-041
 
 ## Conflicts between an item and a lesson
 
@@ -534,3 +533,7 @@
 - Sync, part 2 / Saying truthfully what the sync is doing | Files edited on two computers at once are both kept | how conflicts are shown
 - Sync, part 2 / Computers joining and changing | Each computer has its own sync plan | renames and a computer's identity
 - Accounts, privacy and the legal paperwork / Suspending, disabling and removing a person | Only computers holding a full tick for a project receive its files | a suspended editor's computers receive nothing
+
+## Settled from the present product
+
+- sync-1-U3 | more than a quarter of the active projects, and at least two

@@ -76,15 +76,15 @@
 - 28-079 | What the editor says when the server refuses an edit, a connection fails for good, or the sign-in has expired
 - 28-080 | Edits are kept on this device until the server has them, and the editor says when the device will not keep them
 - 28-081 | Two tabs on one cut list never lose each other's edits
-- 29-010 | A sync pill in the header always says whether edits are saved
+- 29-010 | A sync pill in the header always says whether edits are saved ; While working offline by choice the pill says so
 - 29-014 | Errors never blank the screen: they say what is kept and offer to sign in, retry or keep working
-- 29-015 | Offline, a standing toast tells the person to keep editing
+- 29-015 | Offline, a standing toast tells the person to keep editing ; Each change between live and offline is announced once
 - 29-016 | A full panel says "You are offline. Keep editing."
 - 29-066 | The editor opens with no network once it has been opened on that device ; What works offline and what needs the server
 - 29-067 | What works offline and what needs the server
 - 29-068 | The panel says where things are kept and whether they will stay ; In the Windows and Android apps, kept cut lists are real files in a folder the person can open and move
 - 29-069 | left out: for the builders only
-- 30-026 | Inserting still works when the server cannot be reached
+- 30-026 | Inserting still works when the server cannot be reached ; Any paragraph the transcript panel shows can be inserted offline, placed approximately and trimmed when it syncs
 - 31-056 | The English already seen stays on the device, so a reload offline still shows it
 - 32-029 | The On this device panel keeps a cut list on a device so it opens, edits and plays with no network ; The panel shows whether the open cut list is on this device, how big each part is, and how it will be kept ; A person can choose to work offline even with the server up
 - 32-030 | What a kept cut list holds ; Keeping a cut list shows progress and says plainly how it ended ; Bringing a kept copy up to date fetches only what changed and says what it found
@@ -97,7 +97,7 @@
 - 33-038 | The note editor warns about changes from another device, a vanished gap, and a refused save
 - 33-046 | The On this device panel keeps a cut list on a device so it opens, edits and plays with no network
 - 33-047 | The panel shows whether the open cut list is on this device, how big each part is, and how it will be kept
-- 33-048 | Keeping a cut list shows progress and says plainly how it ended
+- 33-048 | Keeping a cut list shows progress and says plainly how it ended ; A keep that will not fit is refused before it starts, naming both sizes
 - 33-049 | A kept cut list can be removed from the device without touching the server
 - 33-050 | Kept here lists every cut list kept on the device and the space used
 - 33-051 | The panel says where things are kept and whether they will stay
@@ -296,7 +296,7 @@
 - U-31-3 | settled: anyone who can open the editor and write to the cut list may use shortening and the chat
 - U-31-4 | settled: a chat "delete" puts cards on the shelf under the name of the section they came from; stage takes an optional category; unstage puts a card back at a named place
 - U-31-8 | behind the glass
-- U-32-4 | open: cards-editor-4-U2
+- U-32-4 | settled: one describe or one revise gives up after 15 minutes, and the whole montage job is stopped after 60 minutes (answered by a reader of the code)
 - U-32-6 | settled: every on-screen name of the assistant is written as [the assistant], per the brief
 - U-33-1 | settled: the text requires live editing inside the apps exactly as in a browser (cards-editor-4-Q8)
 - U-34-1 | cards-editor-4-Q11
@@ -306,17 +306,14 @@
 
 ## Still unsettled
 
-- cards-editor-4-U1 | the on-screen words for behaviours the lessons require and no item shows: the "Offline (your choice)" pill row, the mark on a card waiting for the server, the keep mine / drop mine choice, the announcement of each change between live and offline, the note that an offline insert's edges were approximated, the refusal naming the room needed and the room left, the update report ("all media up to date" is given, the rest is not), the saved-file settings line and its iPhone reason, the display of who is working in which episode | the text says what is shown and when, with no wording beyond what the lessons quote | 29-010, 29-015, 30-026, 33-048, 33-054, 32-033, 34-017, 40-060
-- cards-editor-4-U2 | how long describing or revising a montage may take before it gives up: the editor's drawer says a montage gives up after 60 minutes, another reading says each describe or revise gives up after 15 minutes | the text keeps 60 minutes, from the drawer the editor shows | 32-050, 40-044
-
 ## Conflicts between an item and a lesson
 
 - CE2-094 | 31-042, 40-063 | the server can pin one strength for everyone, overriding the picker; the ruling says the strength the person picks is the one that answers. Wrote: an admin sets the default and the person's pick always wins.
 - CE2-094 | 31-025, 40-078 | shortening runs at a fixed strength; the ruling says the chat's chosen strength answers every call including shortening. Wrote the ruling.
 - CE3-066 | 29-010 | the pill is hidden in the phone's edit view; the ruling asks for it in every view. Wrote the ruling.
-- CE1-138 | 29-010, 32-031 | the pill reads plain "Offline" when offline by choice; the ruling says it reads "offline (your choice)". Added an "Offline by choice" row.
+- CE1-138 | 29-010, 32-031 | the pill reads plain "Offline" when offline by choice; the ruling says it reads "offline (your choice)". Wrote the ruling in its own behaviour, with the words the studio already knows.
 - CE2-132 | 28-077, 40-042 | opening a cut list clears the selection and puts the playhead at 0; the ruling keeps selection, playhead and view per device and starts a first visit at the latest place. Wrote the ruling.
-- CE2-118 | 30-026 | text with no timing of its own needs the server to be placed; the ruling says any paragraph the panel shows can be inserted offline from the stored transcript, within 12 frames, approximating edges and saying so. Wrote the ruling and kept the message only for a clip whose word timing is not on the device.
+- CE2-118 | 30-026 | the editor refuses an offline insert of text with no timing of its own; the ruling says any paragraph the panel shows can be inserted offline from the stored transcript, within 12 frames, approximating edges and saying so. Wrote the ruling as its own behaviour (placed a little wide, trimmed by the server when it syncs) and kept the refusal only for a clip with nothing kept on the device.
 - CE3-067 | 32-030, 33-053 | only transcripts that a used clip appears in are kept; the ruling keeps every transcript of the episode, the cut's first. Wrote the ruling.
 - CE2-110 | 33-055 | a failed top-up tells nobody; the ruling says refreshing reports "all media up to date" or what changed, the last-checked time and an unreachable server. Wrote the ruling.
 - CE2-128 | 33-052, 33-095 | one project folder per app; the ruling asks for a visible folder chosen per project per computer. Wrote that an episode can be given a folder of its own on a computer.
@@ -324,7 +321,7 @@
 - CE2-101, CE2-116, CE1-139 | 29-066, 29-067, 32-032, 33-089, 27-030 | the server is treated as gone after 4 or 5 seconds per request, and the offline launch is allowed 10 seconds; the lessons ask for a short reachability check of about 3 seconds, the offline copy within about 3 seconds, and no deadline on long requests. Wrote the lessons.
 - CE1-137 | 28-081 | a tab's waiting edits are sent when the cut list is next opened; the ruling asks for queued edits to replay without the cut list being opened first. Wrote the ruling.
 - CE3-073 | 32-029 | asking for video in the download sizes starts the server making previews; the lesson says showing sizes starts no work. Wrote the lesson.
-- CE3-072 | 32-030, 33-048 | a full device is refused without sizes; the lesson asks for both sizes. Added them.
+- CE3-072 | 32-030, 33-048 | a full device is refused without sizes; the lesson asks for both sizes before the keep starts. Wrote the lesson as its own behaviour; the editor's own out-of-room messages stay for a device that fills up during a keep.
 - CE2-124, CE3-069, CE2-107 | 32-033 | the copy of waiting edits is saved only by hand; the lessons ask for it to save itself to one silently overwritten file, off by default on iPhone and iPad. Added the behaviour.
 - CE2-114 | 33-094 | the apps keep every opened cut list by default; the lesson says media is kept only where the person switched it on. Wrote the apps' switch (on by default, as CE1-143 asks) as that choice, and a browser keeps only what the person kept.
 - owner's requirements | 32-050, 40-045, 40-046, 29-014 | messages carry double hyphens, and messages from elsewhere turn a double hyphen into a dash; nothing a person reads has a long dash. Wrote single hyphens in messages; the "unmatched" note written into the cut list file keeps its form, since the file format is kept exactly.
@@ -357,6 +354,16 @@
 - Timeline Cards has its own apps for Windows and Android that show the editor from the studio's server | live editing inside the apps (cards-editor-4-Q8)
 - The editor opens with no network once it has been opened on that device | CE1-133, CE1-135, CE2-105: any address, only its own pages, nothing kept deleted by an update
 
+- While working offline by choice the pill says so | CE1-138: "Offline (your choice)" with its waiting and saved additions; the wording comes from words the studio already knows
+- Each change between live and offline is announced once | CE3-066: "server unreachable: ..." and "server back: live cut list"; the wording comes from words the studio already knows
+- Any paragraph the transcript panel shows can be inserted offline, placed approximately and trimmed when it syncs | CE2-118 (a ruling): the wording comes from words the studio already knows
+- A keep that will not fit is refused before it starts, naming both sizes | CE3-072: the wording comes from words the studio already knows
+- When the cut list moved on while edits waited, the editor asks once whether to keep them | the buttons "Keep mine", "Drop mine", "Keep all mine" and the dropped-edits heading come from words the studio already knows (capitals and square brackets dropped)
+- An edit made offline is the same edit it would have been online | "N edits waiting to sync" and "<edit> · waiting for the server" come from words the studio already knows
+- Bringing a kept copy up to date fetches only what changed and says what it found | the report lines come from words the studio already knows; "brought up to date <when>", "up to date <when>" and "part <when>" are the editor's own
+- Waiting edits save themselves to a file without being asked | the tick-box labels, the Downloads line and the iPhone reason come from words the studio already knows ("[ SAVE A COPY ]" written as Save a copy)
+- Every signed-in person sees who is working in which episode | the dashboard list's lines and the close question come from words the studio already knows
+
 ## Parts of items left out
 
 - 29-053 | the reader's remark that the waiting line names the assistant's maker
@@ -378,7 +385,7 @@
 - 33-095 | its lower-case message wording ("moved N to <folder>", "now keeping in <folder>; N left in the old folder", "type the whole path of the new folder"): the same act as the panel's folder change, written once with the panel's words
 - 33-092 | the app's switch not telling the editor (cards-editor-4-Q9)
 - 32-034 | an audio-only keep every 10 minutes and its hidden per-browser off switch (cards-editor-4-Q7)
-- 40-044 | "the present editor runs the montage conversation in its own code", and 15 minutes per describe or revise (cards-editor-4-U2)
+- 40-044 | "the present editor runs the montage conversation in its own code"; the 15 minutes per describe or revise is written, the helper steps' own limits are not
 - 40-046 | the end of the no-corpus message naming a hand-run command
 - 40-065 | the exact sentence the assistant is told when there are no transcripts: an inside
 - 40-060 | the list of edit kinds an offline page could replay and per-edit keep or drop choices, and the revision-number message: the retired page's mechanism; the promise (lesson CE2-122) is written
@@ -402,4 +409,5 @@
 - cards-editor / Opening episodes and keeping the editor running | Every signed-in person sees who is working in which episode | the episode list, the projects sheet and opening an episode
 - cards-to-resolve-and-exports / Bringing Resolve's changes back into the cut | Every suggestion from the assistant and every import arrives as a proposal the editor previews and accepts in whole or in part | changes brought back from Resolve arrive as proposals
 - accounts-privacy-legal / Passwords, sessions and failed sign-ins | Errors never blank the screen: they say what is kept and offer to sign in, retry or keep working | an expired sign-in and signing in again
+- dashboard / Projects | Every signed-in person sees who is working in which episode | the dashboard's list of episodes shows who is in each open episode and asks before closing one
 - releases-and-updates / Installing an update on an editor's computer | The Android app needs Android 10 or newer and asks for little | the apps updating themselves

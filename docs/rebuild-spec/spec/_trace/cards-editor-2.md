@@ -297,13 +297,12 @@
 - 40-Q7 | with cards-editor-1
 - U-28-3 | settled: the refusals and their sentences are those of the edit rules written under the editing headings
 - U-28-4 | settled: the shelf is the file's `## staged` heading with the category after a spaced long dash, the category named after the last section heading above the cut
-- U-32-1 | open: cards-editor-2-U1
+- U-32-1 | settled: a cut list stops counting as open about ten minutes after the last device left it or last did anything with it; the exact refusal stays and the truth is said beside it
 - U-33-3 | settled: shown to the editor (lessons CE1-082 and CE3-027)
 - U-33-4 | settled: the edits behind the shelf and their refusals are written in this piece
 
 ## Still unsettled
 
-- cards-editor-2-U1 | What the rename refusal's "wait about ten minutes after the last edit" corresponds to | the sentence is kept as given; a cut list counts as open on a device until about ten minutes after its last edit there | 32-025
 
 ## Conflicts between an item and a lesson
 

@@ -249,8 +249,9 @@ The list of an episode's cut lists names each by its own file name, with a title
 
 {{32-025}}
 
+A cut list stops counting as open about ten minutes after the last device left it or last did anything with it (opened it, read it, edited it or left it), not only ten minutes after the last edit; until then a rename is refused with the sentence above.
+
 - Exact: yes
-- Pending: cards-editor-2-U1
 
 ### Rename on the open cut list changes its title instead, on every device, undoably
 

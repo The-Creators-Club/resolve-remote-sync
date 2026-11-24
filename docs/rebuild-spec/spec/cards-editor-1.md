@@ -106,9 +106,17 @@ A cut whose clip has no transcript at all is still a card and a clip like any ot
 
 Cards are never gathered into stacks unless the editor asks. Any neighbouring cards, including every card of a box selection, can be joined into one stack at once, read as one card, and a stack can be split apart again at once, back to single cards. A new stack starts closed. Whether each stack is closed or open is remembered per timeline across reloads and restarts, so a closed stack stays closed. If the cut has meanwhile left the timeline, the editor is told "that cut is no longer on the timeline".
 
+The controls:
+
+- J on a selected card toggles its mark: "join" when the card starts a stack, "split" when it is inside one, and back to no mark when it already carries one. The small control on the card shows the same thing: "⤒ join", titled "join this cut to the stack above ... J", or "⤓ split", titled "start a new stack at this cut ... J".
+- J with a box selection, or the "⌃ join" button on the selection bar ("join the selected cards into one stack (J)"), joins the selection into one stack and closes it. A box selection is made with a Shift-drag, or a plain drag that starts on blank space beside the cards; on a phone, in select mode.
+- W opens or closes the stack under the cursor, and so do the chips on the card "⌄ N" ("show these N cuts one by one (W)") and "⌃ N" ("collapse this stack of N cuts into one card (W)"). With a mouse, a click on a closed stack's text opens it; a finger's tap does not.
+- Shift+W, the row "↕ all stacks" and the phone's stack icon close every open stack or open every closed one, whichever there are more of.
+
 - Who: anyone who can open the editor and write to the cut list.
+- Phone and desk: select mode and the stack icon on a phone, a click on a closed stack's text with a mouse.
 - Exact: yes
-- Pending: cards-editor-1-U1
+- Pending: cards-editor-1-Q13
 
 #### Lessons
 
@@ -313,7 +321,11 @@ The lane is worked the way the studio's editors work Resolve's timeline: Alt or 
 
 A trim gesture repaints within 125 ms in 95 of 100 tries on a desk computer, and within 500 ms on a processor slowed four times. After a trim or a split the clip shows only the words inside its new edges, and their English, in the same frame as the edit, with nothing to wait for.
 
-- Pending: cards-editor-1-U2
+### After an edge edit the playhead stays on the same spoken moment
+
+After any edge edit (dragging a clip's edge on the lane, the controller's bumpers, a hold on the phone, the trim and extend keys), the playhead stays on the same spoken moment of the clip it was in. A trim earlier on the timeline makes the playhead slide back with that moment. If the trim cut away the very moment the playhead was on, the playhead lands on the last frame of that same clip, never on the next clip's first frame. A playhead in a gap keeps its distance into that gap, and a playhead past the end of the cut keeps its time. An edit never carries the playhead forward: when a ripple extend adds material before it, the playhead stays where it is on screen. None of this applies while playing: the playhead is only put back when playback is stopped.
+
+- Pending: cards-editor-1-Q14
 
 ### Mouse, finger and pen each have their own click allowance and edge grab size on the lane
 

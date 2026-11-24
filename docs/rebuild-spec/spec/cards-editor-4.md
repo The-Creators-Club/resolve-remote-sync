@@ -386,10 +386,11 @@ The rules the assistant works to, which decide what the editor gets:
 - The cut is spread across the sources without filling a quota, and long runs on one clip are allowed.
 - Every quote must be words actually said, and the assistant says when the material cannot carry a beat.
 
+One describe or one revise gives up after 15 minutes; the whole job, reading the material in included, is stopped after 60 minutes with "the montage took longer than 60 min and was stopped".
+
 A conversation keeps the material it was started with and its most recent turns, 40 turns in all, dropped in whole question-and-answer pairs. Starting a new conversation replaces the old one. When a conversation has been lost, the next turn says so, once, and reads the material again. An answer from the assistant that holds no montage, or one that cannot be read, is reported as such, with the end of the reply shown.
 
 - When the assistant is off: there is no montage builder.
-- Pending: cards-editor-4-U2
 
 ### The assistant reads the episode's corpus once per conversation, so a revision comes back in seconds, and every failure says why
 
@@ -399,13 +400,12 @@ A conversation keeps the material it was started with and its most recent turns,
 - Revise refusals: "there is no montage to revise yet: cut one first"; "the corpus has changed since the last montage, so there is no montage to revise in this conversation: cut it again".
 - The assistant's quotes are found in the clips' words to the frame, falling back to the whole transcript segment; a quote found nowhere is kept as unmatched; a clip not in the corpus is listed as dropped. A corpus re-transcribed meanwhile: "the corpus changed while the montage was being cut - ask again and it reads the new one". No placeable cuts: "the model proposed no cuts this server could place - try saying it another way"; no sections: "the model's answer has no sections - try saying it another way".
 - Other failures: "the montage builder needs [the assistant]: <reason>"; "the corpus could not be read into the conversation: <reason>"; "the model run produced no usable output: <reason>"; "the montage helper answered without the corpus prompts"; "the montage helper answered with something that is not a montage"; "the montage took longer than <n> min and was stopped".
-- Limits: a montage gives up after 60 minutes; at most 200 sections, 2000 cuts per section, quotes of 2000 characters; a request of at most 8000 characters ("a montage note is at most 8000 characters"); one montage at a time per cut list ("a montage is already being cut for this cut list"); at most two at once across the server ("<n> montages are being cut already - try again when one is done"); "that cut list is not in the episode"; "the server is shutting down".
+- Limits: one describe or one revise gives up after 15 minutes, and the whole job is stopped after 60 minutes ("the montage took longer than 60 min and was stopped"); at most 200 sections, 2000 cuts per section, quotes of 2000 characters; a request of at most 8000 characters ("a montage note is at most 8000 characters"); one montage at a time per cut list ("a montage is already being cut for this cut list"); at most two at once across the server ("<n> montages are being cut already - try again when one is done"); "that cut list is not in the episode"; "the server is shutting down".
 - "Stop" ends it: "stopped: nothing was changed". Stopping the server stops every running montage. Nothing is written to the cut list until the person inserts.
 
 Refusals before starting: "say what the montage should be first"; "the montage builder needs [the assistant]: <why>"; the cut list's read-only reason or "this cut list is open read only"; "the montage builder writes a cut list, so it needs one open"; "a describe is already running". States shown: opening (with "part k of N"), describing, writing, done (cuts, sections, unmatched, dropped clips, seconds), failed.
 
 - Exact: yes
-- Pending: cards-editor-4-U2
 
 ### The montage builder's answer is placed as cards, and nothing it proposed is silently lost
 
@@ -476,7 +476,6 @@ The pill (a dot with a short label; the long label is the hover and spoken name)
 | State | Long label | Short label | Tone |
 |---|---|---|---|
 | Offline | "Offline" / "Offline, N queued" | "Offline" / "Offline N" | warning (gold) |
-| Offline by choice | "Offline (your choice)" / "Offline (your choice), N queued" | "Offline" / "Offline N" | warning (gold) |
 | Connecting, with edits queued | shown as Offline | as Offline | warning (gold) |
 | Connecting, nothing queued | "Connecting" | "Connecting" | busy (cyan) |
 | Syncing | "Sending N" or "Syncing" | "N queued" or "Syncing" | busy (cyan) |
@@ -488,7 +487,12 @@ The short count is capped at "99+".
 
 - Phone and desk: the pill shows in every view on both.
 - Exact: yes
-- Pending: cards-editor-4-U1
+
+### While working offline by choice the pill says so
+
+While the Work offline switch is on, the pill reads "Offline (your choice)", followed by " · N edits waiting" when edits are waiting and " · saved <time>" when the device has saved them, so offline by choice is never mistaken for a server that cannot be reached. The header's "Offline" button and the switch's own sentences are described under "A person can choose to work offline even with the server up".
+
+- Phone and desk: the same on both.
 
 ### What the editor says when the server refuses an edit, a connection fails for good, or the sign-in has expired
 
@@ -544,10 +548,10 @@ Up to 50 saved places per cut list are shared across every device, so a place sa
 
 ### Every signed-in person sees who is working in which episode
 
-The list of episodes opens without loading any of them, and two people can each open and edit a different episode, or the same one, at the same time. Every signed-in person sees who is working in which open episode, and the editor's messages may name them. A person counts as working in an episode while they really are, offline or on a phone that has gone to sleep included, and an episode stays occupied while any of its devices holds edits not yet sent. A person who closes an episode is told who was last in it and when.
+The list of episodes opens without loading any of them, and two people can each open and edit a different episode, or the same one, at the same time. On the dashboard's list of episodes, every signed-in person sees who is working in which open episode: "<who> is in it now" (within the last minute), "<who> was last in N min ago", or "<who> opened it <how long ago>". A person counts as working in an episode while they really are, offline or on a phone that has gone to sleep included, and an episode stays occupied while any of its devices holds edits not yet sent. Closing an episode asks first, naming who was last in it and when: "Close <episode>? <who> was last in N min ago. Anything an offline browser has not sent yet stays in that browser until it reconnects."
 
 - Who: anyone signed in.
-- Pending: cards-editor-4-U1
+- Ways in: the dashboard's list of episodes.
 
 ### The editor opens with no network once it has been opened on that device
 
@@ -587,34 +591,32 @@ No background download, check or save holds the page up for longer than one fram
 
 - Every edit can be made offline, undo included: undo takes back the last edit not yet sent.
 - An edit made offline lands on exactly the frames, gaps and leading black the same edit made online would give.
-- Where the device cannot know an edit's result until the server has it (a card's final words or span), the card is visibly marked as waiting for the server, never shown with guessed numbers.
+- Where the device cannot know an edit's result until the server has it (a card's final words or span), the card is visibly marked as waiting for the server, with no numbers drawn on it rather than guessed ones. The On this device panel lists every waiting edit under "N edits waiting to sync", each as "<edit> · waiting for the server".
 - An edit the editor refuses while offline is shown as refused at once and is never queued.
 - Each piece of a cut split offline has its own name, the same every time it is sent, and on reconnecting each is found by the stretch of the clip it covers. Any number of edits made offline on one cut land correctly, and a cut renamed meanwhile is found again by its clip and span.
 - If an edit made offline cannot be stored on the device, the editor says so at once and the edit is not shown as saved.
 - Losing or regaining the server never shows an older state than the one on screen: an older revision never replaces a newer one, a kept copy is replaced only by a state of the same cut list and never by an empty one, and a copy that has been emptied says so.
 - Waiting edits are sent when the connection returns, whether or not their cut list is open.
 
-- Pending: cards-editor-4-U1
-
 ### When the cut list moved on while edits waited, the editor asks once whether to keep them
 
-On reconnecting, the edits that waited on this device are applied in the order they were made, on top of the cut list as it now is, and each lands exactly once. If nobody else changed the cut list meanwhile, they simply land. If others changed it meanwhile, the waiting edits stop before any is sent, the editor says so once, and offers:
+On reconnecting, the edits that waited on this device are applied in the order they were made, on top of the cut list as it now is, and each lands exactly once. If nobody else changed the cut list meanwhile, they simply land. If others changed what a waiting edit touches, the waiting edits stop at that edit before it is sent, and the editor offers on it:
 
-- keep mine: every waiting edit is sent on top of the others' changes; one answer carries them all, and the editor never asks edit by edit;
-- drop mine: the waiting edits are discarded, after a copy of them has been offered as a file.
+- a button "Keep mine" ("send this edit anyway, on top of what the server now has"): that edit is sent and the rest carry on after it;
+- a button "Drop mine" ("throw this edit away and keep what the server has");
+- when more than one edit is held up, a button "Keep all mine", which sends every held edit in one answer, so the editor never has to ask edit by edit.
 
-Either way, each edit sent lands or is dropped with its reason in words (see "What the editor says when the server refuses an edit, a connection fails for good, or the sign-in has expired"), and the rest carry on: one refused edit never holds up the others. Nothing is sent twice, and nothing is laid over the others' changes without the person's say.
-
-- Pending: cards-editor-4-U1
+Every edit that lands is sent once only. Every edit that could not be made is listed under "N edits could not be made and were dropped", each with its reason, and the rest carry on: one refused edit never holds up the others. Nothing is laid over the others' changes without the person's say, and a copy of the waiting edits can be saved as a file before any is dropped.
 
 ### Offline, a standing toast tells the person to keep editing
 
 {{29-015}}
 
-Each change between live and offline is announced once, in both directions.
-
 - Exact: yes
-- Pending: cards-editor-4-U1
+
+### Each change between live and offline is announced once
+
+When the server stops answering, the editor says once "server unreachable: editing the offline copy, edits will sync when it is back". When it answers again, the editor says once "server back: live cut list", followed by ", syncing N edits" when edits are waiting. The pill changes at the same moment.
 
 ### A full panel says "You are offline. Keep editing."
 
@@ -626,12 +628,14 @@ A full panel version of the offline message, reading "You are offline. Keep edit
 ### Inserting still works when the server cannot be reached
 
 - When the server does not answer (offline, no answer, or while it restarts), a selection or pick with its own timing is placed on the page itself by the same rules (12 frames of handle, held off neighbouring speech, words under the span), using the clip's word timings fetched when the transcript opened (waited for up to 5 s if still arriving) or the lane's. When the browser reports it is offline, it does not try the server first.
-- Any paragraph the transcript panel shows can be inserted offline: text with no timing of its own is placed from the word timing of its clip kept on the device, within 12 frames of where the server would place it, and where an edge cannot be found exactly it is approximated and the editor says so.
-- Only when the device holds no word timing for that clip: "<error>; this selection has no timing of its own, so it needs the server to place it". If the timings never reached the page: "<error>; and the word timings of this clip did not reach the page before it went - reopen the transcript once it is back".
+- Only when the device holds no word timing for that clip and no transcript to place it from (see the next behaviour): "<error>; this selection has no timing of its own, so it needs the server to place it". If the timings never reached the page: "<error>; and the word timings of this clip did not reach the page before it went - reopen the transcript once it is back".
 - Messages: "the server did not answer - check the connection and try again"; a refusal: the server's own error text or "the server refused it (<status>)"; "the server sent something that is not an answer".
 
 - Exact: yes
-- Pending: cards-editor-4-U1
+
+### Any paragraph the transcript panel shows can be inserted offline, placed approximately and trimmed when it syncs
+
+Offline, a paragraph or text with no timing of its own is placed from the transcript and word timing kept on the device, within 12 frames of where the server would place it. Where its edges cannot be found exactly, the cut is made a little wider than the words and the editor says "that paragraph has no word timing in this copy, so the cut covers a little more than the words: the server trims it to them when this syncs". When the edit reaches the server, the cut is trimmed to the words.
 
 ### The English already seen stays on the device, so a reload offline still shows it
 
@@ -704,10 +708,11 @@ Working out the sizes starts no work on the server: missing audio or preview vid
 
 {{33-048}}
 
-Before a keep starts, a device without room for it is refused with both sizes shown: what the keep needs and the room left. A keep the server interrupts by asking for a new sign-in stops and says so. Nothing that holds edits not yet sent is ever removed to make room without asking.
-
 - Exact: yes
-- Pending: cards-editor-4-U1
+
+### A keep that will not fit is refused before it starts, naming both sizes
+
+Before a keep starts, a device without room for it is refused with both sizes: "this download is <size> and this browser has <size> left: untick some audio, or remove a copy you are not using". A keep the server interrupts by asking for a new sign-in stops and says so. Nothing that holds edits not yet sent is ever removed to make room without asking.
 
 ### What a kept cut list holds
 
@@ -717,9 +722,7 @@ A kept cut list holds the cut list itself; for every clip used in the cut or on 
 
 Audio, waveforms and video already on the device are skipped when unchanged; a clip re-made on the server (a replaced recording, for example) is recognised by more than its size, fetched again with its waveform, and named. Documents are always checked and replaced when they changed. Audio and documents come first and preview videos last, so a keep stopped part-way leaves a list that plays. An interrupted download picks up where it stopped when the part held belongs to the same source, and otherwise starts that file again; every file is checked for size and content when it lands, and one that arrives short or wrong is fetched once more. A busy server is waited out for a few seconds before it counts as a failure. After a complete run, files of clips the list no longer uses are removed from the device, but only those no other kept list uses, so updating one episode's copy never touches another's.
 
-Each update says "all media up to date" or names what changed, shows when the copy was last checked, and says so when the server could not be reached.
-
-- Pending: cards-editor-4-U1
+A kept list shows "On this device" or "Partly on this device", its size and "brought up to date <when>"; in the list of kept cut lists each row reads "up to date <when>" or "part <when>". While an update checks, it reads "checking the downloaded media against the server...", and afterwards it reports what it found: "all media up to date (N files) · checked <time>"; "N files changed on the server and were dropped: ..."; "N files are no longer on this device: ..."; "no media files are downloaded on this device"; or, when the server could not be reached, "could not check: <why>. Last checked <time>" ("Not checked yet" before the first check).
 
 ### Kept cut lists are topped up quietly in the background
 
@@ -755,11 +758,10 @@ What a device keeps lives in one of three places, chosen by itself: inside the W
 
 ### Waiting edits save themselves to a file without being asked
 
-While edits are waiting on a device, a copy of them saves itself to one file in the person's Downloads within seconds of an edit, at most once a minute and always including the last edit, overwriting the same file each time. Where the browser lets a page overwrite a file it chose once, this happens with no question at all; where the browser asks for every download, it interrupts at most once every ten minutes. On iPhone and iPad, where every download asks, it is off by default and the panel says why; closing the share sheet there is not an error. The file is the same kind of copy that "Save a copy" makes, and restoring it never applies an edit twice: edits are added once each, oldest first, a file of another cut list is refused naming both lists, and the editor says how many it added.
+While edits are waiting on a device, a copy of them saves itself to a file within seconds of an edit, at most once a minute and always including the last edit. Where the browser lets a page keep one file it chose once up to date, the copy overwrites that one file with no question at all, and the tick box in the On this device panel reads "keep a rescue copy of your unsynced edits up to date as you work". Elsewhere the tick box reads "a copy of your unsynced edits is saved to Downloads as you work", and the line under it says "this browser cannot keep one file up to date, so a copy goes to your Downloads folder: at most one every ten minutes, and one the moment the server goes away." On iPhone and iPad it is off by default, with the reason "on an iPhone or an iPad this browser asks before every download, so it is off here unless you turn it on. Save a copy is the one-tap way to keep one."; closing the share sheet there is not an error. The file is the same kind of copy that "Save a copy" makes, and restoring it never applies an edit twice: edits are added once each, oldest first, a file of another cut list is refused naming both lists, and the editor says how many it added.
 
 - Setting: Save waiting edits to a file. Does: keeps a copy of edits not yet on the server in one file in Downloads, overwritten as they change. Default: on, off on iPhone and iPad. Who: anyone, for their own device. Applies to: a computer. Search words: rescue copy, backup edits, unsent edits file, save copy.
 - Phone and desk: off by default on iPhone and iPad.
-- Pending: cards-editor-4-U1
 
 ### Timeline Cards has its own apps for Windows and Android that show the editor from the studio's server
 

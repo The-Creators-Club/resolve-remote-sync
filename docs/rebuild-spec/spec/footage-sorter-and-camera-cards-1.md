@@ -829,7 +829,6 @@ After a destination drive lost power or was pulled mid-copy, its last writes may
 
 A long copy runs steadily, and the person always sees its live speed. When a copy makes no progress for a set time (a destination drive hung, a card stopped answering), it stops cleanly as above and says which drive stopped answering, telling the person to plug it back in if it stays gone; the next copy copies only what is missing. While a copy runs slower than it should, the progress says where the slowness comes from: the card being read, the drive being written, or the network to the NAS.
 
-- Pending: footage-sorter-and-camera-cards-1-U1
 
 ### Room and path length are checked before anything moves
 
@@ -999,7 +998,6 @@ Every day at 08:00 studio time the report is mailed to the owner, from "Backups"
 
 - Who: anyone signed in sees the report; the mail goes to the owner.
 - Setting: Daily mail about footage not at home. Does: mails the owner every morning what footage is not yet on the NAS. Default: on. Who: an admin. Applies to: the site. Search words: backups mail, not at home, daily report, laptop only, reminder.
-- Pending: footage-sorter-and-camera-cards-1-U3
 
 ### Drives and folders with automatic backup on are copied to the NAS when the computer is at home
 
@@ -1017,7 +1015,6 @@ Each source shows one state, kept across restarts: copying (files, size, whether
 - Setting: Automatic backup folder. Does: the folder on the NAS automatic backups land in. Default: "Auto backup". Who: an admin. Applies to: the site. Search words: auto backup folder, backup destination, NAS folder.
 - Setting: Studio network answer time. Does: how quickly the NAS must answer for a computer to count as at home. Default: 15 ms. Who: an admin. Applies to: the site. Search words: home network, at home, away, studio network.
 - Pending: footage-sorter-and-camera-cards-1-Q19
-- Pending: footage-sorter-and-camera-cards-1-U2
 
 #### Lessons
 

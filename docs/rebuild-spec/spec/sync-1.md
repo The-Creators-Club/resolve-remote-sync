@@ -496,10 +496,9 @@ A computer stays marked as holding footage the server does not have until each o
 
 ### A project whose folder disappears from the NAS is never deleted
 
-A project whose folder has vanished from the NAS is left set up as it was; nothing is deleted. It is marked no longer active on the dashboard. When many projects would go inactive at once, none of them is marked and admins see a serious problem, "a mass project deactivation was refused", saying N projects looked deleted in one check, over the limit, so none were marked gone.
+A project whose folder has vanished from the NAS is left set up as it was; nothing is deleted. It is marked no longer active on the dashboard. When more than a quarter of the active projects (and never fewer than two) would go inactive in one check, none of them is marked and admins see a serious problem, "a mass project deactivation was refused", saying N projects looked deleted in one check, over the limit, so none were marked gone. A project seen within the last 15 minutes is never counted as gone.
 
 - Pending: sync-1-Q19
-- Pending: sync-1-U3
 
 #### Lessons
 

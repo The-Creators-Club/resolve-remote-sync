@@ -218,7 +218,7 @@ Each computer's row lists what is wrong with it, errors first and then warnings,
 - "proxy download stopped itself": "<reason>, stopped <ago>. Uploads and project files are still moving; nothing was deleted." The reason is only ever the one the computer gave, at its own threshold.
 - "stopped by your admin" or "syncing paused on this computer", with the reason.
 - "project files not syncing <ago>" (never on a computer wired to the server): they have not been kept in step since <time>, whether anything is still trying, and the last error.
-- "clock <amount> ahead" or "clock <amount> behind": "this computer's clock is <amount> ahead of/behind the server's. A clock this far out can make files fail to come down while reporting no error. Fix the clock on that computer (turn on automatic time)." Shown when the difference reaches the warning amount.
+- "clock <amount> ahead" or "clock <amount> behind": "this computer's clock is <amount> ahead of/behind the server's. A clock this far out can make files fail to come down while reporting no error. Fix the clock on that computer (turn on automatic time)." Shown once the two clocks are a minute or more apart; the alert mailed to admins waits until they are five minutes apart.
 - "stalled: <what>": it made no progress for N seconds, <ago>; "A local drive that stops answering reads exactly like this." Shown only while the stall is current: a finished pass in that direction since the stall began clears it, while a stall nothing can confirm as over stays shown.
 - "being turned away: sign in on its app": "the last report from this computer was refused <ago>: <reason>. Nothing below is current. The editor has to sign in again in the app on this computer."
 - "nobody signed in": nobody is signed in on this computer, so it syncs nothing until someone signs in.
@@ -246,7 +246,6 @@ Each computer's row lists what is wrong with it, errors first and then warnings,
 
 - When the help for the editing program is off: no issue mentions Resolve, clips in Resolve, or the editing program.
 - When YouTube downloads are off: no YouTube issue is shown.
-- Pending: dashboard-1-U2
 
 ### Each computer shows the work in progress on it
 
@@ -1026,15 +1025,13 @@ Each of these opens a problem that closes itself once the cause is gone; every o
 
 ### Files moved by hand on the NAS are reported as they are followed
 
-For each move made by hand on the NAS that the server recognises, an information problem opens: "N file(s) were moved on the server, by hand, from <old place>. K computer(s) are following: each moves its own copy and relinks Resolve, so nothing re-uploads the old path." Its fix: "Nothing to do; the computers follow on their own. If this was not a move, open the project page's list of moves." At most 500 moves are taken at once; beyond that the first 500 (by project and path) are followed and a serious problem says moves were left out. When not every project could be read, the check for moves made by hand is not marked as checked. How a move is followed is in Proxies and file moves: Moves made by hand on the NAS.
+For each move made by hand on the NAS that the server recognises, an information problem opens: "N file(s) were moved on the server, by hand, from <old place>. K computer(s) are following: each moves its own copy and relinks Resolve, so nothing re-uploads the old path." Its fix: "Nothing to do; the computers follow on their own. If this was not a move, open the project page's list of moves." At most 500 moves are taken at once; beyond that the first 500 (by project and path) are followed and a serious problem opens, "more file moves were made on the server in one go than could be followed". It says how many were found and how many could be followed, that the rest count as deletions for every editor's computer (their copies go back up to the old places, and downloading stops itself on the computers that held them), and what to do: find what changed on the server (a restore, a remount or a big reorganisation), then move the rest through the product so every computer follows. When not every project could be read, the check for moves made by hand is not marked as checked. How a move is followed is in Proxies and file moves: Moves made by hand on the NAS.
 
-- Pending: dashboard-1-U1
 
 ### Slow work on the server is shown as a problem until it is fast again
 
-When a kind of work the server does by itself takes longer than its threshold, a warning opens naming that work. It measures only how long the work itself took, names what was really holding it up, and never advises an editor to untick anything. The next time the same work finishes within the threshold, the warning closes, also after a restart of the server.
+When a kind of work the server does by itself takes longer than a minute, a warning opens naming that work and how long the last one took. It measures only how long the work itself took, names what was really holding it up, and never advises an editor to untick anything. The next time the same work finishes within a minute, the warning closes, also after a restart of the server.
 
-- Pending: dashboard-1-U1
 
 ### Problems in the server's own set-up are shown at start
 

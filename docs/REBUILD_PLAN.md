@@ -473,8 +473,8 @@ read the current code.
 |---|---|---|
 | 1 | **Finish the inventory**: a list of everything the software does, read from the code alone, in `docs/feature-inventory/`. | **40 sections written 2026-11-12**, the Footage Sorter (35 to 38) and the engine behind Timeline Cards (39, 40) included. **Sections 41 to 43 added the same day**, when the owner brought the pipeline before the editor, and the planning step, into the rebuild; section 44 (Story Deck) is a partial record only, because he cut Story Deck. **Complete at 43.** Two top-ups owed before it is used: sections 06 and 10 (ten companion commits about camera cards landed after they were read), and section 36's audio sync (read while another session was still building it). |
 | 2 | **The knowledge base**: everything real use taught, gathered from every place it was written down (the owner's own messages, the bug ledger, the gotchas, the hunts, the memory notes, the commits), one entry per lesson, each ending in a rule the rebuild can be tested against. In `docs/rebuild-spec/knowledge-base/`. | **Written 2026-11-13; the owner's part is open.** 7,855 register items, read in 59 slices into 4,442 lessons, merged per capability, repeats across capabilities folded: **2,230 lessons cross, in 18 files** (`docs/rebuild-spec/knowledge-base/<capability>.md`), and **209 sealed tool notes** wait in `docs/rebuild-spec/sealed/`. Every count closes (`check_parts.py`, `check_merge.py`, `check_cross.py`, `assemble_kb.py`, all `OK`). Still owed: the owner's answers to `knowledge-base/_owner/QUESTIONS.md` (lessons still open, outcomes not found, fixes never shipped, disagreements), his test of twenty remembered problems, razer's history, and the top-up before hand-over. Method and state: `docs/rebuild-spec/knowledge-base/README.md`. |
-| 3 | **Rewrite the inventory as one specification organised by what people do** (sync a project, make proxies, find b-roll, cut in Timeline Cards, and so on). No source-file tags, no route or config-key names, each capability described once, each capability linked to the knowledge-base entries that apply to it. | **Started 2026-11-13**, after the owner answered page 1 of the decision list. Method under "Step 3 as it is being done". **Extracts complete 2026-11-24: 47 of 47, 2,925 items, 431 readers' questions, 320 unsettled points** (`python docs/rebuild-spec/tools/check_extract.py` prints `OK`). **Writers finished 2026-11-24: 27 of 27 pieces written and passing** (`python docs/rebuild-spec/tools/check_spec.py` prints `OK`): 2,127 behaviours, 303 settings, 352 questions for the owner, 485 passages marked pending on one of them, 42 points still unsettled. What is left of step 3 is under "After the writers". |
-| 4 | **A decision list for the owner**: every overlap in what a person can do, every several-ways-in, every dormant or dead feature, each as a keep / cut / merge question with a recommendation. Only questions about WHAT the product does; never an engineering question. A question he has already answered in a past session is shown with his answer, not asked cold. The list itself stays behind; only his answers, restated as what the product does, reach the specification. | Page 1 (what can be switched on and off) asked and answered 2026-11-13: every recommendation accepted. Page 2 (seven places where he ruled two ways) asked 2026-11-13, **not yet answered**. **Pages 3 to 29 written 2026-11-24, not yet asked**: the 352 questions from the writers, one page per piece, in `docs/rebuild-spec/decisions/` (index in `docs/rebuild-spec/DECISIONS.md`; made by `tools/build_decisions.py`, which never writes over a page that holds answers). |
+| 3 | **Rewrite the inventory as one specification organised by what people do** (sync a project, make proxies, find b-roll, cut in Timeline Cards, and so on). No source-file tags, no route or config-key names, each capability described once, each capability linked to the knowledge-base entries that apply to it. | **Started 2026-11-13**, after the owner answered page 1 of the decision list. Method under "Step 3 as it is being done". **Extracts complete 2026-11-24: 47 of 47, 2,925 items, 431 readers' questions, 320 unsettled points** (`python docs/rebuild-spec/tools/check_extract.py` prints `OK`). **Writers finished 2026-11-24: 27 of 27 pieces written and passing** (`python docs/rebuild-spec/tools/check_spec.py` prints `OK`): 2,134 behaviours, 303 settings, 354 questions for the owner, 456 passages marked pending, 20 points still unsettled. What is left of step 3 is under "After the writers". |
+| 4 | **A decision list for the owner**: every overlap in what a person can do, every several-ways-in, every dormant or dead feature, each as a keep / cut / merge question with a recommendation. Only questions about WHAT the product does; never an engineering question. A question he has already answered in a past session is shown with his answer, not asked cold. The list itself stays behind; only his answers, restated as what the product does, reach the specification. | Page 1 (what can be switched on and off) asked and answered 2026-11-13: every recommendation accepted. Page 2 (seven places where he ruled two ways) asked 2026-11-13, **not yet answered**. **Pages 3 to 30 written 2026-11-24, not yet asked**: the 354 questions from the writers, one page per piece, and page 30, written by hand (what only he can answer), in `docs/rebuild-spec/decisions/` (index in `docs/rebuild-spec/DECISIONS.md`; made by `tools/build_decisions.py`, which never writes over a page that holds answers). |
 | 5 | **Three companions**: (a) the givens the rebuild must live with, taken from the knowledge base; (b) what information must still be there afterwards; (c) the look book: screenshots of every screen plus the look written as plain values. Plus the two sealed drawers: notes per chosen tool, and the old data's real formats. | Not started. |
 | 6 | **The purge check and the clean room**: the word scan, the blind reader, and a place for the rebuild session to run where the old build cannot be seen. | Not started. |
 
@@ -1115,17 +1115,20 @@ see one capability, with a script that proves nothing was skipped.
 6. **After the writers.** `python docs/rebuild-spec/tools/check_seams.py`
    shows what only appears once the pieces sit side by side. In hand or
    owed, 2026-11-24:
-   - **Lessons one piece passed to another.** A writer who judged that a
-     lesson belonged in a sibling piece listed it "not yet met"; 19 such in
-     the Timeline Cards editor were met by no piece. Each receiving writer
-     was sent back to check its text against them and list them as `- Met
-     for another part:` (in hand).
-   - **The 42 points still unsettled.** About thirty are a number or a
-     wording the present code can answer; the rest only the owner can (is a
-     thing still used, has he ever seen a thing) or need a try against a
-     real Resolve. Owed: a reader per repository answers the first kind
-     into a stays-behind note, and the answers are then written into the
-     text by hand, in plain words; the second kind become a decision page.
+   - **Lessons one piece passed to another: done.** A writer who judged
+     that a lesson belonged in a sibling piece listed it "not yet met"; 19
+     such in the Timeline Cards editor were met by no piece. Each receiving
+     writer checked its text against them, added what was missing and
+     listed them `- Met for another part:`. The check now finds none.
+   - **The points still unsettled: 42 down to 20.** Two readers of the
+     present code answered 31 of them into stays-behind notes
+     (`spec/_trace/_settled-ccsync.md`, `_settled-cards.md`); the answers
+     were written into the text in plain words, by the writers for the
+     editor and by hand elsewhere. Ten turned out to be "not in the code":
+     things a lesson or ruling asks for that were never built. The 20 left
+     are for the owner (decision page 30) or need a try against a real
+     Resolve or the Synology (listed at the foot of page 30). Each keeps
+     its Pending mark until answered.
    - **The 38 lessons tied to an arrangement** (listed by the check): they
      only make sense if the product is built as the present one is, and
      must come out of the knowledge base that crosses, into the trace. Owed.
@@ -1227,7 +1230,7 @@ Paste this into a new Claude Code session opened in
 > `build_spec_bundles.py` again, and do not regenerate a decision page that
 > holds answers. Bring me the step 4 questions a page at a time: page 2 of
 > `docs/rebuild-spec/DECISIONS.md` is asked and not yet answered, and pages
-> 3 to 29 are in `docs/rebuild-spec/decisions/`, not yet asked. When I
+> 3 to 30 are in `docs/rebuild-spec/decisions/`, not yet asked. When I
 > answer a page, type the answer into it, change the specification to
 > match and remove the Pending marks. Commit each finished piece; push
 > nothing.

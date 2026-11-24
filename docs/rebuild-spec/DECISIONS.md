@@ -88,22 +88,23 @@ must meet unless you say one is no longer wanted. Sixteen factual
 disagreements were settled from the code and the record
 (`knowledge-base/_owner/SETTLED_BY_EVIDENCE.md`).
 
-## Pages 3 to 29: the questions that came out of writing the specification (2026-11-24, not yet asked)
+## Pages 3 to 30: the questions that came out of writing the specification (2026-11-24, not yet asked)
 
-352 questions, gathered from the 27 writers of the specification by
-`python docs/rebuild-spec/tools/build_decisions.py` (it never writes over a
-page that holds answers). Each writer folded the readers' questions on the
-same point into one, so nothing is asked twice within a page; the same
-point can still come up on two pages where two parts of the product share
-it, and those are marked when the pages are put to him. One page per piece
-of the specification, each in two halves: **choices** (two forms of one
-thing that behave differently, an either-or, a change the lessons or his
-requirements ask for) in full, then **tidy-ups** (one thing reachable from
-several places, the same job built twice, things switched off for everyone,
-things nobody can reach, builders' tools) as a table. The specification is
-already written to each recommendation, with a "Pending" mark on the
-passage; where the recommendation is to cut something, the passage is still
-there, ready to delete.
+354 questions on pages 3 to 29, gathered from the 27 writers of the
+specification by `python docs/rebuild-spec/tools/build_decisions.py` (it
+never writes over a page that holds answers), and 14 more on page 30,
+written by hand. Each writer folded the readers' questions on the same
+point into one, so nothing is asked twice within a page; the same point can
+still come up on two pages where two parts of the product share it, and
+those are marked when the pages are put to him. One page per piece of the
+specification, each in two halves: **choices** (two forms of one thing that
+behave differently, an either-or, a change the lessons or his requirements
+ask for) in full, then **tidy-ups** (one thing reachable from several
+places, the same job built twice, things switched off for everyone, things
+nobody can reach, builders' tools) as a table. The specification is already
+written to each recommendation, with a "Pending" mark on the passage; where
+the recommendation is to cut something, the passage is still there, ready
+to delete.
 
 He answers a page by naming the numbers he disagrees with. An answer is
 typed into that page under "Your answers", starting with the word ANSWERED
@@ -133,14 +134,13 @@ Pending mark removed.
 | 21 | [The Footage Sorter and camera cards, part 3](decisions/page-21-footage-sorter-and-camera-cards-3.md) | 5 | 1 | not yet answered |
 | 22 | [Timeline Cards: footage in, ready to cut](decisions/page-22-cards-footage-in.md) | 8 | 0 | not yet answered |
 | 23 | [Timeline Cards: the board](decisions/page-23-cards-board.md) | 7 | 1 | not yet answered |
-| 24 | [Timeline Cards: the editor, part 1](decisions/page-24-cards-editor-1.md) | 6 | 6 | not yet answered |
+| 24 | [Timeline Cards: the editor, part 1](decisions/page-24-cards-editor-1.md) | 8 | 6 | not yet answered |
 | 25 | [Timeline Cards: the editor, part 2](decisions/page-25-cards-editor-2.md) | 8 | 6 | not yet answered |
 | 26 | [Timeline Cards: the editor, part 3](decisions/page-26-cards-editor-3.md) | 9 | 1 | not yet answered |
 | 27 | [Timeline Cards: the editor, part 4](decisions/page-27-cards-editor-4.md) | 4 | 9 | not yet answered |
 | 28 | [Timeline Cards: the editor, part 5](decisions/page-28-cards-editor-5.md) | 5 | 8 | not yet answered |
 | 29 | [Timeline Cards: the hand-over to Resolve, and exports](decisions/page-29-cards-to-resolve-and-exports.md) | 4 | 5 | not yet answered |
+| 30 | [What only he can answer](decisions/page-30-open-points.md): points neither the writers nor the code could settle, places where the code differs from what the specification assumed, the assistant's name on screen, the client page's look, Rust | 14 | 0 | not yet answered |
 
-Still to add before these are put to him: the questions from settling the
-"still unsettled" points that only he can answer (is a thing still used,
-has a thing ever been seen), a page pruning settings nobody would feel, and
-whether the assistant's own name shows on screen.
+Still to add before the last pages are put to him: a page pruning settings
+nobody would feel (303 were written; some only tune machinery).

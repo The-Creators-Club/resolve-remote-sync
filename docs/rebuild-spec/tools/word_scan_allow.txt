@@ -1,0 +1,657 @@
+# Answers to the word scan (tools/word_scan.py). Stays behind.
+#
+# One line per hit: `the hit | why it may cross`. A hit with no line here fails the scan.
+#
+# How these were judged, 2026-11-24:
+#  - every hit shaped like code and every library name was read in its place in the pack;
+#  - every name of several words was read as a list, and the 38 that could be one of the
+#    present build's own nouns were read in their place;
+#  - every single word was read as a list, and the 80 that could be one of the present
+#    build's own nouns (marked `read in place`) were read in their place. The rest are
+#    words of ordinary English that a source file happens to be named after.
+# One leak was found and removed from the text (a builder's aside, "site data, not code").
+# This scan catches NAMES. Whether the pack gives away the SHAPE of the present build is
+# the blind reader's job (step 6), not this file's.
+
+[snake_case] start_tc | a key of the cut list's file, which crosses exactly by the owner's decision (2026-11-12)
+[snake_case] updated_from_timeline | a key of the cut list's file, which crosses exactly by the owner's decision
+[snake_case] tl_start | a key of the cut list's file, which crosses exactly by the owner's decision
+[ALL_CAPS] A001_0512 | an example of a camera's own clip name, in shown wording
+[path] /mnt/tree | an example in wording a person is shown
+[snake_case] timeline_cards | the name of the field the OpenTimelineIO export writes, which a person or another program meets in the file
+[snake_case] vault_root | a key of the cut list's file, which crosses exactly by the owner's decision (the word comes from the notes program he cut; the file format outranks that here)
+[ALL_CAPS] A001_06271102_C250 | an example of a camera's own clip name
+[ALL_CAPS] A007_08090854_C137 | an example of a camera's own clip name
+[path] /host/... | part of a masked web address a person is shown
+[snake_case] fx3_20260521_9490 | an example of a camera's own file name
+[snake_case] keep_from | wording the assistant's chat shows a person
+[snake_case] keep_to | wording the assistant's chat shows a person
+[source file] Thumbs.db | a file Windows itself leaves in folders; a fact about a given
+click | ordinary word (the library of that name is not meant)
+requests | ordinary word
+six | ordinary word
+express | ordinary word: the name of a kind of upload a person sees
+packaging | ordinary word
+watchdog | a search word a person might type for the setting that restarts stopped work
+timeline cards | plain words for something a person sees or does; read in the list of names of several words
+footage sorter | plain words for something a person sees or does; read in the list of names of several words
+settings window | plain words for something a person sees or does; read in the list of names of several words
+project library | Resolve's own name for where it keeps projects
+card copy | plain words for something a person sees or does; read in the list of names of several words
+proxy generator | Blackmagic Proxy Generator: a program the studio has, the only maker of proxies from its raw camera files
+transcript panel | plain words for something a person sees or does; read in the list of names of several words
+cloud backup | plain words for something a person sees or does; read in the list of names of several words
+file moves | plain words for something a person sees or does; read in the list of names of several words
+dry run | plain words for something a person sees or does; read in the list of names of several words
+gap notes | plain words for something a person sees or does; read in the list of names of several words
+shared folders | plain words for something a person sees or does; read in the list of names of several words
+client folders | plain words for something a person sees or does; read in the list of names of several words
+make proxies | plain words for something a person sees or does; read in the list of names of several words
+youtube download | plain words for something a person sees or does; read in the list of names of several words
+display name | plain words for something a person sees or does; read in the list of names of several words
+transcript search | plain words for something a person sees or does; read in the list of names of several words
+active project | plain words for something a person sees or does; read in the list of names of several words
+drive mapping | plain words for something a person sees or does; read in the list of names of several words
+tree name | plain words for something a person sees or does; read in the list of names of several words
+site settings | plain words for something a person sees or does; read in the list of names of several words
+cards editor | plain words for something a person sees or does; read in the list of names of several words
+crash report | plain words for something a person sees or does; read in the list of names of several words
+release feed | plain words for something a person sees or does; read in the list of names of several words
+missing files | plain words for something a person sees or does; read in the list of names of several words
+progress window | plain words for something a person sees or does; read in the list of names of several words
+projects tree | plain words for something a person sees or does; read in the list of names of several words
+fleet jobs | wording of a menu item a person is shown
+cards app | plain words for something a person sees or does; read in the list of names of several words
+daily budget | plain words for something a person sees or does; read in the list of names of several words
+project database | Resolve's own name for where it keeps projects
+script server | a fact about Resolve: its scripting is served by a helper it starts itself
+key in | plain words for something a person sees or does; read in the list of names of several words
+sign in in | plain words for something a person sees or does; read in the list of names of several words
+disk in | plain words for something a person sees or does; read in the list of names of several words
+first question | plain words for something a person sees or does; read in the list of names of several words
+moved in | plain words for something a person sees or does; read in the list of names of several words
+preview video | plain words for something a person sees or does; read in the list of names of several words
+card tracker | the name of a view a person sees
+cards view | plain words for something a person sees or does; read in the list of names of several words
+lane bar | the name of a part of the Timeline Cards editor's screen, which crosses exactly
+video in | plain words for something a person sees or does; read in the list of names of several words
+auto backup | plain words for something a person sees or does; read in the list of names of several words
+drive reminder | plain words for something a person sees or does; read in the list of names of several words
+job in | plain words for something a person sees or does; read in the list of names of several words
+menu item | plain words for something a person sees or does; read in the list of names of several words
+new job | plain words for something a person sees or does; read in the list of names of several words
+proxy history | plain words for something a person sees or does; read in the list of names of several words
+sentence end | plain words for something a person sees or does; read in the list of names of several words
+accept all | plain words for something a person sees or does; read in the list of names of several words
+account you | plain words for something a person sees or does; read in the list of names of several words
+editor name | plain words for something a person sees or does; read in the list of names of several words
+google calendar | plain words for something a person sees or does; read in the list of names of several words
+path in | plain words for something a person sees or does; read in the list of names of several words
+plan changes | plain words for something a person sees or does; read in the list of names of several words
+resolve undo | plain words for something a person sees or does; read in the list of names of several words
+transfer in | plain words for something a person sees or does; read in the list of names of several words
+video tab | plain words for something a person sees or does; read in the list of names of several words
+api key | plain words for something a person sees or does; read in the list of names of several words
+archive names | plain words for something a person sees or does; read in the list of names of several words
+cards shown | plain words for something a person sees or does; read in the list of names of several words
+download job | plain words for something a person sees or does; read in the list of names of several words
+link folder | plain words for something a person sees or does; read in the list of names of several words
+music bin | plain words for something a person sees or does; read in the list of names of several words
+protection line | plain words for something a person sees or does; read in the list of names of several words
+transfer history | plain words for something a person sees or does; read in the list of names of several words
+video panel | plain words for something a person sees or does; read in the list of names of several words
+alert kind | plain words for something a person sees or does; read in the list of names of several words
+ask why | plain words for something a person sees or does; read in the list of names of several words
+auto update | plain words for something a person sees or does; read in the list of names of several words
+borrowed folders | plain words for something a person sees or does; read in the list of names of several words
+claim in | plain words for something a person sees or does; read in the list of names of several words
+clip facts | plain words for something a person sees or does; read in the list of names of several words
+code in | plain words for something a person sees or does; read in the list of names of several words
+dsm error | plain words for something a person sees or does; read in the list of names of several words
+field copy | plain words for something a person sees or does; read in the list of names of several words
+local copies | plain words for something a person sees or does; read in the list of names of several words
+music ingest | plain words for something a person sees or does; read in the list of names of several words
+project links | plain words for something a person sees or does; read in the list of names of several words
+section move | plain words for something a person sees or does; read in the list of names of several words
+settings people | plain words for something a person sees or does; read in the list of names of several words
+stills in | plain words for something a person sees or does; read in the list of names of several words
+youtube import | plain words for something a person sees or does; read in the list of names of several words
+account password | plain words for something a person sees or does; read in the list of names of several words
+action refused | plain words for something a person sees or does; read in the list of names of several words
+ai providers | plain words for something a person sees or does; read in the list of names of several words
+audio match | plain words for something a person sees or does; read in the list of names of several words
+blocked in | plain words for something a person sees or does; read in the list of names of several words
+bpg path | a search word for a setting; BPG is how editors abbreviate Blackmagic Proxy Generator
+cleanup failed | plain words for something a person sees or does; read in the list of names of several words
+copy error | plain words for something a person sees or does; read in the list of names of several words
+crashes in | plain words for something a person sees or does; read in the list of names of several words
+device id | something a person copies with a Copy button
+editor shell | a search word for a setting a person sets
+erase history | plain words for something a person sees or does; read in the list of names of several words
+file move in | plain words for something a person sees or does; read in the list of names of several words
+fleet halt | plain words in two lessons for the studio-wide stop
+folder problems | plain words for something a person sees or does; read in the list of names of several words
+ignored resolve projects | plain words for something a person sees or does; read in the list of names of several words
+lane text | plain words for something a person sees or does; read in the list of names of several words
+local users | plain words for something a person sees or does; read in the list of names of several words
+login in | plain words for something a person sees or does; read in the list of names of several words
+media job | plain words in one lesson
+music proxies | plain words for something a person sees or does; read in the list of names of several words
+music share | plain words for something a person sees or does; read in the list of names of several words
+pool root | TrueNAS's own terms
+preview error | plain words for something a person sees or does; read in the list of names of several words
+project roots | plain words for something a person sees or does; read in the list of names of several words
+proxy maker | plain words for something a person sees or does; read in the list of names of several words
+release in | plain words for something a person sees or does; read in the list of names of several words
+release key | plain words for something a person sees or does; read in the list of names of several words
+restarts in | plain words for something a person sees or does; read in the list of names of several words
+rows view | plain words for something a person sees or does; read in the list of names of several words
+search transcripts | plain words for something a person sees or does; read in the list of names of several words
+sftp port | a search word for a setting a person sets
+share name | plain words for something a person sees or does; read in the list of names of several words
+site data | plain words in one lesson (the drive letter is the site's choice); the same phrase as builder's shorthand was removed from the editor's text 2026-11-24
+translation store | plain words in one lesson
+truenas api key | TrueNAS's own name for the thing
+truenas user | TrueNAS's own name for the thing
+computer | ordinary word
+kind | ordinary word
+cut | ordinary word
+clip | ordinary word
+server | ordinary word
+name | ordinary word
+file | ordinary word
+resolve | ordinary word
+project | ordinary word
+editor | ordinary word
+list | ordinary word
+card | ordinary word
+admin | ordinary word
+words | ordinary word
+clips | ordinary word
+page | ordinary word
+copy | ordinary word
+files | ordinary word
+search | ordinary word
+read | ordinary word
+sync | ordinary word
+nas | ordinary word
+cards | ordinary word
+timeline | ordinary word
+refused | ordinary word
+names | ordinary word
+start | ordinary word
+owner | ordinary word
+transcript | ordinary word
+check | ordinary word
+line | ordinary word
+proxy | ordinary word
+text | ordinary word
+folders | ordinary word
+place | ordinary word
+move | ordinary word
+change | ordinary word
+windows | ordinary word
+word | ordinary word
+settings | ordinary word
+download | ordinary word
+edit | ordinary word
+path | ordinary word
+shared | ordinary word
+site | ordinary word
+note | ordinary word
+projects | ordinary word
+missing | ordinary word
+update | ordinary word
+button | ordinary word
+lane | ordinary use; read in place
+stopped | ordinary word
+section | ordinary word
+proxies | ordinary word
+browser | ordinary word
+runs | ordinary word
+key | ordinary word
+phone | ordinary word
+moves | ordinary word
+episode | ordinary word
+audio | ordinary word
+downloads | ordinary word
+stop | ordinary word
+answer | ordinary word
+gap | ordinary word
+job | ordinary word
+link | ordinary word
+tree | ordinary word
+current | ordinary word
+media | ordinary word
+video | ordinary word
+offline | ordinary word
+copies | ordinary word
+drop | ordinary word
+view | ordinary word
+step | ordinary word
+account | ordinary word
+menu | ordinary word
+archive | ordinary word
+source | ordinary word
+playhead | ordinary word
+library | ordinary word
+state | ordinary word
+deleted | ordinary word
+paragraph | ordinary word
+head | ordinary word
+destination | ordinary word
+install | ordinary word
+send | ordinary word
+originals | ordinary word
+board | ordinary word
+music | ordinary word
+share | ordinary word
+report | ordinary word
+undo | ordinary word
+preview | ordinary word
+selection | ordinary word
+shelf | ordinary word
+restart | ordinary word
+progress | ordinary word
+plan | ordinary word
+play | ordinary word
+problem | ordinary word
+lines | ordinary word
+match | ordinary word
+password | ordinary word
+language | ordinary word
+backup | ordinary word
+help | ordinary word
+build | ordinary word
+status | ordinary word
+live | ordinary word
+records | ordinary word
+sorter | ordinary word
+edits | ordinary word
+delete | ordinary word
+history | ordinary word
+transcripts | ordinary word
+notes | ordinary word
+session | ordinary word
+links | ordinary word
+pass | ordinary word
+identity | ordinary word
+field | ordinary word
+mark | ordinary word
+release | ordinary word
+control | ordinary word
+client | ordinary word
+home | ordinary word
+action | ordinary word
+result | ordinary word
+local | ordinary word
+marker | ordinary word
+close | ordinary word
+montage | ordinary word
+keys | ordinary word
+save | ordinary word
+split | ordinary word
+timecode | ordinary word
+find | ordinary word
+frames | ordinary word
+places | ordinary word
+pick | ordinary word
+gone | ordinary word
+item | ordinary word
+keyboard | ordinary word
+problems | ordinary word
+group | ordinary word
+script | ordinary word
+installer | ordinary word
+multicam | ordinary word
+summary | ordinary word
+cancel | ordinary word
+follow | ordinary word
+setup | ordinary word
+kinds | ordinary word
+rules | ordinary word
+tracks | ordinary word
+rows | ordinary word
+scan | ordinary word
+clear | ordinary word
+rename | ordinary word
+remove | ordinary word
+trim | ordinary word
+access | ordinary word
+fleet | ordinary use; read in place
+gain | ordinary word
+join | ordinary word
+mode | ordinary word
+select | ordinary word
+target | ordinary word
+layout | ordinary word
+retry | ordinary word
+queue | ordinary use; read in place
+synology | ordinary word
+shoot | ordinary word
+format | ordinary word
+insert | ordinary word
+range | ordinary word
+idle | ordinary word
+transfers | ordinary word
+sequence | ordinary word
+truenas | ordinary word
+diagnostics | ordinary word
+tray | ordinary word
+marks | ordinary word
+jobs | ordinary use; read in place
+entry | ordinary word
+import | ordinary word
+machine | ordinary use; read in place
+episodes | ordinary word
+questions | ordinary word
+fade | ordinary word
+markers | ordinary word
+stretch | ordinary word
+waveform | ordinary word
+paths | ordinary word
+health | ordinary word
+alerts | ordinary word
+reply | ordinary word
+storage | ordinary word
+accept | ordinary word
+code | ordinary word
+colours | ordinary word
+export | ordinary word
+items | ordinary word
+steps | ordinary word
+calendar | ordinary word
+chat | ordinary word
+pointer | ordinary word
+render | ordinary word
+volume | ordinary word
+cloud | ordinary word
+root | ordinary word
+detail | ordinary word
+fact | ordinary word
+service | ordinary word
+android | ordinary word
+bins | ordinary word
+call | ordinary word
+reload | ordinary word
+unfinished | ordinary word
+refresh | ordinary word
+events | ordinary word
+pending | ordinary word
+terms | ordinary word
+theme | ordinary word
+apply | ordinary word
+block | ordinary word
+create | ordinary word
+restore | ordinary word
+user | ordinary word
+model | ordinary word
+recovery | ordinary word
+stills | ordinary word
+task | ordinary word
+exports | ordinary word
+interviews | ordinary word
+web | ordinary word
+active | ordinary word
+analysis | ordinary word
+image | ordinary word
+ending | ordinary word
+joins | ordinary word
+port | ordinary word
+proposal | ordinary word
+reset | ordinary word
+cancelled | ordinary word
+http | ordinary word
+duplicate | ordinary word
+login | ordinary word
+signs | ordinary word
+panels | ordinary word
+area | ordinary word
+budget | ordinary word
+bad | ordinary word
+chrome | ordinary word
+duplicates | ordinary word
+pad | ordinary word
+strip | ordinary word
+style | ordinary word
+backups | ordinary word
+decision | ordinary word
+platform | ordinary word
+player | ordinary word
+schedule | ordinary word
+serial | ordinary word
+stage | ordinary word
+videos | ordinary word
+luts | ordinary word
+sources | ordinary word
+lock | ordinary word
+downloader | ordinary word
+fetch | ordinary word
+publish | ordinary word
+rollback | ordinary word
+confirms | ordinary word
+served | ordinary word
+tabs | ordinary word
+dismiss | ordinary word
+shares | ordinary word
+wav | ordinary word
+host | ordinary word
+jump | ordinary word
+protection | ordinary word
+notices | ordinary word
+grid | ordinary word
+proposals | ordinary word
+auto | ordinary word
+features | ordinary word
+aids | ordinary word
+loudness | ordinary word
+redo | ordinary word
+watch | ordinary word
+package | ordinary word
+releases | ordinary word
+scope | ordinary word
+devices | ordinary word
+sessions | ordinary word
+corpus | ordinary use; read in place
+provider | ordinary word
+store | ordinary use; read in place
+verify | ordinary word
+levels | ordinary word
+score | ordinary word
+stream | ordinary use; read in place
+upgrade | ordinary word
+commands | ordinary use; read in place
+fingerprint | ordinary word
+fold | ordinary word
+preference | ordinary word
+rescan | ordinary word
+toggle | ordinary word
+decode | ordinary word
+detected | ordinary word
+finding | ordinary word
+markdown | ordinary word
+shell | ordinary word
+browse | ordinary word
+conform | ordinary use; read in place
+inspector | ordinary word
+splice | ordinary word
+describe | ordinary word
+plans | ordinary word
+shorten | ordinary word
+stores | ordinary word
+summaries | ordinary word
+compare | ordinary word
+roster | ordinary use; read in place
+cache | ordinary use; read in place
+edl | ordinary word
+feed | ordinary word
+google | ordinary word
+token | ordinary use; read in place
+assets | ordinary word
+beat | ordinary word
+claim | ordinary use; read in place
+similar | ordinary word
+scores | ordinary word
+subscription | ordinary word
+transcribe | ordinary word
+approve | ordinary word
+brief | ordinary word
+grammar | ordinary word
+ids | ordinary word
+machines | ordinary use; read in place
+outcome | ordinary word
+decide | ordinary word
+serve | ordinary word
+assign | ordinary word
+icons | ordinary word
+otio | ordinary word
+security | ordinary word
+users | ordinary word
+popup | ordinary use; read in place
+surface | ordinary word
+throughout | ordinary word
+worker | ordinary use; read in place
+assignments | ordinary word
+boot | ordinary use; read in place
+drift | ordinary use; read in place
+extend | ordinary word
+ingest | ordinary use; read in place
+prompts | ordinary word
+url | ordinary use; read in place
+batches | ordinary word
+ogg | ordinary word
+scans | ordinary word
+uid | ordinary use; read in place
+canon | ordinary word
+policy | ordinary word
+allowance | ordinary word
+continue | ordinary word
+segment | ordinary use; read in place
+views | ordinary word
+companion | ordinary use; read in place
+fcpxml | ordinary word
+stamp | ordinary word
+forget | ordinary word
+options | ordinary word
+reveal | ordinary word
+slots | ordinary use; read in place
+tapes | ordinary word
+transport | ordinary use; read in place
+activity | ordinary word
+calendars | ordinary word
+component | ordinary word
+doc | ordinary word
+hash | ordinary use; read in place
+intake | ordinary word
+meta | ordinary use; read in place
+reorder | ordinary word
+tasks | ordinary word
+volumes | ordinary word
+withdraw | ordinary word
+audit | ordinary use; read in place
+bulk | ordinary word
+context | ordinary word
+revoke | ordinary word
+ship | ordinary word
+suspend | ordinary word
+thumb | ordinary word
+wavs | ordinary word
+bridge | ordinary use; read in place
+disconnect | ordinary word
+guard | ordinary use; read in place
+modules | ordinary use; read in place
+peaks | ordinary use; read in place
+terminal | ordinary use; read in place
+timer | ordinary word
+config | ordinary use; read in place
+dataset | ordinary use; read in place
+engine | ordinary use; read in place
+gear | ordinary word
+manifest | ordinary use; read in place
+replay | ordinary use; read in place
+services | ordinary use; read in place
+settle | ordinary word
+suggest | ordinary word
+tagging | ordinary word
+unassign | ordinary word
+unlock | ordinary word
+bindings | ordinary word
+bpg | ordinary use; read in place
+broll | ordinary use; read in place
+digest | ordinary use; read in place
+everyday | ordinary word
+heartbeat | ordinary use; read in place
+judge | ordinary word
+roots | ordinary word
+stack | ordinary use; read in place
+stages | ordinary use; read in place
+tidy | ordinary word
+components | ordinary word
+detect | ordinary word
+disable | ordinary word
+factory | ordinary use; read in place
+lookup | ordinary use; read in place
+scene | ordinary word
+selections | ordinary word
+skeleton | ordinary use; read in place
+api | ordinary use; read in place
+capabilities | ordinary word
+color | ordinary word
+fuzzy | ordinary word
+gate | ordinary use; read in place
+halt | ordinary use; read in place
+identify | ordinary word
+launcher | ordinary word
+logout | ordinary word
+models | ordinary word
+packages | ordinary word
+response | ordinary word
+static | ordinary use; read in place
+tokens | ordinary use; read in place
+unstage | ordinary word
+vault | ordinary use; read in place
+align | ordinary word
+contract | ordinary word
+deal | ordinary word
+discovery | ordinary word
+docs | ordinary word
+drill | ordinary word
+geometry | ordinary word
+hollow | ordinary use; read in place
+ledger | ordinary use; read in place
+parse | ordinary word
+persist | ordinary use; read in place
+pipeline | ordinary use; read in place
+reduce | ordinary word
+spine | ordinary use; read in place
+sweep | ordinary use; read in place
+translate | ordinary word
+asker | ordinary use; read in place
+embed | ordinary use; read in place
+fixer | ordinary use; read in place
+gid | ordinary use; read in place
+graph | ordinary word
+handler | ordinary use; read in place
+infer | ordinary word
+invariants | ordinary use; read in place
+inventory | ordinary use; read in place
+legacy | ordinary use; read in place
+logic | ordinary word
+onboard | ordinary use; read in place
+protocol | ordinary use; read in place
+relocate | ordinary word
+reporter | ordinary use; read in place
+scopes | ordinary word
+stats | ordinary use; read in place
+styles | ordinary word
+thumbs | ordinary word
+triage | ordinary use; read in place
+unpin | ordinary use; read in place
+violation | ordinary word
+[path] P:\Assets\Luts | the folder a person sees in Resolve's own settings; the drive letter is the site's choice
+[path] \r\n | the cut list file's line endings, part of its format
+chinese | ordinary word: the language
+gmail | a mail service a studio may use, named where its own rules differ; a given, not a choice of the build
+hosted | ordinary word
+offsite | ordinary word
+resolve preference files | a fact about Resolve in one lesson: its own preference files

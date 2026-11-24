@@ -916,7 +916,6 @@ When the server has crash reports of its own: "This server has N saved crash rep
 #### Lessons
 
 - Met: DSH-074, DSH-075, DSH-077, DSH-078.
-- Tied to an arrangement: DSH-076 (the promise is in "What an admin and an editor can see about a computer, and how fresh it is").
 
 ## Problems the server finds
 

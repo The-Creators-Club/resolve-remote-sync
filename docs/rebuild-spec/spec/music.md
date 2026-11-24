@@ -155,7 +155,6 @@ Reading a file gives up after 2 minutes and analysing it after 15 minutes. A fai
 #### Lessons
 
 - Met: MUS-009, MUS-010, MUS-011, MUS-012, MUS-013, MUS-015, MUS-016, MUS-017.
-- Tied to an arrangement: MUS-008, MUS-014 (the promise is in "Dropping audio anywhere on the music page adds it to the library" and "Each dropped track shows its state until it is in the library").
 
 ## Imports across computers
 
@@ -210,7 +209,6 @@ Music analysis uses a graphics card when the computer offers one, and otherwise 
 #### Lessons
 
 - Met: MUS-018, MUS-019, MUS-020, MUS-023, MUS-024, MUS-025, MUS-027, MUS-028, MUS-029, MUS-030.
-- Tied to an arrangement: MUS-021, MUS-022, MUS-026 (the promise is in "Each dropped track shows its state until it is in the library", "A drop survives the page closing, a restart and the network dropping" and "A person sees their own drops, and an admin sees everyone's").
 
 ## Keeping the library's data whole
 
@@ -229,7 +227,6 @@ When music cannot work (for example its data cannot be read by this version of t
 #### Lessons
 
 - Met: MUS-033, MUS-034, MUS-035, MUS-036, MUS-037, MUS-038, MUS-040.
-- Tied to an arrangement: MUS-031, MUS-032, MUS-039 (the promise is in "What people add is never lost, and every change shows within a minute" and "When music cannot work, it says so").
 
 ## Searching and filtering
 

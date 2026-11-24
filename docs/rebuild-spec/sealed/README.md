@@ -11,7 +11,7 @@ Written by `tools/assemble_kb.py`; do not edit by hand.
 | `anthropic-api-and-models.md` | 10 |
 | `anthropic-api-and-models+claude-code-cli.md` | 2 |
 | `anthropic-api-and-models+local-vision-model.md` | 2 |
-| `browser-features.md` | 2 |
+| `browser-features.md` | 5 |
 | `chinese-word-segmenters.md` | 1 |
 | `clap-audio-embeddings.md` | 3 |
 | `claude-code-cli.md` | 12 |
@@ -30,7 +30,7 @@ Written by `tools/assemble_kb.py`; do not edit by hand.
 | `hugging-face.md` | 2 |
 | `local-vision-model.md` | 3 |
 | `loudness-envelope-cross-correlation-for-multicam-sync.md` | 1 |
-| `macos-facilities.md` | 3 |
+| `macos-facilities.md` | 5 |
 | `offsite-storage-providers.md` | 1 |
 | `offsite-storage-providers+restic.md` | 1 |
 | `opencc.md` | 2 |
@@ -48,7 +48,9 @@ Written by `tools/assemble_kb.py`; do not edit by hand.
 | `rclone.md` | 18 |
 | `rclone+syncthing.md` | 1 |
 | `rclone+yt-dlp.md` | 1 |
-| `resolve-keystrokes.md` | 4 |
+| `resolve-editing-a-timeline-by-script.md` | 3 |
+| `resolve-keystrokes.md` | 5 |
+| `resolve-own-transcription.md` | 3 |
 | `resolve-preference-files.md` | 3 |
 | `resolve-project-library-direct.md` | 19 |
 | `resolve-scripting-api.md` | 1 |
@@ -61,5 +63,5 @@ Written by `tools/assemble_kb.py`; do not edit by hand.
 | `teracopy.md` | 3 |
 | `tkinter.md` | 3 |
 | `whisper.md` | 15 |
-| `windows-facilities.md` | 5 |
+| `windows-facilities.md` | 7 |
 | `yt-dlp.md` | 10 |

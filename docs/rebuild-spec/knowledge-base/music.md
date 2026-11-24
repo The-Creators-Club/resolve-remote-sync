@@ -1,6 +1,6 @@
 # Music: what real use taught
 
-54 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+46 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## What the owner wants
 
@@ -43,11 +43,6 @@
 
 ## Adding tracks to the library
 
-### MUS-008: A music drop on a laptop with 15 GB free was refused.
-- Why: The 20 GB free-space minimum meant for b-roll was applied to music, whose largest file is about half a gigabyte.
-- Must: Each kind of drop has its own free-space minimum fitting its files (b-roll 20 GB, music 2 GB).
-- Kind: situation
-
 ### MUS-009: Music dropped while the NAS share was unmounted was answered "queued" and lost.
 - Why: An unmounted share is an empty folder on the server's own disk; uploads landed there, hidden once the share mounted back, including for seconds after a NAS reboot.
 - Must: Every write into the library confirms at that moment that the share is mounted and is the library; otherwise the upload is refused with the reason.
@@ -71,11 +66,6 @@
 ### MUS-013: Choosing a free file name spun forever when the library could not be checked.
 - Why: Every "is this name taken" check answered taken on any error, so a share the server could list but not enter made every candidate taken.
 - Must: "Could not tell" is a retryable error, picking a name gives up after a fixed number of candidates, and the page says the library cannot be checked.
-- Kind: situation
-
-### MUS-014: A music drop with no capable computer falls back, and says so.
-- Why: When the editor's app is absent or too old, the drop falls back to uploading for later analysis on the studio's own machine.
-- Must: A music drop always lands somewhere, and the page tells the editor in words which path it took.
 - Kind: situation
 
 ### MUS-015: Nothing searchable may be missing its audio.
@@ -110,16 +100,6 @@
 - Must: A track whose save succeeded is answered as a success even when a follow-up bookkeeping read fails.
 - Kind: situation
 
-### MUS-021: A computer waiting out a retry reported idle and threw away its loaded analyser.
-- Why: During a NAS blip, tracks waiting to retry made the computer report idle for up to five minutes while holding the batch, and the 4-12 GB analyser was rebuilt.
-- Must: A computer holding an import with tracks waiting to retry shows as working, keeps its analyser loaded, and never tells the editor it is idle.
-- Kind: situation
-
-### MUS-022: Another computer's retry or late cancel took an import from the computer running it.
-- Why: Retry reset a batch still held by a working computer, letting a second one index the same tracks, and a stale computer's cancel deleted a track mid-upload.
-- Must: Only the computer holding an import can cancel or release it, retry is refused while another holds it, naming it, and an abandoned import stays retryable.
-- Kind: situation
-
 ### MUS-023: Cancelling a batch nobody was working on hung on "cancelling" for ever.
 - Why: The cancel waited for a confirmation from a computer that never held the batch, or whose hold had lapsed, leaving it shown as live with no button to end it.
 - Must: Cancelling work no computer holds, or whose holder has lapsed, ends it at once; no state exists that neither cleanup nor any button can leave.
@@ -133,11 +113,6 @@
 ### MUS-025: After a page reload, staged or retried music could not be sent by any button.
 - Why: Only the page remembered the batch, so after a reload send, cancel, retry and take-over were refused, and the fallback advice started a different import.
 - Must: After a page reload, staged work can still be sent, cancelled, retried or taken over from the page, and no fallback advice starts a different import.
-- Kind: situation
-
-### MUS-026: Every refusal from the editor's own app read "another of your computers is working".
-- Why: The page ignored the reason the editor's app gave, including "reload the page and try again", and once said "queued" after a silent refusal.
-- Must: When the editor's app refuses, the page shows that app's own reason and action, and never reports success for work nothing picked up.
 - Kind: situation
 
 ### MUS-027: An open music tab kept starting work on the editor's computer.
@@ -161,16 +136,6 @@
 - Kind: situation
 
 ## Keeping the library's data whole
-
-### MUS-031: Publishing a fresh music index wiped tracks the live library had queued.
-- Why: Tracks added on the live library were overwritten when a copy worked on elsewhere was copied or published back over it.
-- Must: Results worked on elsewhere merge in track by track, only where the file is unchanged, and never discard tracks the live library gained meanwhile; otherwise the publish refuses.
-- Kind: situation
-
-### MUS-032: Merging an older analysis bundle rolled the whole library's scores back.
-- Why: Applying results computed earlier elsewhere replaced every track's scores wholesale, undoing newer re-scoring on the live library.
-- Must: Merging results never overwrites library-wide data newer than the results; stale parts are skipped with a reason, and a failing track is rolled back alone.
-- Kind: situation
 
 ### MUS-033: A newly published library was not what search answered from.
 - Why: Search kept answering from the previous library after a publish or new tracks, until someone restarted the dashboard.
@@ -200,11 +165,6 @@
 ### MUS-038: A track's preview played a deleted track's audio.
 - Why: Previews were chosen by a track number that a new track could inherit from a deleted one, while waveform, tags and Resolve got the new file.
 - Must: A track's preview always plays that track's own audio; a preview made for different audio is never served.
-- Kind: situation
-
-### MUS-039: A library written by a newer version broke every request.
-- Why: Publishing a music index from a newer build made every request fail while the menu still offered the page as working.
-- Must: Data written by a newer version is detected at start, the section is marked degraded with that reason, and its link is not offered as working.
 - Kind: situation
 
 ### MUS-040: A library was marked upgraded although its upgrade never ran.

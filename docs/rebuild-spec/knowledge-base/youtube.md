@@ -1,6 +1,6 @@
 # YouTube downloads: what real use taught
 
-100 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+96 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## Searching and reviewing results
 
@@ -279,11 +279,6 @@
 - Must: An "on this computer" switch defaults on, a stale page reads it as on, and every download ending on the server names its reason once and what it means for the clip.
 - Kind: ruling
 
-### YTD-054: Every job silently went to the server because a busy app answered slowly.
-- Why: Mid-sync the editor's app took 3.9 s to answer a 1 s check, the server started before any claim, and pasted links were never offered: 45 of 45 jobs ran there.
-- Must: Every download is offered to the requester's computer, which answers within 1 s even mid-sync; slow answers are retried, refusals fall back at once, and the server waits 4 s.
-- Kind: situation
-
 ### YTD-055: Downloads meant for editors' computers silently ran on the server for two days.
 - Why: Editors' computers lacked a needed tool and the server lacked a setting, so every job fell back to the server, which worked, so nobody noticed.
 - Must: Each download records and shows which computer ran it, and health shows each computer's downloader version and last real download, so a fallback is never invisible.
@@ -314,11 +309,6 @@
 - Must: A computer takes a download job only if it can complete it (tools, quality, project); otherwise the job starts elsewhere at once.
 - Kind: situation
 
-### YTD-061: A job made for the server's wider project choice was taken by an editor's computer.
-- Why: A server download may target any active project; a page could mark a job for the server, then let its own computer take it into a project it does not sync.
-- Must: A job created to run on the server can never be taken by an editor's computer.
-- Kind: situation
-
 ### YTD-062: A failed tool install turned off downloading on that computer for a day.
 - Why: After a failed install or update of the download tools the next try was 24 hours away, so one network blip at start sent that computer's downloads to the server.
 - Must: A failed install or update retries within minutes with backoff, and the editor can see why downloading on their computer is off.
@@ -330,11 +320,6 @@
 - Why: A review limited lapsed jobs to their creator's computers; the owner: "I want the old behaviour back", because the editors share one archive.
 - Must: Once a job's hold has expired, any signed-in editor's running computer may take it over and finish it.
 - Kind: ruling
-
-### YTD-064: Two computers, even one person's laptop and desktop, downloaded the same job.
-- Why: A hold was checked by person, or only when claimed, so a laptop waking after its hold expired kept renewing and reporting beside the desktop that took over.
-- Must: Each job is held by exactly one computer, every call names the calling computer, holding is checked at every step, and a computer that lost a job is told to stop and stops.
-- Kind: situation
 
 ### YTD-065: A three-second dashboard restart ended a 22-clip download at clip 2.
 - Why: The editor's computer treated one refused connection during a brief restart as the end of the job, and the server then fetched clips the editor could not get.
@@ -532,9 +517,4 @@ See also, filed under another capability:
 ### YTD-104: A punctuation-only edit to the rights notice must not force re-agreement.
 - Why: Changing the notice's version sends every editor in every studio back through the dialog.
 - Must: Editors are asked to agree again only when the words agreed to change, never for punctuation alone.
-- Kind: ruling
-
-### YTD-105: A download refused for unaccepted terms says "Please first accept download terms".
-- Why: A download started on the dashboard was silently refused when the editor's computer had not accepted the terms.
-- Must: The page tells the person to accept the download terms in the editor's app first, where the item reads "Accept YouTube Terms".
 - Kind: ruling

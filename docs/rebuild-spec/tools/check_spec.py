@@ -240,11 +240,19 @@ def check(piece: str, build=False):
 
     # Every lesson.
     whole = "\n".join(built)
+    # A lesson taken out of what crosses since the bundle was made
+    # (knowledge-base/_cross/TAKEN_OUT.txt) must NOT be named in the text:
+    # the rebuild would be pointed at a lesson it is never given.
     lessons = ids_in(os.path.join(RAW, piece + ".lessons"))
-    missing = [l for l in lessons if not re.search(rf"\b{re.escape(l)}\b", whole)]
+    taken = ml.taken_out()[0]
+    missing = [l for l in lessons if l not in taken and not re.search(rf"\b{re.escape(l)}\b", whole)]
     if missing:
         problems.append(f"{len(missing)} of {len(lessons)} lessons are in no Lessons line: "
                         + ", ".join(missing[:25]))
+    named = sorted(t for t in taken if re.search(rf"\b{re.escape(t)}\b", whole))
+    if named:
+        problems.append("the text names lessons that were taken out of what crosses: "
+                        + ", ".join(named[:25]))
     not_met = len(re.findall(r"[A-Z][A-Z0-9]{2}-\d{3}", " ".join(
         l for l in built if l.startswith("- Not yet met"))))
     tied = len(re.findall(r"[A-Z][A-Z0-9]{2}-\d{3}", " ".join(

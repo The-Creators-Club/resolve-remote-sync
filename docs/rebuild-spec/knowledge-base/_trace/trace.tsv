@@ -1,10 +1,8 @@
 finished id	capability	sub-topic or tool	kind	merged ids	readers' entries	register ids
 ACC-001	accounts-privacy-legal	Who may sign in	3	ACC-001	L11-022 H04-015	L-1230 H-bh2026-08-21-111
 ACC-002	accounts-privacy-legal	Who may sign in	3	ACC-002	H08-037	H-plr-2026-10-06-007
-ACC-003	accounts-privacy-legal	Who may sign in	3	ACC-003	L11-019 H07-123	L-1230 H-plr-2026-10-06-004
 ACC-004	accounts-privacy-legal	Who may sign in	3	ACC-004	L07-043 L09-021	L-0663 L-0731 L-0910
 ACC-005	accounts-privacy-legal	Who may sign in	3	ACC-005	H03-029	H-bh2026-08-21-054
-ACC-006	accounts-privacy-legal	Who may sign in	3	ACC-006	L04-167	L-0347
 ACC-007	accounts-privacy-legal	Who may sign in	2	ACC-007	P14-011	P-03287
 ACC-008	accounts-privacy-legal	Who may sign in	2	ACC-008	D06-026	D-tc-truenas-app-plan-007 D-tc-truenas-app-plan-002
 ACC-009	accounts-privacy-legal	Who may sign in	2	ACC-009 CE2-109	C04-032 P14-026 C06-064	C-cc-7887d1ff4 C-cc-95bba3960 P-03339 P-03340 M-ed-cards-offline-launch C-ed-b365cb454
@@ -206,7 +204,6 @@ BRO-133	broll	Client folders and links	3	BRO-133 ACC-038	L01-080 H03-043	L-0084 
 BRO-134	broll	Client folders and links	3	BRO-134	H05-007 L06-068 L07-061	H-bh2026-09-11-007 H-bh2026-09-11-024 H-bh2026-09-11b-014 L-0522 L-0523 L-0714 L-0716 L-0720
 BRO-135	broll	Client folders and links	3	BRO-135	L07-053	L-0692 L-0715
 BRO-136	broll	Replacing the search index	3	BRO-136	L04-067 H07-036 L09-044	L-0305 L-0313 H-rs-2026-08-28-010 H-urs-2026-09-03-003 H-urs-2026-09-03-006 H-plr-2026-10-06-002 L-0951
-BRO-137	broll	Replacing the search index	3	BRO-137	L09-045	L-0956 L-0985
 BRO-S01	sealed	anthropic-api-and-models	1b	BRO-S01	M05-007	M-home-broll-platform
 BRO-S02	sealed	anthropic-api-and-models	1b	BRO-S02	M05-013	M-home-broll-platform
 BRO-S03	sealed	anthropic-api-and-models	1b	BRO-S03	H08-076	H-aud-2026-11-10-016
@@ -250,7 +247,6 @@ BRD-024	cards-board	What the assistant may do	2	BRD-024	P16-043 M04-032	P-03621 
 BRD-025	cards-board	What the assistant may do	2	BRD-025	D06-002	D-tc-story-deck-plan-004
 BRD-026	cards-board	What the assistant may do	3	BRD-026	M04-031	M-ed-superage-two-canvases
 BRD-027	cards-board	What the assistant may do	2	BRD-027	P16-044	P-03622
-BRD-028	cards-board	What the assistant may do	2	BRD-028	P01-006	P-00213 P-00215 P-00216 P-00217
 BRD-029	cards-board	What the assistant may do	2	BRD-029	M04-037 P13-035	M-ed-whole-canvas-single-agent P-03017
 BRD-030	cards-board	What the assistant may do	2	BRD-030	M04-038	M-ed-story-deck-plan
 BRD-031	cards-board	What the assistant may do	3	BRD-031	P13-038	P-03038
@@ -337,7 +333,6 @@ CE1-063	cards-editor	Editing, undo and the cut list	3	CE1-063	D05-022 D04-072	D-
 CE1-064	cards-editor	Editing, undo and the cut list	3	CE1-064	D05-085	D-tc-standalone-rebuild-007
 CE1-065	cards-editor	Editing, undo and the cut list	3	CE1-065	D05-017	D-tc-project-format-plan-016 D-tc-reorder-plan-010
 CE1-066	cards-editor	Editing, undo and the cut list	3	CE1-066	P16-006 H08-074	P-03544 H-aud-2026-11-10-015
-CE1-067	cards-editor	Editing, undo and the cut list	3	CE1-067	P07-042 M03-045	P-01720 P-01723 P-01724 P-01733 M-ed-no-second-engine-on-live-resolve
 CE1-068	cards-editor	Speed and smoothness	2	CE1-068	D04-057 P09-033 C05-020 M01-048 P10-007 L05-053	D-tc-perf-harness-001 D-tc-perf-harness-004 D-tc-perf-harness-006 P-02100 P-02113 P-02117 P-02119 P-02121 P-02122 P-02123 P-02124 P-02125 P-02134 P-02148 P-02153 P-02158 P-02237 P-02238 C-ed-db7948d3d C-ed-1253e4beb C-ed-8f6cdb8fe C-ed-e7c098ec2 C-ed-24aa26e36 C-ed-ca954beaa C-ed-187201503 M-cc-cards-latency-2026-09-03 P-02263 P-02315 L-0378
 CE1-069	cards-editor	Speed and smoothness	3	CE1-069	C06-040 P11-065	C-ed-9bb0a4251 P-02736 P-02737 P-02738 P-02739
 CE1-070	cards-editor	Speed and smoothness	3	CE1-070	M04-055 P09-034	M-ed-timeline-cards-perf-fleet-2026-08-31 P-02109 P-02110 P-02111 P-02112 P-02154
@@ -402,7 +397,7 @@ CE1-130	cards-editor	Opening episodes and keeping the editor running	3	CE1-130	P
 CE1-131	cards-editor	Opening episodes and keeping the editor running	3	CE1-131	C03-050 M01-025	C-cc-abdee0757 C-cc-ec857f24a M-cc-cards-claude-lost-on-restart-cr195 M-cc-cards-wave-2026-09-03 M-cc-cards-mobile-wave-2026-09-06
 CE1-132	cards-editor	Opening episodes and keeping the editor running	3	CE1-132	G01-061 P08-044	G-tc-008 P-01936 P-01937 P-01943 P-01944 C-ed-7c3a35d5b
 CE1-133	cards-editor	Working offline, connections and several devices	1a	CE1-133	D04-048 P10-012	D-tc-offline-plan-009 P-02286 P-02287
-CE1-134	cards-editor	Working offline, connections and several devices	1a	CE1-134	C03-038	C-cc-8a41f3516 C-cc-a3b23b332
+CE1-134	sealed	browser-features	1a	CE1-134	C03-038	C-cc-8a41f3516 C-cc-a3b23b332
 CE1-135	cards-editor	Working offline, connections and several devices	3	CE1-135	C05-005 D03-009	C-ed-b57b7e7f7 D-tc-layout-008
 CE1-136	cards-editor	Working offline, connections and several devices	2	CE1-136	P10-009 D04-024 D05-090 M04-116	P-02281 P-02282 D-tc-native-apps-001 D-tc-offline-plan-001 D-tc-standalone-rebuild-007 M-pr-timeline-cards-lane-is-the-product
 CE1-137	cards-editor	Working offline, connections and several devices	2	CE1-137	D04-025	D-tc-native-apps-004 D-tc-offline-plan-011
@@ -413,8 +408,7 @@ CE1-141	cards-editor	Working offline, connections and several devices	3	CE1-141	
 CE1-142	cards-editor	Working offline, connections and several devices	3	CE1-142	D04-040	D-tc-offline-plan-006
 CE1-143	cards-editor	Working offline, connections and several devices	3	CE1-143	D04-051	D-tc-native-apps-006
 CE1-144	cards-editor	Working offline, connections and several devices	3	CE1-144	H08-071	H-aud-2026-11-10-015
-CE1-145	cards-editor	Working offline, connections and several devices	1a	CE1-145	M01-046 C05-049	M-cc-cards-gate-green-2026-09-04 C-ed-561742b6e
-CE1-146	cards-editor	Working offline, connections and several devices	1a	CE1-146	D03-057	D-tc-layout-021
+CE1-145	sealed	windows-facilities	1a	CE1-145	M01-046 C05-049	M-cc-cards-gate-green-2026-09-04 C-ed-561742b6e
 CE1-S01	sealed	claude-code-cli	1b	CE1-S01	C03-049	C-cc-00a96c8cc C-cc-932adc3bc
 CE1-S02	sealed	claude-code-cli	1b	CE1-S02	L05-069 P10-047 C05-008 D01-033	L-0398 P-02397 P-02398 P-02399 C-ed-224fef99d C-ed-952649c3b D-tc-chat-edit-007 D-tc-claude-sessions-004
 CE1-S03	sealed	claude-code-cli	1b	CE1-S03	D03-055	D-tc-layout-020
@@ -440,7 +434,6 @@ CE2-019	cards-editor	Selecting, deleting, inserting and keys	2	CE2-019	C05-024 P
 CE2-020	cards-editor	Selecting, deleting, inserting and keys	2	CE2-020	D07-019	D-tc-whats-new-2026-09-03-001
 CE2-021	cards-editor	Selecting, deleting, inserting and keys	2	CE2-021	P04-068	P-00916
 CE2-022	cards-editor	Selecting, deleting, inserting and keys	2	CE2-022	D05-052	D-tc-reorder-plan-017
-CE2-023	cards-editor	Selecting, deleting, inserting and keys	2	CE2-023	P07-048 P07-049	P-01602 P-01603 P-01604 P-01607 P-01605 P-01606 P-01621 P-01623 P-01624
 CE2-024	cards-editor	Selecting, deleting, inserting and keys	3	CE2-024	D05-043	D-tc-reorder-plan-005 D-tc-reorder-plan-006
 CE2-025	cards-editor	Selecting, deleting, inserting and keys	2	CE2-025	P08-023	P-01821 P-01831 P-01852 P-01853 P-01874 P-01880 P-01881 P-01891 P-01892 C-ed-cd3600df3
 CE2-026	cards-editor	Selecting, deleting, inserting and keys	3	CE2-026	D06-049	D-tc-transcript-gamepad-pla-002
@@ -514,11 +507,10 @@ CE2-096	cards-editor	Shortening, the edit chat and the assistant	3	CE2-096	H08-0
 CE2-097	cards-editor	Shortening, the edit chat and the assistant	2	CE2-097	C05-070 P11-001 D01-022 P11-015	C-ed-9edf2a745 C-ed-fab3211fb C-ed-ab57f6038 C-ed-9be08518c P-02505 D-tc-auto-shorten-plan-011 P-02523
 CE2-098	cards-editor	Shortening, the edit chat and the assistant	3	CE2-098	D01-016 D03-050 C05-069	D-tc-auto-shorten-plan-004 D-tc-auto-shorten-plan-008 D-tc-layout-020 D-tc-layout-021 C-ed-d66e7b98b C-ed-0d4c58073 C-ed-197572995
 CE2-099	cards-editor	Shortening, the edit chat and the assistant	3	CE2-099	D01-020 P10-053	D-tc-auto-shorten-plan-011 P-02481 P-02482 P-02483 P-02486 C-ed-ecf4732c2
-CE2-100	cards-editor	Shortening, the edit chat and the assistant	3	CE2-100	D06-043	D-tc-ui-pass-007
 CE2-101	cards-editor	Working offline, connections and several devices	1a	CE2-101	L05-033 M01-038 P10-011 D04-028 C05-050	L-0360 M-cc-cards-fixes-2026-09-05 P-02290 D-tc-offline-plan-003 D-tc-native-apps-003 C-ed-8cac87fb9
 CE2-102	cards-editor	Working offline, connections and several devices	1a	CE2-102	D04-037	D-tc-offline-plan-003 D-tc-native-apps-002
-CE2-103	cards-editor	Working offline, connections and several devices	1a	CE2-103	M04-120 D04-026	M-pr-timeline-cards-native-apps D-tc-native-apps-002 D-tc-native-apps-010
-CE2-104	cards-editor	Working offline, connections and several devices	1a	CE2-104	L09-005	L-0889
+CE2-103	sealed	browser-features	1a	CE2-103	M04-120 D04-026	M-pr-timeline-cards-native-apps D-tc-native-apps-002 D-tc-native-apps-010
+CE2-104	sealed	browser-features	1a	CE2-104	L09-005	L-0889
 CE2-105	cards-editor	Working offline, connections and several devices	3	CE2-105	L10-010 H06-073 C04-048 P18-015	L-1079 H-bh2026-09-18-004 H-bh2026-09-18-007 H-bh2026-09-18b-003 H-bh2026-09-18b-005 C-cc-7a81073e4 P-03764 P-03797
 CE2-106	cards-editor	Working offline, connections and several devices	1a	CE2-106	L08-039	L-0800
 CE2-107	cards-editor	Working offline, connections and several devices	1a	CE2-107	D04-045 C05-057	D-tc-offline-plan-008 C-ed-719df59c7
@@ -546,8 +538,6 @@ CE2-129	cards-editor	Working offline, connections and several devices	2	CE2-129	
 CE2-130	cards-editor	Working offline, connections and several devices	2	CE2-130	L09-004	L-0942
 CE2-131	cards-editor	Working offline, connections and several devices	3	CE2-131	H06-069 L10-011	H-bh2026-09-18b-003 H-bh2026-09-18b-005 H-bh2026-09-24-015 H-bh2026-09-24-017 L-1081 L-1083
 CE2-132	cards-editor	Working offline, connections and several devices	2	CE2-132	M04-053 D05-053	M-ed-timeline-cards-draft-modes D-tc-reorder-plan-017 D-tc-reorder-plan-020
-CE2-133	cards-editor	Working offline, connections and several devices	3	CE2-133	D04-067	D-tc-project-format-plan-002 D-tc-project-format-plan-005
-CE2-134	cards-editor	Working offline, connections and several devices	3	CE2-134	D01-038	D-tc-confirm-latency-profil-001 D-tc-confirm-latency-profil-004 D-tc-confirm-latency-profil-005 D-tc-confirm-latency-profil-006
 CE2-135	cards-editor	Phone and game controller	1a	CE2-135	D01-002 M04-062	D-tc-android-app-002 D-tc-android-app-003 M-ed-vertical-mobile-editor
 CE2-136	cards-editor	Phone and game controller	1a	CE2-136	C04-084 M03-048	C-ed-c16977c4d C-ed-dffc5b55e M-ed-nas-timeline-cards-deployed
 CE2-137	cards-editor	Phone and game controller	1a	CE2-137	L03-080 C03-037 M01-037 D01-003	L-0257 C-cc-097f5a310 M-cc-cards-install-and-canvases-2026-09-02 D-tc-android-app-002
@@ -624,7 +614,6 @@ CE3-024	cards-editor	Editing, undo and the cut list	3	CE3-024	C05-076	C-ed-ab57f
 CE3-025	cards-editor	Editing, undo and the cut list	3	CE3-025	C05-023	C-ed-8f6cdb8fe
 CE3-026	cards-editor	Editing, undo and the cut list	3	CE3-026	P10-004	P-02262 L-0302
 CE3-027	cards-editor	Editing, undo and the cut list	3	CE3-027	P07-052 L05-041	P-01619 P-01620 P-01621 L-0363 L-0361 L-0362
-CE3-028	cards-editor	Editing, undo and the cut list	3	CE3-028	D05-045	D-tc-reorder-plan-018 D-tc-reorder-plan-019
 CE3-029	cards-editor	Editing, undo and the cut list	3	CE3-029	D02-042	D-tc-lag-investigation-009
 CE3-030	cards-editor	Editing, undo and the cut list	3	CE3-030	P09-051	P-02178
 CE3-031	cards-editor	Editing, undo and the cut list	2	CE3-031	M01-050 P11-068 C06-044 D05-080	M-cc-cards-saved-sequences-2026-09-22 P-02749 P-02750 C-ed-e719c217e D-tc-staged-and-bins-plan-013
@@ -699,7 +688,6 @@ CE3-101	cards-editor	Opening episodes and keeping the editor running	2	CE3-101	C
 CE3-102	cards-editor	Opening episodes and keeping the editor running	3	CE3-102	L08-041 C03-067 M01-035	L-0802 C-cc-5491f44b5 M-cc-cards-engine-pool-live-2026-09-14 M-cc-ff2-own-footage-live-2026-09-30
 CE3-103	cards-editor	Opening episodes and keeping the editor running	3	CE3-103	L09-001 D03-005	L-0887 D-tc-layout-008 D-tc-layout-012
 CE3-104	cards-editor	Opening episodes and keeping the editor running	3	CE3-104	L03-081	L-0258
-CE3-105	cards-editor	Opening episodes and keeping the editor running	3	CE3-105	H06-070 L09-003	H-bh2026-09-18-004 H-bh2026-09-18-007 H-bh2026-09-24-015 H-bh2026-09-24-017 L-0902 L-0942
 CE3-106	cards-editor	Opening episodes and keeping the editor running	2	CE3-106	P15-019 C06-082	P-03456 C-ed-da91dbbbf
 CE3-107	cards-editor	Opening episodes and keeping the editor running	3	CE3-107	H08-064	H-aud-2026-11-10-012
 CE3-S01	sealed	browser-features	1b	CE3-S01	L10-082	L-1219
@@ -743,13 +731,13 @@ CFI-036	cards-footage-in	Grouping clips and building the multicam	2	CFI-036	C06-
 CFI-037	cards-footage-in	Grouping clips and building the multicam	3	CFI-037	D01-010	D-tc-audio-sources-audit-006
 CFI-038	cards-footage-in	Grouping clips and building the multicam	2	CFI-038	P04-003	P-00788
 CFI-040	cards-footage-in	Facts about Resolve's own transcription	1a	CFI-040	M02-055 D02-021 P12-018	M-cc-framing-formosa-wave-2026-09-08 D-tc-interview-prep-004 D-tc-interview-prep-005 D-tc-interview-prep-006 P-02800
-CFI-041	cards-footage-in	Facts about Resolve's own transcription	1a	CFI-041	P03-011 D06-013	P-00594 P-00603 P-00605 P-00606 P-00607 D-tc-transcript-audit-004
-CFI-042	cards-footage-in	Facts about Resolve's own transcription	1a	CFI-042	C04-064 P09-001 G01-052	C-ed-80b853d6d P-02037 G-tc-001
+CFI-041	sealed	resolve-own-transcription	1a	CFI-041	P03-011 D06-013	P-00594 P-00603 P-00605 P-00606 P-00607 D-tc-transcript-audit-004
+CFI-042	sealed	resolve-own-transcription	1a	CFI-042	C04-064 P09-001 G01-052	C-ed-80b853d6d P-02037 G-tc-001
 CFI-043	cards-footage-in	Facts about Resolve's own transcription	1a	CFI-043	G01-053 P08-055 D06-014	G-tc-001 P-01978 P-01979 D-tc-transcript-audit-006 D-tc-transcript-audit-007
 CFI-044	cards-footage-in	Facts about Resolve's own transcription	1a	CFI-044	M03-039 D06-010 D03-037	M-ed-cherish-algal-reef-montage M-ed-guantang-origins-montage D-tc-transcript-audit-002 D-tc-layout-016
 CFI-045	cards-footage-in	Facts about Resolve's own transcription	1a	CFI-045	D01-048 M05-069 P03-012	D-tc-export-notes-001 M-home-resolve-transcription-extraction P-00551
 CFI-046	cards-footage-in	Facts about Resolve's own transcription	1a	CFI-046	D06-011	D-tc-transcript-audit-003 D-tc-transcript-audit-004 D-tc-transcript-audit-007
-CFI-047	cards-footage-in	Facts about Resolve's own transcription	1a	CFI-047	D01-061	D-tc-interview-prep-001
+CFI-047	sealed	resolve-own-transcription	1a	CFI-047	D01-061	D-tc-interview-prep-001
 CFI-048	cards-footage-in	Facts about Resolve's own transcription	1a	CFI-048	D04-069 C04-079	D-tc-project-format-plan-014 D-tc-project-format-plan-012 C-ed-31af0b0b1 C-ed-1152298d4
 CFI-049	cards-footage-in	Speech-to-text: rulings	2	CFI-049	P15-018 M03-040 D02-022 P11-013	P-03455 P-03470 P-03471 M-ed-always-whisper-never-resolve M-ed-montage-builder D-tc-interview-prep-009 P-02520 P-02522
 CFI-050	cards-footage-in	Speech-to-text: rulings	2	CFI-050	D04-020	D-tc-montage-builder-plan-014
@@ -855,25 +843,22 @@ CRX-014	cards-to-resolve-and-exports	Frames, frame rates and timecode	3	CRX-014	
 CRX-015	cards-to-resolve-and-exports	Frames, frame rates and timecode	3	CRX-015	P16-042	P-03616
 CRX-016	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-016	M04-003 M05-048	M-ed-reorder-tool-plan M-home-resolve-appendtotimeline-endframe M-home-resolve-multicam-conform-tool M-home-resolve-reel-typography
 CRX-017	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-017	D05-009 P04-047	D-tc-reorder-plan-006 P-00867
-CRX-018	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-018	M04-004 D05-005 P04-044	M-ed-reorder-tool-plan D-tc-reorder-plan-004 D-tc-reorder-plan-006 P-00909
+CRX-018	sealed	resolve-editing-a-timeline-by-script	1a	CRX-018	M04-004 D05-005 P04-044	M-ed-reorder-tool-plan D-tc-reorder-plan-004 D-tc-reorder-plan-006 P-00909
 CRX-019	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-019	D05-064 P13-001	D-tc-repro-rights-v7-damage-001 D-tc-repro-rights-v7-damage-002 D-tc-repro-rights-v7-damage-004 P-03041 P-03042 P-03044 M-cc-repro-rights-v7-db-writer-damage-2026-09-29
 CRX-020	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-020	D05-007 M04-002 P04-045	D-tc-reorder-plan-003 D-tc-reorder-plan-006 M-ed-reorder-tool-plan P-00887 P-00901 P-00902
-CRX-021	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-021	M04-014 P07-069	M-ed-resolve-driven-edits P-01720 P-01721
-CRX-022	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-022	D05-001 M04-001 P04-043	D-tc-reorder-plan-001 D-tc-reorder-plan-005 D-tc-reorder-plan-006 M-ed-reorder-tool-plan P-00857 P-00860 P-00861
+CRX-021	sealed	resolve-keystrokes	1a	CRX-021	M04-014 P07-069	M-ed-resolve-driven-edits P-01720 P-01721
+CRX-022	sealed	resolve-editing-a-timeline-by-script	1a	CRX-022	D05-001 M04-001 P04-043	D-tc-reorder-plan-001 D-tc-reorder-plan-005 D-tc-reorder-plan-006 M-ed-reorder-tool-plan P-00857 P-00860 P-00861
 CRX-023	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-023	M03-036 G01-066	M-ed-nas-timeline-cards-deployed G-tc-014
 CRX-024	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-024	M05-023	M-home-canvas-timeline-tool
 CRX-025	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-025	D04-061	D-tc-project-format-plan-002 D-tc-project-format-plan-003
 CRX-026	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-026	D04-063	D-tc-project-format-plan-002
 CRX-027	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	1a	CRX-027	D05-066 M02-058 D04-064	D-tc-repro-rights-v7-damage-006 M-cc-repro-rights-v7-rebuild-2026-09-29 D-tc-project-format-plan-004 D-tc-project-format-plan-005
-CRX-028	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	2	CRX-028	M04-011 P07-035 D05-003	M-ed-resolve-driven-edits P-01583 P-01584 D-tc-reorder-plan-004 D-tc-reorder-plan-006
-CRX-029	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	2	CRX-029	P04-046	P-00889 P-00900
 CRX-030	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	2	CRX-030	P04-001 P04-041	P-00751 P-00752 P-00765 P-00847 P-00848
-CRX-031	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	3	CRX-031	M04-009	M-ed-reorder-tool-plan
 CRX-032	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	3	CRX-032	G01-067	G-tc-015
 CRX-033	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	3	CRX-033	C05-017	C-ed-30fed2593 C-ed-563b587d2
 CRX-034	cards-to-resolve-and-exports	Placing, deleting and linking clips in Resolve	3	CRX-034	D05-067	D-tc-repro-rights-v7-damage-006
 CRX-035	cards-to-resolve-and-exports	Undo, markers, titles, fades and properties	1a	CRX-035	P07-034 M04-013 D05-004	P-01583 P-01584 M-ed-resolve-driven-edits D-tc-reorder-plan-006 D-tc-reorder-plan-016
-CRX-036	cards-to-resolve-and-exports	Undo, markers, titles, fades and properties	1a	CRX-036	D05-012	D-tc-reorder-plan-016 D-tc-reorder-plan-019
+CRX-036	sealed	resolve-editing-a-timeline-by-script	1a	CRX-036	D05-012	D-tc-reorder-plan-016 D-tc-reorder-plan-019
 CRX-037	cards-to-resolve-and-exports	Undo, markers, titles, fades and properties	1a	CRX-037	M03-029	M-ed-conform-means-cut-file
 CRX-038	cards-to-resolve-and-exports	Undo, markers, titles, fades and properties	1a	CRX-038 CE2-060	M01-022 P14-017 C06-021 D01-044 D05-083 M03-035 D03-058	M-cc-cards-audio-fades-2026-09-15 M-cc-cards-conform-from-base-rig P-03329 C-ed-f264cf4c3 C-ed-b9ec944ef C-ed-e29e3ddcf D-tc-db-edit-investigation-009 D-tc-standalone-rebuild-003 D-tc-standalone-rebuild-006 D-tc-standalone-rebuild-007 M-ed-cut-gain-manual D-tc-layout-028
 CRX-039	cards-to-resolve-and-exports	Undo, markers, titles, fades and properties	1a	CRX-039	D01-059	D-tc-gap-notes-003 D-tc-gap-notes-004
@@ -911,11 +896,6 @@ CRX-070	cards-to-resolve-and-exports	Sending a cut to Resolve	3	CRX-070	D05-029	
 CRX-071	cards-to-resolve-and-exports	Sending a cut to Resolve	3	CRX-071	P09-046	P-02008 P-02010
 CRX-072	cards-to-resolve-and-exports	Sending a cut to Resolve	3	CRX-072	P08-046	P-01949 P-01962
 CRX-073	cards-to-resolve-and-exports	Sending a cut to Resolve	3	CRX-073	M01-028	M-cc-cards-conform-from-base-rig
-CRX-074	cards-to-resolve-and-exports	Edits sent live and staged edits	2	CRX-074	P07-040 M04-051 P07-043	P-01590 P-01593 P-01594 P-01600 P-01733 M-ed-timeline-cards-draft-modes
-CRX-075	cards-to-resolve-and-exports	Edits sent live and staged edits	2	CRX-075	M04-012 P07-050	M-ed-resolve-driven-edits P-01600 P-01610 P-01611
-CRX-076	cards-to-resolve-and-exports	Edits sent live and staged edits	3	CRX-076	D05-044 P07-041	D-tc-reorder-plan-015 P-01601 P-01615 P-01616 P-01617
-CRX-077	cards-to-resolve-and-exports	Edits sent live and staged edits	3	CRX-077	P07-044	P-01591 P-01592 P-01725
-CRX-078	cards-to-resolve-and-exports	Edits sent live and staged edits	3	CRX-078	G01-056	G-tc-003
 CRX-079	cards-to-resolve-and-exports	Bringing Resolve's changes back into the cut	3	CRX-079	D05-030 C04-080 D02-060 M04-052 D04-068	D-tc-project-format-plan-019 D-tc-reorder-plan-010 C-ed-88ab819be D-tc-layout-004 M-ed-timeline-cards-draft-modes D-tc-project-format-plan-005 D-tc-project-format-plan-007
 CRX-080	cards-to-resolve-and-exports	Bringing Resolve's changes back into the cut	3	CRX-080	D05-031	D-tc-project-format-plan-019
 CRX-081	cards-to-resolve-and-exports	Bringing Resolve's changes back into the cut	3	CRX-081	D05-032	D-tc-project-format-plan-019
@@ -1031,7 +1011,6 @@ DSH-072	dashboard	People and computers	3	DSH-072	L02-051 H07-017	L-0154 H-rs-202
 DSH-073	dashboard	People and computers	3	DSH-073	L04-148	L-0339
 DSH-074	dashboard	Reports from computers	3	DSH-074	L06-032 H05-032 L04-035 L02-022 C02-015 L01-008	L-0470 L-0473 L-0475 L-0487 L-0492 L-0493 L-0514 H-bh2026-09-11-013 H-bh2026-09-11-033 H-bh2026-09-11b-014 L-0305 L-0311 L-0326 L-0119 L-0186 C-cc-cb8ae65f4 C-cc-7272c48f9 C-cc-d9ea155f4 C-cc-adf16cee9 L-0009
 DSH-075	dashboard	Reports from computers	3	DSH-075	H07-008 H06-117 M02-075 H05-033 L07-016 H04-053 C01-047	H-fr-wave2-companion-003 H-fr-wave2-dashboard-002 H-rs-2026-08-28-002 H-rs-2026-08-28-005 H-rs-2026-08-28-016 H-bh2026-09-24-014 H-bh2026-09-24-017 M-cc-ship-2026-09-11-and-hunt-b H-bh2026-09-11b-002 H-bh2026-09-11b-015 L-0623 L-0624 L-0627 L-0631 L-0637 H-bh2026-08-009 C-cc-5f1b07d98 C-cc-da8005e8c
-DSH-076	dashboard	Reports from computers	3	DSH-076	H04-039	H-bh2026-08-21-138
 DSH-077	dashboard	Reports from computers	3	DSH-077	L02-025 L03-023	L-0123 L-0124 L-0183 L-0216
 DSH-078	dashboard	Reports from computers	3	DSH-078	L03-018 L02-070	L-0213 L-0188
 DSH-079	dashboard	Problems the server finds	2	DSH-079	L02-066	L-0180
@@ -1153,8 +1132,8 @@ APP-048	editor-app	Starting, staying running and crashing	1a	APP-048	L04-010 M01
 APP-049	editor-app	Starting, staying running and crashing	1a	APP-049	H07-082	H-fr-wave2-companion-010
 APP-050	editor-app	Starting, staying running and crashing	1a	APP-050	C04-019 P12-014 L10-035	C-cc-9c3f554a9 P-02780 L-1157 L-1160
 APP-051	editor-app	Starting, staying running and crashing	1a	APP-051	H05-023	H-bh2026-09-11-013 H-bh2026-09-11-014
-APP-052	editor-app	Starting, staying running and crashing	1a	APP-052	H05-022	H-bh2026-09-11-012 H-bh2026-09-11b-010
-APP-053	editor-app	Starting, staying running and crashing	1a	APP-053	C01-111 G01-019	C-cc-a68f2a809 G-cc-011
+APP-052	sealed	windows-facilities	1a	APP-052	H05-022	H-bh2026-09-11-012 H-bh2026-09-11b-010
+APP-053	sealed	macos-facilities	1a	APP-053	C01-111 G01-019	C-cc-a68f2a809 G-cc-011
 APP-054	editor-app	Starting, staying running and crashing	1a	APP-054	M05-082	M-home-razer-laptop-vault-sync
 APP-055	editor-app	Starting, staying running and crashing	1a	APP-055	C01-057	C-cc-6303043a6
 APP-056	editor-app	Starting, staying running and crashing	2	APP-056	M03-061 P09-016 C03-016 P12-051 L10-066 H04-074 L03-085 L02-001 G01-035 L01-091 C04-018 M02-008 P08-009	M-ed-ccsync-cr93-gc-recurrence P-02048 P-02049 P-02050 C-cc-802ec0dc1 P-02900 P-02901 P-02902 L-1210 H-bh2026-09-03-011 L-0264 L-0102 G-cc-019 L-0101 C-cc-43820978b M-cc-tk-root-wrong-thread-cr93 M-cc-never-schtasks-launch-the-companion M-cc-ship-2026-09-25 P-01969
@@ -1177,7 +1156,7 @@ APP-072	editor-app	The tray or menu-bar icon and its menu	1a	APP-072	P04-026 C01
 APP-073	editor-app	The tray or menu-bar icon and its menu	1a	APP-073	L11-048	L-1236
 APP-074	editor-app	The tray or menu-bar icon and its menu	1a	APP-074	P14-021	P-03327
 APP-075	editor-app	The tray or menu-bar icon and its menu	1a	APP-075	H07-061 L04-099	H-fr-wave2-companion-005 L-0328
-APP-076	editor-app	The tray or menu-bar icon and its menu	1a	APP-076	H03-009 L01-041	H-bh2026-08-21-025 L-0072 L-0100
+APP-076	sealed	macos-facilities	1a	APP-076	H03-009 L01-041	H-bh2026-08-21-025 L-0072 L-0100
 APP-077	editor-app	The tray or menu-bar icon and its menu	1a	APP-077	C01-053 P04-004	C-cc-0c8a3cbca P-00768 P-00770
 APP-078	editor-app	The tray or menu-bar icon and its menu	2	APP-078	M01-004 P04-027 C01-068	M-cc-broll-improvement-pass-2026-08-10 P-00943 P-00947 P-00948 C-cc-b62084c60 C-cc-fca04f1bd
 APP-079	editor-app	The tray or menu-bar icon and its menu	2	APP-079	C03-004 L03-030 P07-016	C-cc-d03a47cdd L-0221 P-01750 P-01752 P-01753 P-01754
@@ -1231,9 +1210,7 @@ APP-130	editor-app	Signing in, the computer's identity and the licence	3	APP-130
 APP-132	editor-app	Signing in, the computer's identity and the licence	3	APP-132	P08-004	P-01792 P-01793 L-0221 L-0113
 APP-133	editor-app	Settings, records and background work	2	APP-133	P05-020	P-01078
 APP-134	editor-app	Settings, records and background work	3	APP-134	L08-081 L01-038 L02-012 H06-065	L-0826 L-0039 L-0069 L-0111 H-bh2026-09-18b-002 H-bh2026-09-18b-005 H-bh2026-09-24-014 H-fr-wave2-companion-002
-APP-135	editor-app	Settings, records and background work	3	APP-135	L06-004	L-0442 L-0447
 APP-136	editor-app	Settings, records and background work	3	APP-136	H08-077	H-aud-2026-11-10-017
-APP-137	editor-app	Settings, records and background work	3	APP-137	H05-036	H-bh2026-09-11-013
 APP-138	editor-app	Settings, records and background work	3	APP-138	H06-099 H03-017	H-bh2026-09-24-014 H-bh2026-09-24-017 H-fr-wave2-companion-002 H-bh2026-08-21-039
 APP-139	editor-app	Settings, records and background work	3	APP-139	C02-023	C-cc-2deadc333
 APP-140	editor-app	Settings, records and background work	3	APP-140	H05-052	H-bh2026-09-11-016
@@ -1242,7 +1219,6 @@ APP-142	editor-app	Settings, records and background work	3	APP-142	H06-100 H07-0
 APP-143	editor-app	Settings, records and background work	3	APP-143	H05-016 L05-074 H07-077 H05-099	H-bh2026-09-11-013 H-bh2026-09-11-031 H-bh2026-09-11b-014 L-0403 L-0406 L-0409 L-0411 L-0417 L-0424 H-fr-wave2-companion-007 H-bh2026-09-11-033
 APP-144	editor-app	Settings, records and background work	1a	APP-144	P12-048	P-02892
 APP-145	editor-app	Settings, records and background work	3	APP-145	H04-054	H-bh2026-08-012
-APP-146	editor-app	Settings, records and background work	3	APP-146	H07-004	H-rs-2026-08-28-003 H-rs-2026-08-28-004 H-fr-wave2-companion-007
 APP-147	proxies-and-file-moves	Making proxies on editors' computers	3	APP-147	M05-046	M-home-resolve-api-untitled-project-state
 APP-148	editor-app	Uninstalling	1a	APP-148	L08-012 H05-090 L06-079	L-0765 H-bh2026-09-11-028 H-bh2026-09-11b-014 L-0534 L-0537
 APP-149	editor-app	Uninstalling	3	APP-149	L09-039 L10-017 L08-013 H06-067	L-0946 L-1112 L-1113 L-1114 L-0765 L-0766 L-0771 H-bh2026-09-18-004 H-bh2026-09-18-007 H-bh2026-09-18b-003 H-bh2026-09-18b-005 H-bh2026-09-24-014
@@ -1515,38 +1491,30 @@ MUS-004	music	Which files are music	1a	MUS-004	M05-078	M-home-music-library-cent
 MUS-005	music	Which files are music	3	MUS-005	M05-074	M-home-music-library-centralisation
 MUS-006	music	Which files are music	3	MUS-006	M05-075	M-home-music-library-centralisation
 MUS-007	music	Which files are music	3	MUS-007	H06-111	H-bh2026-09-24-014
-MUS-008	music	Adding tracks to the library	3	MUS-008	L04-154	L-0341
 MUS-009	music	Adding tracks to the library	3	MUS-009	L04-003 H04-078 L07-064	L-0274 H-bh2026-09-03-013 L-0728
 MUS-010	music	Adding tracks to the library	3	MUS-010	L07-065 H05-080 L06-071	L-0729 H-bh2026-09-11-025 H-bh2026-09-11b-014 L-0526 L-0529
 MUS-011	music	Adding tracks to the library	3	MUS-011	H04-079 H07-106 H06-047 L09-051	H-bh2026-09-03-013 H-fr-wave2-webapps-ops-002 H-bh2026-09-24-013 H-bh2026-09-24-014 H-bh2026-09-18-007 L-0966
 MUS-012	music	Adding tracks to the library	3	MUS-012	L01-013	L-0014 L-0085
 MUS-013	music	Adding tracks to the library	3	MUS-013	L06-069 H05-008	L-0526 H-bh2026-09-11-008
-MUS-014	music	Adding tracks to the library	3	MUS-014	C02-040	C-cc-58d3982bc
 MUS-015	music	Adding tracks to the library	3	MUS-015	H06-046	H-bh2026-09-18-004 H-bh2026-09-18-007 H-bh2026-09-18b-003 H-bh2026-09-18b-005 H-bh2026-09-24-014 H-bh2026-09-24-017
 MUS-016	music	Adding tracks to the library	3	MUS-016	H03-044	H-bh2026-08-21-083 H-bh2026-08-21-087
 MUS-017	music	Adding tracks to the library	3	MUS-017	L04-134	L-0336
 MUS-018	music	Imports across computers	3	MUS-018	L06-022 H05-081	L-0458 L-0461 L-0526 L-0528 L-0529 H-bh2026-09-11-025 H-bh2026-09-11-033
 MUS-019	music	Imports across computers	3	MUS-019	L07-015	L-0603
 MUS-020	music	Imports across computers	3	MUS-020	L07-066	L-0730
-MUS-021	music	Imports across computers	3	MUS-021	L07-014	L-0602 L-0607
-MUS-022	music	Imports across computers	3	MUS-022	L10-050 L07-062	L-1194 L-0725 L-0726
 MUS-023	music	Imports across computers	3	MUS-023	C02-042 L09-040	C-cc-6393bde68 L-0947
 MUS-024	music	Imports across computers	3	MUS-024	L01-014 L04-121	L-0016 L-0334
 MUS-025	music	Imports across computers	3	MUS-025	L09-042 L07-063	L-0949 L-0727
-MUS-026	music	Imports across computers	3	MUS-026	L09-041	L-0948
 MUS-027	music	Imports across computers	3	MUS-027	H08-040	H-aud-2026-11-10-010
 MUS-028	music	Imports across computers	3	MUS-028	P06-023	P-01416 C-cc-6393bde68
 MUS-029	music	Imports across computers	3	MUS-029	L08-071	L-0854
 MUS-030	music	Imports across computers	3	MUS-030	H02-019	H-bh2026-08-14-082
-MUS-031	music	Keeping the library's data whole	3	MUS-031	L01-031 H01-023	L-0038 L-0085 H-bh2026-08-11-030 H-bh2026-08-11-035
-MUS-032	music	Keeping the library's data whole	3	MUS-032	L04-004 H04-080	L-0274 H-bh2026-09-03-013
 MUS-033	music	Keeping the library's data whole	3	MUS-033	H03-045	H-bh2026-08-21-086
 MUS-034	music	Keeping the library's data whole	3	MUS-034	L04-069	L-0313
 MUS-035	music	Keeping the library's data whole	3	MUS-035	H05-082 L06-070	H-bh2026-09-11-025 L-0526
 MUS-036	music	Keeping the library's data whole	3	MUS-036	L04-068 H07-037	L-0313 H-urs-2026-09-03-003 H-urs-2026-09-03-006
 MUS-037	music	Keeping the library's data whole	3	MUS-037	H02-021	H-bh2026-08-14-084
 MUS-038	music	Keeping the library's data whole	3	MUS-038	H03-046	H-bh2026-08-21-088
-MUS-039	music	Keeping the library's data whole	3	MUS-039	L04-084	L-0322
 MUS-040	music	Keeping the library's data whole	3	MUS-040	M05-079	M-home-music-library-centralisation
 MUS-041	music	Searching and filtering	3	MUS-041	L04-131 H06-097	L-0336 H-bh2026-09-24-016 H-bh2026-09-24-017
 MUS-042	music	Searching and filtering	3	MUS-042	L04-132	L-0336
@@ -1779,8 +1747,6 @@ RSV-024	resolve-on-the-editors-computer	Connecting to Resolve's scripting: launc
 RSV-025	resolve-on-the-editors-computer	Connecting to Resolve's scripting: launch, stalls and death	3	RSV-025	H08-063	H-aud-2026-11-10-010
 RSV-026	resolve-on-the-editors-computer	Connecting to Resolve's scripting: launch, stalls and death	3	RSV-026	C03-033 D01-057	C-cc-116b4e2af C-cc-247d48e0f D-tc-fleet-011
 RSV-027	resolve-on-the-editors-computer	Connecting to Resolve's scripting: launch, stalls and death	3	RSV-027	M03-060	M-ed-ccsync-port-investigation
-RSV-028	resolve-on-the-editors-computer	Connecting to Resolve's scripting: launch, stalls and death	3	RSV-028	L06-003 L08-080	L-0441 L-0447 L-0824
-RSV-029	resolve-on-the-editors-computer	Connecting to Resolve's scripting: launch, stalls and death	3	RSV-029	L06-002	L-0441
 RSV-030	resolve-on-the-editors-computer	Connecting to Resolve's scripting: launch, stalls and death	3	RSV-030	D07-107	D-fs-cloud-backup-plan-2026-007
 RSV-031	resolve-on-the-editors-computer	Connecting to Resolve's scripting: launch, stalls and death	3	RSV-031	P10-071	P-02257
 RSV-032	resolve-on-the-editors-computer	Setting Resolve up: edition, scripting switch, preferences	1a	RSV-032	H07-079 M05-038 L04-073 L11-044	H-plr-2026-10-06-002 H-plr-2026-10-06-004 M-home-davinci-resolve-mcp L-0314 L-0346 L-1236
@@ -1922,8 +1888,6 @@ SRV-004	server-install-and-running	Installing on a NAS	1a	SRV-004	H04-060	H-bh20
 SRV-005	server-install-and-running	Installing on a NAS	1a	SRV-005	H02-004	H-bh2026-08-14-057
 SRV-006	server-install-and-running	Installing on a NAS	1a	SRV-006	L11-012	L-1228
 SRV-007	server-install-and-running	Installing on a NAS	1a	SRV-007	L11-008 L06-060 H07-117	L-1227 L-0511 L-0516 H-plr-2026-10-06-002 H-plr-2026-10-06-004
-SRV-008	server-install-and-running	Installing on a NAS	1a	SRV-008	H03-036 L01-006	H-bh2026-08-21-068 L-0082
-SRV-009	server-install-and-running	Installing on a NAS	1a	SRV-009	M02-105	M-cc-synology-nas-access
 SRV-010	server-install-and-running	Installing on a NAS	1a	SRV-010	C01-105	C-cc-9b1e1a923
 SRV-011	server-install-and-running	Installing on a NAS	1a	SRV-011	M06-009	M-home-truenas-nfs-mount
 SRV-012	server-install-and-running	Installing on a NAS	1a	SRV-012 RSV-039	M05-050 P02-056	M-home-resolve-collab-docker-nat P-00448 P-00474 P-00478 P-00480 P-00481
@@ -2093,7 +2057,6 @@ SYN-025	sync	Wired or remote	3	SYN-025	H03-031 L03-088 H05-096	H-bh2026-08-21-05
 SYN-026	sync	Wired or remote	3	SYN-026	L06-041	L-0472 L-0484 L-0492 L-0494
 SYN-027	sync	Wired or remote	3	SYN-027	H07-135	H-plr-2026-10-06-002
 SYN-028	sync	Upload only	2	SYN-028	L03-035 C02-083 M02-090 P07-014 H08-011 L11-015	L-0227 C-cc-097745f5c M-cc-upload-only-tick-2026-08-27 M-cc-prelaunch-decisions-2026-10-07 P-01739 P-01744 H-plr-2026-10-06-005 L-1229
-SYN-029	sync	Upload only	3	SYN-029	L05-089 H05-030	L-0420 H-bh2026-09-11-012
 SYN-030	sync	Deletions and removing a project	2	SYN-030	P06-044 C01-081 L03-063 P04-034	P-01367 P-01368 C-cc-3b0fc191e C-cc-31bc8acfb L-0244 P-00984 P-00985 P-00986 P-00987
 SYN-031	sync	Deletions and removing a project	3	SYN-031	H04-003	H-bh2026-08-21-097
 SYN-032	sync	Deletions and removing a project	2	SYN-032	P02-024 C01-027	P-00454 C-cc-fb68a12d0
@@ -2378,17 +2341,14 @@ YTD-050	youtube	File names and what a file carries	2	YTD-050	P01-034	P-00170
 YTD-051	youtube	File names and what a file carries	3	YTD-051	H01-059 H02-025	H-bh2026-08-14-032 H-bh2026-08-14-036 H-bh2026-08-14-046 H-bh2026-08-14-095
 YTD-052	youtube	Where a download runs, and saying so	2	YTD-052	P06-059	P-01502
 YTD-053	youtube	Where a download runs, and saying so	2	YTD-053	P06-054 L01-058 C02-063	P-01482 P-01489 L-0058 C-cc-ea478fa9d
-YTD-054	youtube	Where a download runs, and saying so	3	YTD-054	L01-056 P06-053 L01-055 M03-010 C02-057	L-0054 L-0056 P-01449 P-01465 P-01485 P-01486 L-0049 L-0057 M-cc-ytdl-probe-cold-start-cr29 C-cc-26cfd0d9c
 YTD-055	youtube	Where a download runs, and saying so	3	YTD-055	C01-091 P05-011 L03-043	C-cc-414de42c5 P-01162 P-01163 P-01164 L-0231 L-0238
 YTD-056	youtube	Where a download runs, and saying so	3	YTD-056	P12-055	P-02922 P-02926
 YTD-057	youtube	Where a download runs, and saying so	3	YTD-057	H06-123 L04-120 L08-003	H-bh2026-09-24-015 H-bh2026-09-24-017 L-0334 L-0738
 YTD-058	youtube	Where a download runs, and saying so	3	YTD-058	L01-057 H01-063	L-0057 H-bh2026-08-14-045
 YTD-059	youtube	Where a download runs, and saying so	3	YTD-059	L10-089	L-1223
 YTD-060	youtube	Where a download runs, and saying so	3	YTD-060	H01-060	H-bh2026-08-14-035 H-bh2026-08-14-039
-YTD-061	youtube	Where a download runs, and saying so	3	YTD-061	L06-065	L-0518 L-0521
 YTD-062	youtube	Where a download runs, and saying so	3	YTD-062	H06-101	H-bh2026-09-24-014 H-bh2026-09-24-017
 YTD-063	youtube	One job, one computer	2	YTD-063	P11-050 L09-054 M03-007 H05-101 H06-091	P-02676 L-0972 L-0985 M-cc-ytdl-jobs-shared-across-editors H-bh2026-09-18-001 H-bh2026-09-18-007
-YTD-064	youtube	One job, one computer	3	YTD-064	H01-065 H04-037 L07-023 H05-086 L06-015	H-bh2026-08-14-043 H-bh2026-08-21-122 L-0619 H-bh2026-09-11-026 L-0453 L-0518 L-0519 L-0520
 YTD-065	youtube	One job, one computer	3	YTD-065	L01-059 M02-101 C02-062	L-0051 L-0074 M-cc-requester-first-fix-pass-2026-08-19 C-cc-e7717bd43
 YTD-066	youtube	One job, one computer	3	YTD-066	H03-018	H-bh2026-08-21-040 H-bh2026-08-21-094
 YTD-067	youtube	Choosing the destination and checking space	3	YTD-067	C02-076 P07-017 P09-009 L01-089 C03-054	C-cc-8718e813b P-01662 P-02011 P-02060 L-0095 L-0094 C-cc-2d3f5d59f C-cc-34c0f1995
@@ -2426,7 +2386,6 @@ YTD-101	youtube	The assistant behind search	3	YTD-101	L04-054	L-0310 L-0313
 YTD-102	youtube	The assistant behind search	3	YTD-102	H03-051	H-bh2026-08-21-096
 YTD-103	youtube	Rights and terms	2	YTD-103	L01-016	L-0020
 YTD-104	youtube	Rights and terms	2	YTD-104	L06-067	L-0518 L-0521
-YTD-105	youtube	Rights and terms	2	YTD-105	P06-011	P-01393
 YTD-S01	sealed	yt-dlp	1b	YTD-S01	L02-011	L-0131
 YTD-S02	sealed	yt-dlp	1b	YTD-S02	C02-061 L01-061 P06-051	C-cc-e7717bd43 L-0053 P-01452 P-01474 P-01475
 YTD-S03	sealed	yt-dlp	1b	YTD-S03	H01-058	H-bh2026-08-14-033 H-bh2026-08-14-034

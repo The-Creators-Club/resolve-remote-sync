@@ -1,6 +1,6 @@
 # Timeline Cards: the hand-over to Resolve, and exports: what real use taught
 
-105 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+93 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## Frames, frame rates and timecode
 
@@ -82,11 +82,6 @@ See also, filed under another capability:
 - Must: A cut placed on an upper track lands on a track that exists, with picture and sound both placed and linked, as a hand edit would.
 - Kind: given
 
-### CRX-018: A scripted delete in Resolve leaves the clip's linked audio behind.
-- Why: The leftover audio silently blocks later appends over those frames while the call reports success, and left another interviewee's sound duplicated underneath a moved cut.
-- Must: Removing or moving a cut removes its picture and sound together, and no orphaned or duplicated sound is left on the timeline.
-- Kind: given
-
 ### CRX-019: Resolve crashes on a timeline whose picture-sound links are one-sided.
 - Why: 63 audio items named a video partner that did not name them back; Resolve 21.0.4 crashed 20-75 s after opening it, after bursts of "An attempt to unlink a not linked item!".
 - Must: Every timeline the product creates or changes has each picture-sound link recorded on both sides, checked after creation.
@@ -95,16 +90,6 @@ See also, filed under another capability:
 ### CRX-020: Resolve's scripted delete hits the named timeline, but append lands on the current one.
 - Why: Switching timeline tabs mid-edit deleted a tail from one timeline and appended it to another, which looked exactly like lost clips.
 - Must: Before every write the open timeline is confirmed as the one being edited and unchanged; otherwise the edit stops, is rolled back and is reported.
-- Kind: given
-
-### CRX-021: Resolve's select-at-playhead and split act on every track with auto-select on.
-- Why: A delete aimed at V1 also took a V2 overlay or another interviewee's audio clip, and with A1 off a split cut picture but not sound.
-- Must: Deleting a card removes only that card's picture and sound; any change on another track is undone and reported.
-- Kind: given
-
-### CRX-022: Resolve's scripting cannot move a clip, insert mid-timeline, or announce changes.
-- Why: Scripting offers append and delete only, so moving one card meant rebuilding everything after it, and a change made in Resolve is seen only by reading again.
-- Must: A change the editor makes in Resolve shows in the cards within about one second without Resolve announcing it, and moving one card takes seconds.
 - Kind: given
 
 ### CRX-023: Nothing in Resolve's scripting or shortcuts can insert empty time.
@@ -132,25 +117,10 @@ See also, filed under another capability:
 - Must: A multicam or graded timeline is never rebuilt by export and re-import, and any repaired timeline keeps every track, angle, link, colour, marker, subtitle and grade.
 - Kind: given
 
-### CRX-028: An insert or move from the cards must be exact, keep grades and undo once.
-- Why: An insert rebuilt 160 or more later cuts, each its own undo step, landed in the wrong place and lost their grades; the owner called it "a major flaw".
-- Must: An insert or move lands exactly where chosen, leaves every other cut's position, identity and grade unchanged, and undoes with one Ctrl+Z in Resolve.
-- Kind: ruling
-
-### CRX-029: Insert and place-on-top put the new cut at the playhead.
-- Why: Both actions placed the new cut at a clip's start or end, far from the playhead; the owner wants it at the playhead.
-- Must: Insert and place-on-top put the new cut at the playhead frame, not at the nearest clip boundary.
-- Kind: ruling
-
 ### CRX-030: Cuts are built from each interviewee's multicam, and plain clips work too.
 - Why: The owner wants lines cut from the interviewee's multicam, never the separate camera files, and montages from news clips "will need to use clips which are not multicams".
 - Must: A cut is built in its own order from each interviewee's multicam where one exists, and from ordinary single clips otherwise.
 - Kind: ruling
-
-### CRX-031: Several passages inserted in a row must land one after another.
-- Why: Inserting at the playhead mid-cut splits that cut; a playhead left one frame short made the next insert split the passage just placed.
-- Must: After an insert the playhead sits at the inserted passage's end, so a run of inserts lands in order without splitting each other.
-- Kind: situation
 
 ### CRX-032: Sending a cut refused every clip because names had been shortened.
 - Why: The cards dropped " Multicam" and the extension from names, but Resolve finds clips only by exact media pool name, odd casing like "MultiCam" included.
@@ -172,11 +142,6 @@ See also, filed under another capability:
 ### CRX-035: Resolve's undo history is project-wide and counts every scripted change.
 - Why: Every scripted append, delete, link, mark and marker change is its own step in one shared history; one undo too many undid the editor's own timeline duplication.
 - Must: An edit the product makes costs a known small number of undo steps, and undoing it checks the timeline state, never undoing the editor's own work.
-- Kind: given
-
-### CRX-036: Resolve's markers stay put when a ripple edit moves the cuts under them.
-- Why: Ripple moves, deletes, trims and inserts leave timeline markers at their absolute frames, so section markers land on the wrong cut; scripting has no marker move.
-- Must: After any edit, each marker still sits on the cut it marked, keeping its name, colour, note and duration, within one undo step.
 - Kind: given
 
 ### CRX-037: Resolve keeps one marker per frame and silently refuses the rest.
@@ -366,33 +331,6 @@ See also, filed under another capability:
 ### CRX-073: A build stopped early left 54 cuts with no audio or markers.
 - Why: The build placed all video first, then audio, then markers, and with no timeline open the status flickered between available and unreachable.
 - Must: A send reports done only when picture, sound and markers are all placed, flags any partial timeline, and keeps a steady status while Resolve is idle.
-- Kind: situation
-
-## Edits sent live and staged edits
-
-### CRX-074: Edits wait as a draft until applied; a cut-loose draft becomes a new timeline.
-- Why: Moves in Resolve were slow, so the owner wanted edits staged until he says so, an edit-at-once mode removed ("serves no purpose"), and independent cutting away from Resolve.
-- Must: Edits stay a draft until applied, Resolve's own changes show meanwhile, and a cut-loose draft is sent as a new timeline the editor then follows, the original untouched.
-- Kind: ruling
-
-### CRX-075: Nothing cut from the timeline is ever lost.
-- Why: The owner asked that every piece removed by a trim or delete be kept on an offcuts timeline in the same project, created if missing.
-- Must: Every piece removed by a delete or trim stays recoverable in the project, leaving there only when its removal is undone.
-- Kind: ruling
-
-### CRX-076: After staged edits ran, the cards no longer matched Resolve.
-- Why: A run can stop partway when Resolve refuses one edit, and once the moves worked in Resolve while the page stayed out of step.
-- Must: Staged edits are saved on every change, each leaves the draft only once Resolve confirms it, and after a run the cards show exactly what Resolve holds.
-- Kind: situation
-
-### CRX-077: A card dragged on the page did not move in Resolve, and nothing said so.
-- Why: Drags and later moves silently did nothing in Resolve, leaving the editor unsure whether the edit happened.
-- Must: A move Resolve did not perform is reported on the page within seconds, and the card returns to where Resolve has it.
-- Kind: situation
-
-### CRX-078: The page silently showed a different timeline from Resolve's.
-- Why: With the page held on another timeline, Resolve's updates were set aside, and only a small status text said so.
-- Must: When the page shows something other than Resolve's open timeline, it names Resolve's timeline and offers a one-click "follow Resolve".
 - Kind: situation
 
 ## Bringing Resolve's changes back into the cut

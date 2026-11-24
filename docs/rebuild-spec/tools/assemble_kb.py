@@ -21,6 +21,11 @@ sub-topics onto one list (knowledge-base/_cross/topics.tsv). Writes:
                                         ids -> readers' entries -> register ids
     knowledge-base/_trace/removed.tsv   STAYS BEHIND: what the mergers removed
                                         and why
+    knowledge-base/_trace/taken_out.tsv STAYS BEHIND: finished lessons taken
+                                        out afterwards (_cross/TAKEN_OUT.txt:
+                                        overruled by the owner's later answer,
+                                        or tied to the present arrangement),
+                                        each with its full text and sources
     knowledge-base/_owner/QUESTIONS.md  STAYS BEHIND: lessons still open, with
                                         no outcome found, or never shipped;
                                         the mergers' `Check:` questions; and
@@ -190,20 +195,51 @@ def main():
     absorbed = collections.defaultdict(list)          # keeper -> merged ids dropped into it
     for d in drop_to:
         absorbed[keeper(d)].append(d)
-    final = [e for e in entries if e["id"] not in drop_to]
+
+    # 3a. Lessons taken out after the merge (_cross/TAKEN_OUT.txt): the
+    # owner's later answers overruled some, and the specification's writers
+    # found others only make sense for the present build's arrangement. A
+    # withdrawn lesson goes to the trace; a sealed one joins the drawer under
+    # the file its line names. Nothing is renumbered and the count still
+    # closes, because both are written to _trace/taken_out.tsv with every
+    # reader's entry they were made of.
+    taken, tprobs = ml.taken_out()
+    problems.extend(tprobs)
+    for i, r in taken.items():
+        e = by_id.get(i)
+        if e is None:
+            problems.append(f"TAKEN_OUT: {i} is not a finished lesson")
+        elif i in drop_to:
+            problems.append(f"TAKEN_OUT: {i} was folded into {keeper(i)}; name that one")
+        elif e["sealed"]:
+            problems.append(f"TAKEN_OUT: {i} is already a sealed note")
+        elif e["fields"].get("Kind") == "2" and not r["reason"].lower().startswith("overruled"):
+            problems.append(f"TAKEN_OUT: {i} is a ruling of the owner's; only his later "
+                            "word takes one out (the reason must start 'overruled')")
+        elif r["action"] == "seal":
+            e["sealed"], e["family"] = True, r["family"]
+            e["fields"]["Tool"] = r["tool"]
+    withdrawn = [e for e in entries if e["id"] in taken and taken[e["id"]]["action"] == "withdraw"
+                 and e["id"] not in drop_to]
+    gone_ids = {e["id"] for e in withdrawn}
+
+    def drawer_of(e):
+        return e.get("family") or family(e["fields"].get("Tool", ""))
+
+    final = [e for e in entries if e["id"] not in drop_to and e["id"] not in gone_ids]
     caps = collections.defaultdict(lambda: collections.defaultdict(list))
     sealed = collections.defaultdict(list)
     for e in final:
         k = e["fields"].get("Kind", "")
         if e["sealed"]:
-            sealed[family(e["fields"].get("Tool", ""))].append(e)
+            sealed[drawer_of(e)].append(e)
         else:
             cap, topic = place(e)
             caps[cap][topic].append(e)
     see_also = collections.defaultdict(lambda: collections.defaultdict(list))
     for d, _ in drop_to.items():
         de, ke = by_id[d], by_id[keeper(d)]
-        if de["sealed"]:
+        if de["sealed"] or ke["sealed"] or ke["id"] in gone_ids:
             continue
         dcap, dtopic = place(de)
         kcap, _ = place(ke)
@@ -311,10 +347,33 @@ def main():
                 if p not in pids:
                     pids.append(p)
         placed_parts.update(set(pids))
-        where = (("sealed", family(e["fields"].get("Tool", ""))) if e["sealed"] else place(e))
+        where = (("sealed", drawer_of(e)) if e["sealed"] else place(e))
         rows.append("\t".join([e["id"], where[0], where[1], e["fields"].get("Kind", ""),
                                " ".join(ids), " ".join(pids), " ".join(sources(pids))]))
     files[os.path.join(TRACE, "trace.tsv")] = "\n".join(rows) + "\n"
+    trows = ["finished id\taction\twas under\tkind\treason\tthe promise is in\ttitle\twhy\tmust\t"
+             "merged ids\treaders' entries\tregister ids"]
+    for e in entries:
+        r = taken.get(e["id"])
+        if not r or e["id"] in drop_to:
+            continue
+        ids = [e["id"]] + absorbed.get(e["id"], [])
+        pids = []
+        for i in ids:
+            for p in by_id[i]["from"]:
+                if p not in pids:
+                    pids.append(p)
+        if r["action"] == "withdraw":
+            placed_parts.update(set(pids))
+        f = e["fields"]
+        cap, topic = place(e)
+        trows.append("\t".join([
+            e["id"], r["action"] + (f" -> sealed/{r['family']}.md" if r["action"] == "seal" else ""),
+            f"{cap} / {topic}", f.get("Kind", ""), r["reason"],
+            f"{r['piece']}: {r['heading']}" if r["piece"] else "", e["title"],
+            f.get("What was going on", ""), f.get("What the product must do", ""),
+            " ".join(ids), " ".join(pids), " ".join(sources(pids))]))
+    files[os.path.join(TRACE, "taken_out.tsv")] = "\n".join(trows) + "\n"
     rrows = ["reader's entry\tbundle\treason\tregister ids"]
     for r in removed:
         for i in r["ids"]:
@@ -397,7 +456,9 @@ def main():
     print(f"{len(want)} readers' entries -> {len(entries)} merged -> {n_final} lessons that "
           f"cross in {len(caps)} capabilities, {n_sealed} sealed notes in {len(sealed)} "
           f"tool files; {len(gone)} removed by the mergers, {len(drop_to)} repeats across "
-          f"capabilities folded, {len(moved)} moved")
+          f"capabilities folded, {len(moved)} moved; taken out afterwards: "
+          f"{len(gone_ids)} withdrawn, "
+          f"{sum(1 for r in taken.values() if r['action'] == 'seal')} sealed")
     print("to ask the owner:", dict(n_state), f"{n_check} questions, {len(conflicts)} conflicts")
     print("sealed files:", ", ".join(f"{k} ({len(v)})" for k, v in sorted(sealed.items())))
     for n in notes[:40]:

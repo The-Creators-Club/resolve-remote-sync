@@ -1,6 +1,6 @@
 # The app on each editor's computer: what real use taught
 
-142 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+136 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## Installing and setting up
 
@@ -264,16 +264,6 @@ See also, filed under another capability:
 - Must: Crash, restart and rate-limit counts and waits survive the clock stepping backwards or forwards and never reset because of it.
 - Kind: given
 
-### APP-052: On Windows, two clock readings a moment apart are often identical.
-- Why: Windows' clock ticks every 15.6 ms, so identifiers taken from the time collided (6 distinct of 10), muting new warnings and double-counting relaunches.
-- Must: Nothing uses a clock reading as a unique identifier; two events in the same instant stay distinct.
-- Kind: given
-
-### APP-053: A program started at Mac login cannot find tools that work in Terminal.
-- Why: Programs launched by macOS's login service get a search path of /usr/bin:/bin:/usr/sbin:/sbin only, without Homebrew or per-user tool folders.
-- Must: Everything the app runs on a Mac is referenced by a full path recorded at install.
-- Kind: given
-
 ### APP-054: A Windows laptop on battery silently stopped a scheduled background task.
 - Why: Windows scheduled tasks by default do not start on battery and stop when the laptop is unplugged, leaving no error.
 - Must: Anything the app schedules keeps running on battery, and a stopped background job shows on the computer and the dashboard.
@@ -369,11 +359,6 @@ See also, filed under another capability:
 ### APP-075: A tray menu rebuilt while open vanished under the editor's mouse.
 - Why: Rebuilding an open menu destroys it under the cursor, so lines carrying live percentages make it unusable; on macOS rebuilding an open menu-bar menu is also unsafe.
 - Must: An open tray or menu-bar menu is never rebuilt for a changing figure; changes to what it lists wait until it closes.
-- Kind: given
-
-### APP-076: On macOS, changing the menu-bar icon or a window from another thread risks a crash.
-- Why: macOS menu-bar items, menus and windows may only be changed from the main thread; elsewhere it can crash without a trace or block for ever.
-- Must: On macOS every menu-bar, menu and window change, animation included, is handed to the main thread without the caller waiting.
 - Kind: given
 
 ### APP-077: On a MacBook with a notch, the app's menu-bar icon never appeared.
@@ -653,19 +638,9 @@ See also, filed under another capability:
 - Must: Every record is replaced whole or left untouched, whatever the timing; an unreadable one gives the cautious answer or the last good copy, with a visible warning.
 - Kind: situation
 
-### APP-135: Half-written temporary files from killed processes piled up for ever.
-- Why: A process killed between writing a temporary file and renaming it leaves it behind, and the cleanup only matched finished file names.
-- Must: Every cleanup that ages out the app's records also removes temporary files left by a killed write, on the same retention.
-- Kind: situation
-
 ### APP-136: Files the product keeps on an editor's computer grew without limit.
 - Why: On-demand b-roll and music clips were never evicted (about 150 GB a year), save-point exports grew 10 to 50 GB a year, and each install left 130 MB.
 - Must: Every file the product stores on an editor's computer has a size or age limit and is removed when it passes it.
-- Kind: situation
-
-### APP-137: Reports from editors' computers grew with the size of the media pool.
-- Why: A list of refused relinks had no cap, so 200 or more clips went into every 30-second report.
-- Must: Every list a computer reports is capped, keeping the newest, with a count of what was left out.
 - Kind: situation
 
 ### APP-138: A feature switched on for the site never reached apps already running.
@@ -701,11 +676,6 @@ See also, filed under another capability:
 ### APP-145: A lost NAS connection kept a PC awake and blocked every shutdown.
 - Why: "Still syncing" counted files still needed, not data moving, so with the NAS off overnight the PC never slept and shutdowns were interrupted.
 - Must: Keep-awake and shutdown warnings apply only while data is moving or recently moved, with a maximum hold time.
-- Kind: situation
-
-### APP-146: Helper jobs either hung for ever or were killed mid-encode by a fixed limit.
-- Why: Some helper processes had no upper bound, while every long encode was cut off at 15 minutes regardless of size.
-- Must: A helper job is stopped when it makes no progress for a set time, and a slow job that keeps progressing is never killed by a fixed clock.
 - Kind: situation
 
 ### RSV-150: Send to Resolve failed when the dashboard address differed from the browser's.

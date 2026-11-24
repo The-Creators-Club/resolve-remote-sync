@@ -1,0 +1,100 @@
+# Lessons taken out of what crosses AFTER the merge and the pass across
+# capabilities. Stays behind. Read by tools/assemble_kb.py (which applies it),
+# tools/check_spec.py and tools/check_seams.py.
+#
+# One line per finished lesson id, seven fields separated by " | ":
+#
+#   id | action | sealed file | tool | reason | piece | heading
+#
+# action    withdraw  the lesson leaves the knowledge base for the trace
+#                     (knowledge-base/_trace/taken_out.tsv). Used when the
+#                     owner's later answer overruled it, or when it only makes
+#                     sense for the present build's arrangement and what a
+#                     person needs is already a behaviour of the specification.
+#           seal      the lesson moves to the sealed drawer (../sealed/<file>.md)
+#                     and is released only when the rebuild's own design names
+#                     that tool or technique. Used for a true fact about a
+#                     given whose rule only applies under a design choice.
+# sealed file, tool   for `seal` only: the drawer file (no .md) and the
+#                     `Tool:` line the note is filed under. Empty for withdraw.
+# reason    why. A ruling (kind 2) may only be taken out with a reason that
+#           starts "overruled": the owner's later word is the only thing that
+#           removes one.
+# piece, heading      where the promise a person needs is written, when the
+#                     lesson was tied to an arrangement. check_seams.py fails
+#                     if that heading is no longer in that piece. Empty when
+#                     overruled.
+#
+# An id is never renumbered and never reused. To put a lesson back, delete its
+# line and run assemble_kb.py.
+
+# --- Overruled by the owner's answers of 2026-11-24 (decision pages 2 to 31) ---
+ACC-003 | withdraw | | | overruled 2026-11-24: the admins named at install keep a password door under single sign-on | |
+BRD-028 | withdraw | | | overruled 2026-11-24: the first sort runs before the owner picks themes | |
+CE1-067 | withdraw | | | overruled 2026-11-24: nothing is staged for Resolve, a timeline in Resolve is not edited from the cards | |
+CE2-023 | withdraw | | | overruled 2026-11-24: the editor has no stacks | |
+CE2-100 | withdraw | | | overruled 2026-11-24: nothing is staged for Resolve, so nothing is held | |
+CE3-028 | withdraw | | | overruled 2026-11-24: nothing is staged for Resolve | |
+CRX-028 | withdraw | | | overruled 2026-11-24: cuts on a timeline in Resolve are not moved, deleted or inserted from the cards | |
+CRX-029 | withdraw | | | overruled 2026-11-24: cuts on a timeline in Resolve are not moved, deleted or inserted from the cards | |
+CRX-031 | withdraw | | | overruled 2026-11-24: cuts on a timeline in Resolve are not moved, deleted or inserted from the cards | |
+CRX-074 | withdraw | | | overruled 2026-11-24: a timeline in Resolve is not edited from the cards, live or staged | |
+CRX-075 | withdraw | | | overruled 2026-11-24: a timeline in Resolve is not edited from the cards, so nothing is cut from one | |
+CRX-076 | withdraw | | | overruled 2026-11-24: a timeline in Resolve is not edited from the cards, live or staged | |
+CRX-077 | withdraw | | | overruled 2026-11-24: a timeline in Resolve is not edited from the cards, live or staged | |
+CRX-078 | withdraw | | | overruled 2026-11-24: the editor does not follow or edit Resolve's open timeline | |
+SYN-029 | withdraw | | | overruled 2026-11-24: an upload-only project brings its empty folders down | |
+YTD-105 | withdraw | | | overruled 2026-11-24: the YouTube terms are accepted on the page, not in the app first | |
+# Facts about Resolve that stay true but have no behaviour to hold them now
+# that the cards do not edit a timeline in Resolve: sealed, not thrown away.
+CRX-018 | seal | resolve-editing-a-timeline-by-script | Editing an existing Resolve timeline by script | overruled 2026-11-24 as a rule (no cut is moved or deleted in Resolve from the cards); the fact about Resolve is kept for a design that does | |
+CRX-022 | seal | resolve-editing-a-timeline-by-script | Editing an existing Resolve timeline by script | overruled 2026-11-24 as a rule; the fact about Resolve's scripting is kept for a design that edits a timeline | |
+CRX-036 | seal | resolve-editing-a-timeline-by-script | Editing an existing Resolve timeline by script | overruled 2026-11-24 as a rule (no marker has to follow an edit); the fact about Resolve's markers is kept | |
+CRX-021 | seal | resolve-keystrokes | Resolve's select-at-playhead and split commands, driven by keystrokes | overruled 2026-11-24 as a rule; the fact about Resolve's commands is kept for a design that sends them | |
+
+# --- Tied to an arrangement: the promise is a behaviour of the specification ---
+ACC-006 | withdraw | | | a computer's key approved by an admin is the present arrangement; the specification has no key to supply or approve | accounts-privacy-legal | An admin adds a person in one step
+BRO-137 | withdraw | | | publishing a search index by hand from another computer is the present arrangement | broll | Search never stops because of an update
+CE1-146 | withdraw | | | how a server logs a dropped connection is the build's own business; the promise is that a drop is never a fault | cards-editor-4 | Several people and devices edit one cut list live, and every edit is saved before it counts
+CE2-133 | withdraw | | | two editing modes kept per browser existed only while two editors did | cards-editor-4 | Several people and devices edit one cut list live, and every edit is saved before it counts
+CE2-134 | withdraw | | | how many requests confirm an edit is mechanism; that edits feel instant is lesson CE1-068, which crosses | cards-editor-4 | Several people and devices edit one cut list live, and every edit is saved before it counts
+CE3-105 | withdraw | | | a limit on open episodes is the present arrangement; the specification has no such limit | cards-editor-5 | Opening an episode goes into the editor at the cut list last left there
+DSH-076 | withdraw | | | how often a computer re-sends an unchanged list is mechanism; the promise is what can be seen and how fresh | dashboard-1 | What an admin and an editor can see about a computer, and how fresh it is
+APP-135 | withdraw | | | temporary files beside the app's records are the present build's way of writing them | editor-app | The app keeps a log and its other records within fixed limits
+APP-137 | withdraw | | | the promise (every reported list keeps the newest, with a count) is written | editor-app | The app keeps a log and its other records within fixed limits
+APP-146 | withdraw | | | helper processes are the present arrangement; the promise (stopped for no progress, never by a fixed clock) is written | editor-app | The app keeps its own work going when part of it stops
+MUS-008 | withdraw | | | a free-space minimum for a drop existed because drops were staged on the person's computer; the specification refuses no drop for space | music | Dropping audio anywhere on the music page adds it to the library
+MUS-014 | withdraw | | | falling back from one computer to another for analysis is the present arrangement | music | Each dropped track shows its state until it is in the library
+MUS-021 | withdraw | | | an analyser loaded on an editor's computer and an import it holds are the present arrangement | music | Each dropped track shows its state until it is in the library
+MUS-022 | withdraw | | | imports held, retried and released between computers are the present arrangement | music | A drop survives the page closing, a restart and the network dropping
+MUS-026 | withdraw | | | the page relaying the editor's app's refusals is the present arrangement | music | Each dropped track shows its state until it is in the library
+MUS-031 | withdraw | | | a copy of the library worked on elsewhere and published back is the present arrangement | music | What people add is never lost, and every change shows within a minute
+MUS-032 | withdraw | | | merging an analysis bundle made elsewhere is the present arrangement | music | What people add is never lost, and every change shows within a minute
+MUS-039 | withdraw | | | publishing an index from a newer build is the present arrangement | music | When music cannot work, it says so
+RSV-028 | withdraw | | | separate Resolve workers started and retried are the present arrangement; one part talks to Resolve | resolve-on-the-editors-computer | The product never harms a Resolve session
+RSV-029 | withdraw | | | a count of helpers started is the present build's check; the promise (alive means doing its work) is written | editor-app | The app keeps its own work going when part of it stops
+SRV-008 | withdraw | | | staging install files is the present way of installing; the fact about Synology is in the specification's table | server-install-and-running-1 | Facts about TrueNAS and Synology the person setting up meets
+SRV-009 | withdraw | | | calling Synology's tools in a remote session is the present way of installing; the fact is in the specification's table | server-install-and-running-1 | Facts about TrueNAS and Synology the person setting up meets
+YTD-054 | withdraw | | | offering a job, waiting for a claim and a server head start are the present arrangement | youtube | An editor's computer takes a download only when it can finish it there
+YTD-061 | withdraw | | | a job marked for the server is the present arrangement; a computer takes only what it can finish | youtube | An editor's computer takes a download only when it can finish it there
+YTD-064 | withdraw | | | holds renewed and checked per call are the present arrangement; one job, one computer is written | youtube | One job is downloaded by one computer at a time, exactly as the job says
+# True facts about a given whose rule only applies under a design choice:
+# sealed, released when the rebuild's design names the technique.
+CE1-134 | seal | browser-features | Browser offline storage and installed offline workers | the fact is the browser's; the rule applies once the design installs an offline worker | cards-editor-4 | The editor opens with no network once it has been opened on that device
+CE2-103 | seal | browser-features | Browser offline storage and installed offline workers | the fact is the browser's; the rule about a local address and port is an arrangement | cards-editor-4 | The editor opens with no network once it has been opened on that device
+CE2-104 | seal | browser-features | Browser offline storage and installed offline workers | the fact is the browser's; the promise (removing one kept list deletes only its own files) is written | cards-editor-4 | The panel says where things are kept and whether they will stay
+CE1-145 | seal | windows-facilities | Windows' network stack, when a server running on Windows refuses a request | applies only if a server of the product runs on Windows | |
+APP-052 | seal | windows-facilities | Windows' system clock | a fact about Windows with no behaviour a person sees; released when the design reaches Windows | |
+APP-053 | seal | macos-facilities | macOS's login service starting a program | applies once the app starts other programs on a Mac; released when the design reaches macOS | |
+APP-076 | seal | macos-facilities | macOS's menu bar and windows | a fact about macOS; the promise (the menu never freezes) is written | editor-app | Clicking the icon opens the menu at once, and it never shifts or freezes while open
+CFI-041 | seal | resolve-own-transcription | Resolve's own transcription, started by script | the specification never asks Resolve to transcribe | cards-footage-in | A transcription made in the editing program is never the transcript
+CFI-042 | seal | resolve-own-transcription | Resolve's own transcription, started by script | the specification never asks Resolve to transcribe | cards-footage-in | A transcription made in the editing program is never the transcript
+CFI-047 | seal | resolve-own-transcription | Resolve's own transcription, started by script | the specification never asks Resolve to transcribe | cards-footage-in | A transcription made in the editing program is never the transcript
+
+# Marked "tied to an arrangement" by a writer and KEPT in what crosses on a
+# second reading (2026-11-24), so they have no line here: APP-143 (how retries
+# grow, with a ceiling, and survive months of running: true of any build),
+# RSV-027 (the check for another program driving Resolve must not mistake an
+# unrelated one: the behaviour is in the specification), SRT-080 (what a look
+# over the footage costs across the network: a measured fact about the
+# studio's NAS). Their pieces list them as met.

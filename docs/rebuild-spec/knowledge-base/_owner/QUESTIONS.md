@@ -3,9 +3,9 @@
 Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not edit by hand.
 
 - 123 lessons the old product never solved (**still open**). Each is a rule the rebuild must meet; say if any is no longer wanted.
-- 152 reports whose outcome could not be found (**outcome not found**). Say whether it was fixed, still happens, or no longer matters.
-- 109 fixes written but never released to the editors (**fixed, never shipped**), so nobody has used them.
-- 9 questions where two sources disagreed and the dates did not settle it.
+- 150 reports whose outcome could not be found (**outcome not found**). Say whether it was fixed, still happens, or no longer matters.
+- 108 fixes written but never released to the editors (**fixed, never shipped**), so nobody has used them.
+- 8 questions where two sources disagreed and the dates did not settle it.
 - 0 pairs of lessons that cannot both hold.
 
 ## Accounts, privacy and the legal paperwork
@@ -27,7 +27,6 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 ### Fixed, never shipped
 
-- **ACC-003** On a single-sign-on site, a NAS password still let someone in. Must: Where single sign-on is required, every way in refuses a password and goes through the identity provider.
 - **ACC-011** One credential shared by every computer could not be revoked for one. Must: Each computer holds its own credential bound to one person, revocable alone; a site-wide shared credential is off unless the admin turns it on.
 - **ACC-018** Disabling or deleting a person left their browsers and computers working. Must: Disabling, deleting or suspending a person ends their sessions, shares and every computer's access at the next request, all or nothing, and the confirm states this.
 - **ACC-019** A deleted person came back when their computer reported. Must: No report or registration ever re-creates a deleted person.
@@ -148,8 +147,6 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 ### Question only
 
-- **SYN-029** Ticking a project upload-only created the NAS's folder skeleton on the editor's disk. Must: An upload-only project creates nothing on the editor's computer and makes no download-side connection for it.
-  - **Question:** Earlier the owner was recorded as wanting upload-only editors to receive the empty folder structure to place originals in; should it come down or not?
 - **SYN-058** Quitting or updating the app left its old transfer running beside a new one. Must: Once quit, sign-out or update begins nothing new starts, and no file is ever sent by an old and a new transfer at once.
   - **Question:** Should quitting or updating the app stop an in-flight upload, losing its progress, or leave it running to finish?
 - **SYN-073** With the sync drive unplugged, downloads would have filled the internal disk. Must: With the drive absent or mounted under another name, all syncing pauses, nothing is written elsewhere, free space is never measured on another disk, and the app says the drive is disconnected.
@@ -513,7 +510,6 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **CE2-012** Go-to-clip-start and end keys act on the clip under the playhead. Must: The go-to-clip-start and go-to-clip-end keys move the playhead within the clip it is in, whatever is selected.
 - **CE2-044** Neighbouring montage clips from different sources should differ in colour. Must: Each speaker or source in a montage gets its own colour, and no two adjacent clips from different sources share one.
 - **CE2-128** Downloaded projects sit in a readable folder chosen per computer. Must: The desktop app opens projects from the NAS and keeps each downloaded cut list as named files in a visible folder chosen per project per computer.
-- **CE2-134** An edit took 709 ms to confirm though applied in 37 ms. Must: An edit is confirmed by the answer to the edit itself, in one round trip, without refetching the whole cut.
 - **CE3-016** The phone's vertical edit view must zoom out to an overview. Must: The phone's vertical edit view zooms vertically, from detail out to an overview of many cards.
 - **CE3-036** Section colours disappeared from a cut. Must: Section colours persist through every edit, reload and import of a cut.
 - **CE3-045** The first cut list of an episode said "no audio sources" until reloaded. Must: A slow first audio load shows loading and keeps retrying, including on Play, and never stays stuck on an error that has since cleared.
@@ -549,7 +545,6 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **CRX-057** Keys sent to Resolve on the editor's behalf stopped him typing in Resolve. Must: Nothing the product installs ever intercepts keys the editor types into Resolve or any other program.
 - **CRX-071** A thirteen-cut montage built a timeline with far more clips. Must: A timeline made from a cut holds exactly one clip per card, in the cut's order, and nothing else.
 - **CRX-072** Clip colours set in the cards did not reach Resolve. Must: A colour set on a cut in the cards appears on that clip in the timeline Resolve receives.
-- **CRX-077** A card dragged on the page did not move in Resolve, and nothing said so. Must: A move Resolve did not perform is reported on the page within seconds, and the card returns to where Resolve has it.
 - **CRX-092** A render queue across projects must survive Resolve crashing. Must: When Resolve dies during a queued render, the queue restarts Resolve, re-runs the interrupted job and continues with the rest.
 - **CRX-093** The studio's default render is QuickTime H.264 at 3840x2160, proxies off. Must: Before a queue starts, each job differing from the studio defaults is listed per project with a yes or no to switch it.
 - **CRX-094** Before rendering, clips hidden inside compound clips must be checked online. Must: Before a render is queued, every clip inside every compound clip on the timeline is checked, and offline ones are named.

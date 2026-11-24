@@ -836,8 +836,7 @@ While anything is copying, an indicator shows "<n> backup(s)" and the combined s
 
 #### Lessons
 
-- Met: SRT-070, SRT-071, SRT-072, SRT-073, SRT-074, SRT-075, SRT-076, SRT-077, SRT-078, SRT-079, SRT-081.
-- Tied to an arrangement: SRT-080 (the promise is in "A look over a drive survives interruptions, and one that dies is said so").
+- Met: SRT-070, SRT-071, SRT-072, SRT-073, SRT-074, SRT-075, SRT-076, SRT-077, SRT-078, SRT-079, SRT-080, SRT-081.
 
 ## Backed up and safe to format
 

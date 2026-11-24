@@ -1,6 +1,6 @@
 # The b-roll archive: what real use taught
 
-134 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+133 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## Givens: browsers, cameras, files and Resolve
 
@@ -695,9 +695,4 @@ See also, filed under another capability:
 ### BRO-136: Publishing a rebuilt search index deleted the clips added since.
 - Why: Clips and tracks added by editors exist only in the live index; swapping in a rebuilt copy dropped them and the import queue, a size check passed it, and success was reported.
 - Must: Replacing a search index keeps every item and queue entry added since the rebuild began, or refuses before anything changes, and a failed merge is reported naming the recovery.
-- Kind: situation
-
-### BRO-137: A published index the running server could not read switched search off.
-- Why: An index in a newer format disabled b-roll search; an older one under a newer server made every import fail until restart.
-- Must: Publishing an index whose format version differs from the running server's is refused in either direction, naming what to do first.
 - Kind: situation

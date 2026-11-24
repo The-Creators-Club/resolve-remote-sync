@@ -1,6 +1,18 @@
 # Sealed notes: windows-facilities
 
-SEALED. Not part of the pack. Released to the rebuild only after its own committed design names this tool. 5 notes.
+SEALED. Not part of the pack. Released to the rebuild only after its own committed design names this tool. 7 notes.
+
+### CE1-145: Windows turns a refusal into a reset if the request body was not read.
+- Why: A server refusing an upload before reading its body makes Windows reset the connection, so slow clients, a phone for one, never see the refusal.
+- Must: Every refusal reaches the client as the server's own message, with the body read, within a size limit, before answering.
+- Tool: Windows' network stack, when a server running on Windows refuses a request
+- Where it bit: Timeline Cards: the editor
+
+### APP-052: On Windows, two clock readings a moment apart are often identical.
+- Why: Windows' clock ticks every 15.6 ms, so identifiers taken from the time collided (6 distinct of 10), muting new warnings and double-counting relaunches.
+- Must: Nothing uses a clock reading as a unique identifier; two events in the same instant stay distinct.
+- Tool: Windows' system clock
+- Where it bit: The app on each editor's computer
 
 ### SRT-S04: The copy tool gives a file its full size the moment it starts writing.
 - Why: A progress view counting files by size alone would call unfinished files done, because the tool pre-sizes each file.

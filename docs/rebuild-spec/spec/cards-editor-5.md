@@ -813,7 +813,6 @@ On an editor's computer the editor can also be opened in a window of its own, wi
 
 - Met: CE1-125, CE1-128, CE3-101, CE3-106, CE1-126, CE1-127, CE1-129, CE1-130, CE1-131, CE1-132, CE2-174, CE2-175, CE2-176, CE2-177, CE3-102, CE3-103, CE3-104, CE3-107.
 - Met for another part: CE1-048 (in "A new, empty cut list is made from the sheet"), CE1-012 (in "The episode's browser lists every transcript and cut list, and several can be chosen at once").
-- Tied to an arrangement: CE3-105 (the promise is in "Opening an episode goes into the editor at the cut list last left there").
 
 ## Resolve is optional
 

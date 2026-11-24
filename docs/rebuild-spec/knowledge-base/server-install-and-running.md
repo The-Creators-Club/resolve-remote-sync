@@ -1,6 +1,6 @@
 # The server: installing it and keeping it running: what real use taught
 
-128 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+126 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## Installing on a NAS
 
@@ -37,16 +37,6 @@
 ### SRV-007: Synology and TrueNAS number users differently, so a fixed account number fails.
 - Why: Synology numbers local users from 1026 and TrueNAS gives 3000 to its first, so the server ran as a nonexistent user and could write nothing.
 - Must: Install uses the real NAS account the server runs as, and every start warns, naming account and owner, when that account does not own its data folder.
-- Kind: given
-
-### SRV-008: On Synology the file-transfer login cannot reach system folders, even as admin.
-- Why: Synology confines its secure file-transfer login to shared folders, so a file staged in the system temporary folder can never be sent.
-- Must: Every file copied onto a Synology is staged inside a shared folder the transfer login can see.
-- Kind: given
-
-### SRV-009: Synology's admin command-line tools are not found under sudo in a remote session.
-- Why: On DSM 7.2 the share, user, ACL and app tools live in system folders missing from sudo's search path in a remote session.
-- Must: Install steps on a Synology call these tools by full path or set the path first.
 - Kind: given
 
 ### SRV-010: Synology caps transfer chunks at 64 KiB and breaks on permission changes in shares.

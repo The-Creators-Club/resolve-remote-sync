@@ -275,7 +275,6 @@ On a Synology, set-up asks DSM whether its secure file transfer service is on, s
 #### Lessons
 
 - Met: SRV-001, SRV-002, SRV-003, SRV-004, SRV-005, SRV-006, SRV-007, SRV-010, SRV-011, SRV-012, SRV-013, SRV-014, SRV-015, SRV-016, SRV-017, SRV-018, SRV-019, SRV-020, SRV-021, SRV-022, SRV-023, SRV-024, SRV-025, SRV-026, SRV-027, SRV-028, SRV-029, SRV-030, SRV-031, SRV-032, SRV-034, SRV-035.
-- Tied to an arrangement: SRV-008, SRV-009 (the promise is in "Facts about TrueNAS and Synology the person setting up meets").
 
 ## Settings and secrets
 

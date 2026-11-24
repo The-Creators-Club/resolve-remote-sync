@@ -5,6 +5,8 @@
                and every removed line
     parts()    every reader's entry of knowledge-base/_parts/*.md, with the
                register ids it cites
+    taken_out()  the finished lessons taken out of what crosses afterwards
+               (knowledge-base/_cross/TAKEN_OUT.txt)
 
 Nothing here writes anything.
 """
@@ -85,6 +87,46 @@ def merged(only: list[str] | None = None):
     for e in entries:
         e["from"] = PART_ID.findall(e["fields"].get("From", ""))
     return entries, removed
+
+
+TAKEN_OUT = os.path.join(CROSS, "TAKEN_OUT.txt")
+_FINISHED_ID = re.compile(r"^[A-Z][A-Z0-9]{2}-\d{3}$")
+
+
+def taken_out():
+    """-> ({finished id: row}, problems). The lessons taken out of what
+    crosses after the merge (knowledge-base/_cross/TAKEN_OUT.txt, which says
+    what each field is). A row: id, action ('withdraw' | 'seal'), family,
+    tool, reason, piece, heading."""
+    rows, problems = {}, []
+    if not os.path.exists(TAKEN_OUT):
+        return rows, problems
+    for n, line in enumerate(open(TAKEN_OUT, encoding="utf-8"), 1):
+        line = line.rstrip("\r\n")
+        if not line.strip() or line.startswith("#"):
+            continue
+        cols = [c.strip() for c in line.split("|")]     # no field may hold a |
+        if len(cols) != 7:
+            problems.append(f"TAKEN_OUT L{n}: {len(cols)} fields, not 7")
+            continue
+        r = dict(zip(("id", "action", "family", "tool", "reason", "piece", "heading"), cols))
+        if not _FINISHED_ID.match(r["id"]):
+            problems.append(f"TAKEN_OUT L{n}: '{r['id']}' is not a finished lesson id")
+        elif r["id"] in rows:
+            problems.append(f"TAKEN_OUT L{n}: {r['id']} is listed twice")
+        elif r["action"] not in ("withdraw", "seal"):
+            problems.append(f"TAKEN_OUT L{n}: {r['id']}: action must be withdraw or seal")
+        elif r["action"] == "seal" and not (re.match(r"^[a-z0-9+-]+$", r["family"]) and r["tool"]):
+            problems.append(f"TAKEN_OUT L{n}: {r['id']}: seal needs a drawer file and a tool")
+        elif r["action"] == "withdraw" and (r["family"] or r["tool"]):
+            problems.append(f"TAKEN_OUT L{n}: {r['id']}: withdraw takes no drawer file or tool")
+        elif len(r["reason"]) < 12:
+            problems.append(f"TAKEN_OUT L{n}: {r['id']}: say why")
+        elif bool(r["piece"]) != bool(r["heading"]):
+            problems.append(f"TAKEN_OUT L{n}: {r['id']}: a piece needs a heading and a heading a piece")
+        else:
+            rows[r["id"]] = r
+    return rows, problems
 
 
 _REG = r"[PLGHDMC]-[A-Za-z0-9_.\-]+"

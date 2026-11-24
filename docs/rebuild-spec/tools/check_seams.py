@@ -108,7 +108,29 @@ def main():
     print("\n3. Lessons tied to an arrangement (to come out of what crosses):")
     for cap in sorted(tied):
         print(f"   {cap} ({len(tied[cap])}): {', '.join(sorted(tied[cap]))}")
-    print(f"   {sum(len(v) for v in tied.values())} in all")
+    n = sum(len(v) for v in tied.values())
+    print("   none still listed in a piece" if not n else f"   {n} in all")
+
+    # What has been taken out (knowledge-base/_cross/TAKEN_OUT.txt). Where a
+    # line says which behaviour holds the promise, that heading must still be
+    # in that piece: a later edit of the text must not strand the promise.
+    taken, tprobs = ml.taken_out()
+    kinds = collections.Counter()
+    for r in taken.values():
+        kinds[("overruled by the owner" if r["reason"].lower().startswith("overruled")
+               else "tied to an arrangement", r["action"])] += 1
+    print(f"\n3a. Taken out of what crosses so far: {len(taken)}"
+          + "".join(f"\n   {k[0]}, {k[1]}: {v}" for k, v in sorted(kinds.items())))
+    heads = {p: {l[4:].strip() for l in cs.lines_of(os.path.join(cs.TEXT, p + ".md"))
+                 if l.startswith("### ")} for p in written}
+    bad = list(tprobs)
+    for i, r in sorted(taken.items()):
+        if r["piece"] and r["piece"] not in heads:
+            bad.append(f"{i}: '{r['piece']}' is not a written piece")
+        elif r["piece"] and r["heading"] not in heads[r["piece"]]:
+            bad.append(f"{i}: {r['piece']} has no heading '{r['heading'][:70]}'")
+    for b in bad:
+        print("   PROBLEM: " + b)
 
     print("\n4. Joins that name a sub-topic no written piece has:")
     all_subs = {(ml.capability_of(p), s.lower()) for p in written for s in subs[p]}

@@ -1,6 +1,6 @@
 # Accounts, privacy and the legal paperwork: what real use taught
 
-72 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+70 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## Who may sign in
 
@@ -29,11 +29,6 @@
 - Must: An outside sign-in maps to an account only through an identifier the person cannot change at the sign-in service, never by name.
 - Kind: situation
 
-### ACC-003: On a single-sign-on site, a NAS password still let someone in.
-- Why: One sign-in route accepted a NAS password where the site requires its identity provider, its second factor and its allowed groups.
-- Must: Where single sign-on is required, every way in refuses a password and goes through the identity provider.
-- Kind: situation
-
 ### ACC-004: A name the sign-in accepted quietly failed in some sections.
 - Why: Names with spaces, accents or over 64 characters became sessions, but ticks, computer joins and music import refused them while naming the wrong cause.
 - Must: Any name accepted at sign-in works the same in every section; a name the product cannot use is refused at sign-in, saying the shape required.
@@ -42,11 +37,6 @@
 ### ACC-005: A fresh install had no way to create its first admin in a browser.
 - Why: With local accounts and none created yet, the setup page sent visitors to a sign-in nobody could pass.
 - Must: On a fresh install with no accounts the setup page creates the first admin in a browser, and closes once any account exists.
-- Kind: situation
-
-### ACC-006: Creating an account needed a key that only exists after the account does.
-- Why: The new-account form demanded the computer key that only the editor's setup wizard generates, after the account exists.
-- Must: An account can be created without the key; setup submits it for one-click admin approval, and a missing key is shown with what it blocks.
 - Kind: situation
 
 ## How a computer proves who it belongs to

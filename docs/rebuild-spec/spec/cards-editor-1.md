@@ -823,4 +823,4 @@ When only the whole paragraph could be placed, the message also gives that parag
 #### Lessons
 
 - Met: CE1-033, CE1-034, CE1-035, CE1-036, CE1-037, CE1-038, CE1-039, CE1-040, CE1-041, CE1-042, CE1-043, CE1-044, CE1-045, CE1-046, CE1-047, CE2-018, CE2-019, CE2-020, CE2-021, CE2-022, CE2-024, CE2-025, CE2-026, CE2-027, CE2-029, CE2-031.
-- Not yet met by any behaviour above: CE2-023 (the owner's answer of 2026-11-24: the editor has no stacks), CE1-049 (dropping media on the editor is written once, with the transcript panel's intake in part 3), CE1-048 (making a new cut list is written with opening episodes in part 5), CE2-028 (the panels' headers and the top bar are written with the page in part 5), CE2-030 (menus and settings sections are written with the page in part 5).
+- Not yet met by any behaviour above: CE1-049 (dropping media on the editor is written once, with the transcript panel's intake in part 3), CE1-048 (making a new cut list is written with opening episodes in part 5), CE2-028 (the panels' headers and the top bar are written with the page in part 5), CE2-030 (menus and settings sections are written with the page in part 5).

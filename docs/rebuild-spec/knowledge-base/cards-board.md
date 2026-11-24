@@ -1,6 +1,6 @@
 # Timeline Cards: the board: what real use taught
 
-47 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+46 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## What the board is
 
@@ -138,11 +138,6 @@
 ### BRD-027: An interviewee used noticeably less than every other is flagged for cutting.
 - Why: The owner ruled that if one interviewee's screen time is "noticeably lower than any other interviewee he needs to be cut overall".
 - Must: A draft reports each interviewee's minutes and flags one noticeably below every other for cutting entirely.
-- Kind: ruling
-
-### BRD-028: Themes are proposed, the owner picks, and only then are cards sorted.
-- Why: The owner sorts every interview paragraph into themes; he wants up to 30 proposed, picks about 12, then sees content sorted.
-- Must: The assistant proposes at most 30 themes, names which interviews it will read, and sorts paragraphs only into the themes the owner picked.
 - Kind: ruling
 
 ### BRD-029: The assistant decides placement with the whole board and notes in view.

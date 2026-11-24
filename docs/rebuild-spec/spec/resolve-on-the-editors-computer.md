@@ -376,8 +376,7 @@ If another of the app's windows is open or the window cannot be shown, the advic
 
 #### Lessons
 
-- Met: RSV-001, RSV-002, RSV-003, RSV-004, RSV-005, RSV-006, RSV-007, RSV-008, RSV-009, RSV-010, RSV-011, RSV-012, RSV-013, RSV-014, RSV-015, RSV-016, RSV-017, RSV-018, RSV-019, RSV-020, RSV-021, RSV-022, RSV-023, RSV-024, RSV-025, RSV-026, RSV-030, RSV-031.
-- Tied to an arrangement: RSV-027, RSV-028, RSV-029 (the promise is in "The product never harms a Resolve session").
+- Met: RSV-001, RSV-002, RSV-003, RSV-004, RSV-005, RSV-006, RSV-007, RSV-008, RSV-009, RSV-010, RSV-011, RSV-012, RSV-013, RSV-014, RSV-015, RSV-016, RSV-017, RSV-018, RSV-019, RSV-020, RSV-021, RSV-022, RSV-023, RSV-024, RSV-025, RSV-026, RSV-027, RSV-030, RSV-031.
 
 ## Project libraries and projects
 

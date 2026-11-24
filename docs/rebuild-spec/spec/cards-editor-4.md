@@ -432,7 +432,7 @@ Every assistant task started in the editor shows what it is expected to cost bef
 
 - Met: CE1-021, CE1-022, CE1-024, CE1-025, CE1-026, CE1-028, CE1-029, CE2-090, CE2-092, CE2-094, CE2-097, CE3-055, CE3-056, CE3-057, CE3-058, CE3-064, CE1-023, CE1-027, CE1-030, CE1-031, CE1-032, CE2-088, CE2-089, CE2-093, CE2-095, CE2-096, CE2-098, CE2-099, CE3-059, CE3-060, CE3-061, CE3-062, CE3-063.
 - Met for another part: CE3-054 (in "The montage builder's answer is placed as cards, and nothing it proposed is silently lost").
-- Not yet met by any behaviour above: CE2-091 (it is about the transcript search, written in part 3 of this editor), CE2-100 (held staged edits belong to the hand-over to Resolve).
+- Not yet met by any behaviour above: CE2-091 (it is about the transcript search, written in part 3 of this editor).
 
 ## Working offline, connections and several devices
 
@@ -834,4 +834,3 @@ The Android app runs on Android 10 or newer. It asks to use the internet, to vib
 #### Lessons
 
 - Met: CE1-133, CE1-135, CE2-101, CE2-102, CE2-105, CE2-106, CE2-107, CE2-108, CE1-136, CE1-137, CE1-138, CE2-110, CE2-111, CE2-118, CE2-124, CE2-128, CE2-129, CE2-130, CE2-132, CE3-066, CE3-067, CE3-068, CE3-074, CE3-078, CE1-139, CE1-140, CE1-141, CE1-142, CE1-143, CE1-144, CE2-112, CE2-113, CE2-114, CE2-115, CE2-116, CE2-117, CE2-119, CE2-120, CE2-121, CE2-122, CE2-123, CE2-125, CE2-126, CE2-127, CE2-131, CE3-069, CE3-070, CE3-071, CE3-072, CE3-073, CE3-075, CE3-076, CE3-077.
-- Tied to an arrangement: CE1-134, CE1-145, CE1-146, CE2-103, CE2-104, CE2-133, CE2-134 (the promises are in "The editor opens with no network once it has been opened on that device", "Several people and devices edit one cut list live, and every edit is saved before it counts", "Timeline Cards has its own apps for Windows and Android that show the editor from the studio's server" and "The panel says where things are kept and whether they will stay").

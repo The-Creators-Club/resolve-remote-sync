@@ -1,6 +1,18 @@
 # Sealed notes: macos-facilities
 
-SEALED. Not part of the pack. Released to the rebuild only after its own committed design names this tool. 3 notes.
+SEALED. Not part of the pack. Released to the rebuild only after its own committed design names this tool. 5 notes.
+
+### APP-053: A program started at Mac login cannot find tools that work in Terminal.
+- Why: Programs launched by macOS's login service get a search path of /usr/bin:/bin:/usr/sbin:/sbin only, without Homebrew or per-user tool folders.
+- Must: Everything the app runs on a Mac is referenced by a full path recorded at install.
+- Tool: macOS's login service starting a program
+- Where it bit: The app on each editor's computer
+
+### APP-076: On macOS, changing the menu-bar icon or a window from another thread risks a crash.
+- Why: macOS menu-bar items, menus and windows may only be changed from the main thread; elsewhere it can crash without a trace or block for ever.
+- Must: On macOS every menu-bar, menu and window change, animation included, is handed to the main thread without the caller waiting.
+- Tool: macOS's menu bar and windows
+- Where it bit: The app on each editor's computer
 
 ### APP-S06: Multi-line safety notifications never appeared on a Mac.
 - Why: The Mac notification was built as a script string, which cannot hold a newline, so every multi-line notice silently failed; the Windows balloon also cut long text.

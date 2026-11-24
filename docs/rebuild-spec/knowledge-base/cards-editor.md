@@ -1,6 +1,6 @@
 # Timeline Cards: the editor: what real use taught
 
-423 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+411 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## The lane: how clips look and read
 
@@ -357,11 +357,6 @@
 - Must: Flipping between cards and lane, either way and repeatedly, lands on the same cut at the same position.
 - Kind: ruling
 
-### CE2-023: Cards are not collapsed into stacks unless the editor asks.
-- Why: The owner ruled cards start expanded and the editor chooses what is a stack; joining lagged, a box selection offered no join, and closed stacks reopened after restart.
-- Must: No stack exists by default; any adjacent cards join or unjoin at once, including a box selection; a new stack starts closed, and closed stays closed after restart.
-- Kind: ruling
-
 ### CE2-025: Keys went to the wrong panel with the transcript open.
 - Why: With the transcript viewer open, Space and Delete acted on the wrong panel; the owner wants keys on the focused panel and Tab to move with an obvious outline.
 - Must: Keys act only on the visibly focused panel, Tab cycles panels with a clear outline, and a selection made in one panel shows in the other.
@@ -509,11 +504,6 @@
 - Must: When one cut list is saved from two places at once, both changes are kept or the second is refused, with the conflict shown to both people.
 - Kind: situation
 
-### CE1-067: Every staged edit is saved the moment it is made.
-- Why: A plan of staged edits lived only in memory, so a timeline switch, a restart, or a second reader's read without the moves wiped hours of work.
-- Must: Every staged edit is saved on change, per timeline, survives switches and restarts, can be reopened as a file, and a move whose cuts are missing from a read is held.
-- Kind: situation
-
 ### CE3-022: A held trim key during playback shrank a whole cut to frame-long pieces.
 - Why: Holding the trim key while the lane played repeated the edit 350 times in 90 seconds, each on the next clip, until every clip was 1 to 7 frames.
 - Must: Holding an editing key never repeats the edit; one press is one edit; every cut-list revision is kept so a damaged list can be restored.
@@ -537,11 +527,6 @@
 ### CE3-027: An action that is refused must say so where the person is looking.
 - Why: Delete on a selected card did nothing visible; split on a phone said nothing, its reason hidden off screen, in a tooltip, or naming keys a phone lacks.
 - Must: Every action gives a visible result or a reason where the person is looking on any device, naming something they can reach; a disabled control answers a tap.
-- Kind: situation
-
-### CE3-028: A pending edit stopped showing when its card folded into a group.
-- Why: A staged move folded into a collapsed group lost its marking, and a marker staged on a member was invisible, though both were still queued.
-- Must: Every staged (pending, not yet applied) edit and marker is visible in any grouping, so the editor can see it and take it back.
 - Kind: situation
 
 ### CE3-029: A word at a cut's edge came and went.
@@ -1268,11 +1253,6 @@ See also, filed under another capability:
 - Must: A multi-step task's next step appears where the person asked; a finished shortening opens its review, every marker is labelled, and nothing scrolls sideways.
 - Kind: situation
 
-### CE2-100: A staged edit counted as held was shown nowhere.
-- Why: The run button said "1 held" but no card showed which edit was held, so the count could not be answered.
-- Must: Every staged edit that cannot apply is marked "held" on the card it concerns, so every held count can be traced.
-- Kind: situation
-
 ### CE3-059: Shortening gave no suggestions for one section and many for another.
 - Why: Sections answered in parallel wrote to the same record without coordination, so some answers erased others.
 - Must: When sections are processed in parallel, every section's result is kept.
@@ -1305,21 +1285,6 @@ See also, filed under another capability:
 - Must: The installed editor keeps its identity and offline copies under any address prefix, and the same bookmark or app opens the downloaded copy with no network.
 - Kind: given
 
-### CE1-134: An installed offline worker keeps serving its old page over moved addresses.
-- Why: An installed worker controls every address under its scope, so after the page moved it served the old page; a scope of "/" claimed the whole site.
-- Must: When pages move, the old worker is switched off for everyone without losing unsent edits, and no worker claims more than its own section.
-- Kind: given
-
-### CE1-145: Windows turns a refusal into a reset if the request body was not read.
-- Why: A server refusing an upload before reading its body makes Windows reset the connection, so slow clients, a phone for one, never see the refusal.
-- Must: Every refusal reaches the client as the server's own message, with the body read, within a size limit, before answering.
-- Kind: given
-
-### CE1-146: Browsers drop connections constantly.
-- Why: Closed tabs, locked phones and abandoned reloads arrive on Windows as connection-reset or aborted errors, each logged as a forty-line traceback hiding real ones.
-- Must: A client dropping its connection is one log line naming the client; every other error keeps its full detail.
-- Kind: given
-
 ### CE2-101: A laptop's browser says "online" while the server is unreachable.
 - Why: The online flag stays true while any adapter is up (a VPN's, Wi-Fi without internet), and Windows waits about 21 s per connection to an unreachable address.
 - Must: Reachability is measured with a request of about 3 s deadline, never read from the online flag, and with no server the offline copy answers within about 3 s.
@@ -1328,16 +1293,6 @@ See also, filed under another capability:
 ### CE2-102: Offline use in a browser needs https or the machine's own address.
 - Why: Browsers allow offline page machinery only in a secure context; plain http by IP registers nothing, while the machine's own loopback address counts as secure.
 - Must: Where offline cannot work, the panel says so in a sentence instead of offering a download that cannot work.
-- Kind: given
-
-### CE2-103: Browser storage belongs to an address, port included.
-- Why: Offline storage is kept per page origin and can be evicted, so changing the server address or the app's local port strands every downloaded copy.
-- Must: A released app's local address and port never change, and changing the server address keeps every downloaded copy and queued edit available.
-- Kind: given
-
-### CE2-104: Browser caches belong to the whole site, not to one page.
-- Why: Deleting "all caches" to clear one stale offline page also removed another app's offline page and media an editor had saved for offline work.
-- Must: Clearing a page's offline copy deletes only that page's own files, never another page's or saved media.
 - Kind: given
 
 ### CE2-106: Only desktop Chrome and Edge let a page keep rewriting one chosen file.
@@ -1548,16 +1503,6 @@ See also, filed under another capability:
 ### CE2-131: An editor working offline could be thrown out of their episode.
 - Why: Presence was measured by server requests, so after 15 quiet minutes an offline editor looked gone, while an always-on computer kept its editor "in" for ever.
 - Must: Presence follows a person actually working, offline or on a sleeping phone; unsent work keeps an episode occupied; a closer is told who was last in and when.
-- Kind: situation
-
-### CE2-133: Phone and desktop were in different modes on the same draft.
-- Why: The editing mode was a per-browser preference, so two devices disagreed about what the same draft was.
-- Must: Which mode a project is edited in follows the project itself, the same on every device.
-- Kind: situation
-
-### CE2-134: An edit took 709 ms to confirm though applied in 37 ms.
-- Why: Owner wanted edits to "feel instant"; over a 100 ms one-way remote path, two full requests on fresh connections cost 637 of the 709 ms.
-- Must: An edit is confirmed by the answer to the edit itself, in one round trip, without refetching the whole cut.
 - Kind: situation
 
 ### CE3-069: The offline rescue copy asked to save a growing file every minute.
@@ -2135,11 +2080,6 @@ See also, filed under another capability:
 ### CE3-104: After switching episode the panel claimed there were no documents.
 - Why: Switching episode cleared the document list, but a refresh throttle blocked the refetch for 30 seconds.
 - Must: Switching episode refreshes the document list at once, and a failed fetch is never shown as "none".
-- Kind: situation
-
-### CE3-105: An editor blocked by a limit on open episodes had nothing they could do.
-- Why: One editor could hold every open-episode place, only an admin could free one, the refusal named others' episodes, and anyone could close a shared one.
-- Must: A person may close an episode they are in or one idle 15 minutes; closing one others are using is admin-only, named and warned; refusals reveal no one's work.
 - Kind: situation
 
 ### CE3-107: When the server stops, open cut lists are saved first.

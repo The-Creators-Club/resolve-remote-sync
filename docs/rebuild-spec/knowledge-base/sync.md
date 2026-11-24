@@ -1,6 +1,6 @@
 # Sync: what real use taught
 
-136 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+135 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## What syncs where
 
@@ -181,11 +181,6 @@
 - Why: The owner asked for "an upload only tick for editors who have backed up footage locally"; he later ruled that such a project carries every file, not only video.
 - Must: A project can be ticked upload-only per computer: every file except system clutter and temporary files goes up, nothing comes down, and it never reads as out of sync.
 - Kind: ruling
-
-### SYN-029: Ticking a project upload-only created the NAS's folder skeleton on the editor's disk.
-- Why: The project's folder structure was still copied down before the upload-only check, filling the local folder with empty folders.
-- Must: An upload-only project creates nothing on the editor's computer and makes no download-side connection for it.
-- Kind: situation
 
 ## Deletions and removing a project
 

@@ -115,7 +115,6 @@ A fact about Resolve: a timeline clip gets a new id on every ripple move, and a 
 #### Lessons
 
 - Met: CRX-016, CRX-017, CRX-019, CRX-020, CRX-023, CRX-024, CRX-025, CRX-026, CRX-027, CRX-030, CRX-032, CRX-033, CRX-034.
-- Not yet met by any behaviour above: CRX-018, CRX-021, CRX-022, CRX-028, CRX-029, CRX-031 (the owner's answer of 2026-11-24: cuts on a timeline in Resolve are not moved, deleted or inserted from the cards).
 
 ## Undo, markers, titles, fades and properties
 
@@ -178,7 +177,6 @@ A fact about Resolve: its undo history is project-wide and counts every scripted
 #### Lessons
 
 - Met: CRX-035, CRX-037, CRX-038, CRX-039, CRX-040, CRX-041, CRX-042, CRX-043, CRX-044.
-- Not yet met by any behaviour above: CRX-036 (the owner's answer of 2026-11-24: no edit is made to a timeline in Resolve from the cards, so no marker has to follow one).
 
 ## Talking to Resolve: restarts, dialogs and speed
 
@@ -372,11 +370,6 @@ So that a cut list can be compared with its timeline while Resolve is closed or 
 - Exact: yes
 
 While a cut list is open, the computer with Resolve is used only to know its clips, to say what Resolve has open there (project and timeline, shown in the header, or nothing while Resolve is closed or starting), whether Resolve is reachable, its keyboard preset for the lane keys, and the timeline the cut list was last sent to (for the comparison, never shown as cards). Its playhead is used only by the Live tab. Only sending goes to that computer; anything else is refused: "a project file is edited in the file, not in Resolve -- the '<kind>' was not sent to the agent". Resolve's later changes reach the cut list only through the comparison and the Import tab.
-
-#### Lessons
-
-- Not yet met by any behaviour above: CRX-074, CRX-075, CRX-076, CRX-077, CRX-078 (the owner's answer of 2026-11-24: a timeline in Resolve is not edited from the cards, live or staged; a cut is edited as its cut list and handed over as a new timeline).
-- Not yet met by any behaviour above: CE1-067, CE3-028, CE2-100, passed here by the editor's pieces (the owner's answer of 2026-11-24: there are no edits staged for Resolve).
 
 ## Bringing Resolve's changes back into the cut
 

@@ -1,6 +1,6 @@
 # Timeline Cards: footage in, ready to cut: what real use taught
 
-107 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+104 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## Cameras, sound recorders and their clocks
 
@@ -210,16 +210,6 @@ See also, filed under another capability:
 - Must: No transcript the editor relies on comes from Resolve's transcription; any Resolve transcript brought in is checked for holes against an independent one.
 - Kind: given
 
-### CFI-041: Resolve transcribes a multicam to the end only from a 24-bit recorder track.
-- Why: A 16-minute multicam stopped at 13 minutes and another left a 270 s hole; with a 24-bit recorder render active on track 1, both came back whole, 476 words more.
-- Must: When Resolve must transcribe a multicam, it does so against a full 24-bit recorder render, and the result is checked for holes.
-- Kind: given
-
-### CFI-042: Resolve's transcription language is one project-wide setting, and redoing returns the cache.
-- Why: There is no per-clip language (46 of 84 English clips came out as fluent nonsense Mandarin), and re-transcribing returns the cached result unless it is cleared first.
-- Must: Anything asking Resolve to transcribe sets each clip's real language, clears the earlier result first, and restores the project setting afterwards.
-- Kind: given
-
 ### CFI-043: "(Speaking In Foreign Language)" in a Resolve transcript means the wrong language.
 - Why: Mandarin transcribed as English gave 26 minutes of placeholders, 334 words, against 3,661 in Mandarin; "(Blank Audio)", "(Music Playing)" and one token repeating for minutes mean no speech.
 - Must: A placeholder-filled transcript is treated as wrong-language and redone, and no cut is placed in a placeholder or repeated-token span.
@@ -238,11 +228,6 @@ See also, filed under another capability:
 ### CFI-046: Resolve's transcription sometimes crushes a sentence into one millisecond.
 - Why: Two of ten clips had 1 ms cues carrying full sentences, cues starting before the last ended, and rates up to 46,000 characters per second; re-transcribing did not fix one.
 - Must: Any transcript brought in is swept for tiny cues with real text, backwards starts and absurd rates, and those spots are flagged before a cut uses them.
-- Kind: given
-
-### CFI-047: Resolve refuses to transcribe after a render until the Edit page is opened.
-- Why: After a Deliver-page render every clip refused transcription; sharing the GPU with another transcriber dropped Resolve to real time and stalled it 20 minutes.
-- Must: Any Resolve transcription starts from the Edit page and never runs beside another GPU transcription.
 - Kind: given
 
 ### CFI-048: Spans timed from Resolve's subtitle cues run up to six seconds long.

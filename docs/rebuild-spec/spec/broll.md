@@ -870,4 +870,3 @@ An update of the product never switches the archive's search off: search keeps a
 #### Lessons
 
 - Met: BRO-136.
-- Tied to an arrangement: BRO-137 (the promise is in "Search never stops because of an update").

@@ -522,7 +522,7 @@ read the current code.
 | Step | What | State |
 |---|---|---|
 | 1 | **Finish the inventory**: a list of everything the software does, read from the code alone, in `docs/feature-inventory/`. | **40 sections written 2026-11-12**, the Footage Sorter (35 to 38) and the engine behind Timeline Cards (39, 40) included. **Sections 41 to 43 added the same day**, when the owner brought the pipeline before the editor, and the planning step, into the rebuild; section 44 (Story Deck) is a partial record only, because he cut Story Deck. **Complete at 43.** Two top-ups owed before it is used: sections 06 and 10 (ten companion commits about camera cards landed after they were read), and section 36's audio sync (read while another session was still building it). |
-| 2 | **The knowledge base**: everything real use taught, gathered from every place it was written down (the owner's own messages, the bug ledger, the gotchas, the hunts, the memory notes, the commits), one entry per lesson, each ending in a rule the rebuild can be tested against. In `docs/rebuild-spec/knowledge-base/`. | **Written 2026-11-13; the owner's part is open.** 7,855 register items, read in 59 slices into 4,442 lessons, merged per capability, repeats across capabilities folded: **2,230 lessons cross, in 18 files** (`docs/rebuild-spec/knowledge-base/<capability>.md`), and **209 sealed tool notes** wait in `docs/rebuild-spec/sealed/`. Every count closes (`check_parts.py`, `check_merge.py`, `check_cross.py`, `assemble_kb.py`, all `OK`). Still owed: the owner's answers to `knowledge-base/_owner/QUESTIONS.md` (lessons still open, outcomes not found, fixes never shipped, disagreements), his test of twenty remembered problems, razer's history, and the top-up before hand-over. Method and state: `docs/rebuild-spec/knowledge-base/README.md`. |
+| 2 | **The knowledge base**: everything real use taught, gathered from every place it was written down (the owner's own messages, the bug ledger, the gotchas, the hunts, the memory notes, the commits), one entry per lesson, each ending in a rule the rebuild can be tested against. In `docs/rebuild-spec/knowledge-base/`. | **Written 2026-11-13; the owner's part is open.** 7,855 register items, read in 59 slices into 4,442 lessons, merged per capability, repeats across capabilities folded: **2,230 lessons crossed, in 18 files** (`docs/rebuild-spec/knowledge-base/<capability>.md`), and **209 sealed tool notes** waited in `docs/rebuild-spec/sealed/`. **Since 2026-11-24: 2,175 cross and 223 are sealed**, after the lessons the owner's answers overruled and those tied to the present arrangement were taken out (step 3, "After the writers"). Every count closes (`check_parts.py`, `check_merge.py`, `check_cross.py`, `assemble_kb.py`, all `OK`). Still owed: the owner's answers to `knowledge-base/_owner/QUESTIONS.md` (lessons still open, outcomes not found, fixes never shipped, disagreements), his test of twenty remembered problems, razer's history, and the top-up before hand-over. Method and state: `docs/rebuild-spec/knowledge-base/README.md`. |
 | 3 | **Rewrite the inventory as one specification organised by what people do** (sync a project, make proxies, find b-roll, cut in Timeline Cards, and so on). No source-file tags, no route or config-key names, each capability described once, each capability linked to the knowledge-base entries that apply to it. | **Started 2026-11-13**, after the owner answered page 1 of the decision list. Method under "Step 3 as it is being done". **Extracts complete 2026-11-24: 47 of 47, 2,925 items, 431 readers' questions, 320 unsettled points** (`python docs/rebuild-spec/tools/check_extract.py` prints `OK`). **Writers finished 2026-11-24: 27 of 27 pieces written and passing** (`python docs/rebuild-spec/tools/check_spec.py` prints `OK`): 2,134 behaviours, 303 settings, 354 questions for the owner, 456 passages marked pending, 20 points still unsettled. What is left of step 3 is under "After the writers". |
 | 4 | **A decision list for the owner**: every overlap in what a person can do, every several-ways-in, every dormant or dead feature, each as a keep / cut / merge question with a recommendation. Only questions about WHAT the product does; never an engineering question. A question he has already answered in a past session is shown with his answer, not asked cold. The list itself stays behind; only his answers, restated as what the product does, reach the specification. | Page 1 (what can be switched on and off) asked and answered 2026-11-13: every recommendation accepted. Page 2 (seven places where he ruled two ways) asked 2026-11-13, **not yet answered**. **ALL ANSWERED 2026-11-24** (page 2 one by one; page 3 and most of page 4 one by one; then "accept all the recommendations"; page 31 one by one; each page records it, and the answers are written into all 27 pieces, which now carry 11 marks: the speed measurements, four things to try on a real Resolve or Synology, nothing else). Pages 3 to 31 as written: the 354 questions from the writers, one page per piece, and page 30, written by hand (what only he can answer), in `docs/rebuild-spec/decisions/` (index in `docs/rebuild-spec/DECISIONS.md`; made by `tools/build_decisions.py`, which never writes over a page that holds answers). |
 | 5 | **Three companions**: (a) the givens the rebuild must live with, taken from the knowledge base; (b) what information must still be there afterwards; (c) the look book: screenshots of every screen plus the look written as plain values. Plus the two sealed drawers: notes per chosen tool, and the old data's real formats. | Not started. |
@@ -1179,10 +1179,24 @@ see one capability, with a script that proves nothing was skipped.
      are for the owner (decision page 30) or need a try against a real
      Resolve or the Synology (listed at the foot of page 30). Each keeps
      its Pending mark until answered.
-   - **The 38 lessons tied to an arrangement** (listed by the check): they
-     only make sense if the product is built as the present one is, and
-     must come out of the knowledge base that crosses, into the trace. Owed.
-     No `ruling` is among them by rule; check that before moving any.
+   - **The 38 lessons tied to an arrangement, and the 20 the owner's
+     answers overruled: done 2026-11-24.** Each was read against the text
+     that is said to hold its promise. 55 are out of what crosses, listed
+     with a reason each in `knowledge-base/_cross/TAKEN_OUT.txt`, which
+     `assemble_kb.py` applies: 41 withdrawn to the trace
+     (`knowledge-base/_trace/taken_out.tsv`, full text and sources kept) and
+     14 moved to the sealed drawer, because they are true facts about
+     Resolve, Windows, macOS or the browser whose rule only applies under a
+     design choice (two new drawer files: Resolve's own transcription, and
+     editing an existing Resolve timeline by script). No ruling went except
+     by the owner's later word; the script refuses otherwise. Three the
+     writers had marked were kept on a second reading (how retries grow,
+     the check for another program driving Resolve, what a look over the
+     footage costs across the network) and are listed as met. The pieces no
+     longer name any lesson that does not cross (`check_spec.py` fails if
+     one does), and `check_seams.py` fails if a heading said to hold a
+     promise is later renamed. What crosses now: **2,175 lessons; 223
+     sealed notes in 59 files.**
    - **The joins.** 471 places where one piece leans on another. Known
      disagreement: accounts says signing in is all it takes to join a
      computer and no key is ever approved or pasted, while the server
@@ -1261,7 +1275,7 @@ Paste this into a new Claude Code session opened in
 > Read `docs/REBUILD_PLAN.md`, `docs/feature-inventory/README.md` and
 > `docs/rebuild-spec/knowledge-base/README.md`, then carry on with the plan.
 > Step 1, the inventory, is complete at 43 sections. Step 2, the knowledge
-> base, is written (2,230 lessons in 18 capability files, 209 sealed tool
+> base, is written (2,175 lessons in 18 capability files, 223 sealed tool
 > notes); `python docs/rebuild-spec/tools/assemble_kb.py --check` must print
 > OK. What is open in step 2 is mine to answer: bring me
 > `docs/rebuild-spec/knowledge-base/_owner/QUESTIONS.md` a page at a time,

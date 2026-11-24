@@ -15,12 +15,23 @@ they belong to. **What crosses: 2,230 lessons in 18 files** (445 facts about
 givens, 583 rulings of the owner, 1,202 situations to survive). **Sealed:
 209 notes in 57 tool files.**
 
+**Since 2026-11-24: 2,175 lessons cross and 223 notes are sealed, in 59
+files.** After the specification was written and the owner had answered
+every decision page, 55 finished lessons were taken out of what crosses: 20
+his answers overruled, 35 that only make sense for the present build's
+arrangement (the promise a person needs is a behaviour of the
+specification). 41 went to the trace and 14 to the sealed drawer. They are
+listed, with the reason for each, in `_cross/TAKEN_OUT.txt`, which
+`../tools/assemble_kb.py` applies; their full text and sources are kept in
+`_trace/taken_out.tsv`. To take another lesson out, or put one back, edit
+that file and run the script: never edit a merged file or a finished one.
+
 | Where | What | Crosses? |
 |---|---|---|
 | `<capability>.md` in this folder (18 files) | The finished lessons: what a person saw, why, what the product must do, the kind | **Yes.** This is the knowledge base the rebuild reads. |
 | `../sealed/` | Notes about tools and techniques the old build chose, one file per tool | Not until the rebuild's own design names the tool |
-| `_owner/QUESTIONS.md` | 124 lessons still open, 154 with no outcome found, 109 fixed but never shipped, 19 questions, 6 conflicts | No. For the owner. |
-| `_trace/` | Finished id to merged ids to readers' entries to register ids; what was removed and why | No |
+| `_owner/QUESTIONS.md` | 123 lessons still open, 150 with no outcome found, 108 fixed but never shipped, 8 questions, no conflicts (2026-11-24) | No. For the owner. |
+| `_trace/` | Finished id to merged ids to readers' entries to register ids; what was removed and why; what was taken out afterwards | No |
 | `_parts/`, `_merged/`, `_cross/`, this README | The working files and the briefs | No |
 
 Still owed: the owner's answers to the questions; his test of twenty

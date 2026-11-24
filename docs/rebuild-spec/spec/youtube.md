@@ -484,7 +484,6 @@ Stopping ends the download at once, including any joining or conversion under wa
 #### Lessons
 
 - Met: YTD-052, YTD-053, YTD-055, YTD-056, YTD-057, YTD-058, YTD-059, YTD-060, YTD-062.
-- Tied to an arrangement: YTD-054, YTD-061 (the promise is in "A download runs wherever YouTube will serve it" and "An editor's computer takes a download only when it can finish it there").
 
 ## One job, one computer
 
@@ -511,7 +510,6 @@ When an editor's computer finishes a job with failures, every clip that failed t
 #### Lessons
 
 - Met: YTD-063, YTD-065, YTD-066.
-- Tied to an arrangement: YTD-064 (the promise is in "One job is downloaded by one computer at a time, exactly as the job says").
 
 ## Choosing the destination and checking space
 
@@ -932,4 +930,3 @@ A clip whose address is not a web address on YouTube (youtube.com, music.youtube
 #### Lessons
 
 - Met: YTD-103, YTD-104.
-- Not yet met by any behaviour above: YTD-105 (the terms are accepted on the page, not in the app first: the owner's answer of 2026-11-24).

@@ -1,6 +1,6 @@
 # The dashboard: what real use taught
 
-139 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+138 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## Overview, menus and finding things
 
@@ -387,11 +387,6 @@ See also, filed under another capability:
 ### DSH-075: One bad field got a computer's whole report refused, cutting it off.
 - Why: A number where text was expected, over-long error text, over 64 projects or over 8 MB refused every report, and the reply is the computer's only channel for stops and updates.
 - Must: A report is never refused whole: a wrong, unknown or oversized part is trimmed or dropped and named, the rest kept, its commands delivered, the computer still listed.
-- Kind: situation
-
-### DSH-076: Computers re-sent unchanged file lists every minute.
-- Why: Each computer re-sent thousands of file names every 60 seconds though they changed every 2 to 5 minutes, and the server rewrote every row.
-- Must: Large file lists are sent and stored only when they change, with an occasional full resend so the server converges after a restart.
 - Kind: situation
 
 ### DSH-077: A momentary empty listing made the server treat projects as deleted.

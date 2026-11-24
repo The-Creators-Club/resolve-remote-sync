@@ -282,7 +282,6 @@ A Resolve transcription or subtitle export the studio already holds is used only
 #### Lessons
 
 - Met: CFI-040, CFI-043, CFI-044, CFI-045, CFI-046, CFI-048.
-- Tied to an arrangement: CFI-041, CFI-042, CFI-047 (the promise is in "A transcription made in the editing program is never the transcript").
 
 ## Speech-to-text: rulings
 

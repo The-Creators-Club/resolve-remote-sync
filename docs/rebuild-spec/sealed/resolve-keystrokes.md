@@ -1,6 +1,12 @@
 # Sealed notes: resolve-keystrokes
 
-SEALED. Not part of the pack. Released to the rebuild only after its own committed design names this tool. 4 notes.
+SEALED. Not part of the pack. Released to the rebuild only after its own committed design names this tool. 5 notes.
+
+### CRX-021: Resolve's select-at-playhead and split act on every track with auto-select on.
+- Why: A delete aimed at V1 also took a V2 overlay or another interviewee's audio clip, and with A1 off a split cut picture but not sound.
+- Must: Deleting a card removes only that card's picture and sound; any change on another track is undone and reported.
+- Tool: Resolve's select-at-playhead and split commands, driven by keystrokes
+- Where it bit: Timeline Cards: the hand-over to Resolve, and exports
 
 ### CRX-S09: Keystroke edits into Resolve work only on an unlocked desktop with Resolve open.
 - Why: A locked or sleeping computer cannot take key presses, so the page must say Resolve is away rather than pretend.

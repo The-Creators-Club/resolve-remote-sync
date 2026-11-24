@@ -316,7 +316,6 @@ Anything the board or the assistant does that takes more than a second (a sort, 
 #### Lessons
 
 - Met: BRD-023, BRD-024, BRD-025, BRD-026, BRD-027, BRD-029, BRD-030, BRD-031, BRD-032, BRD-033, BRD-034, BRD-036.
-- Not yet met by any behaviour above: BRD-028 (the first sort runs before the owner picks themes: the owner's answer of 2026-11-24).
 
 ## The owner's editorial rules
 

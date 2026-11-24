@@ -1,6 +1,6 @@
 # Resolve on the editor's computer: what real use taught
 
-152 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+150 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## Multicams, frame rates and timelines
 
@@ -408,16 +408,6 @@ See also, filed under another capability:
 ### RSV-027: A check for a competing Resolve client mistook unrelated programs and stayed refused.
 - Why: It matched any command line containing certain words, including an operator's shell, and was run again only at the next app start.
 - Must: The check identifies only a real competing Resolve client, names it, and re-checks by itself without an app restart.
-- Kind: situation
-
-### RSV-028: A failed start left extra Resolve workers running, one more every minute.
-- Why: A start that failed after its Resolve worker began left it running, each retry added another, and a restarted stuck worker later ran beside its replacement, both changing the project.
-- Must: A failed start stops what it began, retries stop after five failures and say so, a stuck worker is reported rather than duplicated, and one computer never runs two.
-- Kind: situation
-
-### RSV-029: A dead background helper kept reporting itself as running.
-- Why: The restart check counted helpers started rather than alive, so a dead one was never restarted and the editor's phone page stayed dead.
-- Must: A helper whose work has stopped is restarted within a minute, judged by whether it is actually alive.
 - Kind: situation
 
 ### RSV-030: A scheduled per-project Resolve export must wait for Resolve to finish launching.

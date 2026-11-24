@@ -325,7 +325,6 @@ About 3 seconds after starting, the app checks whether macOS really placed its m
 #### Lessons
 
 - Met: APP-045, APP-046, APP-047, APP-048, APP-049, APP-050, APP-051, APP-054, APP-055, APP-056, APP-057, APP-058, APP-059, APP-060, APP-061, APP-062, APP-063, APP-064, APP-065, APP-066.
-- Tied to an arrangement: APP-052, APP-053 (the promise is in "The app keeps its own work going when part of it stops" and "Everything set-up fetches is checked before it is used").
 
 ## The tray or menu-bar icon and its menu
 
@@ -433,7 +432,6 @@ While the camera cards part is on and field backup is on for this computer, "Fie
 #### Lessons
 
 - Met: APP-070, APP-071, APP-072, APP-073, APP-074, APP-075, APP-077, APP-078, APP-079, APP-080, APP-081, APP-082, APP-083, APP-084, APP-085, APP-086.
-- Tied to an arrangement: APP-076 (the promise is in "Clicking the icon opens the menu at once, and it never shifts or freezes while open").
 
 ## Windows, dialogs and notifications
 
@@ -828,8 +826,7 @@ When getting what the app needs for video and audio on a computer has failed 2 o
 
 #### Lessons
 
-- Met: APP-133, APP-134, APP-136, APP-138, APP-139, APP-140, APP-141, APP-142, APP-144, APP-145, RSV-150, RSV-151.
-- Tied to an arrangement: APP-135, APP-137, APP-143, APP-146 (the promise is in "The app keeps a log and its other records within fixed limits" and "The app keeps its own work going when part of it stops").
+- Met: APP-133, APP-134, APP-136, APP-138, APP-139, APP-140, APP-141, APP-142, APP-143, APP-144, APP-145, RSV-150, RSV-151.
 
 ## Uninstalling
 

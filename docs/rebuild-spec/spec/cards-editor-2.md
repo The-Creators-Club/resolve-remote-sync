@@ -458,7 +458,7 @@ A UTF-8 Markdown file at `<Episode>/Script Docs/Cuts/<name>.cut.md`, meant to be
 #### Lessons
 
 - Met: CE1-062, CE3-021, CE3-023, CE3-031, CE3-033, CE3-034, CE1-063, CE1-064, CE1-065, CE1-066, CE3-022, CE3-024, CE3-025, CE3-026, CE3-027, CE3-029, CE3-035, CE3-036.
-- Not yet met by any behaviour above: CE3-032 (the shelf staying out of the editing program is written here; switching panel tabs with Alt and a digit belongs with the page's panels in part 5), CE1-067 (staged edits waiting for the editing program belong with the hand-over to Resolve), CE3-028 (the same: staged edits and markers waiting for the editing program), CE3-030 (a highlighted stretch of transcript becoming a card is written with the transcript panel in part 3).
+- Not yet met by any behaviour above: CE3-032 (the shelf staying out of the editing program is written here; switching panel tabs with Alt and a digit belongs with the page's panels in part 5), CE3-030 (a highlighted stretch of transcript becoming a card is written with the transcript panel in part 3).
 
 ## Notes and the staged shelf
 

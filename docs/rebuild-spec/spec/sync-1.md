@@ -374,7 +374,6 @@ Its status adds "Uploads only. Proxies do not come down for this project." while
 #### Lessons
 
 - Met: SYN-028.
-- Not yet met by any behaviour above: SYN-029 (the owner's later answer is that the empty folders do come down).
 
 ## Deletions and removing a project
 

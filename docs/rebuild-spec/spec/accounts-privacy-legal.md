@@ -119,8 +119,6 @@ A person may use their own sign-in name in any capitals. Two people can never cl
 #### Lessons
 
 - Met: ACC-001, ACC-002, ACC-004, ACC-005, ACC-007, ACC-008, ACC-009.
-- Not yet met by any behaviour above: ACC-003 (the admins named at install keep a password door under single sign-on: the owner's answer of 2026-11-24).
-- Tied to an arrangement: ACC-006 (the promise is in "An admin adds a person in one step").
 
 ## How a computer proves who it belongs to
 

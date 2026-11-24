@@ -67,4 +67,21 @@ One thing that can be done from several places, the same job existing twice, thi
 
 ## Your answers
 
-Not yet answered.
+ANSWERED 2026-11-24, asked one by one.
+
+- 3.1 to 3.6: the recommendation each time. Start-up findings go on the
+  problems list; one "Are you sure?" dialog everywhere; the installed
+  Timeline Cards app carries the product's mark; a site may connect several
+  kinds of assistant, with a pin; gear naming follows the site's assistant
+  choice and its off switch; one daily budget in money, with the expected
+  cost shown before each task.
+- 3.9: **against the recommendation.** The subscription way of running the
+  assistant STAYS in the product, off by default on every new site. (His
+  own studio uses it.) This is later than, and overrules, the earlier
+  ruling that a customer's build never offers it.
+- 3.10: follows from 3.9 as recommended: it is switched on in one place
+  only, by accepting the notice in the set-up.
+- 3.7 and 3.8 (the builders' tools go; one logo for the whole studio): put
+  to him as a tick-what-you-disagree-with list, which came back with
+  nothing ticked. Taken as the recommendation; confirmed with him in the
+  next round.

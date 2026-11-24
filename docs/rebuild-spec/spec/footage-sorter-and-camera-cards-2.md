@@ -248,7 +248,7 @@ Any signed-in person can audit the destination tree: it is read in the backgroun
 
 ### Moves the product makes are followed in the record at once
 
-Every file the product moves is followed in the record the moment it moves: the clip gains its new place, keeping whether its copy was verified, and its old place is marked moved, so no scan ever asks "where did these go?" about it. A moved folder takes every copy beneath it. Only the main file's move changes where a clip is recorded; its proxies and metadata files are not separate places. A clip's sorting counts as done only when all its planned files moved: a clip whose main file moved but whose other files did not is held back, across restarts too, so its leftover files go into the next move plan. After a move that finished cleanly the NAS is walked again to catch anything else. A failure in this follow-up never fails the move.
+Every file the product moves is followed in the record the moment it moves: the clip gains its new place, keeping whether its copy was verified, and its old place is marked moved, so no scan ever asks "where did these go?" about it. A moved folder takes every copy beneath it. Only the main file's move changes where a clip is recorded; its proxies and metadata files are not separate places. A clip's sorting counts as done only when all its planned files moved: a clip whose main file moved but whose other files did not is held back, across restarts too, so its leftover files go with its next move. After a move that finished cleanly the NAS is walked again to catch anything else. A failure in this follow-up never fails the move.
 
 ### The activity panel shows every scan and copy running and waiting
 
@@ -429,7 +429,7 @@ With clips selected and no modifier key, ] moves each selected clip to the next 
 
 ### A person assigns clips to a folder, or takes them back
 
-Any number of clips can be assigned to one folder of the destination tree, in one of two ways: **the studio's convention** (time folders and the studio's layout inside the folder, see "Footage is filed in day-and-camera time folders" and "A person plans a move and sees exactly what it will do") or **keep the card's layout** (each file keeps its path below its source folder, and no time folders). Which one new assignments use is a choice on the page ("Folder structure used for new assignments": Convention, the default, or Preserve), stored with every assignment made after it is changed. Assigning again replaces the earlier choice; unassigning returns clips to unsorted.
+Any number of clips can be assigned to one folder of the destination tree, in one of two ways: **the studio's convention** (time folders and the studio's layout inside the folder, see "Footage is filed in day-and-camera time folders" and "Where each file of a sorted clip goes") or **keep the card's layout** (each file keeps its path below its source folder, and no time folders). Which one new assignments use is a choice on the page ("Folder structure used for new assignments": Convention, the default, or Preserve), stored with every assignment made after it is changed. Assigning again replaces the earlier choice; unassigning returns clips to unsorted.
 
 Each change shows at once, with the count and the folders and time folders it produces: "<n> clip(s) → <dest>". If the server refuses it, it is put back on screen and "Assign failed: <reason>" or "Unassign failed: <reason>" is shown. With no clips chosen the person is told clips are required. Unassign (also Delete or Backspace) removes the selected clips' assignments; a clip that is in place has nothing to remove. The answer refreshes the suggestions and the planned time folders.
 
@@ -475,7 +475,7 @@ Under the folder it is assigned to, each clip is filed in a time folder per day 
 
 An existing time folder for the same day and camera that already holds any of the group's clips (by the record, or by name and recorded size among its own files) is reused under its existing name and never renamed, even when the new range is wider; the person is warned "range widened: <fresh name> reused <existing name>". A folder with exactly the new name that holds none of the group's clips belongs to another shoot, so the new one becomes "<name> (2)", "(3)" and so on, in the order the folders are named. Every existing folder name, "(2)" suffixes included, is kept exactly.
 
-Before anything moves, the person sees, under each open destination folder, each time folder its assignments imply, with "<n> clips · <size>", "(existing, will merge)" when it exists already, and on hovering its path, "merges into <folder>", its camera and day, and "not created yet - the copy makes it". Clicking one selects its clips ("<n> clip(s) heading for <name>"). Nothing can be dropped on one. What is on disk is read again at least every 30 seconds, and at once after a change to assignments, a move plan, a card copy, a scan or an audit.
+Before anything moves, the person sees, under each open destination folder, each time folder its assignments imply, with "<n> clips · <size>", "(existing, will merge)" when it exists already, and on hovering its path, "merges into <folder>", its camera and day, and "not created yet - the copy makes it". Clicking one selects its clips ("<n> clip(s) heading for <name>"). Nothing can be dropped on one. What is on disk is read again at least every 30 seconds, and at once after a change to assignments, a move, a card copy, a scan or an audit.
 
 - On its own: each time folder's name and range, from the clips' recording times and camera labels, reusing an existing folder that holds any of them.
 - By hand: a person renames a time folder in the plan like any other folder, or assigns clips with the card's layout kept to have none; a name set by hand is never changed by a later pass.
@@ -538,65 +538,72 @@ When footage is put onto client drives, each shoot day is given to one client dr
 
 ## Moving footage on the NAS
 
-### Looking at footage never changes it, and only an admin's approved move moves it
+### Looking at footage never changes it, and only the Sorter's moves of sorted clips move it
 
-Looking through folders, drives and cards only reads: it lists folders, reads file sizes and dates, reads the start of camera metadata files and sound files' headers, and may ask a video file for its recording time. It never writes, renames or deletes anything where it looks. Sorting clips into folders only records an intention. No file in a source folder or in the destination tree is moved, renamed, overwritten or deleted by the Sorter on its own. The only things it makes there are empty folders that a card copy is about to land in, and the folders an approved move creates. A copy from a card only adds files (see part 1, "Copying a card").
+Looking through folders, drives and cards only reads: it lists folders, reads file sizes and dates, reads the start of camera metadata files and sound files' headers, and may ask a video file for its recording time. It never writes, renames or deletes anything where it looks. A copy from a card only adds files (see part 1, "Copying a card").
 
-The only thing that moves footage is a move an admin approves and starts. The Sorter always knows who is signed in and whether they are an admin, from their sign-in, and nobody can claim to be someone else. Every move is recorded under the name of the admin who started it, and every change made in the Sorter carries the dashboard's protection against another site acting on a signed-in person's behalf.
+The only thing that moves footage is the Sorter moving a clip that has been sorted into the folder it was sorted to (see "Sorted footage moves into its folder on its own"), or a person moving it somewhere else or putting it back. A suggestion nobody has accepted, and a sound match left waiting for a person, sort nothing and so move nothing. The Sorter always knows who is signed in from their sign-in, and nobody can claim to be someone else. Every move is recorded with the person whose sorting or hand move led to it, and every change made in the Sorter carries the dashboard's protection against another site acting on a signed-in person's behalf.
 
-### A person plans a move and sees exactly what it will do
+### Where each file of a sorted clip goes
 
-Move plans the moves for the selected clips that have an assignment ("None of the selected clips has a destination" if none), or, with nothing selected, for every assigned clip not yet in place, plus the leftover files of half-moved clips. A move can be planned for a single clip. The plan covers clips assigned a valid folder whose clips are in the last scan; a clip that is only on a camera card in a reader is left to the card copy.
-
-Where each file goes:
+When a clip has been sorted, its files go to its folder like this:
 
 - an image sequence moves as one whole folder;
 - with the card's layout kept, each file keeps its path below its source folder;
 - by the studio's convention (the default), main files go straight into the folder (or its time folder), a proxy from a folder named Proxy or Proxies or a Sony card's proxy folder goes into a "Proxy" folder inside it, keeping any deeper path, and the small file a Blackmagic camera writes beside each clip, and a grade file beside its original, stay beside their clip (Resolve reads the grade there);
 - with time folders on, into the time folder under the assigned folder.
 
-Every planned folder is created, even with nothing moving into it, so an episode's skeleton is made empty; held folders wait until a clip lands in them. A card's paths reported by a Windows computer are understood by Windows rules wherever they are handled.
+Every planned folder is created, even with nothing moving into it, so an episode's skeleton is made empty; held folders wait until a clip lands in them. The leftover files of a half-moved clip go with its next move. A clip that is only on a camera card in a reader is left to the card copy. A card's paths reported by a Windows computer are understood by Windows rules wherever they are handled.
 
-Before the plan is shown, moves whose destination already holds the identical file (same size, and for files of 64 MB or less the same content) are left out as "already there", and of two identical files headed for the same place (the same card staged twice) only one is kept. Anything not identical (a different file already at the destination, or two different files for one name) is a **collision**; an unreadable file counts as not identical. A collision is never resolved on its own: a person decides.
+A file whose destination already holds the identical file (same size, and for files of 64 MB or less the same content) is not moved and is listed as "already there"; of two identical files headed for the same place (the same card staged twice) only one moves, and the other is listed. Anything not identical (a different file already at the destination, or two different files for one name) is a **collision**; an unreadable file counts as not identical. A collision is never resolved on its own.
 
-The move dialog ("Move <n> selected clip(s)" or "Move every assigned clip") shows the entries to move, folders to create, total size and destination root, the time folders (folder, name, camera, day, clips, size, whether it exists, which existing folder it merges into, warnings), and when present:
+Under each destination folder a person can see what is headed for it before it arrives: assigned clips not yet there are drawn dashed and dimmed, and the time folders they will make are shown (see "Footage is filed in day-and-camera time folders"). There is no deliberate wait before a move: a sorted clip moves as soon as its checks pass, so what a person sees as "about to move" is whatever is still waiting for its turn, for its checks, or for a safe copy.
 
-- "⚠ <n> assigned clip(s) are no longer in the scan and were LEFT OUT of the plan. Rescan, then re-assign them." (up to 200 "name → dest" lines);
-- "ℹ <n> already at the destination, identical · <n> staged twice - left out of the plan, nothing to move. The source copies are redundant; delete them when you are ready." (up to 200 "source = destination" lines each);
-- "⚠ <n> clip(s) held back: a file of each already exists at its destination. They stay whole where they are until you decide." (up to 500), each clip listed with its clashing files.
-
-Planning is disabled while a plan is being made; a failure shows "Could not plan the move: <reason>". Plans are kept, newest first, across restarts. Refused when no destination tree is set up.
-
-- Who: anyone signed in plans and sees the plan.
 - Setting: Layout inside a destination folder. Does: whether a clip's files are laid out by the studio's convention or keep their layout from the card. Default: the studio's convention. Who: an admin. Applies to: the site. Search words: layout, proxy folder, convention, keep layout.
 
-### The rehearsal checks every file before anything moves
+### Every move is checked before it starts
 
-Every plan is rehearsed as soon as it is made, and the rehearsal changes nothing. It checks every planned move: both paths are complete and clean; source and destination differ; a folder is not moved into itself; every destination is inside the destination tree; no two moves share a source or a destination; the source exists with exactly the planned size (a folder's size ignores system housekeeping files); the destination does not exist; and the destination's parent is not a file. Paths may hold brackets, spaces, Chinese characters and be very long.
+Before any file of a sorted clip moves, the Sorter checks, on its own and without changing anything: both paths are complete and clean; source and destination differ; a folder is not moved into itself; every destination is inside the destination tree; no two moves share a source or a destination; the source exists with exactly the size the record holds (a folder's size ignores system housekeeping files); the destination does not exist; and the destination's parent is not a file. Paths may hold brackets, spaces, Chinese characters and be very long.
 
-It reports how many entries there are, how many are still to do, how many are already done or were recovered, the folders to create, the size, and its problems (up to 500 listed, with the total): "a file sits where a folder is planned"; "source missing" (or "recovered" when an interrupted earlier move clearly completed it); "expected a folder"; "source unreadable"; "size changed: <src> (<n> bytes, the plan says <m>)"; "destination occupied". A clip with any problem is held back whole and listed; it never moves part of itself. The dialog ends "✓ Dry run clean: every source is where the plan says, at the size it says, and no destination is taken." or "⚠ The dry run found <n> problem(s). These clips stay where they are until they are fixed." (up to 300 listed).
+A clip fails the check, and is held back whole, for any of: "a file sits where a folder is planned"; "source missing" (or "recovered" when an interrupted earlier move clearly completed it, which counts as done); "expected a folder"; "source unreadable"; "size changed: <src> (<n> bytes, the record says <m>)"; "destination occupied"; a collision; a proxy that would be left behind (see "Moves in the folders editors sync reach every editor's computer"); an assigned clip that is no longer in the scan ("no longer in the scan: rescan, then sort it again"); or a destination on a different disk ("on a different filesystem: refused, nothing is ever copied"). A move is always a rename on the same disk and never quietly becomes a copy. A clip is never moved in part.
 
-A move to a different disk is refused at the rehearsal: "on a different filesystem: refused, nothing is ever copied". A move is always a rename on the same disk and never quietly becomes a copy.
+### Sorted footage moves into its folder on its own
 
-### An admin approves the move and it is carried out
+As soon as a clip is sorted (assigned to a folder by a person, a suggestion accepted, a recording's place decided, or a destination folder renamed or moved with footage under it), the Sorter moves its files into that folder by itself. Nothing waits for an approval. Moves run one at a time, in the order clips were sorted; a clip sorted while a move is running waits its turn.
 
-The button reads "Move <size>". It is enabled only when the rehearsal is clean for at least one clip, there is something to move or create, and the person is an admin; anyone else is told "Moving footage needs a dashboard admin." Pressing it is the admin's approval of exactly that plan. When some clips are held back, it reads "Move <n> clean clip(s), <size> · <k> held back", and only the clean clips move.
+Every move keeps these promises:
 
-The move is refused, with nothing moved, when there is no passing rehearsal of this plan ("no passing dry-run of this plan: dry-run it first"), when the passing rehearsal is more than an hour old ("the passing dry-run is more than an hour old: dry-run it again"), when another move is running ("another move is running"; one at a time), or when the disk changed since the rehearsal ("the disk changed since the dry-run: nothing was moved").
+- **It never deletes, never copies over and never overwrites.** An existing file at a destination is never replaced, a source folder emptied by a move is left in place and listed, and nothing is ever removed.
+- **It is checked just before and just after each item.** Just before, the destination is still free and the source still there at its recorded size; just after, the destination exists with the right size and the source is gone.
+- **A clip that clashes is held back whole and shown to a person, while the clean clips move.** Every held-back clip is listed in "Held back" with each reason and its clashing files (up to 500 shown, with the total), and stays exactly where it is until a person decides: sorts it elsewhere, or clears the clash and presses Try again.
+- **Footage that is not yet safely copied does not move.** A clip moves only once the record holds a verified copy of it, other than the one being moved, that counts as a backup (on one of the studio's own drives or in the cloud backup). Until then it is held with "waiting for a safe copy", and moves by itself once one exists.
+- **Nothing moves while the NAS looks wrong.** No move starts while the NAS's footage tree cannot be reached or read, while its last walk was unfinished or treated as a bad scan, or while what is on disk differs from what the checks found ("the disk changed since it was checked: nothing was moved"). The Sorter shows "Moves paused: <reason>" and carries on by itself once the NAS looks right again.
+- **Every move is recorded and can be seen and undone by hand** (see "What was moved can be seen, moved elsewhere or put back").
 
-It creates every planned folder, then moves one item at a time, checking just before each that the destination is still free and the source still there, and just after that the destination exists with the right size. A clip is never split. A move never deletes, never copies footage, never overwrites, and never removes a source folder it emptied: those are reported and left in place.
+While a move runs, the activity panel and the Sorter show "Moving <n> clip(s) into <folder>", "<done> of <total> · <size>", updated about every second. When it ends: "✓ Moved <n> item(s), <size> · <n> source folder(s) now empty (left in place). Verified at the destination.", with moved, skipped, recovered, size and folders created, and the NAS is walked again. Every count, list and the destination tree follow at once.
 
-While moving, the dialog shows a bar, "Moving…", and "<done> of <total> · <size>", updated about every second. When it is done: "✓ Moved <n> item(s), <size> · <n> source folder(s) now empty (left in place). Verified at the destination. A rescan is running." and "Moved <n> item(s)", with moved, skipped, recovered, size and folders created; everything on the page reloads. A plan with nothing left: "Nothing left to move - the plan is already complete."
+The first failure stops that run and undoes nothing. The failed clip is held back with which item failed and why, how many were completed and not attempted, and "Nothing was deleted or overwritten."; what had already moved stays where it was recorded as moved. The rest carry on by themselves once their checks pass again.
 
-The first failure stops the move and undoes nothing. The admin is told which item failed and why, how many were completed, skipped and not attempted, what is still to move, that what had already moved stays where it was recorded as moved, and "Nothing was deleted or overwritten. Fix the cause, run the dry run again, then move again: already-moved items are skipped." The move ends as done (checked), check failed, failed or refused.
+- On its own: which clips move and when, from their being sorted (by a person, by an accepted suggestion, or by a decided recording) and their passing every check.
+- On its own: where each file lands, from the clip's folder, its layout and its time folder.
+- By hand: a person sees every move and moves any clip somewhere else or puts it back (see "What was moved can be seen, moved elsewhere or put back"); a place set by hand is never changed by a later automatic pass.
+- Who: anyone signed in sees moves and held-back clips; the move itself needs nobody.
 
-- Who: an admin.
-- Ways in: the Move button in the Sorter.
-- Pending: footage-sorter-and-camera-cards-2-Q8
+### What was moved can be seen, moved elsewhere or put back
+
+"Moves" lists every move, newest first: when, the clip, from where, to where, why (whose sorting or hand move led to it), and its check result. A clip's details show its moves too. From either place a person can:
+
+- **Move it elsewhere**: sort it to another folder; it moves there on its own with every promise above.
+- **Put it back**: return it to where it was before that move, with the same checks; a clip put back is marked as placed by hand there and is never moved again on its own until a person sorts it again.
+- **Try again** on a held-back clip, once its reason is cleared.
+
+A place set by hand (a clip sorted, moved elsewhere or put back by a person, or moved by hand outside the product and adopted) is never changed by a later automatic pass.
+
+- Who: anyone signed in.
 
 ### An interrupted move is picked up where it stopped
 
-Every move is written down before and after each item, with who started it, so a power cut, a crash or a restart mid-move loses nothing. When the product comes back it rescans, shows which files moved and which did not, and the move is never left showing as running. Running the rehearsal and the move again skips what already moved, and an item interrupted after its file arrived is recognised as done.
+Every move is written down before and after each item, so a power cut, a crash or a restart mid-move loses nothing. When the product comes back it rescans, shows which files moved and which did not, and a move is never left showing as running. The move then carries on by itself, skipping what already moved, and an item interrupted after its file arrived is recognised as done.
 
 ### Moves in the folders editors sync reach every editor's computer
 
@@ -628,7 +635,7 @@ The person sees one line, for example "3 re-keyed, 2 found in place, 1 moved by 
 
 ### Rescan reads every source and destination again
 
-Rescan (ignored and disabled while one runs) shows "Scanning… <n> clips", updated about every second, until it ends (the page stops watching after one hour). Then everything reloads: "Scan complete - <n> clips · <size>". If the scan found footage moved or renamed outside the Sorter and followed it: "Moved outside the app: <what>". A failure shows "Scan failed: <reason>". Moved clips show at their new place and can be planned again, and every count and the destination tree follow what is on disk.
+Rescan (ignored and disabled while one runs) shows "Scanning… <n> clips", updated about every second, until it ends (the page stops watching after one hour). Then everything reloads: "Scan complete - <n> clips · <size>". If the scan found footage moved or renamed outside the Sorter and followed it: "Moved outside the app: <what>". A failure shows "Scan failed: <reason>". Moved clips show at their new place and can be sorted again, and every count and the destination tree follow what is on disk.
 
 - Who: anyone signed in.
 
@@ -644,11 +651,11 @@ Many folders can be planned at once (duplicates differing only in letter case sk
 
 Rename: ✎ ("Rename <name>  (F2, or double-click the name)"), double-clicking the name, or F2 on the last-clicked folder turns the name into a box with the name selected; Enter or leaving saves, Escape cancels (Enter is not taken while a character is being composed). Move: dragging a folder onto another folder, or onto the root; not into itself, its own subfolder, or where it already is. Both work on real folders: on disk, planned, or with something assigned or bound to them.
 
-The folder's planned subfolders, held folders, assignments and event bindings follow it, and a filter on the folder follows it. Success: "Renamed to <name>  (<n> clip(s) followed it)" or "<name> → <target or destination root>  (<n> clip(s) and <n> subfolder(s) followed it)". When the old folder exists on disk and is empty, it stays: "The empty folder is still at the old place on disk - nothing was deleted. Remove it yourself if you want it gone: <path>". When the old folder holds footage on disk, nothing moves on disk: the files under it join the move plan for the new place, and move only when an admin approves that move.
+The folder's planned subfolders, held folders, assignments and event bindings follow it, and a filter on the folder follows it. Success: "Renamed to <name>  (<n> clip(s) followed it)" or "<name> → <target or destination root>  (<n> clip(s) and <n> subfolder(s) followed it)". When the old folder exists on disk and is empty, it stays: "The empty folder is still at the old place on disk - nothing was deleted. Remove it yourself if you want it gone: <path>". When the old folder holds footage on disk, its clips are sorted to the new place and move there on their own, with every promise of a move (see "Sorted footage moves into its folder on its own"); the old folder, once empty, is left in place.
 
 Refusals, in order: "that is not a usable folder name"; "a folder cannot be moved inside itself"; '"<from>" is not a folder this app can move.' (nothing refers to it and it is not on disk); '"<to>" already exists' (a planned folder of that name); '"<to>" already exists on disk and is not empty'. Moving a folder onto itself does nothing and says so. Any other failure shows its reason, or "Could not rename that folder" / "Could not move that folder".
 
-- Who: anyone signed in plans it; an admin approves any move on disk.
+- Who: anyone signed in.
 
 ### A folder is taken out of the plan and nothing on disk is deleted
 
@@ -775,9 +782,9 @@ The decide section has a folder box suggesting shoot folders as the person types
 
 ### Approved recordings are filed beside their video, and duplicates are set aside
 
-An approved recording is filed in the Audio folder inside its shoot's folder, or the folder the person named, through a move an admin approves like any other (see "An admin approves the move and it is carried out"). A loose duplicate is set aside in the duplicates folder, never deleted. Skipped: a recording already in that folder ("already there"), or one with an identical copy already at the destination. Held back: a recording whose shoot folder is itself still unsorted goes with its shoot ("the shoot is itself still unsorted; goes with it"); duplicates are never held. A different file with the same name at the destination is never overwritten: the recording is filed with "_1", "_2" and so on added to its name.
+An approved recording is filed in the Audio folder inside its shoot's folder, or the folder the person named, moving there on its own like any sorted clip, with every promise of a move (see "Sorted footage moves into its folder on its own"). A loose duplicate is set aside in the duplicates folder, never deleted. Skipped: a recording already in that folder ("already there"), or one with an identical copy already at the destination. Held back: a recording whose shoot folder is itself still unsorted goes with its shoot ("the shoot is itself still unsorted; goes with it"); duplicates are never held. A different file with the same name at the destination is never overwritten: the recording is filed with "_1", "_2" and so on added to its name.
 
-- Who: an admin approves the move.
+- Who: an admin decides a recording's place; the move then needs nobody.
 - Setting: Name of a shoot's sound folder. Does: the folder inside a shoot's folder that approved recordings are filed in. Default: "Audio". Who: an admin. Applies to: the site. Search words: audio folder, sound folder, recordings, filing.
 - Setting: Where duplicate recordings are set aside. Does: the folder loose duplicate recordings are moved into instead of being deleted. Default: a "Duplicates" folder in the NAS's staging folder. Who: an admin. Applies to: the site. Search words: duplicates, set aside, recordings, quarantine.
 
@@ -789,7 +796,7 @@ From the record of every copy, the Sorter lists the field recordings that exist 
 
 ### Loose video is placed into shoots by the same matching
 
-A video clip outside the destination tree, under a folder a person names, is placed the same way: filed camera clips elsewhere (never downloaded video) overlapping its time padded by 15 minutes are searched, 60 seconds from its middle against up to 12 of the longest with sound. A single match must reach a peak of 0.75 with a margin of 0.25 ("waveform"); otherwise, if exactly one folder overlaps in time, "time (one shoot overlaps)"; if several, "ambiguous by time". Counts per outcome and folder are shown, and each proposal waits for a person in the same review as sound recordings. Nothing moves until a person approves.
+A video clip outside the destination tree, under a folder a person names, is placed the same way: filed camera clips elsewhere (never downloaded video) overlapping its time padded by 15 minutes are searched, 60 seconds from its middle against up to 12 of the longest with sound. A single match must reach a peak of 0.75 with a margin of 0.25 ("waveform"); otherwise, if exactly one folder overlaps in time, "time (one shoot overlaps)"; if several, "ambiguous by time". Counts per outcome and folder are shown, and each proposal waits for a person in the same review as sound recordings. Nothing moves until a person accepts a proposal or sorts the clip.
 
 - On its own: a loose video clip's proposed shoot folder, from its sound and time.
 - By hand: a person assigns it to any folder, as any clip.

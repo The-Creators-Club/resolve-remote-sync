@@ -53,7 +53,7 @@ A tick, an untick, a change of mode or of order made on the dashboard reaches th
 
 A computer receives a project's files only when that project, or a project that includes a folder of it, is ticked for full sync on that very computer. These receive nothing of it:
 
-- a computer with an upload-only tick for the project;
+- a computer with an upload-only tick for the project (it gets only the project's empty folders, see "An upload-only tick sends every file up and brings down only the empty folders");
 - a wired computer, and every computer of a person whose computers are all wired;
 - every computer of a suspended editor;
 - any computer, for an archived project (an archived project's ticks count for nothing, and so do those of an archived project that includes a folder of another).
@@ -85,7 +85,7 @@ Refusals, each in these words:
 - an unknown computer, or an unknown or inactive project, is refused by name;
 - a path that is a full path or drive: "'<p>' is an absolute path: name the file inside the project instead"; an empty one: "a pick needs a path inside the project"; one too long to be a file in the project: "that path is too long to be a file in this project"; one with a bad folder name, refused by name;
 - inside a Proxy folder: "'<p>' is inside a Proxy folder: proxies already come down on their own"; the project's own mark: "the project marker is not footage";
-- additions (never removals) to a wired computer: "<computer> is wired to the server: it works directly off the NAS, so every original of <project> is already there and nothing needs to come down."; to a computer without the tick: "<project> is not ticked on <computer>, so nothing of it comes down there. Tick it for <computer> first, then choose its originals."; to an upload-only tick: "<project> is set to upload only on <computer>, so nothing comes down to it. Switch it to full sync on the dashboard first.";
+- additions (never removals) to a wired computer: "<computer> is wired to the server: it works directly off the NAS, so every original of <project> is already there and nothing needs to come down."; to a computer without the tick: "<project> is not ticked on <computer>, so nothing of it comes down there. Tick it for <computer> first, then choose its originals."; to an upload-only tick: "<project> is set to upload only on <computer>, so no originals come down to it. Switch it to full sync on the dashboard first.";
 - someone else's computer: "you can only choose originals for your own computers (admins excepted)"; nothing chosen: "choose a computer and a file or folder first".
 
 A computer that must be updated before it can bring originals down is listed but cannot be chosen: "<computer> must be updated before it brings originals down." Every change is recorded in the history with the count and up to 100 of the paths, under the editor's name even when their computer made it from inside Resolve. A refusal reaches the editor word for word, in Resolve too.
@@ -225,13 +225,15 @@ While accepting a new computer, an admin can also share one project with it by h
 
 ### An interrupted transfer carries on where it stopped
 
-A transfer cut off part-way, by a dropped or slow connection, sleep, a shutdown, quitting, signing out, an update, the editor's pause or any stop, carries on from where it stopped the next time it can, in either direction, so a large camera original half-sent from the field over a poor connection is never sent again from the beginning. Leftover pieces of an unfinished transfer are never seen by anyone as files on the server or on a computer.
+An upload cut off by quitting the app or by an update carries on where it left off (see "Quitting, signing out, updating or a stop ends transfers calmly"). A transfer cut off part-way in any other way, by a dropped or slow connection, sleep, a shutdown, signing out, the editor's pause or any stop, and a download cut off in any way, likewise carries on from where it stopped the next time it can, so a large camera original half-sent from the field over a poor connection is never sent again from the beginning. Leftover pieces of an unfinished transfer are never seen by anyone as files on the server or on a computer.
 
 - Pending: sync-1-Q1
 
 ### Quitting, signing out, updating or a stop ends transfers calmly
 
-Signing out, quitting the app, an update, a studio-wide stop or the editor's pause end every transfer in progress, including a large upload carrying on while another project has its turn. This is shown calmly, as stopped mid-transfer or stopped before it started, never as a failure. Once one of these begins nothing new starts, and no file is ever sent by two transfers at once: the one ended is finished with before anything takes its place.
+Signing out, quitting the app, an update, a studio-wide stop or the editor's pause end every transfer in progress, including a large upload carrying on while another project has its turn. Quitting stops an upload at once, and it carries on where it left off the next time the app runs. An update first waits for the file in flight to finish, up to a set limit, then stops it the same way, and it carries on where it left off once the updated app runs. This is shown calmly, as stopped mid-transfer or stopped before it started, never as a failure. Once one of these begins nothing new starts, and no file is ever sent by two transfers at once: the one ended is finished with before anything takes its place.
+
+- Pending: sync-1-U4
 
 ### Shutting down while files are moving is warned against
 
@@ -270,7 +272,7 @@ The app shows one line saying whether it is safe to close this computer: either 
 
 ### Each computer has its own sync plan
 
-Each computer has its own plan: the projects ticked for it, in order, each with its mode. A tick names the person, the computer, the project, its place in that computer's order, who made it and when, when it last changed, and its mode. There are two modes: full (originals go up, proxies and everything else come down) and upload only (every file goes up and nothing comes down). Any other mode is refused with "unknown sync mode". One person may have several computers with different plans, and a computer keeps one identity, and so one plan, across renames of the computer and clashes of its name on the network.
+Each computer has its own plan: the projects ticked for it, in order, each with its mode. A tick names the person, the computer, the project, its place in that computer's order, who made it and when, when it last changed, and its mode. There are two modes: full (originals go up, proxies and everything else come down) and upload only (every file goes up and only the project's empty folders come down). Any other mode is refused with "unknown sync mode". One person may have several computers with different plans, and a computer keeps one identity, and so one plan, across renames of the computer and clashes of its name on the network.
 
 A tick made for the person rather than one computer is a tick on each of their computers that is not wired. A person with no computer yet keeps it, and their first computer starts with it. Where a person's computers disagree about a project's mode, the project shows as mixed for the person.
 
@@ -392,18 +394,19 @@ A wired computer's finish page is headed "DONE: CONNECTED TO THE NAS" and says t
 
 ## Upload only
 
-### An upload-only tick sends every file up and brings nothing down
+### An upload-only tick sends every file up and brings down only the empty folders
 
-For a project ticked upload only on a computer, every file in its folder goes up to the server, not just video, and nothing at all comes down: no proxies, no project files, no originals (a pick of originals for it is refused), and it includes no folders of other projects. Nothing is created on the editor's computer for it, not even the server's folder layout. Left out of the upload: anything inside a Proxy folder, operating-system litter and hidden files, unfinished, temporary, lock and partial files, files half-way through a move, YouTube downloads still in progress, the product's own recovery folder, and the hidden bookkeeping other sync tools keep in a folder.
+For a project ticked upload only on a computer, every file in its folder goes up to the server, not just video. The only thing that comes down is the project's folder structure, empty: the editor sees the project's folders in their own copy of the tree, in the place their own originals go, so they can see where to put them. A folder made on the server later also arrives, empty. Nothing else comes down: no proxies, no project files, no originals (a pick of originals for it is refused), and it includes no folders of other projects. Left out of the upload: anything inside a Proxy folder, operating-system litter and hidden files, unfinished, temporary, lock and partial files, files half-way through a move, YouTube downloads still in progress, the product's own recovery folder, and the hidden bookkeeping other sync tools keep in a folder.
 
-Its status adds "Uploads only. Proxies do not come down for this project." while it is syncing or waiting, and it never reads as out of sync because nothing came down. Whether a file belongs to an upload-only project is decided ignoring letter case, slash direction and the two ways Windows and macOS spell accented letters; when the product cannot tell, it uploads camera video only.
+Its status adds "Uploads only. Proxies do not come down for this project." while it is syncing or waiting, and it never reads as out of sync because no files came down. Whether a file belongs to an upload-only project is decided ignoring letter case, slash direction and the two ways Windows and macOS spell accented letters; when the product cannot tell, it uploads camera video only.
 
 - Who: the editor for their own computers, or an admin.
 - Pending: sync-1-Q4
 
 #### Lessons
 
-- Met: SYN-028, SYN-029.
+- Met: SYN-028.
+- Not yet met by any behaviour above: SYN-029 (the owner's later answer is that the empty folders do come down).
 
 ## Deletions and removing a project
 
@@ -761,22 +764,24 @@ Every 5 seconds the product checks the drive holding the editor's copy of the tr
 
 - there;
 - disconnected: "the sync drive is disconnected";
-- mounted at the wrong place (macOS only): "the sync drive is mounted at the wrong place: eject it, delete the leftover empty folder, then plug it back in";
+- at a place the product cannot confirm (macOS only: something sits where the drive should be, or a drive appears under another name, and the product cannot tell whether it is the sync drive): "the sync drive is mounted at the wrong place: eject it, delete the leftover empty folder, then plug it back in";
 - not answering (plugged in, but its files have stopped answering): "the sync drive is not answering: reconnect it or restart the computer".
 
 These sentences are the same on the status line, in a notification, in the sync detail and on the dashboard. On the first change of an outage the editor gets one notification: "Sync paused: <Drive> is disconnected.", "Sync paused: <Drive> is mounted at the wrong place. See the CC Sync window for what to do." or "Sync paused: <Drive> is not answering: reconnect it or restart this computer." A change of kind within the same outage is announced in its own words. A check that itself fails changes nothing. While the app is quitting a change is not acted on.
 
+A sync drive that comes back under another name (on a Mac, for example "SSD 1" instead of "SSD") counts as there and syncing carries on, at its new name, whenever it is provably the same drive, whatever it is called; nothing is ever written into a leftover folder at the old name. It pauses only when the product cannot tell.
+
 The product never relies on being told of changes on the drive: it notices when such news stops (and tells the editor, "The sync drive isn't responding, so CC Sync can't notice new files on it at once. Disconnect and reconnect the drive, or restart the computer. Everything else is still running." and later "The sync drive is responding again. CC Sync notices new files on it at once again."), and it still finds every change by looking.
 
-- Windows and macOS: on Windows only "there" and "disconnected" are told apart. On macOS an external drive's empty leftover folder on the startup disk counts as disconnected, and the product knows which volume is the sync drive (recorded when the computer was set up), so it can tell when that volume is mounted under a different name, such as "SSD 1"; when it cannot tell, the drive counts as absent.
+- Windows and macOS: on Windows only "there" and "disconnected" are told apart. On macOS an external drive's empty leftover folder on the startup disk counts as disconnected, and the product knows which volume is the sync drive (recorded when the computer was set up), so it follows that volume when it is mounted under a different name, such as "SSD 1"; when it cannot tell, the drive counts as absent.
 
 ### With the sync drive out nothing is written anywhere else
 
-While the sync drive is disconnected, mounted at the wrong place or not answering, nothing touches it and every kind of syncing waits: no upload, no download, no copying into the tree, no new footage noticed. Nothing is ever written to the computer's internal disk instead, nothing is created where the drive should be, and free space is never measured on another disk. The editor's own pause is not touched. A check of what the computer holds that overlaps the drive going away is thrown away, never reported as the computer holding nothing.
+While the sync drive is disconnected, at a place the product cannot confirm, or not answering, nothing touches it and every kind of syncing waits: no upload, no download, no copying into the tree, no new footage noticed. Nothing is ever written to the computer's internal disk instead, nothing is created where the drive should be, and free space is never measured on another disk. The editor's own pause is not touched. A check of what the computer holds that overlaps the drive going away is thrown away, never reported as the computer holding nothing.
 
-### A drive mounted at the wrong place on macOS is explained in three steps
+### A drive the product cannot confirm on macOS is explained in three steps
 
-Once per outage the editor is told "<Drive> is mounted at the wrong path. Sync is paused until it is fixed. See the CC Sync window." and a dialog titled "drive mounted at the wrong path", with OK, explains that an empty leftover folder sits where the drive should be, and gives three steps: eject the drive; delete the leftover empty folder; plug it back in and check it appears at the right place. If another window of the app is open, only the notification is shown.
+Only when the product cannot tell that what it finds is the sync drive, once per outage the editor is told "<Drive> is mounted at the wrong path. Sync is paused until it is fixed. See the CC Sync window." and a dialog titled "drive mounted at the wrong path", with OK, explains that an empty leftover folder sits where the drive should be, and gives three steps: eject the drive; delete the leftover empty folder; plug it back in and check it appears at the right place. If another window of the app is open, only the notification is shown.
 
 - Windows and macOS: macOS only.
 
@@ -808,7 +813,7 @@ While reminders run, the editor has "REMIND ME LATER" (silences them for 2 hours
 
 As the editor types the folder on a Mac it is checked, and refused in red with set-up held back when: it is empty; it starts or ends with a space; it starts with ~ (write the full path instead); it does not start with /; it is / or /Volumes on its own; for a remote editor, it is a whole external drive on its own (pick a folder on it); or it names an external drive that is not mounted now (remote: plug the drive in and unlock it if it is encrypted, and a leftover folder from an unclean eject may be in the way; wired: connect the server share first from the Finder). A check that itself fails never blocks.
 
-When the folder is on an external drive, set-up stops and says to plug it in (and unlock it if encrypted) and run again if the drive is not there. If the drive's usual name is a plain leftover folder, or the Mac mounted the drive under a numbered second name (for example "SSD 1"), set-up stops with a boxed warning that the path IS NOT A MOUNTED VOLUME, explaining either that the drive is really mounted under the numbered name and must not be used that way, or that syncing into the leftover folder would fill the Mac's internal disk instead of the drive, then the fix: eject, remove the leftover folder, unplug and plug in again, run again. If the Mac cannot identify the volume, set-up refuses to guess. Two drives of the same name both mounted get a warning to rename one. A drive not formatted in the Mac's own format gets a warning that other formats lose macOS file details and some cannot keep names differing only in letter case. Set-up records which drive it is, so the app can later tell "drive unplugged" from "drive plugged in but empty".
+When the folder is on an external drive, set-up stops and says to plug it in (and unlock it if encrypted) and run again if the drive is not there. If the Mac mounted the drive under a numbered second name (for example "SSD 1"), set-up records the drive by what it is rather than by its name, and says the app will follow it whatever it is called. If the drive's usual name is only a plain leftover folder and the drive itself cannot be found, set-up stops with a boxed warning that the path IS NOT A MOUNTED VOLUME, explaining that syncing into the leftover folder would fill the Mac's internal disk instead of the drive, then the fix: eject, remove the leftover folder, unplug and plug in again, run again. If the Mac cannot identify the volume, set-up refuses to guess. Two drives of the same name both mounted get a warning to rename one. A drive not formatted in the Mac's own format gets a warning that other formats lose macOS file details and some cannot keep names differing only in letter case. Set-up records which drive it is, so the app can later tell "drive unplugged" from "drive plugged in but empty".
 
 - Windows and macOS: these checks are made on a Mac. See The app on each editor's computer: Installing and setting up, for Windows.
 

@@ -115,31 +115,31 @@
 - 38-047 | The studio's episodes, naming rules and roster
 - 38-088 | Planning every episode's folders and every interviewee's folder at once
 - 38-089 | Planning every episode's folders and every interviewee's folder at once
-- 19-021 | Looking at footage never changes it, and only an admin's approved move moves it ; An admin approves the move and it is carried out
-- 35-003 | Looking at footage never changes it, and only an admin's approved move moves it
-- 35-037 | A person plans a move and sees exactly what it will do
-- 35-038 | An admin approves the move and it is carried out
+- 19-021 | Looking at footage never changes it, and only the Sorter's moves of sorted clips move it ; Sorted footage moves into its folder on its own
+- 35-003 | Looking at footage never changes it, and only the Sorter's moves of sorted clips move it
+- 35-037 | Where each file of a sorted clip goes ; Every move is checked before it starts
+- 35-038 | Sorted footage moves into its folder on its own
 - 35-039 | Footage moved by hand is noticed and the plan follows it
 - 36-015 | Moves the product makes are followed in the record at once
 - 36-036 | Folder names are cleaned the way Windows stores them and match existing folders without case
-- 36-037 | A person plans a move and sees exactly what it will do
-- 36-038 | A person plans a move and sees exactly what it will do
-- 36-040 | The rehearsal checks every file before anything moves ; An admin approves the move and it is carried out ; Moves in the folders editors sync reach every editor's computer ; A move is checked afterwards and a list shows where everything went ; An interrupted move is picked up where it stopped
+- 36-037 | Where each file of a sorted clip goes
+- 36-038 | Where each file of a sorted clip goes
+- 36-040 | Every move is checked before it starts ; Sorted footage moves into its folder on its own ; Moves in the folders editors sync reach every editor's computer ; A move is checked afterwards and a list shows where everything went ; An interrupted move is picked up where it stopped
 - 36-041 | Footage moved by hand is noticed and the plan follows it
 - 37-049 | A destination folder is renamed or moved in the plan
 - 37-050 | A new destination folder is planned without anything being made on disk
 - 37-051 | A folder is taken out of the plan and nothing on disk is deleted
 - 37-052 | A destination folder is renamed or moved in the plan
-- 37-062 | A person plans a move and sees exactly what it will do ; An admin approves the move and it is carried out
+- 37-062 | Where each file of a sorted clip goes ; Sorted footage moves into its folder on its own
 - 37-063 | Rescan reads every source and destination again
-- 38-002 | Looking at footage never changes it, and only an admin's approved move moves it
+- 38-002 | Looking at footage never changes it, and only the Sorter's moves of sorted clips move it
 - 38-014 | Footage moved by hand is noticed and the plan follows it
 - 38-015 | left out: built twice (the follow-up after every scan does the same job by itself; the promise is under Footage moved by hand is noticed and the plan follows it)
-- 38-026 | A person plans a move and sees exactly what it will do
-- 38-027 | A person plans a move and sees exactly what it will do
-- 38-028 | The rehearsal checks every file before anything moves
-- 38-029 | An admin approves the move and it is carried out ; An interrupted move is picked up where it stopped
-- 38-030 | A move is checked afterwards and a list shows where everything went
+- 38-026 | Where each file of a sorted clip goes
+- 38-027 | Where each file of a sorted clip goes
+- 38-028 | Every move is checked before it starts
+- 38-029 | Sorted footage moves into its folder on its own ; An interrupted move is picked up where it stopped
+- 38-030 | A move is checked afterwards and a list shows where everything went ; What was moved can be seen, moved elsewhere or put back
 - 36-030 | The Sorter proposes where each sound recording belongs ; A sound suggestion appears only where the calendar says nothing ; The audio worklist says whose interview is on each recording ; One recording's detail shows who it could be and plays it against the cameras
 - 36-043 | The Sorter proposes where each sound recording belongs ; A person decides a recording's folder and start ; Approved recordings are filed beside their video, and duplicates are set aside
 - 36-046 | Field recordings not yet on the NAS are found on every computer and drive
@@ -238,7 +238,8 @@
 - Options: A: one way, from the Sorter's page: the rehearsal runs by itself when a plan is made, an admin approves by pressing Move, and the move is refused if the clean rehearsal is more than an hour old or the disk changed since. B: keep the hand-run way on the Windows computer as well.
 - Recommend: A, because one path is fewer parts and the hour plus the re-check just before each item keeps footage as safe as the hand-run gate.
 - Changes for a person: with A nobody runs anything at a command line; an admin moves footage from the browser.
-- Text assumes: A
+- Answered by the owner 2026-11-24: moves happen on their own, no approval.
+- Text assumes: the owner's answer. A sorted clip moves into its folder by itself as soon as its checks pass, with no approval, no dry run a person runs and no one-hour gate; a person sees every move and moves a clip elsewhere or puts it back by hand. There is no deliberate wait before a move (no lesson asks for one): what a person sees as about to move is only what is waiting its turn, its checks or a safe copy.
 - Items: 38-002, 38-028, 38-029, 38-030, 35-038, 36-040
 - Covers: 38-Q1
 
@@ -317,7 +318,10 @@
 - SRT-112 | 35-029, 38-024 | the items have time folders off by default; the ruling files clips under the person in date-and-time subfolders. Written: time folders on by default.
 - SRT-092 | 37-084 | the item marks a clip bad only when it is only on a laptop or a card; the ruling also makes "only on a client drive" red and asks for outlined, gold and red states. Written: the ruling.
 - SRT-133 | 37-062, 36-040 | the items block the whole plan on any collision ("Nothing can be moved until they are fixed"); the lesson moves the clean clips and holds back a clashing clip whole. Written: the lesson.
-- SRT-140 | 35-034, 38-020 | the items refuse to move or rename a folder that holds files on disk; the ruling lets a person drag a folder under any parent and rename it. Written: the folder moves in the plan and its footage joins the move plan, moved only when an admin approves.
+- SRT-140 | 35-034, 38-020 | the items refuse to move or rename a folder that holds files on disk; the ruling lets a person drag a folder under any parent and rename it. Written: the folder moves in the plan and its footage is sorted to the new place and moves there on its own, with every promise of a move.
+- SRT-131 (ruling) | 35-038, 36-040, 37-062, 38-028, 38-029 | the ruling and the items have every move dry-run first and approved by an admin before it runs; the owner's answer of 2026-11-24 (the later word) has sorted footage move on its own with no approval. Written: the owner's answer; the dry run survives as the checks the product makes by itself before every move, a single clip moves as soon as it is sorted, and nothing is ever deleted or overwritten. Not asked again.
+- owner's answer 2026-11-24 | 19-021, 35-038, 37-062 | the items let only an admin carry out a move ("moving footage needs an admin of this dashboard"); written: a move needs nobody, and is recorded with the person whose sorting or hand move led to it.
+- SRT-123 (ruling) | none | unconfident matches still wait for a person; since an unaccepted suggestion sorts nothing, nothing moves for it. No conflict with the owner's answer; noted because the answer speaks of the Sorter sorting "on its own": the text keeps the rulings (SRT-114, SRT-123) that a suggestion becomes sorting only when a person accepts it.
 - SRT-144 | 38-048 | the item stops listening at the first name unless asked for the whole file; the lesson uses the whole recording. Written: the whole recording.
 - SRT-121, SRT-134 | 35-037 | the item forgets move plans when the server restarts; the lessons keep a person's plan and show after a restart what moved. Written: plans kept across restarts.
 - SRT-099 | 36-012 | the item says a changed file at the same path "replaces the old copy"; the lesson says it is the same file updated and stays tracked. Written: the lesson's wording.
@@ -342,9 +346,12 @@
 - Footage is filed in day-and-camera time folders | a time folder can be renamed by hand and the name is kept
 - Footage for client drives keeps each shoot day on one drive | written from SRT-124; no item showed it
 - A clip filed in another project can be shared into this one | written from SRT-139; no item showed it
-- An admin approves the move and it is carried out | clean clips move while clashing clips are held back whole (SRT-133)
+- Sorted footage moves into its folder on its own | clean clips move while clashing clips are held back whole (SRT-133)
 - An interrupted move is picked up where it stopped | the rescan and the moved and not-moved list after a failure or restart (SRT-134)
-- A destination folder is renamed or moved in the plan | a folder holding footage can be dragged or renamed; its footage joins the move plan (SRT-140)
+- A destination folder is renamed or moved in the plan | a folder holding footage can be dragged or renamed; its footage follows on its own (SRT-140)
+- Sorted footage moves into its folder on its own | moves happen by themselves once a clip is sorted (owner's answer 2026-11-24), under six stated promises: never deletes, copies over or overwrites; checked just before and after each item; a clashing clip held back whole and shown while clean clips move; nothing moves before a verified backup copy exists ("waiting for a safe copy", new); nothing moves while the NAS looks wrong ("Moves paused", new); every move recorded and undoable by hand
+- What was moved can be seen, moved elsewhere or put back | the list of moves with Put back and Try again, so every automatic move can be overruled by hand (owner's answer 2026-11-24 and his rule that everything can be set by hand)
+- Where each file of a sorted clip goes | no deliberate wait before a move; what is about to move is visible only while it waits its turn, its checks or a safe copy (no lesson asks for a wait)
 - Every sound recording is listened to for names and introductions | runs by itself on every recording; whole recording; "we are" introductions; names only mentioned never credited (SRT-144)
 - Recordings still unplaced can be transcribed in full for a fee | finishing with the product's own transcription when credit runs out (SRT-150)
 - Approved recordings are filed beside their video, and duplicates are set aside | approving actually files the recording, through the admin's move (SRT-145)
@@ -367,6 +374,7 @@
 - 35-021 | patterns matching ASCII only, "." stopping at a line break, files on the server: an inside and a defect
 - 35-037 | plans forgotten at a restart: replaced (SRT-121)
 - 36-040 | the move inside Projects named as the dashboard's own file move: replaced by the join to Proxies and file moves
+- 35-037, 37-062, 36-040, 38-029 | the move dialog's "Move <size>" button, "Moving footage needs a dashboard admin.", the one-hour dry-run gate and its refusals ("no passing dry-run of this plan", "the passing dry-run is more than an hour old"), and the list of move plans: replaced by the owner's answer of 2026-11-24 (moves happen on their own)
 - 38-028 | run by hand on the Windows computer, the saved report, first 25 of each list on screen, the "RESULT:" wording: an arrangement (footage-sorter-and-camera-cards-2-Q8)
 - 38-029 | progress every 25 moves, the "REFUSED - no valid dry-run gate" wording: an arrangement
 - 38-030 | the "No journal found" wording and the saved report: an inside
@@ -398,4 +406,4 @@
 - cards-footage-in / The transcript and its English | The Sorter proposes where each sound recording belongs | the studio's interview transcripts that recordings are compared against
 - fleet-jobs / Choosing who runs what | Every sound recording is listened to for names and introductions | listening and transcribing run on a computer able and free
 - accounts-privacy-legal / What the product records about a person | Drives are known by their own identity and noticed when plugged in | the per-computer switch for telling the studio about its drives
-- resolve-on-the-editors-computer / Missing clips, relinking and refreshing | A person plans a move and sees exactly what it will do | grade files kept beside their original where Resolve reads them
+- resolve-on-the-editors-computer / Missing clips, relinking and refreshing | Where each file of a sorted clip goes | grade files kept beside their original where Resolve reads them

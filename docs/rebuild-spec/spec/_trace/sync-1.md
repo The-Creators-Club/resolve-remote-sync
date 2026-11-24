@@ -62,8 +62,8 @@
 - 22-010 | Setting up a computer starts with choosing remote or wired
 - 22-035 | Setting up a computer starts with choosing remote or wired
 - 22-040 | Setting up a computer starts with choosing remote or wired
-- 02-004 | An upload-only tick sends every file up and brings nothing down
-- 03-006 | An upload-only tick sends every file up and brings nothing down
+- 02-004 | An upload-only tick sends every file up and brings down only the empty folders
+- 03-006 | An upload-only tick sends every file up and brings down only the empty folders
 - 01-030 | A file removed or replaced on the server is moved aside on the editor's computer, never deleted ; The editor can open the recovery folder and see what it holds
 - 01-035 | An editor removes a project from their computer in one action ; Removal is refused while anything here is missing from the server
 - 02-007 | A file removed or replaced on the server is moved aside on the editor's computer, never deleted
@@ -131,7 +131,7 @@
 - 04-041 | The editor can open the folder of a file that will not upload
 - 04-047 | The editor is told about files that will never upload because of a name clash or a wrong clock
 - 01-024 | The product watches whether the sync drive is really there ; With the sync drive out nothing is written anywhere else
-- 01-025 | A drive mounted at the wrong place on macOS is explained in three steps
+- 01-025 | A drive the product cannot confirm on macOS is explained in three steps
 - 01-026 | A returning drive resumes syncing only if nothing else holds it
 - 01-027 | A sync drive missing at start is waited for
 - 02-026 | With the sync drive out nothing is written anywhere else
@@ -175,6 +175,7 @@
 - Changes for a person: with A, switching off mid-upload loses nothing and the shutdown warning says so; with B, a half-sent 20 GB clip goes again from zero.
 - Text assumes: A.
 - Items: 02-025, 03-036, 02-024, 01-036
+- Answered by the owner 2026-11-24: quitting stops an upload and it carries on where it left off next time; an update waits for the file in flight up to a limit, then does the same. Still open: the same promise for a transfer cut off by a dropped connection, sleep, a shutdown, signing out, the pause or a stop, and for downloads; the text keeps those marked pending on this question.
 
 ### sync-1-Q2: Should everything that comes down to a computer follow the server's deletions the same way, by moving the removed file into the recovery folder?
 - Kind: differs
@@ -424,6 +425,7 @@
 
 - sync-1-U1 | Who may change a computer's own sync settings (the shutdown warning, keeping awake, the recovery folder's size, the download safety limits, the free-space floor, the time for each project), and whether an admin can set them for a computer from the dashboard | the editor on that computer | 03-036, 03-037, 09-021, 09-010, 03-017, 03-018, 02-024
 - sync-1-U2 | Whether the CC Sync entries really appear in Resolve's Scripts menu, and whether In and Out marks are read correctly, were never tried against a running Resolve | written as the items describe | 05-038, 01-043
+- sync-1-U4 | How long an update waits for the file in flight before stopping it | "up to a set limit", no number | 02-025
 
 ## Conflicts between an item and a lesson
 
@@ -439,6 +441,9 @@
 - SYN-091 | 03-001, 02-024 | the items give a project up to ten minutes before the next has its go; the lesson says a slow or stuck project never delays others' downloads beyond a short settle time. Wrote that a project with nothing moving gives up its turn within about a minute.
 - SYN-055 | 15-039 | the item warns admins only; the lesson asks for a banner on every page. Wrote the banner as well.
 - SYN-013 | 03-025 | the item asks the editor to get an admin to approve a library; the lesson says a library failing is named with what to do without marking project sync broken. Wrote the libraries as reaching every accepted computer, with no approval step.
+
+- SYN-029 | 02-004, 03-006 | the lesson says an upload-only project creates nothing on the editor's computer; the owner answered on 2026-11-24 that its empty folder structure does come down (and later server folders too), nothing else. Wrote the owner's later answer; the lesson is listed as not yet met.
+- SYN-073 | 03-032, 01-025, 22-033 | the lesson pauses all syncing when the drive is mounted under another name; the owner answered on 2026-11-24 that a drive provably the same carries on whatever it is called, pausing only when the product cannot tell. Wrote the owner's answer.
 
 ## New in this text
 

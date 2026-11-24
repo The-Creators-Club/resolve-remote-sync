@@ -586,12 +586,12 @@
 - Proxies and file moves / What Resolve accepts as a proxy | Where a card's files land | proxies land in a Proxy folder beside their originals so the editing program finds them.
 - Timeline Cards: footage in, ready to cut / Cameras, sound recorders and their clocks | A recorder's reset clock is corrected from its neighbouring files | lining up recordings by sound (Q17).
 - Work shared out across the computers / Choosing who runs what | There is one card copy, and it starts at once on the computer the card is in | a card copy is not shared-out work: it always runs where the card is, at once.
-- The Footage Sorter and camera cards / The record of every copy (part 2) | A copy's result reaches the studio's record even when it finished offline | the record of every copy and the lasting copy history.
-- The Footage Sorter and camera cards / Sorting into shoots, people and cameras (part 2) | Where a card's files land | time folders, assignments and the sorted folders.
-- The Footage Sorter and camera cards / Moving footage on the NAS (part 2) | After a card copy, the sorting follows the footage | moving staged footage to its folders.
-- The Footage Sorter and camera cards / Placing sound recordings (part 2) | A recorder's reset clock is corrected from its neighbouring files | where a sound recording belongs.
-- The Footage Sorter and camera cards / Thumbnails and hover filmstrips (part 3) | Raw clips and raw stills always have a picture to show | how pictures are shown.
-- The Footage Sorter and camera cards / The sorter page (part 3) | Each card is listed under its computer with its state, its health and its copy | where cards, reviews and progress sit on the page.
+- The Footage Sorter and camera cards / The record of every copy | A copy's result reaches the studio's record even when it finished offline | the record of every copy and the lasting copy history. (part 2)
+- The Footage Sorter and camera cards / Sorting into shoots, people and cameras | Where a card's files land | time folders, assignments and the sorted folders. (part 2)
+- The Footage Sorter and camera cards / Moving footage on the NAS | After a card copy, the sorting follows the footage | moving staged footage to its folders. (part 2)
+- The Footage Sorter and camera cards / Placing sound recordings | A recorder's reset clock is corrected from its neighbouring files | where a sound recording belongs. (part 2)
+- The Footage Sorter and camera cards / Thumbnails and hover filmstrips | Raw clips and raw stills always have a picture to show | how pictures are shown. (part 3)
+- The Footage Sorter and camera cards / The sorter page | Each card is listed under its computer with its state, its health and its copy | where cards, reviews and progress sit on the page. (part 3)
 
 ## Settled from the present product
 

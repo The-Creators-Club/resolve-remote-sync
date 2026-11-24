@@ -52,7 +52,7 @@ def main():
         text = cs.lines_of(os.path.join(cs.TEXT, p + ".md"))
         subs[p] = [l[3:].strip() for l in text if l.startswith("## ")]
         for l in text:
-            if l.startswith("- Met:"):
+            if l.startswith("- Met"):
                 met[cap].update(LESSON.findall(l))
             elif l.startswith("- Not yet met"):
                 not_met[cap].update(LESSON.findall(l))

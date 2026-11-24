@@ -186,15 +186,15 @@
 - U-07-4 | not a question: what "end of timeline" and "at the playhead" do inside Resolve belongs to the send-to-Resolve behaviours of the b-roll archive and music, outside this piece
 - U-09-1 | settled: the site's settings are fetched while the app runs, about every 15 minutes, so a change reaches a computer without reinstalling
 - U-09-2 | settled: one rule for every call that carries a sign-in, shared work and Footage Sorter copies included
-- U-09-6 | with youtube
+- U-09-6 | behind the glass
 - U-13-10 | behind the glass
 - U-14-7 | settled: every page carries the same question dialog and the same explanations, written as a rule under "Every question before an action looks and behaves the same" and "Every control and status mark explains itself"
 - U-14-8 | behind the glass
 - U-18-1 | settled: accepting the notice in the set-up switches the subscription way on for the site; where else it may be switched is whole-product-Q10
 - U-18-2 | settled: such notes are shown to admins as problems on the overview, written under "An admin is told when the site's assistant stops working"
-- U-19-8 | with footage-sorter-and-camera-cards
-- U-25-3 | with music
-- U-25-4 | with music
+- U-19-8 | settled: the Sorter's pages and the Timeline Cards app's updates are written in their own pieces
+- U-25-3 | behind the glass
+- U-25-4 | behind the glass
 - U-34-4 | behind the glass
 - U-40-2 | answered: the owner's requirements (one board and one editor), so nothing is served in a second form
 

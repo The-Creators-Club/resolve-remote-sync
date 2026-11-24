@@ -52,8 +52,31 @@ Both are in `docs/rebuild-spec/spec/OWNER_REQUIREMENTS.md` and cross.
   - The clean room (step 6) must give the rebuild session a way to run
     transfers against real computers without seeing the old build: the
     remote editor's Windows PC, the Mac, and computers in other countries.
-    Which computers abroad is NOT settled: ask the owner (editors or
-    friends abroad, or rented machines in two or three regions).
+    **The far-off computers: GitHub's hosted runners**, as the owner
+    recalled 2026-11-24 ("a way to use github servers ... that we
+    previously did for optimising copyparty speeds"). Done before, on
+    2026-09-27, for a client's download from the NAS: a private repository
+    of the studio's GitHub organisation, `dl-speedtest`, with one workflow
+    started by hand, ran the download from a runner in Chicago. It showed
+    one connection at 0.3 MB/s and eight at 4.1 MB/s across 130 to 200 ms,
+    which turned out to be loss on the path under the NAS's default
+    congestion control; switching that route to BBR took one connection to
+    about 17 MB/s. (That finding is in the knowledge base as a lesson about
+    the NAS; the repository and how it was run stay behind.) What the
+    runners give and do not give:
+    - Windows, macOS and Linux machines started on demand, so both of the
+      app's platforms can be measured from far away with nobody's own
+      computer involved.
+    - They sit in data centres in the United States: one country, on fast,
+      clean lines. They measure the long path from the NAS, not a home
+      connection. The remote editor's PC is the home-connection case.
+    - A job runs six hours at most, the machine is thrown away afterwards,
+      and macOS minutes are costed at ten times Linux ones on a private
+      repository.
+    - For "different countries" in the plural, add machines rented by the
+      hour in Europe and in Asia (the studio already rents from a provider
+      with data centres in Germany, Finland and Singapore). Not yet agreed
+      with the owner.
   - A test share on the NAS that holds no client footage, so a rebuild
     under test can never touch the studio's tree.
   - The remote editor's agreement to his computer and connection being

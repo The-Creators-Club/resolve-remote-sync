@@ -19,7 +19,7 @@ The lane is the editor's heart and gets the most room on the screen: clip text s
   - **Playback follow**: while playing with follow on, the window pages along: when the playhead leaves the part of the window from 2% to 92%, the window jumps so the playhead is at 10%.
   - On the portrait phone's mini lane there is no band, ruler, minimap, names or readout; on the landscape phone's small lane no band, ruler, minimap or readout.
 
-On a desk the lane docks at the top or the bottom of the editor, by dragging or by its button; the choice is remembered, and docked at the top it leaves no more gap above it than the page's normal margin. However the lane is resized or moved, the cards and the transcript panel flow around it and are never hidden beneath it. The readouts on the lane and its bar keep a fixed width, so no control moves while a value it shows changes, and the size of the clip text can be changed and is remembered on the device. Coming back to the lane, or reloading, restores its scroll and zoom, unless a jump, playback that is running or the person's own touch asks for somewhere else. The lane stays smooth at the zooms and screen sizes an editor really works at, with real waveforms drawn; a playhead running off screen at a high zoom is acceptable.
+On a desk the lane docks at the top or the bottom of the editor, by dragging or by its button; the choice is remembered, and docked at the top it leaves no more gap above it than the page's normal margin. However the lane is resized or moved, the cards and the transcript panel flow around it and are never hidden beneath it. The readouts on the lane and its bar keep a fixed width, so no control moves while a value it shows changes, and the size of the clip text can be changed and is remembered on the device. Coming back to the lane, or reloading, restores its scroll and zoom, unless a jump, playback that is running or the person's own touch asks for somewhere else. The lane stays smooth at the zooms and screen sizes an editor really works at, with real waveforms drawn; a playhead running off screen at a high zoom is acceptable. A playing playhead moves smoothly at every zoom, never in jumps, and when it reaches the edge of the window the lane pages forward with it, unless the person is panning the lane at that moment.
 
 - Name and search words: the lane: timeline, clips, strip, track, minimap.
 - Phone and desk: the portrait phone has a mini lane and the landscape phone a small lane, each with fewer parts, as listed above.
@@ -36,7 +36,7 @@ On a desk the lane docks at the top or the bottom of the editor, by dragging or 
 - **The lit word**: in the clip under the playhead, the word being spoken is washed and underlined; words already said stay at full brightness and words still to come are slightly dimmer. During an edge drag the lit word is the word the trim will cut to, and on a shortening drag the words that would go are faded and struck through in red. Nothing is lit in a pause more than 0.3 s after a word. In an English line the lit word is carried across by position, or exactly when the links between English and original words are known.
 - Words that have not been laid out yet appear within a frame or two; they never hold up the lane.
 
-Chinese and other scripts written without spaces wrap by character; a Latin word is never split across lines. Clip text re-wraps only when the zoom changes, never while the lane scrolls. At any zoom a narrow clip keeps its words, cut off at its edge.
+Chinese and other scripts written without spaces wrap by character; a Latin word is never split across lines. Clip text re-wraps only when the zoom changes, never while the lane scrolls. At any zoom a narrow clip keeps its words, cut off at its edge. During playback the lit word is exactly the word under the playhead, on a split, a trimmed or an edge-word clip alike, at every zoom, and still after the lane is zoomed while it plays.
 
 - Exact: yes
 
@@ -113,6 +113,7 @@ Cards are never gathered into stacks unless the editor asks. Any neighbouring ca
 #### Lessons
 
 - Met: CE3-001, CE3-002, CE3-003, CE3-004, CE3-005, CE3-006, CE3-007, CE3-008.
+- Met for another part: CE1-090 (in "The lane shows the whole cut as a timeline with a section band, a ruler, the clips and a minimap"), CE2-054 (in "Each clip shows its speaker, its length and its words, sized to what fits").
 
 ## Colours
 
@@ -209,7 +210,9 @@ Any punctuation, bracket or line break a person types into a title, a note or a 
 - W opens or closes a card's full text.
 - States: the selected card has a full-height red bar beside its colour bar (never a red wash); the card under the playhead has a red dot in its left margin; a lifted card is outlined and raised; a delete-armed card has a red outline.
 
-The card the playhead is inside opens like the selected card, at every density of the cards, and closes again when the playhead leaves it. When the playhead sits in a gap, that gap is highlighted in the cards the way a card would be. Playing never moves a control.
+The card the playhead is inside opens like the selected card, at every density of the cards, and closes again when the playhead leaves it. When the playhead sits in a gap, that gap is highlighted in the cards the way a card would be. Playing never moves a control. The marks for the playhead (the dot on its card, the bright frame on its clip in the lane) are their own, apart from the selection's marks, and follow the playhead within a quarter of a second during playback and while scrubbing.
+
+Every section, note and plain heading row and every note row in the cards can be deleted in place with one click on its own delete button, as one undoable edit (""<name>" deleted. Ctrl+Z brings it back."); the rows under it stay. Each can also be dragged to another place, as described under "Mouse and keyboard on the cards select, open, re-order and move markers".
 
 - Phone and desk: "Edges" shows on a phone only.
 - Exact: yes
@@ -300,6 +303,7 @@ The editor shows the cut's total running time in seconds and, for each section h
 #### Lessons
 
 - Met: CE2-032, CE2-033, CE2-034, CE2-035, CE2-036, CE2-037, CE2-038, CE2-039.
+- Met for another part: CE1-053, CE1-092 (in "Each cut's card shows who speaks, its span, its words, its gain, fades and length").
 
 ## The lane: clicking, trimming, zooming and dragging
 

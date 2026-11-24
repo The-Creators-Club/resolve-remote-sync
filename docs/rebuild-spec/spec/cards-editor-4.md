@@ -411,6 +411,8 @@ Refusals before starting: "say what the montage should be first"; "the montage b
 
 A clip that is not among the episode's montage sources is dropped. Each quote is placed in its clip's word timing when it matches closely (about 75% alike or better, with handles kept off neighbouring speech); otherwise the passage holding its first words is used; otherwise the cut stays in the file as an "unmatched" note "<stem> -- <quote>". Sections become section headings and each cut carries its reason as its note. With nothing placed and nothing unmatched: "the model proposed no cuts this server could place - try saying it another way". Only the cut is replaced: the cut list's header facts, its shelf, its shelf categories and its saved sequences are kept. The cut list gets a new revision, stamped written "<time> by the montage builder", saved with history and reloaded.
 
+Before anything is inserted, the montage is shown in the drawer: its sections and cuts in order, each with its reason, and a list of every quote that could not be placed and every clip that was dropped. Each cut there plays where it stands, and any cut can be dragged from the drawer into the cut list at the place it is dropped, so a person can take part of a montage by hand as well as insert or discard it whole.
+
 - Exact: yes
 
 ### The assistant writes a one- or two-sentence summary of a section into the cut list, undoably
@@ -432,6 +434,7 @@ The edit chat's chosen strength (fastest, stronger or most capable) is the one t
 #### Lessons
 
 - Met: CE1-021, CE1-022, CE1-024, CE1-025, CE1-026, CE1-028, CE1-029, CE2-090, CE2-092, CE2-094, CE2-097, CE3-055, CE3-056, CE3-057, CE3-058, CE3-064, CE1-023, CE1-027, CE1-030, CE1-031, CE1-032, CE2-088, CE2-089, CE2-093, CE2-095, CE2-096, CE2-098, CE2-099, CE3-059, CE3-060, CE3-061, CE3-062, CE3-063.
+- Met for another part: CE3-054 (in "The montage builder's answer is placed as cards, and nothing it proposed is silently lost").
 - Not yet met by any behaviour above: CE2-091 (it is about the transcript search, written in part 3 of this editor), CE2-100 (held staged edits belong to the hand-over to Resolve).
 
 ## Working offline, connections and several devices

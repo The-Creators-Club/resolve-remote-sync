@@ -96,6 +96,8 @@ An interviewee stays listed whatever fails with their transcript. When their tra
 - The intake holds at most 200 rows per episode (the oldest drop off) and is forgotten when the server restarts.
 - Result: "Added to the intake." plus, when some were not found, "One is / N are not in [the episode's media] yet: put it/them under the episode folder and drop again."; plus, when some were not media, "<name> is not media, so it was skipped" or "N files that are not media were skipped". Shown as a warning when either applies. Failure: "the intake did not take them: <reason>".
 
+Whatever becomes of the job buttons, a drop on the editor is always matched by name and size within the episode, and each row says plainly whether its file was found, and whether its clip still lacks a transcript or a proxy.
+
 - Phone and desk: dropping files is a desk gesture.
 - Exact: yes
 - Pending: cards-editor-3-Q2
@@ -194,6 +196,8 @@ When an editor highlights text in a transcript and inserts it:
 - Refused with "couldn't find that text in the clip's transcript -- try selecting the Mandarin line, or a longer stretch", or "no transcript for that clip".
 - A span the page timed itself from a played preview gets the same handles; refused with "empty span" or "no transcript for that clip".
 
+Dragging highlighted transcript text onto the lane or the cards does the same as inserting it: the card that lands covers exactly the highlighted words of that clip, by the same rules, in the place it is dropped.
+
 - Exact: yes
 
 ### Highlights on a card's words land on the right copy of a repeated phrase and survive reworded text
@@ -234,7 +238,7 @@ When the words change, a highlight that still matches exactly is kept. Otherwise
 ### The search sheet has pickers for which transcripts, how many results, which strength of assistant, and a fresh start
 
 - "In" (which transcripts): All (labelled "All transcripts" in Exact words, "All interviews" in the assistant kinds), one row per interviewee, and "All corpus clips" (shown only when the episode has clip transcripts). Each row shows a count (interviews, that person's paragraphs, or clips). Changing it re-runs Exact words; in the assistant kinds it does not ask, shows a kept answer if any, else "press Search to ask this of <scope>". The scope goes back to All when a cut list of another episode is opened.
-- What each scope covers in the assistant kinds: "All interviews" searches and ranks across every interview of the episode and leaves the corpus clips out; a person searches only that person's interview transcripts, and a passage from anybody else is not an answer; "All corpus clips" searches only the montage source clips, not the interviews. Each scope is its own conversation holding only its own transcripts.
+- What each scope covers in the assistant kinds: "All interviews" searches and ranks across every interview of the episode and leaves the corpus clips out; a person searches only that person's interview transcripts, and a passage from anybody else is not an answer; "All corpus clips" searches only the montage source clips, not the interviews. Each scope is its own conversation holding only its own transcripts: a search scoped to one person or to the clips reads only those transcripts, on its first search and on every later one, never the rest of the episode.
 - "Results" (assistant kinds only): 5, 10, 20 or 50, default 5, remembered per device. Changing it re-asks the current question if an answer is on show. The server accepts 1 to 100 and brings any number outside that range within it; anything unreadable counts as 5.
 - "Model" (assistant kinds only): three strengths of the assistant, fastest (default), stronger, most capable, each with its short note, remembered per device. Changing it reloads the status line and, if an answer was on show, asks again, since each strength is its own conversation. The strengths themselves are described in The whole product: The assistant.
 - "New conversation" (assistant kinds only, tooltip "Start this scope's [the assistant] conversation over: the next search reads its transcripts again"): starts the conversation for this scope, strength and kind over, forgets this scope's kept answers for that kind, and says "a new conversation: the next search reads <thing>". Other scopes' conversations are untouched.
@@ -291,6 +295,7 @@ Each fragment is checked like a Closest wording span. A splice shows its total l
 - When an answer came from a cold conversation its note says why: "the first search of the session reads <thing>", "a transcript changed since the last search, so <thing> <is/are> read again", or "the conversation had gone cold (over an hour), so <thing> <is/are> read again". The note, or "the same question was already running: this is its answer", appears on the status line.
 - If the assistant lost the conversation, the transcripts are read again once and the question asked again; the note says "the [the assistant] session was lost (new machine or a rebuilt server), so the transcripts were read again". Lost twice: "the [the assistant] session was lost twice running: give it a moment and retry". Could not be opened twice: "the [the assistant] session could not be opened: the provider refused the id twice running".
 - When the assistant is not available: the line says "Searching by meaning needs [the assistant] on the server: <why or 'not installed'>" and Search shows the same as an error.
+- Every answer records how much of what the assistant read was already held by the conversation and how much was read fresh, and the status line after an answer says both.
 - Reading the transcripts gives up after 15 minutes per part, a question after 10 minutes, and a whole search after 40 minutes.
 
 - Exact: yes
@@ -385,6 +390,7 @@ One such search runs at a time; refused with "semantic search needs [the assista
 #### Lessons
 
 - Met: CE2-070, CE1-004, CE1-006, CE1-009, CE1-010, CE2-071, CE2-073, CE2-075, CE2-077, CE2-078, CE2-081, CE2-082, CE2-083, CE3-048, CE3-050, CE3-051, CE3-053, CE1-005, CE1-007, CE1-008, CE1-011, CE2-072, CE2-074, CE2-080, CE2-084, CE3-049, CE3-052.
+- Met for another part: CE1-049 (in "Dropping media files on the panel adds them to an intake list and looks for each one in the episode"), CE3-030 (in "A highlighted stretch of transcript becomes a card of exactly those words"), CE2-091 (in "The search sheet has pickers for which transcripts, how many results, which strength of assistant, and a fresh start").
 - Not yet met by any behaviour above: CE1-012 (choosing several transcripts at once in the episode's browser of transcripts and cut lists: no behaviour here shows it, and it belongs with opening episodes), CE3-054 (building a montage by describing it belongs with the board and footage-in montages, not with search).
 
 ## Chinese text and matching
@@ -621,3 +627,4 @@ The system is the clip's language, but a word with a letter only the other langu
 #### Lessons
 
 - Met: CE1-017, CE1-018, CE1-019, CE1-020, CE2-085, CE2-086, CE2-087, CE3-065, CE1-013, CE1-014, CE1-015, CE1-016.
+- Met for another part: CE2-061 (in "The join check reads every new splice of one speaker again and says on the card and in the lane whether it reads well, changed the meaning, or broke the grammar").

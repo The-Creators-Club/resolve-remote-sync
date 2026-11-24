@@ -122,6 +122,12 @@ On phone and landscape-phone layouts, under the Edit tab.
 
 - Exact: yes
 
+### On a phone, the scrub pad drives the head at a speed set by the finger's distance
+
+The scrub pad is a 96 x 96 px square. A touch in it pauses playback and sets the place where the finger landed as the origin; from then on the head moves at a speed set by how far the finger is from that origin: nothing within 8 px, 1 second per second at about 17 px, 10 seconds per second at 39 px, and at most 180 seconds per second from 76 px on. Sliding the finger higher on the pad makes the same distance finer. Moving back past the origin runs the head the other way. Letting go parks the head where it is, with no coasting.
+
+- Ways in: the scrub pad on the phone, and the "◐" rate scrub pad on the lane bar, which works the same way.
+
 ### On a phone, holding Play plays at twice speed
 
 A tap on the play bar's Play button plays or pauses, once. Holding it plays at twice speed; letting go returns to the speed before, and stops again if playback was stopped when the finger went down.
@@ -366,6 +372,7 @@ No button or combination on the controller sends a cut, or anything else, to the
 #### Lessons
 
 - Met: CE2-135, CE2-136, CE2-137, CE2-138, CE2-139, CE2-140, CE2-141, CE2-142, CE2-143, CE2-144, CE2-145, CE2-146, CE2-147, CE2-148, CE2-161, CE3-084, CE3-085, CE1-103, CE1-104, CE1-107, CE1-108, CE1-109, CE1-110, CE1-111, CE1-112, CE1-113, CE1-114, CE1-115, CE1-116, CE1-117, CE2-149, CE2-150, CE2-151, CE2-152, CE2-162, CE2-163, CE2-164, CE2-165, CE3-086, CE3-088, CE1-102, CE1-105, CE1-118, CE2-153, CE2-154, CE2-155, CE2-156, CE2-157, CE2-158, CE2-159, CE2-160, CE2-166, CE3-087, CE3-089, CE3-090, CE3-091.
+- Met for another part: CE2-056 (in "On a phone, the scrub pad drives the head at a speed set by the finger's distance").
 
 ## Speed and smoothness
 
@@ -389,6 +396,8 @@ While the lane sits idle, plays, starts and stops, scrolls with the wheel, seeks
 
 The lane and the header stay exactly where they are docked in every hover and panel state, and nothing above the cards shifts when the cards scroll.
 
+Each frame of the lane is drawn within a few milliseconds at any zoom, on a 4K screen too, and also in the first seconds after a cut list opens, with no burst of lag while things arrive. Nothing the page asks the server for in the background is asked again more often than every few seconds.
+
 ### Text and the first Play never stutter
 
 On a desk computer a card showing Chinese characters (or any other script) not seen before appears without a stutter, and the first Play after a cut list opens does not stutter either. On a phone nothing is downloaded ahead of need, to save data: characters are fetched as they first appear. The editor's typefaces come with it, so text looks the same with no network. While playing, long cut lists (1,500 cards and more) stay as smooth as short ones, and the selected card and the playing card are always ready on screen.
@@ -410,6 +419,7 @@ Opening a cut list, or making one from the board, takes about one second at most
 #### Lessons
 
 - Met: CE2-167, CE2-168, CE2-169, CE2-170, CE1-068, CE2-171, CE1-069, CE1-070, CE1-071, CE1-072, CE1-073, CE1-074, CE1-075, CE1-076, CE2-172, CE2-173, DSH-129.
+- Met for another part: CE1-089 (in "The lane stays smooth at 100 frames a second").
 
 ## The page: panels, header, warnings and redrawing
 
@@ -504,7 +514,7 @@ Opened from a card's "More actions" and the phone header's More. A sheet from th
 
 {{29-059}}
 
-Opening, closing or moving one panel never changes another panel's width, to the pixel: a hidden panel changes nothing, and only the card column grows or shrinks. On a desk a panel opened beside the cards sits beside them, and the cards reflow; it never covers them. Every panel tab can be closed from its header, and a toggle in the top bar reopens it on its last tab. The bars along the bottom take as little height as they can.
+Opening, closing or moving one panel never changes another panel's width, to the pixel: a hidden panel changes nothing, and only the card column grows or shrinks. On a desk a panel opened beside the cards sits beside them, and the cards reflow; it never covers them. Every panel tab can be closed from its header, and a toggle in the top bar reopens it on its last tab. The bars along the bottom take as little height as they can. Alt with a digit switches panel tabs: Alt+1 the cards, Alt+2 the transcript, Alt+3 the shelf (staged), and on through the panels in the order their tabs stand; every tab can also be clicked or tapped. No panel key uses Ctrl with a digit.
 
 - Name and search words: the panel layout. Search words: panels, tabs, dock, layout, reset panels.
 - Exact: yes
@@ -625,6 +635,7 @@ An answer arriving in the background updates only the cards it concerns, and a s
 #### Lessons
 
 - Met: CE3-100, CE1-119, CE1-120, CE1-122, CE1-123, CE1-124, CE3-092, CE3-093, CE3-094, CE3-095, CE1-121, CE3-096, CE3-097, CE3-098.
+- Met for another part: CE2-028 (in "On a desk, the panels sit in tab groups the person can rearrange, resize and reset" and "The header shows the brand, where you are, search, undo, redo and Send to Resolve"), CE2-030 (in "How the editor's menus open, move and close"), CE3-032 (in "On a desk, the panels sit in tab groups the person can rearrange, resize and reset").
 
 ## Opening episodes and keeping the editor running
 
@@ -785,7 +796,7 @@ A "Back to the cut lists" button. This person's recent episodes first, then ever
 
 ### A new, empty cut list is made from the sheet
 
-"Empty cut list" asks for a name. The name has spaces and quotes trimmed and a trailing file ending dropped. Refused: empty ("give the new project a name"); any folder part, "." or "..", or any of \ / : * ? " < > | ('a project name is a file name: no folders, no \ / : * ? " < > | in it'); an existing name ("<x> already exists -- pick another name (nothing here overwrites a cut list)"); a read-only cut list open. A name over 1024 characters, holding a control character, starting with "." or starting or ending with a space is refused the same way. A name already taken is refused before anything is made. A new cut list starts at revision 1, stamped "by Timeline Cards (new, empty)", its project the episode's name, its title the given name, word timing, no cuts, and takes the open cut list's frame rate, drop-frame and timeline start, or the defaults (01:00:00:00). It opens at once.
+"Empty cut list" asks for a name. The name has spaces and quotes trimmed and a trailing file ending dropped. Refused: empty ("give the new project a name"); any folder part, "." or "..", or any of \ / : * ? " < > | ('a project name is a file name: no folders, no \ / : * ? " < > | in it'); an existing name ("<x> already exists -- pick another name (nothing here overwrites a cut list)"); a read-only cut list open. A name over 1024 characters, holding a control character, starting with "." or starting or ending with a space is refused the same way. A name already taken is refused before anything is made. Before the list is made the sheet shows what it will hold (its name, the episode, its number of cuts and its frame rate), and nothing is written until the person confirms. A new cut list starts at revision 1, stamped "by Timeline Cards (new, empty)", its project the episode's name, its title the given name, word timing, no cuts, and takes the open cut list's frame rate, drop-frame and timeline start, or the defaults (01:00:00:00). It opens at once.
 
 - Who: anyone signed in, where the episode can be written.
 - Exact: yes
@@ -796,6 +807,13 @@ Where a computer with Resolve is connected for this person, a row names the proj
 
 - When the help for the editing program is off: no such row; the sheet lists cut lists only.
 - Exact: yes
+
+### The episode's browser lists every transcript and cut list, and several can be chosen at once
+
+Inside the editor, the episode's browser lists every transcript and every cut list of the episode, can be filtered and searched, and lets a person choose several at once: Ctrl or Cmd with a click adds or removes one, Shift with a click takes a run, and on touch, select mode ticks each one tapped. What is done next (opening, filing into a bin, searching within them) applies to every one chosen. Among the people, only transcripts filed under a named person count as interviews; a news clip or other montage source is listed with the montage material even when its speakers carry names.
+
+- Who: anyone signed in.
+- Name and search words: the episode's browser. Search words: transcripts, cut lists, browse, choose several, interviews.
 
 ### A link to one cut can be copied, and opening it selects that cut
 
@@ -829,6 +847,7 @@ Switching is refused with "no folder given" when nothing is named and "no such f
 #### Lessons
 
 - Met: CE1-125, CE1-128, CE3-101, CE3-106, CE1-126, CE1-127, CE1-129, CE1-130, CE1-131, CE1-132, CE2-174, CE2-175, CE2-176, CE2-177, CE3-102, CE3-103, CE3-104, CE3-107.
+- Met for another part: CE1-048 (in "A new, empty cut list is made from the sheet"), CE1-012 (in "The episode's browser lists every transcript and cut list, and several can be chosen at once").
 - Tied to an arrangement: CE3-105 (the promise is in "Opening an episode goes into the editor at the cut list last left there").
 
 ## Resolve is optional

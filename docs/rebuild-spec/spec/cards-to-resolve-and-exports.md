@@ -486,6 +486,8 @@ After an insert the playhead sits at the inserted passage's end, so a run of ins
 
 Edits can be staged against a timeline open in Resolve instead of performed at once: moves, trims, new cuts, removals, colours, fades and markers. They stay a draft until applied, saved on every change, while Resolve's own changes keep showing on the cards meanwhile. Applying replays them in Resolve one by one as live edits; each leaves the draft only once Resolve confirms it, and after a run the cards show exactly what Resolve holds. A move Resolve did not perform is reported on the page within seconds, and the card goes back to where Resolve has it. A draft that is applied leaves the draft on every device. Removed pieces go to the offcuts timeline, as a live delete's do. If the timeline already equals the draft nothing is done: "'<timeline>' already is the draft: nothing was written". A draft cut loose from its timeline is sent as a new timeline, which the editor then follows, and the original timeline is left untouched.
 
+The draft is kept per timeline and saved the moment each staged edit is made, so switching to another timeline, restarting, or someone else reading the timeline without the staged moves never loses any of it; it can be reopened as a file. Every staged edit and staged marker shows on the card it concerns, in any grouping, including on a card folded into a collapsed group, so the editor can always see it and take it back. A staged edit that cannot apply (for example a move whose cuts are missing from what was read of the timeline) is held, not dropped, and is marked "held" on the card it concerns, so every held count the page shows can be traced to its cards.
+
 Messages: "which timeline's draft? -- no tl was sent"; "nothing to apply -- the cut list is empty"; "a cut with no clip cannot be applied -- every cut needs its mp_uid"; a stale draft is refused and the current draft handed back; "nothing is staged -- there is no draft to apply".
 
 - Exact: yes
@@ -508,6 +510,7 @@ A draft made while working on a timeline open in Resolve can be sent as a new ti
 #### Lessons
 
 - Met: CRX-074, CRX-075, CRX-076, CRX-077, CRX-078.
+- Met for another part: CE1-067, CE3-028, CE2-100 (in "Edits staged against a timeline wait as a draft until applied").
 
 ## Bringing Resolve's changes back into the cut
 

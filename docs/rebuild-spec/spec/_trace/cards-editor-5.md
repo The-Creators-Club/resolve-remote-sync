@@ -340,6 +340,11 @@
 - With the help for the editing program switched off, the editor never mentions it and offers the exports | from the owner's requirements
 - With Resolve closed or absent, everything still edits and nothing shows as a fault | CE3-079, CE1-129, CE3-083
 - Following Resolve is off until switched on, and scrolling never switches it off | CE3-080, CE3-081, CE3-082
+- On a phone, the scrub pad drives the head at a speed set by the finger's distance | CE2-056, passed from another part (the pad's numbers come from the ruling)
+- The lane stays smooth at 100 frames a second | every frame in a few milliseconds just after load too, no background request repeated faster than every few seconds (CE1-089, passed from another part)
+- On a desk, the panels sit in tab groups the person can rearrange, resize and reset | Alt with a digit switches tabs (CE3-032, passed from another part); which digit opens which panel (1 cards, 2 transcript, 3 shelf) is read from the ruling's Alt+1/2/3 and the transcript's key hint 2, and should be checked
+- A new, empty cut list is made from the sheet | what the list will hold is shown before it is made (CE1-048, passed from another part)
+- The episode's browser lists every transcript and cut list, and several can be chosen at once | CE1-012, passed from another part; the ways of choosing several are written from the editor's usual selection keys
 
 ## Parts of items left out
 

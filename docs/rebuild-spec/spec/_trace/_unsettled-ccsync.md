@@ -1,0 +1,25 @@
+# Points the specification's writers could not settle: CC Sync and the Footage Sorter
+
+Each line: the point's id | what is not known | what the specification's text assumes meanwhile | the inventory items it came from (their extract is `docs/rebuild-spec/spec/_extracts/<NN>.md`; the inventory section `docs/feature-inventory/<NN>-*.md` names the source files).
+
+- accounts-privacy-legal-U1 | how long records of conversations with the assistant are kept by default | a site setting whose default is left open; nothing is guessed | 20-113
+- broll-U1 | the graphics memory each quality level needs and the size of its download follow from the describing the build uses | the figures the studio knows (8 and 12 GB, 16 and 24 GB on Apple Silicon, about 3.3 and 6.2 GB) | 07-028, 13-082, 24-015, 24-016
+- broll-U2 | whether, when placed at the playhead, a clip's sound lands on the audio track with the same number as its video track | video and stereo sound both go on tracks free over the span | 05-039
+- dashboard-1-U1 | the threshold at which the server's own work counts as slow, and the exact words of the slow-work problem and of the "moves were left out" problem | the text names the problems without a number or exact words | 16-004, 16-033
+- dashboard-1-U2 | how far a computer's clock must be from the server's before "clock ahead/behind" is shown | the text says "when the difference reaches the warning amount" without a figure | 11-011, 13-035
+- dashboard-2-U1 | which parts of which pages refresh every 2 seconds and every 5 seconds on a desk | the text promises only the touch-device slow-down (2 to 10, 5 to 15) and that slower parts are the same everywhere | 14-004
+- fleet-jobs-U1 | the tries, studio-wide limit and quiet wait for the b-roll and music analysis kinds, which no item describes | the text gives them the computer's quiet time and says what they need is in their own pieces; tries and limit fall under "every other kind" (4 at once) and are not stated | 19-001, 20-093
+- footage-sorter-and-camera-cards-1-U1 | how long a copy may make no progress before it is stopped, and the exact words then | "for a set time", and the copy says which drive stopped answering | 10-021, 38-068 (lesson SRT-076; the one-minute figure in 38-068 is the Sorter waiting on another computer, not a limit a person was given)
+- footage-sorter-and-camera-cards-1-U2 | how often automatic backup looks at the drives marked for it: one account says about every 10 minutes, another about every hour | about every 10 minutes, as a setting | 36-025, 35-064
+- footage-sorter-and-camera-cards-1-U3 | how often the reminder about footage resting only on a laptop is sent | "every few days" | 38-085 (lesson SRT-082; no item gives it)
+- music-U1 | the size of the safety margin of free space added to the music analysis download's own size | "its own size plus a safety margin", with the refusal naming how much is needed | 08-060
+- music-U2 | whether leaving out recorder takes, voiceover, short stings and recordings over 15 minutes applies to a person's own drop or only to looking over the library folder as a whole (a lesson also says music of any length, two hours and more, is indexed) | only to the library-wide look-over; a dropped track is taken whatever its length | 25-023, 25-045
+- proxies-and-file-moves-U1 | whether making proxies is on by default on every computer, or only on some (today a rule ties it to whether the computer keeps its own copies of proxies) | on, on every computer | 06-001, 09-013
+- proxies-and-file-moves-U2 | the exact list of video file types that count as originals needing a proxy, and which YouTube working files are skipped | "video originals", with no list | 06-002
+- proxies-and-file-moves-U3 | how often clips in the open Resolve project are pointed at their synced proxies (only the notes say about every 2 minutes) | about every 2 minutes | 06-030
+- server-install-and-running-1-U1 | Which of Timeline Cards and the Footage Sorter are on by default for a new site | the text states defaults only for the b-roll archive, music and YouTube downloads | 21c-021, 21-028
+- server-install-and-running-2-U1 | how far the NAS's clock may be off before the admin is told | the text says "when the NAS's clock is wrong" and gives no number | none (from SRV-129)
+- sync-1-U1 | Who may change a computer's own sync settings (the shutdown warning, keeping awake, the recovery folder's size, the download safety limits, the free-space floor, the time for each project), and whether an admin can set them for a computer from the dashboard | the editor on that computer | 03-036, 03-037, 09-021, 09-010, 03-017, 03-018, 02-024
+- sync-1-U3 | How many projects disappearing at once counts as too many to mark inactive | "many", no number | 16-018, 15-041
+- sync-2-U1 | whether a computer whose setting up was left unfinished refuses to sync | it shows "Sync: not set up yet" and does not sync until setting up is finished | 04-012, 04-042
+- youtube-U1 | how long a download may write nothing before it is stopped, and the exact words then | "a set time", "stopped making progress" | 26-031 (lesson YTD-032; no item gives it)

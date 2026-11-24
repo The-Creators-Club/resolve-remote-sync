@@ -260,6 +260,10 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Ten reading aids help an editor cut speech in a language they do not read, each switched Off, on for languages not read, or on for all | aid 7 off by default, lit as spoken and shown in the lane (CE1-020)
 - A card shows its English and its spoken words in the order the switch says | the working card's full original and one size in the edit view (CE2-085)
 - A trimmed or split cut's English is worked out from the line-ups and marked approximate only when it truly is | untranscribed speech shown as a gap in the original language (CE1-014), "approximate" never said of a frame-exact cut (CE2-087)
+- Dropping media files on the panel adds them to an intake list and looks for each one in the episode | each row says whether its clip still lacks a transcript or a proxy, whatever Q2 decides (lesson CE1-049, passed from another part)
+- A highlighted stretch of transcript becomes a card of exactly those words | dragging highlighted text onto the lane or cards lands the same exact card (lesson CE3-030, passed from another part)
+- The search sheet has pickers for which transcripts, how many results, which strength of assistant, and a fresh start | a one-person or clips scope reads only its own transcripts, cold or warm (lesson CE2-091, passed from another part)
+- The first assistant search of a set of transcripts is slow because it reads them, and the sheet says which | each answer says how much was reused and how much read fresh (lesson CE2-091)
 - The search sheet offers three kinds of search, and switching kind never asks the assistant by itself | what a person sees with the assistant switched off (owner's requirements, section 2), also on the pickers, the reading, the alignment row, the aids, the aids panel, the join check and the two searches inside one transcript
 
 ## Joins with other capabilities

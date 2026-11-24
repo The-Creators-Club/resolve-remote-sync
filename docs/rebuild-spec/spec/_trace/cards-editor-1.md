@@ -257,10 +257,10 @@
 - U-29-2 | settled: 3 seconds
 - U-29-4 | settled: what the editor remembers on a device is written with each behaviour (follow, places, the lane's height and dock, its language, the clip text size, the language aids)
 - U-29-9 | settled: F held turns follow on and off; no other control is shown
-- U-30-1 | with cards-editor-5
+- U-30-1 | settled: part 5 names each button, under "What the transcript says when a controller press acts or cannot"
 - U-30-3 | settled: the aids' marks and the safe-cut ticks are written here, and Alt drags an edge free of the snap
 - U-32-2 | settled: the colours and the rotation are written under Colours, the shortest cut and gap are 1/24 s, the gain limit is with editing the cut list
-- U-32-5 | with cards-editor-2
+- U-32-5 | settled: no editor key acts while the person types in a text box unless it is meant for text boxes, Ctrl+S included, and only keys listed as repeating repeat, which Shift+V is not (written in "The editor's keys work on any keyboard layout and stay out of the way while the editor is typing")
 - U-39-2 | behind the glass
 
 ## Still unsettled
@@ -269,7 +269,11 @@
 - cards-editor-1-U2 | what "ripple trims carry the playhead" in the ruling on handling like Resolve asks for, beyond what the items show | the text says the lane handles like Resolve's timeline and leaves the playhead where the items put it | 28-057, 29-046
 - cards-editor-1-U3 | whether the faint strike through fillers is one of the hesitation marks the owner declined ("lets ditch all this") | the text keeps the filler strike as one of the language aids | 29-054
 
+
 ## Conflicts between an item and a lesson
+
+- CE1-053 | 29-019 | the items let a note or section row in the cards be read and dragged but not deleted in place; the ruling asks for a one-click delete there. Added it.
+- CE1-092 | 29-020, 29-044 | the items mark the playhead's card and clip but do not say they are apart from the selection or how soon they follow; added the ruling's quarter second. The ruling's "distinct from the selection colour" is met by a distinct mark (a dot and a frame against a bar and a wash), since CE2-019 makes both red.
 
 - CE2-023 | 40-016, 40-017 | the items gather consecutive cuts into stacks on their own (90 s, a gap, a marker, a source jump); the ruling says no stack exists unless the editor asks. Wrote the ruling; the automatic rules are not carried.
 - CE1-098 | 28-054 | the item says a double-click does nothing on the lane; the ruling says a double-click opens that cut's paragraph in its transcript. Wrote the ruling.

@@ -349,6 +349,7 @@
 - A sync pill in the header always says whether edits are saved | CE1-138, CE3-066: the "Offline (your choice)" row and the pill in every view
 - Offline, a standing toast tells the person to keep editing | CE3-066: each change between live and offline announced
 - Inserting still works when the server cannot be reached | CE2-118
+- The montage builder's answer is placed as cards, and nothing it proposed is silently lost | CE3-054 (passed from part 3): the montage shown before insertion with unplaced quotes listed, each cut playable and draggable into the cut
 - The panel shows whether the open cut list is on this device, how big each part is, and how it will be kept | CE2-102, CE3-073
 - Keeping a cut list shows progress and says plainly how it ended | CE3-072
 - Bringing a kept copy up to date fetches only what changed and says what it found | CE2-110, CE2-113

@@ -20,15 +20,9 @@ How long nobody has been at a computer is always told correctly, however long th
 
 - On its own: whether a computer is free, from how long its keyboard and mouse have been left alone and whether Resolve is open or rendering.
 - By hand: the person at the computer can lend it now, which skips the wait (see "The person at a computer can lend it to shared work for a while"); an admin can start a piece of work now (see "An admin can start waiting work now, on a chosen computer"); and the computer's quiet time and the hold-back for Resolve are settings of the computer.
-- Setting: Quiet time before shared work. Does: how long nobody must have used this computer before it takes heavy shared work; 0 means it never waits (a computer nobody sits at). Default: 5 minutes. Who: the computer's own person, on the computer. Applies to: a computer. Search words: idle, quiet time, away, wait, fleet.
+- Setting: Quiet time before shared work. Does: how long nobody must have used this computer before it takes heavy shared work; 0 means it never waits, which is how a computer nobody sits at is set, and its wait is then shown as "no wait". Default: 5 minutes. Who: the computer's own person, on the computer. Applies to: a computer. Search words: idle, quiet time, away, wait, fleet.
 - Setting: Hold shared work back while Resolve is open. Does: when on, this computer takes no new shared work while Resolve is open on it. Default: on. Who: the computer's own person, on the computer. Applies to: a computer. Search words: Resolve open, editing, hold back, fleet work.
 - Windows and macOS: on Windows only the person's own session counts, so another user signed in to the computer or a remote session does not make it busy. On macOS the time since the last input is read from the system. On any other system it can never be told, so work that waits for quiet never runs there.
-
-### A computer set as wired to the server takes shared work without waiting for quiet
-
-A computer set as wired to the server, with nobody sitting at it, never waits for its keyboard and mouse to be left alone. The dashboard shows its wait as "no wait (a computer wired to the server is exempt)".
-
-- Pending: fleet-jobs-Q4
 
 ### Work already running is finished when the person comes back
 
@@ -44,7 +38,6 @@ The item is present only while this computer takes shared work.
 
 - Who: the person at the computer.
 - Ways in: from the app on that computer only. Nothing on the dashboard lends a computer.
-- Pending: fleet-jobs-Q10
 - Setting: Lending period. Does: how long one click of "Take fleet jobs now" lends this computer: "LEND THIS COMPUTER FOR N minutes AT A TIME (click for M)" steps through 15, 30, 60 and 120 minutes, saying "One click of 'Take fleet jobs now' will lend this computer for M minutes." Default: 30 minutes. Who: the computer's own person, on the computer. Applies to: a computer. Search words: lend, volunteer, take jobs now, fleet.
 
 ### A computer's own heavy work comes first
@@ -151,7 +144,6 @@ Where a kind of work needs tools that the computer does not have (the video tool
 
 - On its own: fetching the tools a kind needs.
 - By hand: an editor who does not want the tools on their computer unticks that kind of work.
-- Pending: fleet-jobs-Q12
 
 ### An editor decides whether their computer takes shared work and which kinds
 
@@ -165,8 +157,6 @@ This is how an editor keeps a laptop out of one kind of work without leaving sha
 
 - Who: the computer's own person, on the computer. The computer's owner or an admin can ask for the same two settings from the dashboard (next behaviour).
 - Ways in: the app's settings window on the computer, and the computer's settings asked from the dashboard.
-- Pending: fleet-jobs-Q2
-- Pending: fleet-jobs-Q9
 - Setting: Let the fleet use this computer. Does: whether this computer takes any shared work at all. Default: on. Who: the computer's own person on the computer, or its owner or an admin by asking from the dashboard. Applies to: a computer. Search words: fleet work, shared work, lend computer, take jobs, laptop.
 - Setting: Kinds of work this computer takes. Does: one tick per kind of work. An unticked kind is never given to this computer, and with every kind ticked, kinds added later are taken too. Default: every kind. Who: the computer's own person on the computer, or its owner or an admin by asking from the dashboard. Applies to: a computer. Search words: kinds of work, transcribe, preview copies, waveforms, fleet kinds.
 
@@ -201,8 +191,6 @@ When the ask is applied, the editor at that computer is told once: "<Who> asked 
 
 - Who: the computer's owner, or an admin.
 - Ways in: the computer's own page on the dashboard, the per-computer view, and a person's own account page for their computers; the same two settings on the computer itself (previous behaviour).
-- Pending: fleet-jobs-Q2
-- Pending: fleet-jobs-Q9
 
 ### Each computer's shared-work state on the dashboard
 
@@ -273,14 +261,6 @@ Wherever a person chooses which computer does a piece of work (an admin starting
 
 - Who: anyone allowed to ask for the work.
 
-### An admin can queue a piece of work by hand
-
-An admin can ask for a piece of work by hand: a transcription of an episode's folder (optionally telling speakers apart, with a minimum of graphics memory, 6 GB by default), or a preview copy, the sound or the waveform of a clip (naming where the result goes, and the name the editor knows it by). The admin may give it a priority from -100 to 100 (higher first, 0 by default), start it now, and aim it at one computer picked from the studio's known computers. What it works on is always a place among the studio's shared folders plus a path inside it: a full path, a drive letter, ".." or an empty path is refused. A kind of work that does not exist is refused, saying so; a computer name that has never been heard from is accepted with the warning "no computer of that name has been heard from; it waits until one is". Placing a cut into Resolve and editing in Resolve can never be asked for. The admin is shown the piece's number and, for every computer, whether it can do it and why not.
-
-- Who: an admin ("a job is work on somebody else's computer").
-- Ways in: the work page, and a command line.
-- Pending: fleet-jobs-Q5
-
 ### Work tied to one computer's Resolve is never shared
 
 Placing a cut into Resolve, and any editing inside Resolve, is never shared work: it is done only on the computer where that Resolve runs, by the person at it. See Timeline Cards: the hand-over to Resolve, and exports: Which computer is driving Resolve.
@@ -296,7 +276,6 @@ While the hold-up is only passing (computers busy, the limit reached, waiting fo
 
 The explanation of such a piece reads "the computers could not finish this, so the server is making it; it never goes back to the computers".
 
-- Pending: fleet-jobs-Q3
 
 #### Lessons
 
@@ -351,11 +330,10 @@ The work page is for admins. It keeps itself up to date without reloading. It op
 - Under each row: the one-line answer to "why is this not running", "(<N> attempts: <start of the last error>)", and per computer "yes" or "no", "<person>/<computer>: <reason>".
 - Empty: "Nothing is waiting or running." with how many were given up recently.
 
-For each piece of work the page can open what is known about it: its kind, when and by whom it was asked for, its priority, the files it works on (as a shared folder and the path inside it, never a drive letter), what a computer needs to take it, its state, the person and computer doing it, its last sign of life, its attempts, its last error, its result, its progress, whether it was started now, the computer it is meant for, and when and by whom it was cancelled. The per-computer view shows, for each computer doing work, its kind, state, last sign of life, percentage and file.
+For each piece of work the page can open what is known about it: its kind, when and by whom it was asked for, the files it works on (as a shared folder and the path inside it, never a drive letter), what a computer needs to take it, its state, the person and computer doing it, its last sign of life, its attempts, its last error, its result, its progress, whether it was started now, the computer it is meant for, and when and by whom it was cancelled. The per-computer view shows, for each computer doing work, its kind, state, last sign of life, percentage and file.
 
 - Who: admins.
-- Ways in: the work page, and a command line.
-- Pending: fleet-jobs-Q8
+- Ways in: the work page.
 - Name and search words: shared work. Search words: jobs, queue, fleet work, transcriptions waiting, why not running.
 
 ### The editor sees what their computer is doing for the studio, and its last ten jobs
@@ -383,8 +361,7 @@ An admin can cancel any piece of work that has not finished. The question is "St
 A cancelled piece never runs again anywhere, the cancel reports the state the piece actually ended in, and the counts of waiting work include only work that can still be given out.
 
 - Who: an admin.
-- Ways in: the work page, and a command line.
-- Pending: fleet-jobs-Q6
+- Ways in: the work page.
 
 ### The editor stops the job running on their own computer
 
@@ -392,7 +369,6 @@ The person at a computer can stop the shared work it is running with "STOP THIS 
 
 - Who: the person at the computer.
 - Ways in: the app's settings window and menu on the computer.
-- Pending: fleet-jobs-Q1
 
 ### A stop ends everything the work started and leaves nothing half-made
 
@@ -465,15 +441,13 @@ Every piece of work has one overall answer, in words:
 
 Beside the sentence, the answer says whether the hold-up will pass by itself ("the fleet will get to it": computers busy, the limit, waiting for quiet, a computer resting, a named computer away) or not (no computer able, the named computer unknown, no computer in touch), and the two always point at the same cause. It also says how many computers could ever do it, and how many of that kind are running against the limit.
 
-- Pending: fleet-jobs-Q11
 
 ### For waiting work an admin sees why each computer is or is not taking it
 
 For a piece of work still waiting there is one line for every computer ever heard from. A computer passed over shows its reason (see "The reasons a computer is passed over for a piece of work"). An able computer shows either "this computer can take it, and is first choice", or "this computer can take it (choice <n> of <m>, <why it lost>, <when>)". Why it lost names the first thing it lost on: "the first choice has <somebody at it who lent it now | a hardware video encoder | a graphics card with room for this work | a graphics card | a wired connection to the server> and this computer has not", or "the first choice is better placed for this kind of work", "is doing less work right now", "is less loaded", "has been left alone longer". When is "it may take it now too" or "it may take it in <N> s if nobody ahead of it has by then".
 
 - Who: an admin.
-- Ways in: the work page, and a command line.
-- Pending: fleet-jobs-Q8
+- Ways in: the work page.
 
 ### Admins are warned when work waits and nobody can take it
 
@@ -485,11 +459,10 @@ An admin is warned, "the fleet gave up on some work", when any piece was given u
 
 ### Finished work can be looked back on and tried again
 
-On the work page, "show finished" lists every piece that ended in the last 24 hours (the period can be changed): number, kind, ending ("done", "failed", "given up" or "cancelled"), what it worked on (with "(retry of #N)" for a new attempt), which computer last had it, when, its attempts, and its full last error. Empty: "Nothing has finished in the last <N> hours." A failed or given-up piece has "try again": "Queue job #N again? It goes back on as a new job.", then "job #N is on the queue again as #M. The old one is left as it was." The new piece has the same kind, files, needs, priority, start-now and named computer, and the admin is shown which computers can do it. Refusals: "job #N is <state> and has not finished, so there is nothing to try again yet. Cancel it first."; "job #M is already a new attempt at job #N and it is still on the queue." Trying again never queues a second copy of a piece already waiting or running, however many times it is pressed. Finished work is kept for 30 days; waiting work is never forgotten.
+On the work page, "show finished" lists every piece that ended in the last 24 hours (the period can be changed): number, kind, ending ("done", "failed", "given up" or "cancelled"), what it worked on (with "(retry of #N)" for a new attempt), which computer last had it, when, its attempts, and its full last error. Empty: "Nothing has finished in the last <N> hours." A failed or given-up piece has "try again": "Queue job #N again? It goes back on as a new job.", then "job #N is on the queue again as #M. The old one is left as it was." The new piece has the same kind, files, needs, start-now and named computer, and the admin is shown which computers can do it. Refusals: "job #N is <state> and has not finished, so there is nothing to try again yet. Cancel it first."; "job #M is already a new attempt at job #N and it is still on the queue." Trying again never queues a second copy of a piece already waiting or running, however many times it is pressed. Finished work is kept for 30 days; waiting work is never forgotten.
 
 - Who: an admin.
-- Ways in: the work page, and a command line.
-- Pending: fleet-jobs-Q7
+- Ways in: the work page.
 
 #### Lessons
 

@@ -58,7 +58,6 @@ Each undo puts back the cut list as it was before that edit, which is a saved ve
 {{28-076}}
 
 - Exact: yes
-- Pending: cards-editor-2-Q2
 
 ### Undo puts back only what the undone edit changed
 
@@ -91,13 +90,11 @@ A trim (an edge drag, E / Shift+E, an armed-edge key, a bumper drag):
 - The selection does not change. The head rule applies (the head stays on the same moment of the same clip).
 
 - Exact: yes
-- Pending: cards-editor-2-Q4
 
 ### An edge is set to a source second, and everything after it ripples
 
 An edge is set to a source second, on a cut in the cut or on the bench, and every cut and gap after it moves up or back. Refusals: an in point before 0, "the clip starts N s later than that -- there is no more source before this cut"; an out point past the known end of the source, "the clip runs out N s before that -- there is no more source after this cut"; a cut left at 0 or less, or under 1/24 s and shorter than before, "that would leave nothing of the cut -- delete it instead" (a cut already under 1/24 s may still be lengthened). Fades shrink to fit. Pulling an edge out over a neighbouring cut of the same source is allowed (that stretch then plays twice).
 
-- Pending: cards-editor-2-Q4
 
 ### Trimming to the playhead and taking a range out of a cut
 
@@ -135,7 +132,6 @@ Every edge an edit makes is snapped to the clip's own frames, so the cut list al
 - Insert straight onto the shelf (pasting a transcript paragraph while the shelf is open): note "staged X.X s of <clip>".
 
 - Exact: yes
-- Pending: cards-editor-2-Q4
 
 ### Deleting stages cuts on the shelf under their section's name and takes gaps out
 
@@ -144,7 +140,6 @@ Every edge an edit makes is snapped to the clip's own frames, so the cut list al
 Nothing is lost by a delete: each cut goes onto the shelf named after the last section heading above it (a note heading or a plain heading does not count); before the first section, or when the section's title cannot be a category name, onto the plain shelf. Shelves are made as needed, at the end of the bench. A deleted gap is simply removed, and undo puts it back.
 
 - Exact: yes
-- Pending: cards-editor-2-Q3
 
 ### Moving, staging, unstaging and throwing away cuts follow fixed rules
 
@@ -177,7 +172,6 @@ Rules for every new cut, and for fixes made in the file by hand:
 A gap's length, in the cut or in a saved sequence, is at least 1/24 s ("a gap shorter than a frame is no gap -- delete it instead").
 
 - Exact: yes
-- Pending: cards-editor-2-Q3
 
 ### Fades, gain, clip colour, notes and markers are edits like any other
 
@@ -225,12 +219,6 @@ A gap's length, in the cut or in a saved sequence, is at least 1/24 s ("a gap sh
 
 At every open or reload, the words of every cut (and its link into the transcript) are taken afresh from the transcript for its span, so a corrected transcript shows on the cards. The file itself is not rewritten until the next edit. Highlights are refitted onto the new words; a highlight whose words have all gone is dropped.
 
-### Every cut's words can be refreshed at once
-
-The product can take every cut's words again at once and say how many changed; when it cannot reach the open cut list within 10 s it refuses with "the cut list is not open on this server".
-
-- Pending: cards-editor-2-Q7
-
 ### A person can start a new, empty cut list in an episode
 
 {{32-023}}
@@ -277,7 +265,6 @@ A person can choose to open a cut list read-only when opening it. Then every cha
 
 - Ways in: from the list of an episode's cut lists, when opening one.
 - When the help for the editing program is off: the read-only list offers its exports instead of the hand-over.
-- Pending: cards-editor-2-Q8
 
 ### Opening, browsing and playing never change a file of the episode
 
@@ -299,13 +286,6 @@ Stopping or restarting the server never loses an edit: every open cut list is sa
 
 Within a moment of the last confirmed edit, and when the cut list is put away, the file is rewritten with its edit count and a "written by Timeline Cards" stamp (UTC). The previous version is kept as a backup beside it. If the file changed on disk in a way the editor did not make, that change is merged first, never overwritten ("the file changed while it was being written; merging that first"). A file held open by another program on Windows is still written. A failed write tells every device once: "could not write the cut list file (<reason>); every edit is safe in the edit history and the write will be tried again", and the write is tried again, soon at first and then at most 30 seconds apart. A file deleted while the cut list is open is written again: "the cut list file had gone, so it was written again; nothing was lost". A save is never seen half-written.
 
-### A cut list changed by hand outside Timeline Cards shows on the page within about a second
-
-{{39-040}}
-
-- Exact: yes
-- Pending: cards-editor-2-Q5
-
 ### The cut list file can be edited by hand, and the editor merges the change
 
 A change made to the file in a text editor is noticed within 2 seconds, when the cut list opens, and before every write. A file still reading the same as the last write is ignored.
@@ -317,10 +297,8 @@ A change made to the file in a text editor is noticed within 2 seconds, when the
 - Ignored and written back as they were: a cut's words, its "(12.4s)" length and its transcript link text; the episode, root, board, rate, drop-frame, start and timing facts at the top ("the frontmatter's X was edited; no edit can change it, so it is kept as it was").
 - The person is told "merged an edit made to the file outside the editor (N change(s))"; or "the file was edited outside the editor, but nothing in the edit changes the cut (the words are written from the transcript), so it was written back as it was"; plus "K of the file's changes no longer apply and were skipped: <up to 5 reasons>" and up to 5 warnings. A merge that could not be saved is tried again at the next look; the same file after a crash gives the same edits, which can never apply twice.
 - An edit an editor made against the copy the hand edit replaced is refused with its sentence where it clashes with the hand edit, never merged silently.
+- Changes brought back from the editing program into a cut list follow these same rules: a cut removed there waits on a shelf, and only what changed moves (see Timeline Cards: the hand-over to Resolve, and exports: Bringing Resolve's changes back into the cut).
 
-- Pending: cards-editor-2-Q5
-- Pending: cards-editor-2-Q6
-- Pending: cards-editor-2-Q1
 
 ### A cut list holds the cut, the bench and the timeline's facts
 
@@ -340,7 +318,6 @@ A cut list has the timeline's facts, an optional title, the cut's rows in order,
 - Every cut, gap, heading, note row and bench section has a permanent id written in the file and is never matched by name, time or position; a row arriving without one gets the same id from the same content every time.
 - A cut list longer than 16 MiB is refused as too large.
 
-- Pending: cards-editor-2-Q3
 - When the assistant is off: no section summary is written; summaries already in the file are kept and shown.
 
 ### Facts the editing program knows about a clip win over what the cut list recorded
@@ -370,7 +347,6 @@ A UTF-8 Markdown file at `<Episode>/Script Docs/Cuts/<name>.cut.md`, meant to be
 {{39-059}}
 
 - Exact: yes
-- Pending: cards-editor-2-Q1
 
 ### The frontmatter block carries the timeline's facts in a fixed canonical form
 
@@ -407,7 +383,6 @@ A UTF-8 Markdown file at `<Episode>/Script Docs/Cuts/<name>.cut.md`, meant to be
 - `written` reads like "<time> by Timeline Cards" (or "(new, empty)", "(new from canvas)", "by [the tool that brings cut lists in line with the montage sources]"); `conformed` reads "<time> via <how>"; `updated_from_timeline` reads "<time> from <timeline>". The `clips:` lines are sorted by name, `Name: {fps: .., start_tc: "..", uid: ..}`; the uid is a hint only, and handing over always finds the clip again by name.
 
 - Exact: yes
-- Pending: cards-editor-2-Q1
 
 ### Clip lines and extra-data lines in the frontmatter
 
@@ -442,7 +417,6 @@ A UTF-8 Markdown file at `<Episode>/Script Docs/Cuts/<name>.cut.md`, meant to be
 {{34-048}}
 
 - Exact: yes
-- Pending: cards-editor-2-Q1
 
 ### Comments, id lines, gap notes and section summaries
 
@@ -794,7 +768,7 @@ Selecting transcript text lets the editor hear exactly that passage, from the pr
 
 {{33-030}}
 
-A cut's own gain is kept through a split, a trim, a move, a copy and an undo, and is shown on its clip.
+A cut's own gain is kept through a split, a trim, a move, a copy and an undo, is shown on its clip, and goes with the cut to the editing program when the cut is handed over (see Timeline Cards: the hand-over to Resolve, and exports: Sending a cut to Resolve).
 
 - Exact: yes
 
@@ -826,7 +800,6 @@ A recording channel that never peaks above -30 dB counts as dead: the live chann
 
 The levelling is only for listening: no media file is ever changed by it.
 
-- Pending: cards-editor-2-Q10
 
 ### Playback runs through gaps as silence, and joins never click
 
@@ -854,11 +827,12 @@ A clip with no audio plays silent, with one warning shown to the editor: "no aud
 
 ### The video window shows the picture of the clip under the playhead, switched on and off from the toolbar or Shift+V
 
+There is one video panel. On the desk it docks as the Video tab (see Media the browser gets) or floats as the window described here; on a phone it floats. Shift+V and the toolbar's Video button show and hide that one panel, and it moves into its own browser window the way every other panel of the editor does.
+
 {{32-037}}
 
 - Name and search words: the video window: video, picture, proxy, Shift V.
 - Exact: yes
-- Pending: cards-editor-2-Q9
 
 ### The video panel can be sized, moved and resized, and says why there is no picture
 
@@ -880,7 +854,6 @@ A cut from a multicam shows the picture of the angle in use at that moment, take
 
 - Phone and desk: on a phone the window starts smaller and has no pop-out, as above.
 - Exact: yes
-- Pending: cards-editor-2-Q9
 
 ### The video picture stays on the sound, while playing, scrubbing and across joins
 
@@ -891,7 +864,6 @@ The picture follows the editor's playhead and playback speed (including varispee
 {{32-040}}
 
 - Exact: yes
-- Pending: cards-editor-2-Q9
 
 #### Lessons
 
@@ -902,7 +874,7 @@ The picture follows the editor's playhead and playback speed (including varispee
 
 ### A Video tab shows the interview under the playhead, in step with the sound
 
-- A dockable desk panel showing a small preview of the interview under the playhead, lined up with the clip's sound. It is not on phones.
+- A dockable desk panel showing a small preview of the interview under the playhead, lined up with the clip's sound. It is the same panel as the video window: it can be undocked to float, and on a phone it floats.
 - Always muted (the sound comes from playback). No picture-in-picture.
 - It only runs while its tab is visible; otherwise nothing plays or decodes.
 - Playing: it follows the playhead's speed (between 0.2x and 4.5x) and is pulled back when it drifts more than three frames from the sound. Paused: it shows the frame under the playhead.
@@ -911,7 +883,7 @@ The picture follows the editor's playhead and playback speed (including varispee
 - **Zoom**: the wheel zooms at the pointer (faster with Ctrl, as a trackpad pinch), from 100% to 800%; buttons "−", "100%" (fit), "+" step ×1.5; double-click fits; drag pans while zoomed; the picture always fills the frame. The zoom buttons show on hover, while zoomed, or when focused.
 
 - Name and search words: the Video tab: video, preview, picture, interview video.
-- Phone and desk: desk only; a phone uses the video window.
+- Phone and desk: docked as a tab on the desk; on a phone the same panel floats, as the video window.
 - Exact: yes
 
 ### Every clip is made ready to play without anyone asking
@@ -937,14 +909,6 @@ The editor can list the sound of every clip a cut list uses (in the cut and on t
 
 While a clip's sound copy is being made, the clip is dimmed on the lane and the page asks again until it is ready. A clip's sound is in one of these states: ready, being made, failed (with the reason), or none (its media cannot be reached).
 
-- Pending: cards-editor-2-Q11
-
-### Sound is always prepared before video, and progress is shown as a count
-
-Sound extractions are made before small video copies; a video copy already being made is not interrupted, but waiting sound is then made alongside it. Progress is shown as "N of M" (finished of those asked for), with " + [the studio's other computers] 62%" or " + [the studio's other computers]: N" added while work handed to other studio computers is in flight.
-
-- Exact: yes
-- Pending: cards-editor-2-Q11
 
 ### Each clip's picture copy comes from its own media, and a failure is remembered until the media changes
 

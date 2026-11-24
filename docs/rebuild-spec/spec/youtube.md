@@ -114,12 +114,6 @@ A pasted clip, once landed, is filed into the editing program and joins the down
 
 - Who: anyone signed in.
 
-### Further choices that the page does not offer
-
-Beyond what the page offers, a job can ask for 480p quality, YouTube's "last hour" upload window, a number of results per term (1 to 50, default 15), and skipping the term review.
-
-- Pending: youtube-Q16
-
 ### A news clip with a signer burned into the picture is flagged
 
 Some news uploads carry a sign-language signer burned into the picture, which makes the footage hard to use. A downloaded news clip with a burned-in signer is flagged on its row and in the download history, pointing to a plain version of the same story where one was found.
@@ -251,7 +245,6 @@ The sign-in control reads "Sign in to YouTube (for downloads)…" when never sig
 
 - Who: an editor, for their own computer.
 - Ways in: the one-click sign-in, or a cookies file exported from a browser.
-- Pending: youtube-Q2
 - When signed-in YouTube downloads on editors' computers is off: no sign-in control is shown.
 - Windows and macOS: the browsers tried differ, as listed.
 
@@ -263,11 +256,9 @@ A button "Use an exported cookies file…" opens the system file chooser titled 
 - it must hold at least two of YouTube's sign-in cookies, otherwise "those cookies are not from a signed-in YouTube session (no login cookies found). Sign in to YouTube in the browser first, then export";
 - other failures: "couldn't read that file (<error>)", "couldn't save the cookies (<error>)".
 
-On success it is stored so that only the computer's own user can read it, the session is marked working, and the editor reads "YouTube sign-in saved: your downloads can now reach age-restricted clips". If the chooser cannot open, the editor is told so, and that the file can be named in the computer's settings instead. The chooser is refused while another of the app's windows is open.
+On success it is stored so that only the computer's own user can read it, the session is marked working, and the editor reads "YouTube sign-in saved: your downloads can now reach age-restricted clips". If the chooser cannot open, the editor is told so. The chooser is refused while another of the app's windows is open.
 
 - Who: an editor, for their own computer.
-- Setting: YouTube cookies file. Does: names a cookies file elsewhere on the computer to use as the signed-in YouTube session; if that file is not there, no session is used. Default: none (the session saved by signing in). Who: an editor, for their own computer. Applies to: a computer. Search words: youtube cookies, sign in, session file, age restricted.
-- Pending: youtube-Q2
 
 ### The app judges the editor's YouTube sign-in from real downloads and warns once when it lapses
 
@@ -298,7 +289,6 @@ The server uses the session only after YouTube bot-checks an attempt made withou
 
 - Who: an admin.
 - Setting: The server's YouTube session. Does: gives the server a signed-in YouTube session to fall back on when YouTube bot-checks it. Default: none. Who: an admin. Applies to: the site. Search words: youtube session, cookies, server sign in, bot check.
-- Pending: youtube-Q3
 
 #### Lessons
 
@@ -373,12 +363,6 @@ When a downloaded clip on an editor's computer cannot be decoded and a proxy of 
 
 Fact about Resolve 21: it stops a render on some VP9 and AV1 clips from YouTube. Before a render, a timeline's sources are checked for such codecs, and the editor is told by name which clips will make it fail. See Timeline Cards: the hand-over to Resolve, and exports: Renders from Resolve.
 
-### Clips can be converted to an intra-frame editing format instead
-
-Instead of H.264, a clip can be converted to an intra-frame editing format with uncompressed sound.
-
-- Pending: youtube-Q17
-
 #### Lessons
 
 - Met: YTD-037, YTD-038, YTD-039, YTD-040, YTD-041, YTD-042, YTD-043, YTD-044, YTD-045, YTD-046.
@@ -446,7 +430,7 @@ A job runs on an editor's computer only when that computer can complete it. It c
 | The computer is not set up to reach the server | "this computer has no dashboard URL or token configured" |
 | Nobody is signed in on the computer | "nobody is signed in on this computer" |
 | The computer's sign-in is no longer accepted | "this computer has no valid sign-in token: sign in again from the tray" |
-| The signed-in editor has not accepted the YouTube terms on this computer | "the YouTube terms have not been accepted on this computer: " followed by where to accept them |
+| The signed-in editor has not accepted the YouTube terms on this computer | "the YouTube terms have not been accepted on this computer: accept them at the top of the YouTube page on this computer" |
 | The computer is not yet able to download or to join YouTube's separate picture and sound | the reason, or "the downloader is not ready on this computer" |
 | The project drive is known to be absent | "this computer's project tree isn't mounted right now, so there is nowhere to download into" |
 | The computer does not hold the project, or has too little free space | as in "Clips land in the right project folder on each computer, never in a made-up folder" and "Before downloading, the product checks there is room and refuses with numbers" |
@@ -465,7 +449,7 @@ Whenever a job runs on the server rather than the editor's own computer, or move
 - the computer could not take it: "This computer cannot download right now: <reason>. The server is downloading these clips.";
 - the app on the computer is not answering: "Downloading on the server: the app on your computer is not answering", with a hint to check the app's status;
 - the computer is busy with another job: "Downloading on the server: your computer is already downloading another job";
-- the editor's acceptance is missing: "Please first accept the download terms in the CC Sync app on your computer: <where>. This download runs on the server instead.", or "The dashboard has no record of you accepting the YouTube download terms, so this computer did not download. Read the notice at the top of this page and press Accept.";
+- the editor's acceptance is missing: "The dashboard has no record of you accepting the YouTube download terms, so this computer did not download. Read the notice at the top of this page and press Accept.";
 - the server no longer accepts the computer's sign-in: "The dashboard does not accept this computer's sign-in, so it did not download.";
 - the computer must update first: "This computer must be updated before it can download YouTube clips, so it did not download.";
 - the computer stopped partway and gave the rest back: its reason, said once, at any time in the few minutes after the job moved to it.
@@ -481,30 +465,21 @@ On the YouTube page, an "on this computer" switch shows and sets the same thing 
 - Who: an editor, for their own computer.
 - Ways in: the "on this computer" switch on the YouTube page, and the computer's own settings in the app.
 - Setting: This computer downloads YouTube clips. Does: lets this computer run YouTube downloads over its own connection, or keeps it out so they run on the server. Default: on. Who: an editor, for their own computer. Applies to: a computer. Search words: youtube, download here, on this computer, local download.
-- Pending: youtube-Q5
-
-### Downloads on editors' own computers can be switched off for the whole site
-
-A site can switch off downloading on editors' own computers altogether. With it off, every download runs on the server, the page never contacts the editor's computer about downloads, and it shows no "on this computer" switch or mark.
-
-- Setting: Downloads on editors' computers. Does: allows YouTube downloads to run over editors' own connections as well as on the server. Default: off. Who: an admin. Applies to: the site. Search words: youtube, editor computers, local downloads, where downloads run.
-- Pending: youtube-Q4
 
 ### The YouTube controls on an editor's computer appear only where they can be used
 
-The app on an editor's computer shows its YouTube controls (the terms, the progress and stop of a download) only when the site has YouTube downloads on and this computer is not kept out of them; the sign-in controls additionally need the site's switch for signed-in downloads on editors' computers. When it applies, they come with a warning that downloads on this computer may start failing, or that they are running on the server because this computer could not be made ready (see "An editor is warned when downloads on their computer may start failing").
+The app on an editor's computer shows its YouTube controls (the progress and stop of a download) only when the site has YouTube downloads on and this computer is not kept out of them; the sign-in controls additionally need the site's switch for signed-in downloads on editors' computers. When it applies, they come with a warning that downloads on this computer may start failing, or that they are running on the server because this computer could not be made ready (see "An editor is warned when downloads on their computer may start failing").
 
 When the part is off, or the app cannot tell whether it is on, the computer behaves as if it were off: it prepares nothing for downloading, answers any request to download with "the YouTube downloader is off for this site, or switched off in config", and answers a request to show or fetch a downloaded clip with "the YouTube downloader is not enabled for this site". Quitting the app stops any YouTube download it was running; the server finishes the clips.
 
 ### An editor can stop a download running on their own computer
 
-While a YouTube download runs on the editor's computer, the editor can stop it from the app's menu ("► Stop the YouTube download"), from the app's status ("Stop local downloads", which says how many it stopped), and from the YouTube page (STOP, shown only while this computer is reporting on the job, and DOWNLOAD ON THE SERVER INSTEAD, shown only while a computer holds the job).
+While a YouTube download runs on the editor's computer, the editor can stop it from the app's menu ("► Stop the YouTube download") and from the YouTube page (STOP, shown only while this computer is downloading the job, so it appears only when it will take effect).
 
-Stopping ends the download at once, including any joining or conversion under way, and deletes the half-made files of the clip in flight. The answer is "Stopped. The server will download the clips this computer did not finish." or, with nothing running, "There was no download running on this computer." The job shows as handed back with the reason "You stopped this download on this computer. The server will download the clips this computer did not finish." From the page, DOWNLOAD ON THE SERVER INSTEAD says "handing this job back to the server: it picks up whatever your computer has not finished". If stopping fails: "CC Sync could not stop the download. Copy the diagnostics for your admin from the app's help." The page's STOP also says when the app did not answer or refused.
+Stopping ends the download at once, including any joining or conversion under way, and deletes the half-made files of the clip in flight. The answer is "Stopped. The server will download the clips this computer did not finish." or, with nothing running, "There was no download running on this computer." The job shows as handed back with the reason "You stopped this download on this computer. The server will download the clips this computer did not finish." If stopping fails: "CC Sync could not stop the download. Copy the diagnostics for your admin from the app's help." The page's STOP also says when the app did not answer or refused.
 
 - Who: the editor whose computer is downloading.
-- Ways in: the app's menu, the app's status, and the YouTube page's STOP and DOWNLOAD ON THE SERVER INSTEAD.
-- Pending: youtube-Q6
+- Ways in: the app's menu, and STOP on the YouTube page.
 
 #### Lessons
 
@@ -550,7 +525,6 @@ The page remembers the project last picked, per browser, restores it if it still
 
 Computers are named in messages by their current name, falling back to their identifier.
 
-- Pending: youtube-Q11
 
 ### Clips land in the right project folder on each computer, never in a made-up folder
 
@@ -627,18 +601,15 @@ Any job with clips still owed shows a retry: on a done or failed job with failed
 
 - Who: the editor who owns the job.
 - Ways in: the retry button on the job's downloads, and DOWNLOAD on a finished job's review.
-- Pending: youtube-Q9
 
 ### An editor can cancel a job at any point
 
 A job waiting in the queue, waiting for its terms or waiting for review is cancelled outright. A job under way stops at the next opportunity: between terms, within a few detail lookups, between clips, or within about two seconds during a clip's download, wherever it runs. The clip in flight is stopped, its partial files are removed, it goes back to waiting (so RETRY can fetch it later), and the job ends cancelled. A job being downloaded on the editor's own computer is taken off that computer too. Cancelling a finished job does nothing ("already finished"). The page says "cancelled", or while a clip is downloading "cancelling: stopping the clip in flight". Every cancel message matches the job's real phase.
 
-Cancel buttons appear on the progress panel (hidden once finished), the job's downloads, the review (CANCEL SEARCH, which asks first), and each row of the Queue and "Waiting for you" lists.
+Cancel buttons appear wherever a job is shown: on the progress panel (hidden once finished), the job's downloads, the review (CANCEL SEARCH), and each row of the Queue and "Waiting for you" lists. Only where results nobody has downloaded would be thrown away (the review and the "Waiting for you" list) does it ask first: "Discard this search? Nothing from it was downloaded, and its results will be thrown away."
 
 - Who: the editor who owns the job.
 - Ways in: the progress panel, the job's downloads, the review's CANCEL SEARCH, the Queue list and the "Waiting for you" list.
-- Pending: youtube-Q7
-- Pending: youtube-Q8
 
 ### A run of identical failures stops the job and says what probably broke
 
@@ -651,7 +622,6 @@ When three clips in a row fail in the same way (the same error once video ids, f
 
 On an editor's computer the stop reads "<N> clips in a row failed the same way on this computer (<the error, shortened>), so it stopped at clip <i> of <total> and handed the rest back. The server is downloading them."
 
-- Setting: Identical failures before a computer stops. Does: how many clips in a row may fail the same way on this computer before it stops and hands the rest of the job on. Default: 3 (0 or less never stops). Who: an editor, for their own computer. Applies to: a computer. Search words: youtube failures, stop after, repeated errors.
 
 ### A clip that fails is reported with its reason
 
@@ -677,7 +647,7 @@ Every load of the page shows the running job, the queue behind it and the recent
 
 ### The job on screen shows its state, a bar and a running commentary
 
-States shown: queued, asking the assistant for search terms, pick the search terms, searching youtube, fetching metadata, filtering + checking for duplicates, ready for review, downloading, done, failed, cancelled. A bar moves through a fixed share per state, and searching and fetching move within their share by their counts. The commentary line shows the mode, languages, date range, "N terms (x en / y zh)", "searched i/n", candidates found, "metadata i/n", the latest term and its result count, the queue position of a waiting job, and the failure text.
+States shown: queued, asking Assistant for search terms, pick the search terms, searching youtube, fetching metadata, filtering + checking for duplicates, ready for review, downloading, done, failed, cancelled. A bar moves through a fixed share per state, and searching and fetching move within their share by their counts. The commentary line shows the mode, languages, date range, "N terms (x en / y zh)", "searched i/n", candidates found, "metadata i/n", the latest term and its result count, the queue position of a waiting job, and the failure text.
 
 The page refreshes every 1.5 seconds, slowing to every 5 seconds after two minutes; a network blip is retried. The job being shown is kept in the page address, so a reload or a shared link returns to it. A job that has vanished is let go. "done" is used even when some clips failed; those show per clip.
 
@@ -698,7 +668,6 @@ While a job runs on an editor's computer, the app shows the job's title (the sea
 Newest first, 24 clips at a time, with OLDER for more and "showing N of M. Click a clip to open its folder"; the header counts all clips. Each row: thumbnail, title, "<project>/<folder> · channel · who downloaded it", and when. There is one entry per YouTube video, kept for ever and never shrinking; downloading the same video into another project moves its entry there. The editor credited is the one who started the job. Every signed-in person sees the whole history.
 
 - Who: anyone signed in.
-- Pending: youtube-Q18
 
 #### Lessons
 
@@ -710,7 +679,6 @@ Newest first, 24 clips at a time, with OLDER for more and "showing N of M. Click
 
 YouTube originals, like all original footage, only sync upwards: a clip downloaded on one computer reaches the server, and does not spread to every editor's computer by itself (see Sync: What syncs where). The clips of a job reach the computer of the editor who asked for them on their own, wherever they were downloaded, when that computer syncs the project. Any other editor fetches a clip in one click from the history.
 
-- Pending: youtube-Q12
 
 ### An editor can open a downloaded clip's folder, or fetch it from the NAS
 
@@ -726,7 +694,6 @@ Resolve always receives a downloaded clip's full original, never a preview of it
 - Who: anyone signed in, on their own computer.
 - Ways in: a row of the download history, and a finished clip's row in a job's downloads.
 - Windows and macOS: Explorer opens on Windows and Finder on macOS. On any other system: "opening a folder is only supported on Windows and macOS. The file is at <path>". On Windows a path containing a double quote cannot be shown.
-- Pending: youtube-Q10
 
 ### Downloaded clips are filed into the open Resolve project's bins by themselves
 
@@ -748,17 +715,12 @@ See Resolve on the editor's computer: Bins, clip sorting and imports.
 
 - On its own: filing each settled clip into its bin.
 - By hand: the editor can switch the filing off for their computer, and a clip they remove stays removed.
-- Pending: youtube-Q14
 - When the help for the editing program is off: nothing is filed and nothing about the editing program is shown; the clips are in their folders.
 
-### The owner of a computer can switch the filing off and change its pace
+### The owner of a computer can switch the filing off
 
 - Setting: Filing YouTube clips into Resolve. Does: files downloaded YouTube clips into the open Resolve project's bins by themselves. Default: on. Who: an editor, for their own computer. Applies to: a computer. Search words: youtube, resolve import, bins, filing.
-- Setting: How often to look for clips to file. Does: how often the computer looks for new clips to file into Resolve. Default: 60 seconds (0 or less means 60). Who: an editor, for their own computer. Applies to: a computer. Search words: youtube, import interval, resolve, filing.
-- Setting: How long a clip must settle before filing. Does: how old and unchanged a clip must be before it is filed into Resolve. Default: 2 minutes. Who: an editor, for their own computer. Applies to: a computer. Search words: youtube, settle, import delay, resolve.
-- Setting: Failed filings before giving up. Does: how many times filing a clip may fail before it is given up on until the app restarts. Default: 3. Who: an editor, for their own computer. Applies to: a computer. Search words: youtube, import failures, resolve, give up.
 - When YouTube downloads is off: the filing stops, and these settings are hidden.
-- Pending: youtube-Q13
 
 ### The editor and the dashboard are told what the filing is doing
 
@@ -848,7 +810,6 @@ The dashboard's per-computer view shows each computer's YouTube state: whether i
 When an admin switches it on, at most every five minutes the server fetches a known short public video at 1080p exactly as a real download would (without signing in first, and signed in only after a bot check and only with a real signed-in session), and shows the result on the health line: "canary ok", "canary failed" or "no run yet". Hidden when off.
 
 - Setting: Periodic YouTube test. Does: tests at a set interval, of at least five minutes, that YouTube still serves a known video, so a block is noticed before an editor needs a download. Default: off. Who: an admin. Applies to: the site. Search words: youtube test, canary, health, check downloads.
-- Pending: youtube-Q15
 
 #### Lessons
 
@@ -878,7 +839,7 @@ Each ticked type makes the assistant search with its phrasings, in English and T
 
 With any footage type ticked in visuals mode, at least two thirds of the queries in each language carry one of the ticked phrasings, and compilations under heavy overlays are dropped. With Raw ticked, the longer, steadier, less-edited result is preferred.
 
-Nothing ticked, or everything ticked, means no shot-type preference: the topic is searched broadly. The page says "nothing ticked: no bias, the assistant searches and filters on the topic alone" or the same for everything ticked.
+Nothing ticked, or everything ticked, means no shot-type preference: the topic is searched broadly. The page says "nothing ticked: no bias, Assistant searches and filters on the topic alone" or the same for everything ticked.
 
 Whatever is ticked, unrelated results, music, gaming, AI-generated videos and still-image slideshows are dropped; in news mode also silent, ambient or narration-free footage, music-only footage, talk about something else, and round-ups that only mention the subject. When it is unclear, a result is KEPT.
 
@@ -913,9 +874,9 @@ If the assistant fails, the job does not fail: it shows "<assistant problem> the
 
 Each search uses the assistant the site has set up at that moment, so a key added, changed or removed in settings applies to the next search with no restart (see The whole product: The assistant). Failures, each with an instruction on the page:
 
-- None set up: "this site has no working assistant. An admin must set one up in settings. Until then no job can generate search terms." A MY TERM ONLY search still works.
+- None set up: "this site has no working Assistant. An admin must set one up in settings. Until then no job can generate search terms." A MY TERM ONLY search still works.
 - A key missing, rejected or not allowed, or an assistant whose sign-in has expired and cannot refresh: says so, names where an admin fixes it, and reads "Sign in again" wherever an expired sign-in shows.
-- An assistant that needs a permission the site has not given: "<assistant> is not enabled for this site".
+- An assistant that needs a permission the site has not given: "Assistant is not enabled for this site".
 - No answer in time (about three minutes): "did not answer within N s".
 - Unreachable; declined the request; an unusable or empty reply (tried once more first).
 
@@ -941,7 +902,7 @@ The notice is titled "Before you download: your responsibilities" and sits above
 It ends: "If you cannot make these statements about the material you are about to fetch, do not download it."
 
 - Until the current wording is accepted, the search, paste and download buttons are disabled with the tip "Accept the download terms at the top of this page first"; pressing Enter in the topic box or Ctrl+Enter in the links box shows that sentence as a red message instead. The notice disappears once accepted.
-- Accepting shows "Recorded. Thank you." The time of the first acceptance of each wording is kept; pressing accept again changes nothing.
+- Accepting shows "Recorded. Thank you.", and with the page open on an editor's own computer, "Recorded. YouTube downloads can now run on this computer, for you." The time of the first acceptance of each wording is kept; pressing accept again changes nothing.
 - The wording carries a version. A change to the words asks everyone again, keeping the old acceptances; a change of punctuation alone never does.
 - If the wording changed while the page was open, accepting is refused with "the terms were updated while this page was open. Reload and read the new wording before accepting" and the page reloads itself.
 - The acceptance is checked again at every act that causes a download: starting a search, pasting links, pressing download or retry (a review can sit for a week), and an editor's own computer taking a job. Refusal: "you have not accepted the YouTube download terms. Open the YouTube downloader and read the notice at the top of the page, then press Accept."
@@ -949,20 +910,13 @@ It ends: "If you cannot make these statements about the material you are about t
 
 - Who: anyone signed in, for themselves.
 
-### Each editor accepts the YouTube terms on each computer before it downloads for them
+### Each editor's acceptance counts for the computer it was given on
 
-Before an editor's own computer downloads for them, that editor accepts the YouTube terms on that computer, in the app's settings ("Accept YouTube Terms…", reading "Accept YouTube Terms ✓" once accepted). The notice, titled "Accept YouTube Terms", carries the same four numbered statements (the right to use the material; responsibility for YouTube's terms and copyright law; CC Sync grants no rights in downloaded material; the username, this computer's name, the clip and the time are recorded), and says that downloads are paced, may fail, and the feature may stop working. It shows "Accepting as: <username>", with OK and Cancel, Cancel being the default.
+An acceptance is recorded with the person, the version of the wording, the time and the computer the page was open on, and it counts for that computer's own downloads as well: an editor accepts once per wording on each computer they use, on the YouTube page, and nowhere else. On a computer where this person has not yet accepted the current wording, the notice shows again at the top of the page.
 
-- Nobody signed in: "Sign in first: the record has to say who accepted these terms."
-- Already accepted here: "You already accepted the YouTube terms (<terms version>) on this computer."
-- OK records the wording's version, the editor and the time on that computer: "Recorded. YouTube downloads can now run on this computer, for you."
-- It cannot be saved: "couldn't save that (<error>)".
-- The notice cannot be shown: nothing is recorded, and "Couldn't show the YouTube terms. Open the downloader in the dashboard and accept them there."
+The acceptance counts only for the same editor and the same words: a re-worded notice, another editor signing in on that computer, or a lost record all mean the terms must be accepted again before that computer downloads.
 
-The acceptance counts only for the same editor and the same words: a re-worded notice, another editor signing in, or a lost record all mean the terms must be accepted again before this computer downloads. A download asked for before then runs on the server, and the page tells the editor to accept the terms in the app first.
-
-- Who: an editor, for themselves on their own computer.
-- Pending: youtube-Q20
+- Who: an editor, for themselves on each computer they use.
 
 ### Two standing lines about copyright and YouTube's limits are always on the page
 
@@ -977,4 +931,5 @@ A clip whose address is not a web address on YouTube (youtube.com, music.youtube
 
 #### Lessons
 
-- Met: YTD-103, YTD-104, YTD-105.
+- Met: YTD-103, YTD-104.
+- Not yet met by any behaviour above: YTD-105 (the terms are accepted on the page, not in the app first: the owner's answer of 2026-11-24).

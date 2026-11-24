@@ -1,6 +1,6 @@
 # The Footage Sorter and camera cards, part 1 of 3
 
-The Footage Sorter gets footage off camera cards and sound-recorder cards and into the studio's folders, and keeps track of every copy so that nobody formats a card before its footage is safe. Editors and crew use it when they come back from a shoot, and in the field on their own computer with no network at all; an admin uses it to see what is not yet safe at home and to look after the studio's drives and cards. This first part covers recognising cards and drives, what cameras and recorders write, damaged and unfinished recordings, clocks, telling recordings apart, copying a card, checking the copy, drives and interruptions, and when a card is safe to format. Camera cards with the Footage Sorter is one of the six parts a site switches on and off. When it is off, nobody but an admin sees it, in settings, where it is listed with its switch: there is no Footage Sorter page, menu entry or search result, the app on an editor's computer does not watch for cards, report drives, announce a card or offer field backup, no drive is copied to the NAS by automatic backup, and no mail about footage not at home is sent. Switching it off never deletes anything: every copy already made stays where it is, and the record of every copy, every card's name, every drive's kind and every card-use entry are there again when it is switched back on.
+The Footage Sorter gets footage off camera cards and sound-recorder cards and into the studio's folders, and keeps track of every copy so that nobody formats a card before its footage is safe. Editors and crew use it when they come back from a shoot, and in the field on their own computer with no network at all; an admin uses it to see what is not yet safe at home and to look after the studio's drives and cards. This first part covers recognising cards and drives, what cameras and recorders write, damaged and unfinished recordings, clocks, telling recordings apart, copying a card, checking the copy, drives and interruptions, and when a card is safe to format. Everything the Footage Sorter offers is usable by touch as well as with a mouse and keys: every control works with a tap, and whatever a tooltip says also opens on a tap. Camera cards with the Footage Sorter is one of the six parts a site switches on and off, and it is off on a new site until an admin switches it on. When it is off, nobody but an admin sees it, in settings, where it is listed with its switch: there is no Footage Sorter page, menu entry or search result, the app on an editor's computer does not watch for cards, report drives, announce a card or offer field backup, no drive is copied to the NAS by automatic backup, and no mail about footage not at home is sent. Switching it off never deletes anything: every copy already made stays where it is, and the record of every copy, every card's name, every drive's kind and every card-use entry are there again when it is switched back on.
 
 ## Recognising cards and drives
 
@@ -14,7 +14,6 @@ Watching can be switched off for one computer. That computer then reports no car
 - Setting: Watch for cards and drives on this computer. Does: lets this computer notice camera cards and drives, bring the Sorter up on a new card, and tell the studio's record which drives are plugged in. Default: on. Who: the editor for their own computer, and an admin. Applies to: a computer. Search words: card watching, card reader, detect cards, drives, plugged in.
 - When the Footage Sorter is off: no computer watches for cards or reports drives, and this setting is not shown.
 - Windows and macOS: on Windows the start at sign-in can be switched off in Task Manager, and installing or updating the app switches it back on; on macOS the app starts at sign-in in the same way.
-- Pending: footage-sorter-and-camera-cards-1-Q3
 
 ### Which drives a computer can see, on Windows and on macOS
 
@@ -27,7 +26,6 @@ On both, some drives are never seen at all: a drive with no identity of its own,
 A drive that does not answer within 5 seconds is skipped for that look and noted in the computer's log, and every other card and drive on that computer goes on being seen. On any other operating system the app sees no drives, so there is no card watching, drive reporting or field backup there.
 
 - Windows and macOS: as described above.
-- Pending: footage-sorter-and-camera-cards-1-Q4
 
 ### A card is recognised by what is on it, never by its drive letter
 
@@ -75,7 +73,6 @@ When a card goes into a watching computer, the Footage Sorter comes up on that c
 Every card put in while a tab is open joins that tab's list of cards. A card taken out is reported too. A card that was already in a reader when the person signed in is listed, but does not bring the Sorter up again.
 
 - On its own: opening the Sorter, or switching an open one, on each new card.
-- Pending: footage-sorter-and-camera-cards-1-Q1
 
 ### The person is told when a card arrives, is ready, fails, is removed, and when its copy ends
 
@@ -112,7 +109,6 @@ Each card shows:
 Clicking a card opens its view. A card being read shows its clips as soon as reading finishes. There is one entry per card: when the same card comes back (the same serial, or the same drive when it has no serial) after it was pulled, finished or failed, the earlier entry is replaced so its clips are never listed twice, and the new entry keeps every assignment the earlier one had. After a copy ends the card is ready again. Clips the record of every copy already knows a copy of show that state on the card.
 
 - Who: anyone signed in.
-- Pending: footage-sorter-and-camera-cards-1-Q8
 
 ### A card can be taken off the list and shown again
 
@@ -121,7 +117,6 @@ Clicking a card opens its view. A card being read shows its clips as soon as rea
 A card taken off the list but still in its reader is listed under its computer as "closed", with Show again ("Put this card back on the list."). Showing it again returns it in the state it was closed in, with every assignment of its clips as it was. If it has left its reader: "that card is not in a reader any more. Put it back in and it will be listed again." Failures read "Could not bring that card back" and "Could not dismiss that card". A card that was pulled out (rather than closed) keeps its assignments too, since it may come back.
 
 - Who: anyone signed in.
-- Pending: footage-sorter-and-camera-cards-1-Q11
 
 ### A card is read again when a person asks
 
@@ -134,7 +129,6 @@ A card taken off the list but still in its reader is listed under its computer a
 A person can point the Sorter at a folder that holds a card's contents, or at a mounted image of a whole card, on a computer the studio watches, and it is read and offered exactly like a card in a reader, so a card copied by hand or recovered from an image goes through the same checks and copy.
 
 - Who: anyone signed in.
-- Pending: footage-sorter-and-camera-cards-1-Q12
 
 ### Every drive is known by its identity, and the product knows which computer it is plugged into
 
@@ -170,8 +164,6 @@ Until a person sets it, the kind is guessed: a drive labelled in the studio's fi
 - On its own: a drive's kind, from its label, whether it is removable, and whether it is the system disk.
 - By hand: a person sets the kind; a kind a person set is never overwritten by a guess or by what a computer later reports.
 - Setting: How the studio's and clients' drives are named. Does: decides which drive labels are guessed to be a studio field drive and which a client's drive. Default: studio drives are the letters CIB then D and a number; client drives are WD and a number, or have "passport" in the label. Who: an admin. Applies to: the site. Search words: drive naming, field drive, client drive, drive label, drive kind.
-- Pending: footage-sorter-and-camera-cards-1-Q6
-- Pending: footage-sorter-and-camera-cards-1-Q20
 
 ### An admin describes a drive and chooses what of it is tracked
 
@@ -199,7 +191,6 @@ The list of serials nobody has named shows each one with its label, kind, "<n> c
 - Who: anyone signed in.
 - Ways in: from a card's own view, and from the list of serials nobody has named.
 - By hand: the name is always set by a person; the guess below only suggests.
-- Pending: footage-sorter-and-camera-cards-1-Q7
 
 ### A card formatted since it was last named asks which of the studio's cards it is
 
@@ -218,7 +209,6 @@ At most one such question is shown at a time, and nothing else asks while one is
 - Who: anyone signed in.
 - On its own: which of the studio's cards a freshly formatted card probably is, from its type, size and the crew's record of which cards were used on which day.
 - By hand: a person picks the card, or says it is not one of the studio's; a choice made by hand is never replaced by a guess.
-- Pending: footage-sorter-and-camera-cards-1-Q7
 
 ### Card settings a computer cannot read are reported, never ignored
 
@@ -269,7 +259,6 @@ Every recorder the studio uses writes 32-bit float, so only 32-bit WAVs count as
 
 - On its own: which recorder made a file, its counter and its clock.
 - By hand: a person can set a file's recorder and mark a file as a field recording or not; a value set by hand is never overwritten.
-- Pending: footage-sorter-and-camera-cards-1-Q18
 
 ### Raw clips and raw stills always have a picture to show
 
@@ -353,7 +342,6 @@ The image is named from the card's label and serial and the time, in the studio'
 
 - Who: an admin, and the editor at the computer the card is in.
 - Windows and macOS: both ask for administrator rights on the computer.
-- Pending: footage-sorter-and-camera-cards-1-Q24
 
 ### The same damage check can be run on footage already on disk
 
@@ -372,7 +360,6 @@ An admin can have any folders on the NAS or on a watched drive checked for dead 
 The studio's time zone is a setting. Every camera time, calendar time and file time that does not state a zone of its own is read in this zone, every time the Sorter shows is shown in it, shoot folders are named in local time in it, and the Sorter's nightly work runs by it. A zone that is named (rather than a fixed offset) follows its own summer time.
 
 - Setting: Studio time zone. Does: decides how zone-less camera, calendar and file times are read, the times shown in the Sorter and the time its nightly work runs. Default: UTC+8. Who: an admin. Applies to: the site. Search words: time zone, clock, studio time, offset, local time.
-- Pending: footage-sorter-and-camera-cards-1-Q14
 
 ### The Sorter works out when each clip was recorded
 
@@ -419,7 +406,6 @@ Each estimate is a weak placement that is then checked against the cameras' soun
 
 - On its own: an estimated start for files on a recorder whose clock was reset, from its placed neighbours and the cameras' sound.
 - By hand: a person can set or clear any recording's placement; a placement set by hand is never overwritten.
-- Pending: footage-sorter-and-camera-cards-1-Q17
 
 ### Clocks that are hours off, or change during a trip, are allowed for
 
@@ -519,7 +505,6 @@ The tooltip names the rule. For the copy not kept: "Same size as the copy of “
 
 - On its own: which of two same-name clips to keep.
 - By hand: a person can choose the other copy; the choice is kept.
-- Pending: footage-sorter-and-camera-cards-1-Q9
 
 ### Same-name clips headed for one folder are listed before anything lands
 
@@ -527,7 +512,6 @@ The checks for missing footage list assigned clips with the same name that would
 
 - Who: anyone signed in.
 - Ways in: on each clip, in the checks for missing footage, and when moving clips.
-- Pending: footage-sorter-and-camera-cards-1-Q9
 
 ### Music and broken files are kept out of field recordings, with the reason given
 
@@ -548,7 +532,6 @@ Only then, and only when the admin asks for it, are proven copies moved (never d
 - Who: an admin.
 - On its own: which copies are redundant and which copy stays.
 - By hand: the admin reviews and starts the move; a copy the admin marks to keep is never set aside.
-- Pending: footage-sorter-and-camera-cards-1-Q10
 
 #### Lessons
 
@@ -564,8 +547,6 @@ The card must be in a reader on that computer, and never on its system disk: oth
 
 - Who: anyone signed in, and the editor at the computer the card is in, even with no network.
 - Ways in: from a card's view in the Footage Sorter, and from field backup on the editor's computer.
-- Pending: footage-sorter-and-camera-cards-1-Q1
-- Pending: footage-sorter-and-camera-cards-1-Q15
 
 ### An editor can copy a card with no network at all
 
@@ -577,7 +558,6 @@ Field backup is on by default on every computer while the Footage Sorter is on. 
 - Setting: Field backup on this computer. Does: offers field backup in this computer's menu, so a card can be copied here with no network. Default: on. Who: the editor for their own computer, and an admin. Applies to: a computer. Search words: field backup, offline copy, laptop, on location, card backup.
 - Name and search words: Field backup. Search words: field backup, offline, laptop, copy card, on location.
 - When the Footage Sorter is off: there is no field backup on any computer.
-- Pending: footage-sorter-and-camera-cards-1-Q1
 
 ### The places a card can be copied to
 
@@ -590,7 +570,6 @@ The places offered:
 - **Every folder set up as a place to copy to on this computer.** Copies go straight into the folder. A folder whose drive is not plugged in is shown absent ("That folder's drive is not connected."); a folder that does not exist yet on a plugged-in drive is shown present and is made by the copy.
 
 - Who: anyone signed in from the Sorter, and the editor at the computer from field backup.
-- Pending: footage-sorter-and-camera-cards-1-Q4
 
 ### An editor adds and removes folders as places to copy to
 
@@ -599,7 +578,6 @@ An "Add folder" box (placeholder "Add a folder, like D:\FieldBackup"; Enter also
 - Who: the editor at that computer, and an admin for any computer.
 - Ways in: from field backup and the card copy on that computer, and from the computer's own settings.
 - Setting: Places to copy cards to on this computer. Does: the folders on this computer offered as places a card can be copied to. Default: none. Who: the editor for their own computer, and an admin. Applies to: a computer. Search words: backup folder, copy destination, field folder, laptop folder.
-- Pending: footage-sorter-and-camera-cards-1-Q5
 
 ### A place to copy to is checked to be the drive it claims to be
 
@@ -610,7 +588,6 @@ The NAS is accepted as a place to copy to only when the product can confirm that
 A card is never a place to copy itself to: "a card cannot be a destination for itself". When the places ticked are not the ones the last copy on this computer went to, the copy names the difference and asks the person to confirm before it starts.
 
 - Windows and macOS: the same check on both.
-- Pending: footage-sorter-and-camera-cards-1-Q25
 
 ### The places last ticked are ticked again
 
@@ -632,7 +609,6 @@ Proxies copied off a card land in a Proxy folder inside the dated folder holding
 - On its own: each landing folder's name, from the card's files, label and serial.
 - By hand: a person can rename a landing folder before the copy starts; the name set is kept for that card.
 - Setting: Field backup folder. Does: the name of the folder a card copy lands in on a plugged-in drive. Default: "FieldBackup". Who: the editor for their own computer, and an admin. Applies to: a computer. Search words: field backup folder, landing folder, backup folder name.
-- Pending: footage-sorter-and-camera-cards-1-Q21
 
 ### Before a card is copied, a review shows what goes where, whether it fits and what would be lost
 
@@ -671,7 +647,6 @@ A file the card no longer holds as reviewed fails: "the source is N bytes now an
 
 - On its own: what to do with each file, from what is at its planned place and what the record of every copy knows.
 - By hand: a person can tick a clip that is "already elsewhere" or "differs" to copy it anyway, or untick any clip; the copy follows the ticks exactly.
-- Pending: footage-sorter-and-camera-cards-1-Q26
 
 ### Camera proxies come off a card only when asked
 
@@ -724,8 +699,7 @@ States of a destination: Waiting, "Looking" ("looking at what is already there")
 With nothing copying: "Nothing copying. Pick a card, tick where it goes, and press Copy to all." The three most recent copies stay shown with their outcome. Stop reads "Stopping..." once pressed (see "A copy stops cleanly, and says why, when a card or drive is pulled, a drive fills, or the person presses Stop"); stopping with nothing running just says so.
 
 - Who: anyone signed in can watch and stop a copy, and the editor at the computer.
-- Ways in: on the card's row, on the card's view, in the copy's details, in the list of everything copying right now, and in field backup.
-- Pending: footage-sorter-and-camera-cards-1-Q8
+- Ways in: on the card's row, on the card's view (which holds the copy's details), and in the list of everything copying right now; on the editor's own computer, in field backup.
 
 ### A copy's result reaches the studio's record even when it finished offline
 
@@ -733,7 +707,7 @@ Every copy ends with a result: each file copied, already there, finished, writte
 
 ### After a card copy, the sorting follows the footage
 
-Every clip that landed is recorded with its card (serial, label and kind) as its origin. A checked clip copied into the sorted folders has its assignment done. A checked clip copied to staging keeps its assignment on its staged copy, so it shows assigned there and the next move takes it to its folder. Every checked copy on the NAS is recorded as a trusted copy; a failure to record it never undoes the copy. The copied folders show in the Sorter as soon as the copy ends. Moving footage on is in part 2 (see The Footage Sorter and camera cards: Moving footage on the NAS).
+Every clip that landed is recorded with its card (serial, label and kind) as its origin. A checked clip copied into the sorted folders has its assignment done. A checked clip copied to staging keeps its assignment on its staged copy, so it shows assigned there, and it moves into its folder on its own, with no one approving the move; a person can move it somewhere else by hand afterwards. Every checked copy on the NAS is recorded as a trusted copy; a failure to record it never undoes the copy. The copied folders show in the Sorter as soon as the copy ends. Moving footage on is in part 2 (see The Footage Sorter and camera cards: Moving footage on the NAS).
 
 ### Footage short of a second copy is copied when a second drive appears
 
@@ -746,7 +720,6 @@ An admin chooses the computer, the source drive, the destination (another drive 
 Refusals: source, destination and files are all needed; "copy to a different volume"; the destination folder must be a folder inside the destination drive; an unknown drive; the drive is not plugged into any computer right now; the two drives are plugged into different computers; that computer does not have those drives; "<a> and <b> would both land at <dst>: copy them one at a time, or into different folders"; "more than 20000 files: copy a smaller folder"; nothing to copy; no NAS footage share set up for the studio. Progress, stopping and the result are as for a card copy. A copy into the NAS shows there as soon as it ends. The 40 most recent drive copies stay listed.
 
 - Who: an admin.
-- Pending: footage-sorter-and-camera-cards-1-Q15
 
 ### A card's view shows its clips under a banner that says how much of it is safe
 
@@ -774,7 +747,6 @@ A copy counts as checked only when the product has read it back from the destina
 - Progress is measured by bytes written and checked, never by a drive's free space. A file that is already at a destination counts only once its size and modified time (within 3 seconds) match and its content is checked.
 - A file checked once stays checked when a later copy skips it.
 
-- Pending: footage-sorter-and-camera-cards-1-Q2
 
 ### Files already at a destination are checked against the card
 
@@ -827,7 +799,7 @@ After a destination drive lost power or was pulled mid-copy, its last writes may
 
 ### A copy that stops moving says so
 
-A long copy runs steadily, and the person always sees its live speed. When a copy makes no progress for a set time (a destination drive hung, a card stopped answering), it stops cleanly as above and says which drive stopped answering, telling the person to plug it back in if it stays gone; the next copy copies only what is missing. While a copy runs slower than it should, the progress says where the slowness comes from: the card being read, the drive being written, or the network to the NAS.
+A long copy runs steadily, and the person always sees its live speed. When a copy makes no progress for a set time, which the product states on the copy (a destination drive hung, a card stopped answering), it stops cleanly as above and says which drive stopped answering, telling the person to plug it back in if it stays gone; the next copy copies only what is missing. While a copy runs slower than it should, the progress says where the slowness comes from: the card being read, the drive being written, or the network to the NAS.
 
 
 ### Room and path length are checked before anything moves
@@ -836,7 +808,6 @@ Before anything is copied, each place is checked for room and for what is alread
 
 A destination path longer than 240 characters is warned about: "long path (<n>): <path>".
 
-- Setting: Room kept spare on a destination. Does: the space a card copy always leaves free on a drive it copies to. Default: 256 MiB. Who: an admin. Applies to: the site. Search words: free space, margin, spare room, disk full.
 
 ### Card copies are as fast as a dedicated card-copying program
 
@@ -861,8 +832,7 @@ A look over a drive or the NAS that is interrupted and taken up again starts cle
 While anything is copying, an indicator shows "<n> backup(s)" and the combined speed. It counts card copies (waiting, copying, checking), every drive copy and look, and the cloud backup's upload. Opening it shows "Backups in progress" (closed again by ✕, a click outside, or Escape), refreshed every 2 seconds: each item with its kind ("card copy" or the work's kind), a title ("<drive> · <card>" for a card), a percentage and bar (a busy bar when unknown), "<phase> · <speed> · <eta> left · <done>/<total> files · <size> of <size>" and the file in hand. With nothing running: "Nothing is running." / "No card, drive or scan copies are running."
 
 - Who: anyone signed in.
-- Ways in: this indicator, and each card's row, view and copy details.
-- Pending: footage-sorter-and-camera-cards-1-Q8
+- Ways in: this indicator, and each card's row and view.
 
 #### Lessons
 
@@ -928,7 +898,6 @@ When a clip (other than an image sequence) is not in the record of every copy un
 On the clip grid each clip also carries its copy count and its flags: at home, laptop-only, not backed up, not at home, card-only, every proxy in the cloud, and has a proxy not all in the cloud.
 
 - On its own: each clip's backup state and place.
-- Pending: footage-sorter-and-camera-cards-1-Q13
 
 ### A person can see every copy of a clip, and ask about any files
 
@@ -954,7 +923,6 @@ When a card's copy finishes with nothing unchecked, and every clip on the card h
 
 - On its own: marking a card backed up when all its footage is safe.
 - By hand: a person can mark any card backed up or used; the mark is kept until the card's next copy or the next change by hand.
-- Pending: footage-sorter-and-camera-cards-1-Q22
 
 ### The crew record which cards they used on which day
 
@@ -965,7 +933,6 @@ Each card shows its mark: "<card> ✓" (backed up), "✗" (not backed up) or "?"
 - Who: the crew (anyone signed in) record use; anyone signed in may flip a card's mark.
 - Name and search words: Card use. Search words: card use, card tracker, which cards, crew, shoot day.
 - Phone and desk: the card-use page is made for a phone and installs as an app there; on a desk it is the same page in a browser.
-- Pending: footage-sorter-and-camera-cards-1-Q23
 
 ### The card report: every card, every shooting day, and what is unaccounted for
 
@@ -982,7 +949,6 @@ Footage from before the comparison start date is not compared. The report also s
 - Who: anyone signed in.
 - Name and search words: Card report. Search words: card report, shooting days, unrecorded, unmapped serials, card use.
 - Setting: Compare card use from. Does: footage and card use before this date are left out of the card report. Default: 1 April 2026. Who: an admin. Applies to: the site. Search words: card report start, start date, card use, compare from.
-- Pending: footage-sorter-and-camera-cards-1-Q16
 
 ### A report and a daily mail say what footage is not at home
 
@@ -1011,10 +977,7 @@ Each source shows one state, kept across restarts: copying (files, size, whether
 - On its own: whether the computer is at home, and what still needs copying.
 - By hand: an admin switches automatic backup on or off for each drive and folder.
 - Setting: Automatic backup of drives. Does: copies drives and folders marked for it to the NAS whenever their computer is at home. Default: on. Who: an admin. Applies to: the site. Search words: automatic backup, auto backup, drive backup, home network.
-- Setting: How often automatic backup looks. Does: how often drives marked for automatic backup are looked at. Default: about every 10 minutes, never more often than every minute. Who: an admin. Applies to: the site. Search words: backup interval, how often, automatic backup.
 - Setting: Automatic backup folder. Does: the folder on the NAS automatic backups land in. Default: "Auto backup". Who: an admin. Applies to: the site. Search words: auto backup folder, backup destination, NAS folder.
-- Setting: Studio network answer time. Does: how quickly the NAS must answer for a computer to count as at home. Default: 15 ms. Who: an admin. Applies to: the site. Search words: home network, at home, away, studio network.
-- Pending: footage-sorter-and-camera-cards-1-Q19
 
 #### Lessons
 

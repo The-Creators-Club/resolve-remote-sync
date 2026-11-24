@@ -2,7 +2,7 @@
 
 ## Coverage
 
-- 01-042 | A computer with no dashboard syncs the whole tree
+- 01-042 | left out: cut by the owner (2026-11-24, sync-1-Q9)
 - 01-043 | An editor asks for originals from inside Resolve
 - 02-001 | A full tick sends a project's camera originals up and brings its proxies and other files down ; The editor is told about files that will never upload because of a name clash or a wrong clock
 - 02-003 | New footage starts going up about two minutes after it stops changing
@@ -12,11 +12,11 @@
 - 03-024 | A computer receives the folders its projects include
 - 03-025 | The studio's shared libraries reach every computer without a tick
 - 03-028 | An editor picks camera originals to come down to one computer
-- 03-042 | A computer can be set to keep no local copies of proxies
+- 03-042 | left out: cut by the owner (2026-11-24, sync-1-Q13)
 - 04-049 | The editor is told about waiting projects, broken included folders, renamed projects and files edited twice
 - 04-068 | The app lists this computer's ticked projects and how each is doing
 - 05-038 | An editor asks for originals from inside Resolve
-- 09-005 | A computer can be set to keep no local copies of proxies ; A wired computer syncs nothing and cannot be ticked
+- 09-005 | A wired computer syncs nothing and cannot be ticked
 - 09-009 | New footage starts going up about two minutes after it stops changing ; A tick or untick reaches the computer within about a minute ; Projects ticked on a computer sync one at a time, in the order set for that computer ; Each project gets a turn, and a large upload carries on while the next project goes
 - 11-025 | A computer receives the folders its projects include
 - 11-029 | An editor picks camera originals to come down to one computer
@@ -30,7 +30,7 @@
 - 16-040 | Each included folder says whether it works, and why not
 - 20-005 | Each included folder says whether it works, and why not
 - 20-052 | An editor picks camera originals to come down to one computer
-- 21-016 | A project can be shared with a computer by hand while accepting it
+- 21-016 | left out: cut by the owner (2026-11-24, sync-1-Q10)
 - 21-017 | A delete on an editor's computer never reaches the NAS or any other computer ; Files deleted or replaced on the NAS are kept for a year ; A project never syncs until these rules are in place for it
 - 38-073 | The Footage Sorter includes a folder instead of copying a clip twice
 - 01-036 | Shutting down while files are moving is warned against ; The computer is kept awake while files are moving
@@ -89,7 +89,7 @@
 - 04-037 | Only a person restarts downloads after a safety stop ; Downloads pause when the sync drive is nearly full, uploads never
 - 04-044 | The editor's status says plainly what is stopped and by whom
 - 04-045 | Safety stops survive restarts, and one that cannot be saved still holds
-- 09-010 | Downloads stop themselves when the server suddenly looks wrong ; The recovery folder empties itself by age and size ; Downloads pause when the sync drive is nearly full, uploads never ; A computer can be set to keep no local copies of proxies
+- 09-010 | Downloads stop themselves when the server suddenly looks wrong ; The recovery folder empties itself by age and size ; Downloads pause when the sync drive is nearly full, uploads never
 - 11-042 | An admin approves exactly the removals the product held back ; The product asks an admin before taking many projects off computers at once
 - 11-043 | An admin sets how many removals per computer are allowed before the product asks
 - 12-010 | Only a person restarts downloads after a safety stop
@@ -109,12 +109,12 @@
 - 20-082 | An admin approves exactly the removals the product held back
 - 01-019 | Syncing waits for a short list of reasons, each in its own words
 - 01-020 | The editor pauses and resumes syncing
-- 01-022 | The editor stops all syncing on their computer until they clear the stop ; An admin stops syncing on every computer with a reason ; While any stop is in force nothing moves
+- 01-022 | An admin stops syncing on every computer with a reason ; While any stop is in force nothing moves
 - 03-014 | The editor pauses and resumes syncing ; Sync now runs every transfer this computer has switched on at once
-- 03-015 | The editor stops all syncing on their computer until they clear the stop ; An admin stops syncing on every computer with a reason ; While any stop is in force nothing moves
+- 03-015 | An admin stops syncing on every computer with a reason ; While any stop is in force nothing moves
 - 04-018 | Sync now runs every transfer this computer has switched on at once
 - 04-020 | The editor pauses and resumes syncing
-- 04-038 | The editor stops all syncing on their computer until they clear the stop
+- 04-038 | left out: cut by the owner (2026-11-24, sync-1-Q5)
 - 12-001 | An admin stops syncing on every computer with a reason
 - 12-002 | An admin keeps a studio-wide stop going or starts syncing again
 - 12-003 | An admin keeps a studio-wide stop going or starts syncing again
@@ -175,7 +175,7 @@
 - Changes for a person: with A, switching off mid-upload loses nothing and the shutdown warning says so; with B, a half-sent 20 GB clip goes again from zero.
 - Text assumes: A.
 - Items: 02-025, 03-036, 02-024, 01-036
-- Answered by the owner 2026-11-24: quitting stops an upload and it carries on where it left off next time; an update waits for the file in flight up to a limit, then does the same. Still open: the same promise for a transfer cut off by a dropped connection, sleep, a shutdown, signing out, the pause or a stop, and for downloads; the text keeps those marked pending on this question.
+- Answered by the owner 2026-11-24: A: every transfer that is cut off, up or down, carries on where it stopped; quitting stops an upload, an update waits for the file in flight up to a limit, then does the same.
 
 ### sync-1-Q2: Should everything that comes down to a computer follow the server's deletions the same way, by moving the removed file into the recovery folder?
 - Kind: differs
@@ -185,6 +185,7 @@
 - Changes for a person: with A, a document deleted on the server leaves an editor's computer too, recoverable from the recovery folder for its keep period; with B it stays on every computer until removed by hand.
 - Text assumes: A.
 - Items: 02-007, 03-013, 16-012, 02-010, 03-016
+- Answered by the owner 2026-11-24: A: everything that comes down follows the server, removals moved aside into the recovery folder under one safety stop.
 
 ### sync-1-Q3: Should one recovery folder with one keep period hold everything moved aside or replaced on an editor's computer, set by an admin beside the NAS's own keep period?
 - Kind: differs
@@ -194,6 +195,7 @@
 - Changes for a person: with A, an earlier version of a changed edit project is kept 14 days instead of 30, in the same folder as everything else.
 - Text assumes: A.
 - Items: 03-013, 03-017, 04-046, 16-013, 02-008
+- Answered by the owner 2026-11-24: A: one recovery folder per computer, 14 days and 50 GB, set by an admin beside the NAS's year.
 
 ### sync-1-Q4: When a file already on the server is changed on an editor's computer, what should happen?
 - Kind: differs
@@ -204,6 +206,7 @@
 - Text assumes: A.
 - Items: 02-001, 04-047, 02-004, 03-006
 - Covers: 02-Q3
+- Answered by the owner 2026-11-24: A: camera originals stay first-version-wins; every other file, in either mode, replaces the server's copy, the earlier one kept a year.
 
 ### sync-1-Q5: Should an editor have one pause, or both a pause and a stronger "stop all syncing"?
 - Kind: either-or
@@ -214,6 +217,7 @@
 - Text assumes: A; the stronger stop is written in its place, marked pending, to be deleted if he agrees.
 - Items: 01-020, 03-014, 04-020, 01-022, 03-015, 04-038
 - Covers: 03-Q1
+- Answered by the owner 2026-11-24: A: one pause that stops everything and holds until resumed; the separate stop is cut.
 
 ### sync-1-Q6: Where can downloads be restarted after a safety stop?
 - Kind: several ways in
@@ -223,6 +227,7 @@
 - Changes for a person: the editor finds Resume in one place in the app instead of two.
 - Text assumes: A.
 - Items: 01-031, 02-010, 04-037, 12-010, 20-038
+- Answered by the owner 2026-11-24: A: one place in the app, plus the admin's row on the dashboard.
 
 ### sync-1-Q7: Should "Resume downloads" also be offered when downloads paused because the drive was nearly full?
 - Kind: either-or
@@ -233,6 +238,7 @@
 - Text assumes: A; the low-disk resume is written in place, marked pending, to be deleted if he agrees.
 - Items: 04-037, 04-044, 01-031
 - Covers: 04-Q1
+- Answered by the owner 2026-11-24: B (his own choice): Resume downloads is offered after a low-disk pause as well as after a safety stop.
 
 ### sync-1-Q8: Who may copy one computer's plan onto another computer of the same person?
 - Kind: differs
@@ -242,6 +248,7 @@
 - Changes for a person: with A, an editor with a new laptop copies their desktop's plan themself.
 - Text assumes: A.
 - Items: 12-011, 14-033, 20-047
+- Answered by the owner 2026-11-24: A: the person for their own computers, and an admin.
 
 ### sync-1-Q9: Should a computer with no dashboard set sync the whole tree all the time?
 - Kind: other
@@ -252,6 +259,7 @@
 - Text assumes: written in place, marked pending, to be deleted if he agrees.
 - Items: 01-042, 03-026
 - Covers: 01-Q8
+- Answered by the owner 2026-11-24: A: cut; a computer syncs only what is ticked for it.
 
 ### sync-1-Q10: Can sharing a project with a computer by hand, while accepting it, go?
 - Kind: dormant
@@ -262,6 +270,7 @@
 - Text assumes: written in place, marked pending, to be deleted if he agrees.
 - Items: 21-016
 - Covers: 21-Q1
+- Answered by the owner 2026-11-24: A: cut; projects reach a computer only by ticking.
 
 ### sync-1-Q11: Which libraries should reach every editor's computer without a tick?
 - Kind: other
@@ -272,6 +281,7 @@
 - Text assumes: A.
 - Items: 03-025
 - Covers: 03-Q4
+- Answered by the owner 2026-11-24: A: the LUT library and the Resolve gallery stills only.
 
 ### sync-1-Q12: Should "why is this computer not syncing" give the same reasons in the same order everywhere?
 - Kind: built twice
@@ -282,6 +292,7 @@
 - Text assumes: A.
 - Items: 01-019
 - Covers: 01-Q2
+- Answered by the owner 2026-11-24: A: one list in one order everywhere.
 
 ### sync-1-Q13: Should "this computer works straight off the server" be reached only by choosing wired, without the separate switches?
 - Kind: several ways in
@@ -292,6 +303,7 @@
 - Text assumes: A; the "keep local copies of proxies" switch is written in place, marked pending.
 - Items: 03-042, 09-005, 09-010
 - Covers: 09-Q4
+- Answered by the owner 2026-11-24: A: only the wired or remote choice; the separate switches are cut.
 
 ### sync-1-Q14: Should the button that switches a computer to remote read "SWITCH TO REMOTE EDITOR" instead of "DELETE ANYWAY"?
 - Kind: other
@@ -302,6 +314,7 @@
 - Text assumes: A.
 - Items: 04-058
 - Covers: 04-Q2
+- Answered by the owner 2026-11-24: A: the button reads SWITCH TO REMOTE EDITOR.
 
 ### sync-1-Q15: Should the Resolve menu offer "Stop originals - whole timeline", to match "Bring originals - whole timeline"?
 - Kind: other
@@ -312,6 +325,7 @@
 - Text assumes: A.
 - Items: 05-038
 - Covers: 05-Q5
+- Answered by the owner 2026-11-24: A: add Stop originals - whole timeline.
 
 ### sync-1-Q16: Should an admin be told when an editor removes a project from their computer while uploads were still owed?
 - Kind: other
@@ -322,6 +336,7 @@
 - Text assumes: A.
 - Items: 12-043, 01-035
 - Covers: 12-Q2
+- Answered by the owner 2026-11-24: A: the admin is told.
 
 ### sync-1-Q17: Should the dashboard show the things each computer already knows about its syncing?
 - Kind: other
@@ -332,6 +347,7 @@
 - Text assumes: A.
 - Items: 12-039, 12-041
 - Covers: 12-Q3
+- Answered by the owner 2026-11-24: A: the per-computer view shows what each computer knows about its syncing.
 
 ### sync-1-Q18: Should one "keep this much free" figure per computer decide every free-space verdict?
 - Kind: other
@@ -342,6 +358,7 @@
 - Text assumes: A.
 - Items: 03-017, 03-018, 15-027, 15-028, 15-082, 15-108
 - Covers: 03-Q7, 15-Q5
+- Answered by the owner 2026-11-24: A: one floor per computer decides every free-space verdict; the colours and notes above it stay as early advice.
 
 ### sync-1-Q19: When project folders disappear from the NAS, is "never delete, mark inactive, refuse a mass disappearance and tell the admin" what you want?
 - Kind: other
@@ -352,6 +369,7 @@
 - Text assumes: A.
 - Items: 16-018, 15-041
 - Covers: 16-Q9
+- Answered by the owner 2026-11-24: A: never deleted, marked inactive, a mass disappearance refused and the admin told.
 
 ### sync-1-Q20: Should the Footage Sorter's "link folder" be offered wherever the Sorter runs?
 - Kind: differs
@@ -361,6 +379,7 @@
 - Changes for a person: the dashboard's Sorter page gains "link folder".
 - Text assumes: A.
 - Items: 38-073
+- Answered by the owner 2026-11-24: A: link folder is offered by the Footage Sorter.
 
 ### sync-1-Q21: Should the reminder about a pulled-out sync drive have a setting that can turn the repeats off?
 - Kind: other
@@ -370,6 +389,7 @@
 - Changes for a person: nobody can turn the repeats off for good.
 - Text assumes: the ruling; the setting is written in place, marked pending, to be deleted if he agrees.
 - Items: 09-022, 04-064
+- Answered by the owner 2026-11-24: A: no setting; the reminder repeats every 30 minutes as ruled.
 
 ## Readers' questions and unsettled points
 
@@ -409,9 +429,9 @@
 - U-02-6 | settled: 10 minutes by default, a per-computer setting
 - U-03-1 | behind the glass
 - U-03-2 | settled: the text states for each stop and drive state what pauses and what the editor is told
-- U-03-3 | open: sync-1-U1
-- U-03-4 | open: sync-1-U1
-- U-03-9 | open: sync-1-U1
+- U-03-3 | settled: by the owner 2026-11-24 (sync-1-U1)
+- U-03-4 | settled: by the owner 2026-11-24 (sync-1-U1)
+- U-03-9 | settled: by the owner 2026-11-24 (sync-1-U1)
 - U-05-2 | settled: the request is picked up within about 2 seconds, recorded for that computer, starts the download, and the app confirms in a notice
 - U-05-7 | open: sync-1-U2
 - U-11-3 | settled: the limit is 3 or, if larger, the allowance per computer times the number of editors' computers, as two items state
@@ -423,9 +443,7 @@
 
 ## Still unsettled
 
-- sync-1-U1 | Who may change a computer's own sync settings (the shutdown warning, keeping awake, the recovery folder's size, the download safety limits, the free-space floor, the time for each project), and whether an admin can set them for a computer from the dashboard | the editor on that computer | 03-036, 03-037, 09-021, 09-010, 03-017, 03-018, 02-024
 - sync-1-U2 | Whether the CC Sync entries really appear in Resolve's Scripts menu, and whether In and Out marks are read correctly, were never tried against a running Resolve | written as the items describe | 05-038, 01-043
-- sync-1-U4 | How long an update waits for the file in flight before stopping it | "up to a set limit", no number | 02-025
 
 ## Conflicts between an item and a lesson
 
@@ -509,7 +527,7 @@
 - 13-036 | older app versions that stopped emptying the trash at the floor: one part older than another
 - 15-040 | the mailed alert that says the same as the problem: one message per problem is with broll (15-Q1)
 - 15-041 | the mailed alert that says the same as the problem: as above
-- 01-019 | the line about proxy download switched off: covered by "A computer can be set to keep no local copies of proxies"
+- 01-019 | the line about proxy download switched off: cut with sync-1-Q13
 - 20-057 | "walk returned N of M files - not replacing": reworded plainly as the item allows
 - 03-016, 02-010, 01-031, 04-037, 04-044, 15-026 | "proxy download" stopping: written as downloads stopping, under sync-1-Q2
 - 09-005 | the role shown in diagnostics only: the computer's own setting is what is written
@@ -542,3 +560,8 @@
 ## Settled from the present product
 
 - sync-1-U3 | more than a quarter of the active projects, and at least two
+
+## Settled by the owner 2026-11-24
+
+- sync-1-U1 | the editor changes a computer's own sync settings in the app's settings for their own computer, and an admin can change them for any computer from the dashboard; only an admin may change the download safety limits
+- sync-1-U4 | no figure: an update waits for the file in flight up to a limit the product states

@@ -262,6 +262,11 @@
 - What the assistant costs is shown before it runs, and a site can cap it | expected cost shown before each task, routine runs within a cost the site sets (ALL-088), and one daily budget in money in place of the hourly spend limit and the daily count of calls (whole-product-Q9).
 - An admin is told when the site's assistant stops working | widened from 15-088 to any connected assistant.
 - The studio's website can ask the assistant to name a piece of gear from a photo | follows the site's choice and switch (recommendation of whole-product-Q8).
+- On every screen the assistant is called Assistant | the owner's decision (requirements, 2026-11-24): "Assistant" on every screen, never a maker's or model's name; admins tell connections apart by place and kind; strengths named by what they do, with their price.
+- How footage travels is chosen from real measurements | points to the owner's requirement that the way footage travels is chosen by measurement with near and far-off computers, re-run before each release.
+- An admin switches each part on and off for the whole site | the new-site default (every part off except the help for the editing program) restated from the owner's requirements, with "a studio that only wants syncing sees nothing else".
+- A feature that needs the assistant says plainly when it cannot be used | the refusal for a kind that cannot do Timeline Cards' features no longer names the assistant it was made for.
+- A person picks how strong an assistant answers, where offered | each strength always shows its price, or "price not known yet" for a newer version, instead of dropping it.
 
 ## Parts of items left out
 

@@ -13,8 +13,8 @@
 - 30-007 | The list of transcripts holds every interview and every montage source of the episode
 - 30-008 | The list of transcripts can be filtered by name, kind, use in the cut, person, length and timings, and each row says what it holds
 - 30-009 | An editor groups transcripts into named bins and files each transcript into at most one
-- 30-010 | Dropping media files on the panel adds them to an intake list and looks for each one in the episode
-- 30-011 | From the intake an editor sends a transcription, proxy, audio or waveform job to the studio's computers, aimed at one computer or any
+- 30-010 | Dropping media files on the panel hands the clips to footage in and lists each one in the intake
+- 30-011 | left out: cut by the owner (2026-11-24, cards-editor-3-Q2), except the intake box and its rows, written under Dropping media files on the panel hands the clips to footage in and lists each one in the intake
 - 30-012 | Opening a transcript shows its header, and a person with several recordings can choose which recording's timings are used
 - 30-013 | Each paragraph shows its id, its time in the clip, chips for its use, a Pick button, and the English above the original
 - 30-014 | A cut belongs to the transcript paragraph it overlaps most
@@ -47,7 +47,7 @@
 - 40-023 | Exact words searches every transcript of the episode and the open cut list instantly as the editor types
 - 40-025 | A highlighted stretch of transcript becomes a card of exactly those words
 - 40-026 | Where a paragraph's words could only be placed roughly the editor warns that an insert may be a little wide
-- 40-036 | The assistant searches inside one transcript or across the montage source clips for paragraphs about an idea
+- 40-036 | left out: cut by the owner (2026-11-24, cards-editor-3-Q8)
 - 40-049 | By meaning and Closest wording read every transcript in the chosen scope
 - 40-050 | The search sheet has pickers for which transcripts, how many results, which strength of assistant, and a fresh start
 - 40-051 | By meaning asks the assistant which passages answer a question and shows only passages that really exist
@@ -67,11 +67,11 @@
 - 29-056 | Which words a clip shows and in which language follows set rules
 - 30-027 | When an insert comes from an English selection that lined up word for word the new cut keeps that English
 - 30-028 | Selecting part of the English line in a transcript selects the original words it translates
-- 30-035 | A settings row shows the English-to-original progress and sets the daily allowance of assistant calls for it
+- 30-035 | A settings row shows how far the English is lined up with the original
 - 30-036 | A trimmed or split cut's English is worked out from the line-ups and marked approximate only when it truly is
 - 30-037 | Selecting English on a card, a shelf item or a search result shows the original words it stands for in a floating toolbar
 - 30-038 | Ten reading aids help an editor cut speech in a language they do not read, each switched Off, on for languages not read, or on for all
-- 30-039 | The language aids settings panel shows what the server can analyse and sets the aids' own daily allowance of assistant calls
+- 30-039 | The language aids settings panel shows what the server can analyse and what the editor's own assistant work has spent today
 - 30-040 | The aids read each line's grammar, words and names in Russian, Ukrainian, Chinese and English, and fall back to word lists when that analysis is missing
 - 30-041 | Romanisation under Russian and Ukrainian follows the national standards and never leaves a Cyrillic letter
 - 30-044 | The join check reads every new splice of one speaker again and says on the card and in the lane whether it reads well, changed the meaning, or broke the grammar
@@ -113,6 +113,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Text assumes: A
 - Items: 29-032
 - Covers: 29-Q8
+- Answered by the owner 2026-11-24: A, keep 30 rows on a desk and 40 on a phone
 
 ### cards-editor-3-Q2: Should the transcript panel's intake (drop media, then send a transcription, proxy, audio or waveform job to a chosen computer by hand) stay, now that dropped clips process themselves?
 - Kind: either-or
@@ -123,6 +124,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Text assumes: A, written as it is until he answers
 - Items: 30-010, 30-011, 30-008
 - Covers: 30-Q1
+- Answered by the owner 2026-11-24: B, a drop on the panel hands the clips to footage in; the job buttons and the choice of computer go, and each row still says whether its file was found and what its clip lacks
 
 ### cards-editor-3-Q3: There are two daily allowances of assistant calls with two settings (300 a day for lining English up with the original, 200 a day for glosses and join checks). One allowance, or keep two?
 - Kind: other
@@ -133,6 +135,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Text assumes: B, written as it is until he answers
 - Items: 30-035, 30-039
 - Covers: 30-Q2
+- Answered by the owner 2026-11-24: A, one daily allowance for all the editor's assistant work. Superseded the same day by his answer to another piece: the one limit is the site's daily budget in money, set by an admin; there is no count of calls anywhere (the share for work running on its own is cards-editor-3-Q11)
 
 ### cards-editor-3-Q4: Anyone who can open the editor can change the daily allowances of assistant calls, which cost the studio money. Should only an admin change them?
 - Kind: other
@@ -143,6 +146,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Text assumes: B, written as it is until he answers
 - Items: 30-035, 30-039
 - Covers: 30-Q4
+- Answered by the owner 2026-11-24: A, only an admin may change it; the limit is now the site's daily budget in money, set by an admin
 
 ### cards-editor-3-Q5: The floating English-selection toolbar shows Play on shelf cards, where it always refuses ("Only a card in the cut can play from here."). Keep it there, or hide it on shelf cards?
 - Kind: other
@@ -153,6 +157,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Text assumes: B, written as it is until he answers
 - Items: 30-037
 - Covers: 30-Q7
+- Answered by the owner 2026-11-24: A, Play is hidden on shelf cards
 
 ### cards-editor-3-Q6: Some messages assume the editor can be opened without the right to write into the episode (a "read-only run" without a "working copy"). Is there a read-only way of opening the editor, and what should those messages say?
 - Kind: other
@@ -163,6 +168,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Text assumes: the messages are kept as they are until he answers
 - Items: 30-009, 30-011
 - Covers: 30-Q8
+- Answered by the owner 2026-11-24: A, no read-only opening; the read-only messages are gone
 
 ### cards-editor-3-Q7: The assistant's strength is chosen differently in each place: search starts at the fastest, the edit chat at the most capable, shortening is fixed with no choice. Should one choice of strength apply everywhere?
 - Kind: other
@@ -173,6 +179,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Text assumes: B
 - Items: 31-003, 40-055
 - Covers: 31-Q3
+- Answered by the owner 2026-11-24: B, each feature keeps its own strength choice and default
 
 ### cards-editor-3-Q8: Four searches ask the assistant about the same transcripts. Is the transcript search sheet the one to keep, with the search inside one transcript and the search across the montage clips going?
 - Kind: unreachable
@@ -183,6 +190,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Text assumes: B, the two searches written as live and marked pending; if A, that passage is deleted
 - Items: 40-036, 40-049
 - Covers: 40-Q1
+- Answered by the owner 2026-11-24: A, only the search sheet; the search inside one transcript and the search across the montage clips are cut
 
 ### cards-editor-3-Q9: Every search scope, strength and kind is its own conversation that reads the whole scope again the first time (slow, and paid again). Is that acceptable, or should switching scope, strength or kind keep the assistant's reading?
 - Kind: other
@@ -193,6 +201,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Text assumes: A
 - Items: 31-003, 31-008, 40-050, 40-055
 - Covers: 40-Q9
+- Answered by the owner 2026-11-24: A, separate conversations per scope, strength and kind
 
 ### cards-editor-3-Q10: An idea search with exact quotes lives outside the product and writes pages for the notes program. Should any of it join the editor's By meaning search?
 - Kind: other
@@ -203,6 +212,16 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Text assumes: left out
 - Items: 41-037
 - Covers: 41-Q6
+- Answered by the owner 2026-11-24: A, nothing of the outside search joins By meaning
+
+### cards-editor-3-Q11: Lining English up with the original and the reading aids' glosses and join checks run on their own. What share of the site's daily budget for the assistant may that work use before it stops for the day?
+- Kind: other
+- Today: two daily counts of assistant calls (300 and 200), which the owner has replaced with one daily budget in money for the whole site.
+- Options: A: a quarter of the daily budget, fixed, shown in the language aids panel. B: half. C: no share: it may spend the whole day's budget.
+- Recommend: A, because work nobody asked for must never leave the day's budget empty for a search or the edit chat a person starts, and a fixed, visible share adds no second setting to his one limit.
+- Changes for a person: with A, on a heavy day lining up and glosses pause until the next day while searches still run; with C a busy day of lining up could leave no budget for anything a person asks.
+- Text assumes: A
+- Items: 30-035, 30-039, 30-044
 
 ## Readers' questions and unsettled points
 
@@ -220,7 +239,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - 40-Q1 | cards-editor-3-Q8
 - 40-Q9 | cards-editor-3-Q9
 - 41-Q6 | cards-editor-3-Q10
-- U-30-2 | open: cards-editor-3-U1
+- U-30-2 | settled: by the owner 2026-11-24, all ten reading aids stay as they are, with their settings rows
 - U-30-4 | settled: every such label is written by its role in square brackets
 - U-30-6 | settled: written to the owner's one file per interview: the list holds every interview and every montage source of the episode, with no folder rules
 - U-31-5 | settled: the switch's labels per language are given with naming a line's language by its script
@@ -231,7 +250,6 @@ These were inside items that are otherwise carried; each is behind the glass or 
 
 ## Still unsettled
 
-- cards-editor-3-U1 | Whether the ten reading aids, their settings rows, the lane's instant English after a trim and the aids' marks in the lane are switched on in the editor as the owner uses it, or have never been seen by him | written as live; the lit word and its English, the word-by-word gloss and the instant English are required by lessons CE1-016, CE1-019 and CE1-020 in any case | 30-038, 30-039, 30-040, 30-041, 30-044, 29-056, 31-054
 
 ## Conflicts between an item and a lesson
 
@@ -259,21 +277,32 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Ten reading aids help an editor cut speech in a language they do not read, each switched Off, on for languages not read, or on for all | aid 7 off by default, lit as spoken and shown in the lane (CE1-020)
 - A card shows its English and its spoken words in the order the switch says | the working card's full original and one size in the edit view (CE2-085)
 - A trimmed or split cut's English is worked out from the line-ups and marked approximate only when it truly is | untranscribed speech shown as a gap in the original language (CE1-014), "approximate" never said of a frame-exact cut (CE2-087)
-- Dropping media files on the panel adds them to an intake list and looks for each one in the episode | each row says whether its clip still lacks a transcript or a proxy, whatever Q2 decides (lesson CE1-049, passed from another part)
+- Dropping media files on the panel hands the clips to footage in and lists each one in the intake | each row says whether its clip still lacks a transcript or a proxy (lesson CE1-049, passed from another part), and found clips go to footage in (the owner's answer to Q2)
 - A highlighted stretch of transcript becomes a card of exactly those words | dragging highlighted text onto the lane or cards lands the same exact card (lesson CE3-030, passed from another part)
 - The search sheet has pickers for which transcripts, how many results, which strength of assistant, and a fresh start | a one-person or clips scope reads only its own transcripts, cold or warm (lesson CE2-091, passed from another part)
 - The first assistant search of a set of transcripts is slow because it reads them, and the sheet says which | each answer says how much was reused and how much read fresh (lesson CE2-091)
-- The search sheet offers three kinds of search, and switching kind never asks the assistant by itself | what a person sees with the assistant switched off (owner's requirements, section 2), also on the pickers, the reading, the alignment row, the aids, the aids panel, the join check and the two searches inside one transcript
+- The search sheet offers three kinds of search, and switching kind never asks the assistant by itself | what a person sees with the assistant switched off (owner's requirements, section 2), also on the pickers, the reading, the alignment row, the aids, the aids panel, and the join check
 
 ## Joins with other capabilities
 
-- Work shared out across the computers / Choosing who runs what | From the intake an editor sends a transcription, proxy, audio or waveform job to the studio's computers, aimed at one computer or any | which computer runs a sent job and what an admin sees of it
+- Timeline Cards: footage in, ready to cut / Running on its own, with a hand on every decision | Dropping media files on the panel hands the clips to footage in and lists each one in the intake | clips dropped on the panel are made ready to cut by footage in, with every decision overridable there
 - The whole product / The assistant | The search sheet has pickers for which transcripts, how many results, which strength of assistant, and a fresh start | the three strengths of the assistant and their notes
 - Timeline Cards: footage in, ready to cut / Word links between the original and the English | A trimmed or split cut's English is worked out from the line-ups and marked approximate only when it truly is | the phrase line-ups and word links every cut's English is built from
-- Timeline Cards: footage in, ready to cut / Running on its own, with a hand on every decision | A settings row shows the English-to-original progress and sets the daily allowance of assistant calls for it | lining up runs in the background, most urgent first, within the allowance
+- Timeline Cards: footage in, ready to cut / Running on its own, with a hand on every decision | A settings row shows how far the English is lined up with the original | lining up runs in the background, most urgent first, within the allowance
 - Timeline Cards: the editor / Playback and audio | Clicking a word puts the transcript playhead on it and clicking beside the words picks the paragraph | how the transcript plays, held Space and the sentence cursor
 - Timeline Cards: the editor / Opening episodes and keeping the editor running | Any transcript of the episode can be opened from the episode picker on its own | the picker itself, and choosing several transcripts at once (lesson CE1-012)
 - Timeline Cards: the editor / Selecting, deleting, inserting and keys | Selecting English on a card, a shelf item or a search result shows the original words it stands for in a floating toolbar | the lane's Delete words, Highlight and Split here word tools
 - Timeline Cards: the editor / The lane: clicking, trimming, zooming and dragging | Ten reading aids help an editor cut speech in a language they do not read, each switched Off, on for languages not read, or on for all | the safe cut ticks and the key that moves an edge to one
 - Timeline Cards: the hand-over to Resolve, and exports / Sending a cut to Resolve | A trimmed or split cut's English is worked out from the line-ups and marked approximate only when it truly is | a cut's edges handed over exactly as the editor shows them
 - Timeline Cards: the board / Montages | The search sheet has pickers for which transcripts, how many results, which strength of assistant, and a fresh start | building a montage by describing it (lesson CE3-054, not met here)
+
+## Settled by the owner 2026-11-24
+
+- cards-editor-3-U1 | all ten reading aids stay as they are, with their settings rows and their marks in the lane; the pending mark is removed
+
+## Changes to exact text
+
+- 30-035 | "N used today, B paragraphs a call" is written "<amount> spent today, B paragraphs a call", and the "calls a day" box is removed: the owner's one limit is a daily budget in money (2026-11-24).
+- 30-039 | the "calls a day for glosses and join checks" box and "N used today" become "<amount> spent today, <amount> left" against the share of the daily budget for work running on its own (pending cards-editor-3-Q11).
+- 30-044 | "It counts against the aids' daily allowance" becomes the same share of the daily budget.
+- 30-037 | Play removed from shelf cards (cards-editor-3-Q5). 30-009 | read-only wording removed (cards-editor-3-Q6). 31-008, 31-010 | "<model>" written "<strength>". Every on-screen name of the assistant written "Assistant".

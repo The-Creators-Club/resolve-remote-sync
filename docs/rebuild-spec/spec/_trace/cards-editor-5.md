@@ -23,11 +23,11 @@
 - 28-042 | Menu puts the caret into a find box, with a hint saying what the controller now does
 - 28-043 | In the transcript, the controller's buttons play, select and insert sentences
 - 28-044 | In the transcript, View, Menu, the sticks and RT
-- 28-045 | LT with D-pad Left or Right in the transcript says there is no results list
+- 28-045 | left out: cut by the owner (2026-11-24, cards-editor-5-Q5)
 - 28-046 | On the list of transcripts, the controller walks the list and opens one
 - 28-047 | With the search sheet open, the controller walks the hits, plays them and opens them
 - 28-048 | While the find box or the search box has the caret, a few controller buttons still work
-- 28-049 | After an edge drag or a fade, A plays the join
+- 28-049 | left out: cut by the owner (2026-11-24, cards-editor-5-Q6)
 - 28-050 | The help sheet lists every controller button for each place
 - 28-060 | On touch, the lane is tapped, panned, pressed and pinched
 - 29-024 | On touch, cards are lifted by two taps or a long press, and the transcript opens from a button
@@ -50,7 +50,7 @@
 - 29-002 | When the editor cannot start, the person is told why, or sent to sign in and brought back
 - 29-008 | The header holds a Tools group for the editor's tools, folding into a drop-down on narrow screens
 - 29-009 | The header shows the brand, where you are, search, undo, redo and Send to Resolve
-- 29-011 | A status line at the foot shows the mode and what is happening
+- 29-011 | left out: cut by the owner (2026-11-24, cards-editor-5-Q4)
 - 29-017 | Toasts: one at a time, with set lifetimes, Dismiss, and an Undo after every edit
 - 29-027 | A More menu offers each card's less common actions, and the header's
 - 29-055 | The lane bar sets the lane's height, top or bottom, panels hidden, language, literal line and word size
@@ -65,11 +65,11 @@
 - 33-059 | Card density has five levels
 - 33-060 | Ctrl+wheel or a two-finger pinch over the cards changes density
 - 33-061 | The View sheet holds follow, recorded places, select mode and the keyboard shortcuts
-- 33-062 | An "All stacks" button in the View sheet
+- 33-062 | left out: cut by the owner (2026-11-24, cards-editor-5-Q7)
 - 33-063 | Card text comes in four sizes
 - 33-064 | The View sheet explains how to size and place the lane
 - 33-067 | The sections panel and the inspector can be resized on a wide desk
-- 40-038 | A missing timeline from Resolve is told apart from a fault ; An edit is refused only for a real reason, and never in silence
+- 40-038 | An edit is refused only for a real reason, and never in silence
 - 13-124 | The Timeline Cards page lists every episode in its folders, most recently opened first
 - 14-034 | The Timeline Cards page lists every episode in its folders, most recently opened first
 - 14-035 | Opening an episode goes into the editor at the cut list last left there
@@ -96,7 +96,7 @@
 - 32-022 | The episodes page lists every episode with its counts
 - 32-035 | The editor is reached through the dashboard, behind its sign-in, and knows who is signed in
 - 33-045 | A link to one cut can be copied, and opening it selects that cut
-- 33-099 | The Windows app opens the editor in a window of its own
+- 33-099 | The app on the editor's computer opens the editor in a window of its own
 - 33-113 | left out: for the builders only
 - 33-114 | left out: for the builders only
 - 33-115 | left out: for the builders only (its one-window look, header as title bar, is written as "In a desktop app window the editor is one whole window whose header is its title bar")
@@ -109,7 +109,7 @@
 - 39-056 | Opening an episode goes into the editor at the cut list last left there
 - 40-006 | The episode list offers to carry on with the last episode opened
 - 40-007 | The episodes page lists every episode with its counts
-- 40-008 | A person switches the editor to another episode by naming its folder
+- 40-008 | left out: cut by the owner (2026-11-24, cards-editor-5-Q12)
 - 40-043 | left out: unreachable, it describes a page the rebuild does not have; the same named bins (each transcript in at most one) are written with the transcript panel in part 3, and whether more of that page belongs in the rebuild is asked with cards-editor-4 (40-Q4)
 
 ## Questions for the owner
@@ -123,6 +123,7 @@
 - Text assumes: A (left out)
 - Items: 28-083, 29-063, 33-113, 33-114, 33-115, 34-001
 - Covers: 33-Q1, 34-Q4, U-34-2
+- Answered by the owner 2026-11-24: A, the builders' tools all stay left out
 
 ### cards-editor-5-Q2: Should the Windows window for the editor come from the one app on the editor's computer, instead of being an app of its own?
 - Kind: other
@@ -132,6 +133,7 @@
 - Changes for a person: with A an editor installs nothing extra and finds the editor window in the app they already have; with B they install and update a second app; with C they always cut in a browser tab.
 - Text assumes: A
 - Items: 33-099
+- Answered by the owner 2026-11-24: A, the editor's window comes from the one app on the computer and updates with it; no separate Windows app (the Android app stays its own app, with the product's mark)
 
 ### cards-editor-5-Q3: Should single tools of the editor be switchable for a site, or should the editor's tools only follow Timeline Cards, the help for the editing program and the assistant switch?
 - Kind: other
@@ -142,6 +144,7 @@
 - Text assumes: A
 - Items: 29-062, 34-006
 - Covers: 34-Q6, U-29-7
+- Answered by the owner 2026-11-24: A, no switch per tool; the tools follow Timeline Cards, the help for the editing program and the assistant switch
 
 ### cards-editor-5-Q4: The status line at the foot of the editor (mode, what is happening, the server's confirmed version "rev N") is hidden on every layout, so nobody sees it. Drop it, or show it?
 - Kind: unreachable
@@ -152,6 +155,7 @@
 - Text assumes: kept in its place, marked pending, to be deleted if A
 - Items: 29-011
 - Covers: 29-Q1
+- Answered by the owner 2026-11-24: A, the status line is dropped
 
 ### cards-editor-5-Q5: LT with D-pad Left or Right in the transcript can never reach a list of search results and always says so. Drop it, or give it a working meaning?
 - Kind: unreachable
@@ -162,6 +166,7 @@
 - Text assumes: the hint kept, marked pending
 - Items: 28-045
 - Covers: 28-Q12
+- Answered by the owner 2026-11-24: A, dropped
 
 ### cards-editor-5-Q6: After an edge drag or a fade made with the controller, A was meant to play the join (1 s before the new edge to 1.5 s after). It never does. Should it?
 - Kind: unreachable
@@ -172,6 +177,7 @@
 - Text assumes: written in its place, marked pending, to be deleted if A
 - Items: 28-049
 - Covers: 28-Q11
+- Answered by the owner 2026-11-24: A, left out; A always plays from the head
 
 ### cards-editor-5-Q7: The View sheet's "All stacks" button always says the cut list has no stacks. Can it go?
 - Kind: dormant
@@ -182,6 +188,7 @@
 - Text assumes: kept in its place, marked pending, to be deleted if A
 - Items: 33-062
 - Covers: 33-Q4
+- Answered by the owner 2026-11-24: A, cut (the editor has no stacks at all)
 
 ### cards-editor-5-Q8: Should Follow and recorded places (record, next, drop, clear) work from the View sheet, as they do from their keys?
 - Kind: other
@@ -192,6 +199,7 @@
 - Text assumes: A
 - Items: 33-061
 - Covers: 33-Q5, U-33-2
+- Answered by the owner 2026-11-24: A, Follow and recorded places work from the View sheet as from their keys
 
 ### cards-editor-5-Q9: "Copy a link to the selected cut" sat beside the Story Deck links, which are cut. Where should it live?
 - Kind: other
@@ -202,6 +210,7 @@
 - Text assumes: A
 - Items: 33-045
 - Covers: 33-Q10
+- Answered by the owner 2026-11-24: A, in a cut's More menu and the selection's
 
 ### cards-editor-5-Q10: In the transcript, when Y has no find match to take, should it select the paragraph under the transcript's own playhead, or under the lane's playhead?
 - Kind: differs
@@ -211,6 +220,7 @@
 - Changes for a person: with B, Y in the transcript jumps to whatever the lane is playing.
 - Text assumes: A
 - Items: 28-043, 30-030
+- Answered by the owner 2026-11-24: A, the transcript's own playhead (the lane head when the transcript has none)
 
 ### cards-editor-5-Q11: The retired page told a fault (a red banner) from a quiet "no timeline from Resolve" (an amber note). Does any of that belong in the rebuild?
 - Kind: unreachable
@@ -220,6 +230,7 @@
 - Changes for a person: with A nobody sees a red banner because of Resolve.
 - Text assumes: written in its place, marked pending, to be deleted if A
 - Items: 40-038
+- Answered by the owner 2026-11-24: A, cut
 
 ### cards-editor-5-Q12: Switching the editor to another episode by naming its folder only ever existed on the retired page. Can it go?
 - Kind: unreachable
@@ -229,6 +240,7 @@
 - Changes for a person: none with A.
 - Text assumes: written in its place, marked pending, to be deleted if A
 - Items: 40-008
+- Answered by the owner 2026-11-24: A, cut
 
 ### cards-editor-5-Q13: The episode list offers the last episode twice: "Carry on with" (this browser) and the top of "your recent" (this person). Keep one record, or two?
 - Kind: several ways in
@@ -239,6 +251,7 @@
 - Text assumes: A
 - Items: 19-039, 19-037, 40-006
 - Covers: 19-Q7
+- Answered by the owner 2026-11-24: A, one record per person: Carry on is the top of the person's recent episodes
 
 ## Readers' questions and unsettled points
 
@@ -277,7 +290,6 @@
 
 ## Still unsettled
 
-- cards-editor-5-U1 | the lane's one zoom range, which cards-editor-1-Q1 decides (recommended there: from the whole cut in to 400 px per second for every way of zooming) | the controller and the starting view say they use the lane's one range, with no numbers of their own | 28-040, 28-068
 
 ## Conflicts between an item and a lesson
 
@@ -300,6 +312,7 @@
 - (items) | 34-020, 32-020, 39-053 | one leaves a cut list that cannot be read out of the list, the others list it with "cannot be read"; wrote it listed with its error
 - (settled in cards-editor-1) | 28-027 | the controller counted submit, reset, colour, file and image inputs as typing where the keyboard does not; wrote the keyboard's list for both (28-Q14)
 - (settled in cards-editor-1) | 29-058 | the phone's rows kept a cut at least 0.1 s; wrote the editor's one shortest cut, 1/24 s (29-Q4)
+- (owner's answer 2026-11-24) | 30-030 | the item's Y takes the paragraph under the lane head when no match is to be taken; the owner chose the transcript's own playhead (cards-editor-5-Q10); the exact text is copied by hand with that one change
 
 ## New in this text
 
@@ -336,7 +349,7 @@
 - The editor shows only the tools the site has switched on | from the owner's requirements (the assistant switch and the help for the editing program)
 - The episodes page lists every episode with its counts | the person's recent episodes first (CE1-125)
 - Cut lists that cannot be written are opened read-only and nothing is written to them | CE3-106
-- The Windows app opens the editor in a window of its own | that it comes from the one app on the editor's computer and updates with it (owner's requirements, CE2-149)
+- The app on the editor's computer opens the editor in a window of its own | that it comes from the one app on the editor's computer and updates with it (owner's requirements, CE2-149)
 - With the help for the editing program switched off, the editor never mentions it and offers the exports | from the owner's requirements
 - With Resolve closed or absent, everything still edits and nothing shows as a fault | CE3-079, CE1-129, CE3-083
 - Following Resolve is off until switched on, and scrolling never switches it off | CE3-080, CE3-081, CE3-082
@@ -391,7 +404,11 @@
 - cards-to-resolve-and-exports / Which computer is driving Resolve | With Resolve closed or absent, everything still edits and nothing shows as a fault | only a person's own signed-in computers drive Resolve
 - cards-to-resolve-and-exports / Sending a cut to Resolve | The header shows the brand, where you are, search, undo, redo and Send to Resolve | what the send panel does
 - whole-product / The assistant | The editor shows only the tools the site has switched on | the site-wide assistant switch
-- editor-app / Installing and setting up | The Windows app opens the editor in a window of its own | the one app on the editor's computer
+- editor-app / Installing and setting up | The app on the editor's computer opens the editor in a window of its own | the one app on the editor's computer
 - releases-and-updates / Installing an update on an editor's computer | The Android app gives the phone editor a full screen that never moves | how an app's update is offered and checked
 - accounts-privacy-legal / Who may sign in | The editor is reached through the dashboard, behind its sign-in, and knows who is signed in | the dashboard's sign-in
 - dashboard / Overview, menus and finding things | The Timeline Cards page lists every episode in its folders, most recently opened first | the menu entry that opens the Timeline Cards page
+
+## Settled by the owner 2026-11-24
+
+- cards-editor-5-U1 | the lane zooms from the whole cut in to 400 px per second, for every way of zooming, the controller included (part 1's question, accepted); written into the left stick and the starting view

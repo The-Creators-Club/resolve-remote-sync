@@ -95,6 +95,7 @@
 - Changes for a person: with A an admin can point the Sorter at a new folder without anyone touching the server; editors cannot. With B any editor can; with C nobody can after set-up.
 - Text assumes: A
 - Items: 35-001, 35-002, 37-046, 38-005
+- Answered by the owner 2026-11-24: A, an admin adds and removes the folders to sort from on the Sorter page
 
 ### footage-sorter-and-camera-cards-3-Q2: Should every Sorter setting be changeable on a screen, and by an admin only?
 - Kind: other
@@ -104,6 +105,7 @@
 - Changes for a person: an admin can change the time zone, camera labels and copy rules from the dashboard without help.
 - Text assumes: A
 - Items: 38-006
+- Answered by the owner 2026-11-24: A, every Sorter setting on a screen for an admin, card names by anyone signed in
 - Covers: 38-Q15
 
 ### footage-sorter-and-camera-cards-3-Q3: "Show in the file manager" should open the clip's folder on the person's own computer?
@@ -114,6 +116,7 @@
 - Changes for a person: with A, pressing it on a studio computer opens their own Explorer or Finder at the clip; with B they paste the path themselves.
 - Text assumes: A
 - Items: 35-047, 37-061, 38-039
+- Answered by the owner 2026-11-24: A, opens Explorer or Finder on the person's own computer through the app there, with a copy-the-path fallback
 - Covers: 37-Q7
 
 ### footage-sorter-and-camera-cards-3-Q4: Should sizes read the same way on a folder link's page as on the Sorter?
@@ -124,6 +127,7 @@
 - Changes for a person: a client sees "4.23 GB" instead of "4.2 GB" on a link page.
 - Text assumes: A
 - Items: 37-010, 37-106
+- Answered by the owner 2026-11-24: A, sizes written the same way everywhere
 
 ### footage-sorter-and-camera-cards-3-Q5: Should every link handed outside the studio be in one list?
 - Kind: either-or
@@ -133,6 +137,7 @@
 - Changes for a person: an admin checking what has been handed out looks in one list instead of two.
 - Text assumes: A
 - Items: 36-032, 36-033, 37-104
+- Answered by the owner 2026-11-24: A, both kinds of link kept, every link handed outside the studio in one list
 - Covers: 36-Q3
 
 ### footage-sorter-and-camera-cards-3-Q6: May the tools made only for the people building the Sorter go?
@@ -143,6 +148,7 @@
 - Changes for a person: nothing for anyone at the studio.
 - Text assumes: left out
 - Items: 35-002, 37-022, 37-108, 38-091
+- Answered by the owner 2026-11-24: A, the stand-alone form and the builders' tools are gone
 - Covers: 37-Q9
 
 ## Readers' questions and unsettled points
@@ -182,6 +188,7 @@
 
 ## New in this text
 
+- The header shows the library's totals and leads back to the dashboard | what has moved, what is about to and what is held back, with a way to put a clip back or move it elsewhere (the owner's ruling of 2026-11-24 that moves happen on their own)
 - Every control of the Sorter can be reached by touch | long press opens the clip menu, Select several and Select all, Assign to… and Clip info for drag and double-click, and every tool missing on a phone (Sound, suggestions for several clips, Download…, Share folder…, Rescan, the calendar) reachable there
 - Hovering a clip previews it, silently by scrubbing or with sound | the touch way to preview and scrub
 - Each source folder belongs to the computer it is on | an admin sets a folder's computer by hand, never overwritten (SRT-164 and the owner's override rule)
@@ -203,6 +210,11 @@
 
 ## Parts of items left out
 
+- 38-006 | the calendar refresh interval (every 15 minutes, 5 minutes to one day): a setting only the build would tune; the figure stays in the text
+- 38-006 | the spare room a card copy leaves on its target drive (256 MB): a setting only the build would tune; the figure stays in the text
+- 38-006 | the crew card list refresh interval (every 15 minutes): a setting only the build would tune; the figure stays in the text
+- 35-048 | carrying out a move as an admin act, and planning moves: moves into final folders happen on their own with no approval (the owner's ruling of 2026-11-24); a person puts a clip back or moves it elsewhere afterwards
+- 37-028 | the Move… action in the header: replaced by the counts of what has moved, is about to and is held back (the owner's ruling of 2026-11-24)
 - 35-044 | "up to 2,000 per card": the size of one request, an arrangement
 - 35-053 | the server asking the editor's computer, up to 2,000 per card, two sizes sent back: an arrangement (the promise is under Clips on a card get their pictures from the computer holding the card)
 - 36-035 | "each at most 256 KB" sent from the editor's computer: the size of one pipe
@@ -231,7 +243,7 @@
 - footage-sorter-and-camera-cards / Backed up and safe to format | Each clip card says what the clip is, where it is and where it is headed | the backup states a clip shows
 - footage-sorter-and-camera-cards / The record of every copy | Each clip card says what the clip is, where it is and where it is headed | the copies, drives, cloud and tapes a clip is on; also the header's counts, the clip details' copies, the nightly walk and backup, and archive search
 - footage-sorter-and-camera-cards / Sorting into shoots, people and cameras | Dragging clips onto a folder assigns them | suggestions, assigning, time folders and the "(2)" naming
-- footage-sorter-and-camera-cards / Moving footage on the NAS | A full look through every footage folder | the account of footage moved by hand, and move plans
+- footage-sorter-and-camera-cards / Moving footage on the NAS | A full look through every footage folder | the account of footage moved by hand, moves into final folders that happen on their own, putting a clip back
 - footage-sorter-and-camera-cards / Placing sound recordings | Right-clicking a clip opens a menu to find it, its other possible folders and the clips shot alongside it | the audio worklist
 - footage-sorter-and-camera-cards / Recognising cards and drives | The Sorter's settings | card names by serial number
 - footage-sorter-and-camera-cards / Copying a card | New footage appears on its own once it has finished arriving | a card's own view and copies in progress

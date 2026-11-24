@@ -10,7 +10,7 @@
 - 09-054 | The person at a computer can lend it to shared work for a while
 - 09-065 | A computer takes shared work only while nobody is using it
 - 12-068 | Choosing a computer is a pick from the studio's known computers
-- 19-003 | A computer takes shared work only while nobody is using it ; A computer set as wired to the server takes shared work without waiting for quiet
+- 19-003 | A computer takes shared work only while nobody is using it
 - 19-004 | The person at a computer can lend it to shared work for a while
 - 19-008 | The reasons a computer is passed over for a piece of work
 - 20-096 | Work that needs something a computer lacks says exactly what is missing
@@ -30,13 +30,13 @@
 - 20-100 | An admin or the computer's owner can ask a computer from the dashboard to change its shared-work settings
 - 09-048 | Each piece of work is done by exactly one computer
 - 09-055 | An admin can start waiting work now, on a chosen computer
-- 12-066 | An admin can queue a piece of work by hand
+- 12-066 | left out: cut by the owner (2026-11-24, fleet-jobs-Q5)
 - 19-001 | Each piece of work is done by exactly one computer ; The kinds of shared work and what each needs
 - 19-005 | An admin can start waiting work now, on a chosen computer
 - 19-006 | Work can be meant for one named computer
 - 19-011 | The best-placed able computer is asked first
 - 20-095 | Waiting work is taken in a fair order ; Each piece of work is done by exactly one computer
-- 27-026 | An admin can queue a piece of work by hand ; An admin cancels a piece of work ; For waiting work an admin sees why each computer is or is not taking it ; Finished work can be looked back on and tried again ; The work page shows what is waiting and running, and why any of it is not moving
+- 27-026 | An admin cancels a piece of work ; For waiting work an admin sees why each computer is or is not taking it ; Finished work can be looked back on and tried again ; The work page shows what is waiting and running, and why any of it is not moving
 - 40-033 | Media for Timeline Cards is made by the studio's computers first, and by the server when none can
 - 09-049 | A computer does one piece of shared work at a time
 - 12-065 | Only so many of each kind of work run across the studio at once ; Work names its files inside the studio's shared folders
@@ -89,6 +89,7 @@
 - Text assumes: A
 - Items: 01-066, 04-070, 09-057
 - Covers:
+- Answered by the owner 2026-11-24: A, the work goes back to the queue for another computer
 
 ### fleet-jobs-Q2: Should a change to whether a computer takes shared work, and which kinds, take effect at once instead of at the next start of the app?
 - Kind: other
@@ -99,6 +100,7 @@
 - Text assumes: A
 - Items: 01-067, 04-071, 09-070, 13-121, 14-049
 - Covers: 01-Q12, 09-Q9
+- Answered by the owner 2026-11-24: A, every change takes effect at once
 
 ### fleet-jobs-Q3: When no computer can make a clip's preview copy, sound or waveform for Timeline Cards, or the computers keep failing at it, should the server make it itself?
 - Kind: dormant
@@ -109,6 +111,7 @@
 - Text assumes: A
 - Items: 19-014, 19-015, 20-094, 40-033, 40-035, 15-070
 - Covers: 19-Q3, 20-Q4
+- Answered by the owner 2026-11-24: A, the server makes preview copies, sound and waveforms itself when no computer can or the tries are used up
 
 ### fleet-jobs-Q4: Work can skip the wait for nobody to be at a computer three ways. Keep all three?
 - Kind: several ways in
@@ -119,6 +122,7 @@
 - Text assumes: A (the wired exemption is written, marked pending, to be deleted)
 - Items: 19-003, 19-004, 19-005
 - Covers: 19-Q2
+- Answered by the owner 2026-11-24: A, the wired exemption is deleted and a computer nobody sits at has its quiet time set to 0
 
 ### fleet-jobs-Q5: Should an admin be able to queue a piece of work by hand, and if so from where?
 - Kind: several ways in
@@ -129,6 +133,7 @@
 - Text assumes: A (the behaviour is written, marked pending, with B's refusals, to be deleted)
 - Items: 12-066, 27-026
 - Covers: 27-Q4, 12-Q4
+- Answered by the owner 2026-11-24: A, queueing work by hand is cut
 
 ### fleet-jobs-Q6: Cancelling a piece of work can be done from the dashboard and from a command line. Keep both?
 - Kind: several ways in
@@ -139,6 +144,7 @@
 - Text assumes: A, with the command line listed and marked pending
 - Items: 12-069, 13-097, 27-026
 - Covers:
+- Answered by the owner 2026-11-24: A, the work page only
 
 ### fleet-jobs-Q7: Trying finished work again can be done from the dashboard and from a command line. Keep both?
 - Kind: several ways in
@@ -149,6 +155,7 @@
 - Text assumes: A, with the command line listed and marked pending
 - Items: 12-070, 13-097, 20-099, 27-026
 - Covers:
+- Answered by the owner 2026-11-24: A, the work page only
 
 ### fleet-jobs-Q8: Seeing the work waiting and running, and why a piece is not running, can be done from the dashboard and from a command line (which can also follow one piece live). Keep both?
 - Kind: several ways in
@@ -159,6 +166,7 @@
 - Text assumes: A, with the command line listed and marked pending
 - Items: 12-067, 13-096, 19-012, 27-026
 - Covers:
+- Answered by the owner 2026-11-24: A, the work page only
 
 ### fleet-jobs-Q9: Whether a computer takes shared work, and which kinds, can be set on the computer itself and asked for from the dashboard. Keep both?
 - Kind: several ways in
@@ -169,6 +177,7 @@
 - Text assumes: A
 - Items: 04-071, 13-121, 14-049
 - Covers:
+- Answered by the owner 2026-11-24: A, keep both
 
 ### fleet-jobs-Q10: Should lending a computer to shared work also be possible from the dashboard?
 - Kind: other
@@ -179,6 +188,7 @@
 - Text assumes: A
 - Items: 11-013, 19-004
 - Covers: 11-Q4
+- Answered by the owner 2026-11-24: A, lending stays at the computer only
 
 ### fleet-jobs-Q11: For waiting work, which reason should be shown as THE reason it is not running?
 - Kind: built twice
@@ -189,6 +199,7 @@
 - Text assumes: A
 - Items: 19-013, 19-014
 - Covers: 19-Q1
+- Answered by the owner 2026-11-24: A, both come from the computer nearest to taking the work
 
 ### fleet-jobs-Q12: Should every able computer fetch the tools a kind of work needs by itself, including the transcription set-up?
 - Kind: other
@@ -199,6 +210,7 @@
 - Text assumes: A
 - Items: 09-027, 09-050, 19-007
 - Covers:
+- Answered by the owner 2026-11-24: A, every computer fetches its tools itself, the transcription set-up included
 
 ## Readers' questions and unsettled points
 
@@ -228,7 +240,7 @@
 - U-15-7 | behind the glass
 - U-19-1 | settled: written under Stopping and cancelling and Failures, retries and the queue (rest after a failure 2 minutes)
 - U-19-2 | settled: the text assumes preview copies, sound and waveforms may be made by the server, never transcription; the owner decides in fleet-jobs-Q3
-- U-19-3 | settled: oldest first, sound and waveforms before preview copies, work started now first; priority exists only with queueing by hand (fleet-jobs-Q5)
+- U-19-3 | settled: oldest first, sound and waveforms before preview copies, work started now first; there is no priority number, since work is not queued by hand (fleet-jobs-Q5)
 - U-19-5 | behind the glass
 - U-19-6 | behind the glass
 - U-20-2 | settled: the limit per kind is an admin setting with defaults 2, 2 and 4
@@ -261,7 +273,6 @@
 - A short loss of the server or the network does not cost a running job | written from JOB-025
 - A computer whose access is refused says so and takes no work | a finished result can still be handed in after suspension (JOB-026)
 - Finished work can be looked back on and tried again | try again never queues a second copy of open work (JOB-029); cancelled is listed as an ending
-- An admin can queue a piece of work by hand | an unknown kind is refused and an unknown computer warned about (option B of fleet-jobs-Q5)
 - A computer gone quiet does not keep its work | the history and rest wording is plain wording of the present lost-hold messages
 - Admins are warned when work was given up | the serious warning now covers only work the server took over that shows no sign of life for an hour, since the server takes work only when it can start it (JOB-032)
 - The editor stops the job running on their own computer | stopping is not counted as a failure, ends a lending, and the computer is not rested (fleet-jobs-Q1)
@@ -298,13 +309,12 @@
 - 09-062 | a sound length difference only noted in the log: an inside
 - 09-058 | diagnostics: an inside
 - 01-066 | categories withheld from reports: belongs to Accounts, privacy and the legal paperwork
-- 27-026 | the command line's "watch" (giving up after an hour), sign-in rules, 50 by default: fleet-jobs-Q8 and insides
+- 27-026 | submitting work by hand, and the whole command line (list, why, watch, cancel, retry): cut by the owner (2026-11-24, fleet-jobs-Q5 to fleet-jobs-Q8)
 - 12-067 | 200 by default, "no executor is configured": insides
 - 20-093 | the labels on screen (the speech-to-text tool's name, PROXY 480p, AUDIO, PEAKS and the others): replaced by the plain kind names
 - 01-065 | b-roll and music indexing as the computer's own work: in this text they are shared kinds; the order between them and own proxy making belongs to their pieces
 - 04-019 | the lightning symbol in the menu wording: dropped
 - 11-013 | the end time in universal time: now the viewer's local time
-- 12-066 | the cost of a refused name being checked on any computer is kept; a kind and computer that do not exist being accepted silently: changed (fleet-jobs-Q5)
 
 ## Joins with other capabilities
 
@@ -318,7 +328,7 @@
 - Timeline Cards: the editor / Media the browser gets | Media for Timeline Cards is made by the studio's computers first, and by the server when none can | the editor shows "making" and uses the files
 - Timeline Cards: the hand-over to Resolve, and exports / Which computer is driving Resolve | Work tied to one computer's Resolve is never shared | Resolve work stays on its own computer
 - Sync / Safety stops | The reasons a computer is passed over for a piece of work | a proxy download that stopped itself
-- Sync / Wired or remote | A computer set as wired to the server takes shared work without waiting for quiet | the wired setting of a computer
+- Sync / Wired or remote | The best-placed able computer is asked first | the wired setting of a computer, preferred for sound and waveforms
 - The dashboard / Stopping and resuming the fleet | A studio-wide stop or the app closing puts running work back to waiting | the fleet-wide stop
 - The dashboard / Problems the server finds | Admins are warned when work waits and nobody can take it | where warnings are shown
 - The dashboard / Alerts by mail | Admins are warned when work was given up | warnings by mail

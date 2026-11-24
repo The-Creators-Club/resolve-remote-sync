@@ -16,7 +16,7 @@
 - 22-021 | The install shows every step live, can be retried, and gives up after 30 minutes
 - 22-022 | Every install leaves exactly one copy of the app and keeps the sign-in, settings and identity ; A drive letter already in use is never taken
 - 22-037 | The finish page says whether the computer is ready, and what happens next
-- 22-041 | An admin can set up a computer by hand without the wizard
+- 22-041 | left out: cut by the owner (2026-11-24, editor-app-Q8)
 - 22-049 | One set-up wizard takes a computer from nothing to signed in and working, and is safe to run again
 - 01-029 | On macOS the app checks at every start that it may read the sync drive, and says how to allow it
 - 03-033 | On macOS the app checks at every start that it may read the sync drive, and says how to allow it
@@ -28,7 +28,7 @@
 - 22-029 | The computer's sign-in and settings are readable only by the editor
 - 01-050 | Windows warns when the drive letter does not lead to the synced folder, and repairs it in one click
 - 04-074 | Windows warns when the drive letter does not lead to the synced folder, and repairs it in one click
-- 22-023 | On Windows a remote editor's copy of the projects appears at the studio's drive letter ; A hand-run install can leave the editor's folder reachable from other computers
+- 22-023 | On Windows a remote editor's copy of the projects appears at the studio's drive letter
 - 22-024 | A drive letter already in use is never taken
 - 22-025 | Installing from an administrator window is warned against
 - 01-001 | Only one copy of the app ever runs on a computer
@@ -36,7 +36,7 @@
 - 01-005 | The app keeps its own work going when part of it stops
 - 01-013 | The editor can restart the app
 - 01-081 | Quitting stops everything cleanly and asks first if media is being copied in
-- 01-083 | Every crash is written down on the computer and counted for the admin ; Crash reports can also go to an outside crash-collection service
+- 01-083 | Every crash is written down on the computer and counted for the admin
 - 03-023 | The app keeps its own work going when part of it stops
 - 04-004 | On Windows the icon comes back by itself, and a computer without it keeps working
 - 04-005 | On macOS the app says when the menu bar has no room for its icon
@@ -45,7 +45,7 @@
 - 07-025 | A computer doing heavy work stays awake and warns before shutting down
 - 09-047 | The editor can restart the app
 - 09-075 | Every crash is written down on the computer and counted for the admin
-- 09-076 | Crash reports can also go to an outside crash-collection service
+- 09-076 | left out: cut by the owner (2026-11-24, editor-app-Q2)
 - 09-077 | An app that dies on its own is started again within about ten seconds, and says so
 - 09-078 | An app that dies on its own is started again within about ten seconds, and says so
 - 10-038 | The computer's sign-in and settings are readable only by the editor
@@ -96,7 +96,7 @@
 - 15-112 | Every message points at the smallest action that clears it, and where it lives
 - 22-020 | Every install step is shown live and kept in a log the editor can copy
 - 22-038 | An install that finished with something missing says NOT READY and lists what
-- 01-010 | The editor signs in with the username and password their admin gave them ; The menu says who is signed in and offers to sign in ; Nothing starts syncing on a computer nobody is signed in to ; A computer can be set to sync without anyone signed in
+- 01-010 | The editor signs in with the username and password their admin gave them ; The menu says who is signed in and offers to sign in ; Nothing starts syncing on a computer nobody is signed in to
 - 01-011 | A sign-in never expires on its own, and a refused one is said plainly
 - 04-009 | The menu says who is signed in and offers to sign in ; A sign-in never expires on its own, and a refused one is said plainly
 - 04-029 | The sign-in window
@@ -110,7 +110,7 @@
 - 22-011 | The editor types the dashboard address and it is checked before going on
 - 22-013 | The editor signs in with the username and password their admin gave them
 - 01-006 | The app keeps a log and its other records within fixed limits ; The settings each computer holds
-- 01-086 | The settings each computer holds ; A computer can be set to sync without anyone signed in
+- 01-086 | The settings each computer holds
 - 04-056 | The settings window gathers everything about this computer and keeps itself current
 - 04-061 | The settings window shows the dashboard address this computer uses, and warns when it is unsafe or wrong
 - 07-012 | The product's pages reach Resolve on the editor's computer through the app, and only the studio's pages may
@@ -121,7 +121,7 @@
 - 09-025 | The product's pages reach Resolve on the editor's computer through the app, and only the studio's pages may
 - 14-050 | The admin sees, read-only, the settings each computer last reported
 - 15-072 | Admins are told when a computer could not get what its parts need
-- 22-036 | A setting changed anywhere changes only that setting, and an update never resets one ; An admin can set up a computer by hand without the wizard
+- 22-036 | A setting changed anywhere changes only that setting, and an update never resets one
 - 22-042 | CC Sync is listed among the installed apps with a working uninstall
 - 22-043 | Uninstalling removes the app and every way into the studio's server, never the media
 - 22-044 | Uninstalling removes the app and every way into the studio's server, never the media
@@ -137,6 +137,7 @@
 - Text assumes: this piece only names the pause and the stop as lines of the menu and points to Sync, where the pause and stop are written; the choice is made there.
 - Items: 01-010
 - Covers: 01-Q1
+- Answered by the owner 2026-11-24: B, one pause for the editor that stops everything and holds across restarts, sign-in and updates; the separate stop and its clearing line are gone
 
 ### editor-app-Q2: Sending crash reports to an outside crash-collection service is present but can never work. Can it go?
 - Kind: dormant
@@ -147,6 +148,7 @@
 - Text assumes: A; the passage is written in its place and marked pending, to be deleted
 - Items: 01-083, 09-076
 - Covers: 01-Q9, 09-Q6
+- Answered by the owner 2026-11-24: A, cut; crash reports stay on the computer and are counted on the dashboard
 
 ### editor-app-Q3: A field backup page opens from the app's menu on computers where it is switched on. Is it wanted, and is it on by default?
 - Kind: other
@@ -157,6 +159,7 @@
 - Text assumes: A
 - Items: 01-084
 - Covers: 01-Q11
+- Answered by the owner 2026-11-24: A, kept, shown only while the camera cards part is on
 
 ### editor-app-Q4: A refused computer sign-in is announced in four places (a menu line, a warning line, a line beside the identity, a button) and the sign-in window is opened from four. Keep all, or one warning with one button plus the menu line?
 - Kind: several ways in
@@ -167,6 +170,7 @@
 - Text assumes: B
 - Items: 04-009, 04-050, 04-060
 - Covers: 04-Q7
+- Answered by the owner 2026-11-24: B, one notification (hourly), one menu line, one warning with its button
 
 ### editor-app-Q5: Every button in the settings window closes the window before it acts, and some then reopen it. Should the window stay open and show the result instead?
 - Kind: other
@@ -177,6 +181,7 @@
 - Text assumes: A
 - Items: 04-056
 - Covers: 04-Q8
+- Answered by the owner 2026-11-24: A, the window stays open and shows the result
 
 ### editor-app-Q6: Two protections overlap when a new version of the app will not stay up: going back to the previous version after repeated failed starts, and giving up relaunching after three times an hour. Is one rule enough, and what should the editor and admin see?
 - Kind: built twice
@@ -187,6 +192,7 @@
 - Text assumes: A
 - Items: 10-041, 09-078, 04-051
 - Covers: 09-Q1
+- Answered by the owner 2026-11-24: A, one rule: a version that cannot stay up is replaced by the one before
 
 ### editor-app-Q7: The installer can be downloaded directly or picked from a page that shows the same builds. Keep both?
 - Kind: several ways in
@@ -197,6 +203,7 @@
 - Text assumes: A
 - Items: 13-021, 22-001
 - Covers: 13-Q10
+- Answered by the owner 2026-11-24: A, one installer page plus a file or link an admin hands over
 
 ### editor-app-Q8: A computer can be set up through the wizard or a hand-run install, and a new version can arrive by the app's own update, a hand-run upgrade or by running the wizard again. Keep only the wizard (for setting up or repairing) and the app's own update (for new versions)?
 - Kind: several ways in
@@ -207,6 +214,7 @@
 - Text assumes: A; the hand-run install is written in its place and marked pending, to be deleted
 - Items: 22-041, 22-003, 22-036
 - Covers: 22-Q1
+- Answered by the owner 2026-11-24: A, the wizard and the app's own update only; the hand-run install is cut
 
 ### editor-app-Q9: Uninstalling on a Mac removes the computer's identity (so the admin must approve it again) even in the default mode, while on Windows it is kept unless a full uninstall is asked for. Which should both follow?
 - Kind: built twice
@@ -217,6 +225,7 @@
 - Text assumes: A
 - Items: 22-043, 22-044
 - Covers: 22-Q2
+- Answered by the owner 2026-11-24: A, the same on both systems: the default keeps settings and identity, every credential removed
 
 ### editor-app-Q10: A remote editor must install the private network's app and sign in to it with an invite before the wizard can go on. Should reaching the server from outside still be a separate step the editor does by hand?
 - Kind: other
@@ -227,6 +236,7 @@
 - Text assumes: A
 - Items: 22-012
 - Covers: 22-Q4
+- Answered by the owner 2026-11-24: A, joining the private network stays a step of the wizard
 
 ### editor-app-Q11: Uninstalling on a Mac leaves Resolve's drive mapping that set-up added. Should uninstall remove it?
 - Kind: other
@@ -237,6 +247,7 @@
 - Text assumes: A
 - Items: 22-044
 - Covers: 22-Q5
+- Answered by the owner 2026-11-24: A, uninstall removes the Resolve mapping it added
 
 ### editor-app-Q12: A hand-run Windows install can leave the editor's project folder reachable from other computers on the network. Keep this option?
 - Kind: dormant
@@ -247,6 +258,7 @@
 - Text assumes: A; the passage is written in its place and marked pending, to be deleted
 - Items: 22-023
 - Covers: 22-Q7
+- Answered by the owner 2026-11-24: A, cut; the folder is never reachable from other computers
 
 ### editor-app-Q13: Should a computer ever sync without anyone signed in?
 - Kind: other
@@ -257,6 +269,7 @@
 - Text assumes: A; the switch is written in its place and marked pending, to be deleted
 - Items: 01-010, 01-086, 09-007
 - Covers:
+- Answered by the owner 2026-11-24: A, cut; a computer always belongs to a studio, someone is always signed in, and it syncs only what is ticked for it
 
 ### editor-app-Q14: Should the app show only one of its windows at a time, or let several be open together?
 - Kind: other
@@ -267,6 +280,7 @@
 - Text assumes: A
 - Items: 01-009, 04-028
 - Covers:
+- Answered by the owner 2026-11-24: A, several windows may be open at once, each kind once
 
 ### editor-app-Q15: The app shows two different one-line summaries of syncing: one in its menu ("Sync: ...") and one in its window ("syncing <project> (n/total)", "Waiting for the server ..."). Should there be one?
 - Kind: other
@@ -274,9 +288,10 @@
 - Options: A: one status sentence, used in the menu and the window alike, which also carries the project being synced and the "waiting for the server" states. B: keep both.
 - Recommend: A, because two summaries of the same thing in different words will one day disagree.
 - Changes for a person: with A the editor reads the same words in the menu and the window.
-- Text assumes: B (both written; the window's line is marked pending, to be folded into the menu's if you choose A)
+- Text assumes: A
 - Items: 03-002
 - Covers:
+- Answered by the owner 2026-11-24: A, one status sentence in the menu and the window
 
 ### editor-app-Q16: When the project open in Resolve has no home on the server, the editor is asked once and can also set it up later from a menu line. Keep both?
 - Kind: several ways in
@@ -287,6 +302,7 @@
 - Text assumes: A
 - Items: 04-091
 - Covers:
+- Answered by the owner 2026-11-24: A, keep the one-time question and the menu line
 
 ### editor-app-Q17: A shared library or included folder that is not working is reported in four places: the one-line status, the app's project list, the settings window and the dashboard. Keep all?
 - Kind: several ways in
@@ -297,6 +313,7 @@
 - Text assumes: A
 - Items: 03-011
 - Covers:
+- Answered by the owner 2026-11-24: A, the app's project list and the dashboard only
 
 ### editor-app-Q18: The editor can restart the app from its menu and from its settings window. Keep both?
 - Kind: several ways in
@@ -307,6 +324,7 @@
 - Text assumes: A
 - Items: 01-013, 04-024
 - Covers:
+- Answered by the owner 2026-11-24: A, restart from the menu and the settings window
 
 ### editor-app-Q19: Two things in these items are tools for the people building the product. Can they go from the specification?
 - Kind: dev only
@@ -317,6 +335,7 @@
 - Text assumes: left out
 - Items: 10-044, 09-025
 - Covers:
+- Answered by the owner 2026-11-24: A, left out
 
 ## Readers' questions and unsettled points
 
@@ -441,17 +460,20 @@
 - APP-044 | no password on a command line: kept as "never shown on screen or in a command".
 - APP-048 | the 15-second wait for the lock: an arrangement; the promise of never leaving the computer without the app is written.
 
+- owner's answer 2026-11-24 | 01-010, 09-007 | the items let a computer sync and report without anyone signed in, and sync the whole tree with no dashboard; the owner confirmed a computer always belongs to a studio and syncs only what is ticked for it. Wrote that.
+- owner's answer 2026-11-24 (sync piece) | 04-011 | the items carry a separate "stop all syncing" and a line to clear it; the owner gave the editor one pause. Wrote one pause; downloads after a safety stop or a low-disk pause are started again from one line in the app.
+
 ## Joins with other capabilities
 
 - Sync / Wired or remote | One set-up wizard takes a computer from nothing to signed in and working, and is safe to run again | the role step of set-up and the wired finish page.
 - Sync / Wired or remote | Switching a computer between remote and wired is confirmed first | the confirmation itself.
 - Sync / Computers joining and changing | The finish page says whether the computer is ready, and what happens next | an admin approves a new computer.
-- Sync / Studio-wide stops and the editor's pause | The menu holds about ten everyday lines | Sync now, pause, clearing a stop.
+- Sync / Studio-wide stops and the editor's pause | The menu holds about ten everyday lines | Sync now and the one pause.
+- Sync / Disk space | The menu holds about ten everyday lines | resuming downloads after a low-disk pause.
 - Sync / Safety stops | The computer's sign-in and settings are readable only by the editor | an unsavable safety stop; the resume proxy download prompt.
 - Sync / Saying truthfully what the sync is doing | The menu holds about ten everyday lines | the menu's one-phrase sync line.
 - Sync / Saying truthfully what the sync is doing | The app keeps its own work going when part of it stops | syncing brought back and its sentences.
 - Sync / What syncs where | The editor sees each ticked project with what it is doing and why | the list of ticked projects.
-- Sync / What syncs where | A computer can be set to sync without anyone signed in | a computer with no dashboard syncing the whole tree.
 - Sync / Uploads that cannot resume, shutdown and sleep | A computer doing heavy work stays awake and warns before shutting down | keeping awake and shutdown warnings for syncing.
 - Sync / The sync drive | Notifications are the operating system's own, headed with the studio's name and mark | the pulled-drive warning and reminders.
 - Sync / Clocks and file age | The editor is told when the dashboard is not hearing from the computer, and when the clock is wrong | measuring the clock.

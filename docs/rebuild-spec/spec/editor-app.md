@@ -16,15 +16,14 @@ There is one program for Windows and one for macOS. It never opens a console win
 
 Anyone signed in to the dashboard can download the installer. The download is the full clean-install and repair package (never the bare app), named with its version. The page offering it is headed "INSTALLER", "for a new editor computer, or to repair one", and says: "The full clean-install and repair package for a new editor computer. Save it to that computer's own disk: running it off the shared drive locks the file for everyone, and the setup wizard refuses it." For each system it shows the version, the size, "published <ago>", a shortened checksum (the full one on pointing at it) and a download button. The one that matches the browser is marked "this computer" and is what a single click downloads: a Mac gets the macOS installer, Windows gets the Windows one, and any other browser (Linux, a browser that hides its system) is shown the choice instead of a guess. On a phone the page adds: "On a phone: this package cannot be run here. Download it and send it to the editor's own computer, Windows or macOS, and run it there."
 
-With nothing published for a system: "Nothing published for this platform yet." A download asked for when nothing is published says "No <platform> installer has been published for this studio yet, so there is nothing to download. Ask whoever set this dashboard up for the installer.", with a line telling admins how to publish one (see Releases and updates: Making and publishing a release). A published installer whose file has gone says "installer file is missing on the server: re-publish it".
+With nothing published for a system: "Nothing published for this platform yet." A link followed when nothing is published says "No <platform> installer has been published for this studio yet, so there is nothing to download. Ask whoever set this dashboard up for the installer.", with a line telling admins how to publish one (see Releases and updates: Making and publishing a release). A published installer whose file has gone says "installer file is missing on the server: re-publish it".
 
 A new editor has no sign-in and is not yet on the studio's private network, so an admin can hand them the installer as a file or as a download link that works from anywhere without signing in. The installer carries a "start here" note: copy the installer to the Desktop first and run it from there; how to get past the operating system's warnings (see "The download page walks the editor past the operating system's warnings"); how Resolve is connected; how updates arrive; how to uninstall; and never to map a server share to a drive letter by hand.
 
 - Who: anyone signed in to the dashboard, and anyone an admin hands the file or link to.
-- Ways in: the installer page of the dashboard, a direct download link, the file handed over by an admin.
+- Ways in: the installer page of the dashboard, a file or download link an admin hands to a new editor.
 - Name and search words: Installer download. Search words: installer, new computer, repair, set up, download app.
 - Phone and desk: on a phone the page explains that the package must be run on the editor's own computer.
-- Pending: editor-app-Q7
 
 ### The installer refuses to run from the project drive, a network location or a removable disk
 
@@ -53,7 +52,6 @@ Back returns one page; from the sign-in page it returns to the network page for 
 
 - Who: the editor at the computer, with the address, username and password their admin gave them.
 - Windows and macOS: the same wizard, licence, sign-in, reporting choices, 200 GB space warning, NOT READY verdicts and finish pages on both. Only Windows checks the running account and makes a drive letter; on macOS Resolve's own drive mapping is used instead, and an external sync drive is checked and remembered.
-- Pending: editor-app-Q8
 
 ### Only one set-up runs at a time on a computer
 
@@ -86,7 +84,6 @@ Success shows "connected: the dashboard is answering", and only then is Next ena
 
 - Who: a remote editor.
 - Windows and macOS: on Windows a button installs the network's app with Windows' own package installer (in its own window), then says "installed: sign in to it from its tray icon, then press check connection" or "did not install: try the download page". On macOS the editor installs it from the download page.
-- Pending: editor-app-Q10
 
 ### Set-up checks that it can finish before it changes anything
 
@@ -139,14 +136,6 @@ When a remote editor's install finishes with no problems, the finish page is hea
 
 A wired computer's finish page is described in Sync: Wired or remote.
 
-- Pending: editor-app-Q8
-
-### An admin can set up a computer by hand without the wizard
-
-An admin or technical person can run the install by hand on either system. It asks for the dashboard address and the editor's username (a username is lowercased, with a warning when that changed it), and optionally the local folder (else the one recorded before, else a folder named after the tree on the system drive, or in the home folder on a Mac) and the drive letter. It reads the site's settings from the dashboard, waiting up to 8 seconds, and if they cannot be fetched it warns and uses what was given. It refuses before changing anything when no dashboard address is given, when the site's drive is not a drive letter (it never falls back to P: then), when the local folder name contains a double quote on Windows, or when a required value is missing. A preview mode prints everything it would do and changes nothing, ending "No changes were made." Every step says what it did or skipped, and it is safe to run again. It does not join the private network; its closing text lists that, and signing in from the tray, as the editor's steps, under "NOTHING SYNCS UNTIL YOU DO THIS". A hand run on a Mac can be told to leave Resolve's preferences alone. After a hand run an existing settings file is never overwritten; its key values are printed with "confirm these values match: the app will not fix them for you".
-
-- Who: an admin or a technical person at the computer.
-- Pending: editor-app-Q8
 
 #### Lessons
 
@@ -198,13 +187,6 @@ Resolve stores every clip by its full path, so every computer must see the studi
 Setting the drive up fully may need one administrator approval during the install. If the editor declines it, or it cannot be done, the drive still works but Explorer shows the disk's own name instead of the studio's, and the editor is told that running the installer again and approving gives it the studio's name. If the drive cannot be set to come back at sign-in, the editor is told it will not come back after signing in again, given the command to run by hand, and told NOT to re-run the installer as administrator. Mapping the drive gives up within 30 seconds, and no password is ever shown on screen or in a command while it is done.
 
 - Windows and macOS: on macOS no drive letter is made; set-up points Resolve's own drive mapping at the editor's local copy instead (see Resolve on the editor's computer: Setting Resolve up: edition, scripting switch, preferences).
-
-### A hand-run install can leave the editor's folder reachable from other computers
-
-A hand-run install has an option to leave the editor's project folder reachable from other computers, with a warning that this serves the whole project tree to any network the computer joins.
-
-- Who: an admin or a technical person running the install by hand.
-- Pending: editor-app-Q12
 
 ### A drive letter already in use is never taken
 
@@ -277,7 +259,6 @@ The relaunch limit holds exactly, even when the app cannot save its records (a f
 
 When a newly installed version keeps failing to start, the computer goes back to the version it ran before, the failed version is never installed again by itself, and the editor and the admin are told: "⚠ The vX update kept crashing, so CC Sync went back to the previous version. Your admin has been told". If there is no earlier version to go back to, the app is left down and the admin is told that a person must step in. See Releases and updates: Rolling back and withdrawing a build.
 
-- Pending: editor-app-Q6
 
 ### Every crash is written down on the computer and counted for the admin
 
@@ -286,13 +267,6 @@ Every unexpected error in any part of the app writes a crash report on the compu
 The dashboard is told how many reports a computer holds and the newest one's name; the diagnostics list the newest 3. An admin is warned "background tasks have crashed" when a computer holds any crash report.
 
 - Ways in: the editor's diagnostics, the per-computer view of the dashboard, the admin's alerts.
-
-### Crash reports can also go to an outside crash-collection service
-
-A setting on the computer, off by default, together with an address to send to, also sends each crash report, with no personal data, to an outside crash-collection service the vendor chooses.
-
-- Setting: Send crash reports to the vendor. Does: also sends each crash report, without personal data, to the vendor's crash-collection service. Default: off. Who: an admin. Applies to: the site. Search words: crash reports, send, vendor, telemetry.
-- Pending: editor-app-Q2
 
 ### The app keeps its own work going when part of it stops
 
@@ -305,7 +279,7 @@ What the editor and admin see:
 - Three recoveries of one piece of work within an hour put a line in the app's menu, and in the settings window: "⚠ CC Sync keeps restarting its syncing (N times in the last hour), so syncing is stopping and starting. Copy diagnostics for your admin".
 - The admin sees, per piece of work, how many recoveries in the last 24 hours and the last hour, when, and the last error; these survive a restart of the app and are kept for 24 hours. When there have been 3 or more in 24 hours the admin is warned "CC Sync keeps restarting itself", with the fix: ask the editor to copy diagnostics.
 
-Nothing is brought back while syncing is stopped or paused by a person, or while that cannot be told. Every automatic retry grows its wait to at most 30 minutes, never piles up duplicates, and starts again promptly once the other end answers. Long work that keeps making progress is never cut off by a fixed clock; it is stopped only when it has made no progress for a set time. Anything the app schedules keeps running on battery, and work that stops anyway shows on the computer and the dashboard.
+Nothing is brought back while the editor has paused syncing or an admin has stopped it for the whole studio, or while that cannot be told. Every automatic retry grows its wait to at most 30 minutes, never piles up duplicates, and starts again promptly once the other end answers. Long work that keeps making progress is never cut off by a fixed clock; it is stopped only when it has made no progress for a set time. Anything the app schedules keeps running on battery, and work that stops anyway shows on the computer and the dashboard.
 
 - On its own: brings back background work that stopped or stopped progressing.
 - By hand: the editor turns automatic recovery off in the app's settings; the status then says "... it is not being restarted: automatic restarts are switched off on this computer".
@@ -319,7 +293,6 @@ The app's link to Resolve is renewed on its own whenever Resolve quits and is st
 
 - Who: the editor at the computer.
 - Ways in: the menu, the settings window.
-- Pending: editor-app-Q18
 
 ### Quitting stops everything cleanly and asks first if media is being copied in
 
@@ -396,20 +369,16 @@ When the whole line stays within 120 characters, "syncing" and "up to date" also
 
 ### The app's status line says where syncing has got to
 
-The app's window carries one status line saying where this computer's syncing has got to. It reads one of:
+The app has one status sentence, the same words in its menu and at the top of its window (see Sync: Saying truthfully what the sync is doing, "The app's menu says in one phrase what syncing is doing now"). Besides the states written there, it says:
 
-- "starting up";
-- "Waiting for the server: this computer has no plan saved yet" (the server cannot be reached and this computer has never received its list of projects);
-- "Waiting for the server: using the plan saved on this computer" (the server cannot be reached, so the last list received is being used);
-- "Nothing to sync yet: no projects are ticked for this computer" (the server answered with an empty list: a normal, calm state, never a warning);
-- "syncing <project> (<n>/<total>)", or "uploading <project> (<n>/<total>)" when that project is ticked upload only;
-- "idle between passes";
-- "paused";
-- "stopped".
+- "starting up" while the app starts;
+- "Waiting for the server: this computer has no plan saved yet" when the server cannot be reached and this computer has never received its list of projects;
+- "Waiting for the server: using the plan saved on this computer" when the server cannot be reached, so the last list received is being used;
+- "Nothing to sync yet: no projects are ticked for this computer" when the server answered with an empty list (a normal, calm state, never a warning);
+- which project is being synced, "syncing <project> (<n>/<total>)", or "uploading <project> (<n>/<total>)" when that project is ticked upload only;
+- "idle between passes".
 
 The project is named by its label, else by its place on the server.
-
-- Pending: editor-app-Q15
 
 ### Clicking the icon opens the menu at once, and it never shifts or freezes while open
 
@@ -428,7 +397,7 @@ The menu is short: about ten everyday lines. This computer's role and every othe
 3. What syncing is doing now, in one phrase (see Sync: Saying truthfully what the sync is doing, "The app's menu says in one phrase what syncing is doing now").
 4. The prompts that apply now (below), and the lines for work under way (see "The menu carries a line for each piece of work under way").
 5. "Sync now", which starts every transfer this computer has switched on at once instead of waiting (see Sync: Studio-wide stops and the editor's pause).
-6. Pause or resume syncing (see Sync: Studio-wide stops and the editor's pause).
+6. Pause or resume syncing: the editor's one pause, which stops everything and holds across restarts, sign-in and updates until they resume (see Sync: Studio-wide stops and the editor's pause).
 7. "Open my sync drive".
 8. "Open dashboard".
 9. "Settings…".
@@ -439,8 +408,7 @@ The prompts each appear only while their condition holds, and the group can be e
 - "► Accept the licence agreement to start syncing…" while the licence holds syncing (see "Nothing syncs until the licence is accepted, and the app asks within a minute").
 - "Set up '<project name>' on the server…" while the project open in Resolve has no home on the server.
 - "► N LUT(s) only on this computer: share with the team" (see Resolve on the editor's computer: Colour look-up tables (LUTs)).
-- "► Resume proxy download…" after downloading stopped itself as a safety measure (see Sync: Safety stops).
-- "► Clear the sync stop on this computer (set today at 14:32)" (see Sync: Studio-wide stops and the editor's pause).
+- "► Resume downloads…" after downloading stopped itself as a safety measure or because the sync drive was nearly full: the one place in the app where downloads are started again (an admin can also do it from the dashboard; see Sync: Safety stops, and Sync: Disk space).
 - "► Stop the YouTube download".
 - An offered version of the app (see Releases and updates: Offering an update to a computer).
 
@@ -461,7 +429,6 @@ Every line answers when clicked: it either does what it says or says "not now" w
 While the camera cards part is on and field backup is on for this computer, "Field backup..." in the menu opens the field backup page (see The Footage Sorter and camera cards: Downloading originals and sharing folders). If that page cannot be opened, only it is lost; the rest of the app carries on.
 
 - When camera cards with the Footage Sorter is off: the line is absent.
-- Pending: editor-app-Q3
 
 #### Lessons
 
@@ -484,7 +451,6 @@ Any number of the app's windows can open and close, together or one after anothe
 
 Actions that would cut off what an open window is doing (a restart, an update) say so and wait (see "The editor can restart the app").
 
-- Pending: editor-app-Q14
 
 ### Nothing the app runs ever flashes a console window on Windows
 
@@ -524,9 +490,8 @@ The app's window lists every project ticked for this computer (see Sync: What sy
 - syncing, "Syncing now (N of M).";
 - waiting, "Waiting its turn." for projects still due this round, and waiting with no sentence otherwise.
 
-Only the project being synced shows live states; the others show "waiting" or "paused". Proxy downloads show "off" for an upload-only project or a computer that keeps no proxies; other project files show "off" for an upload-only project. The same window lists the projects waiting for their filter list, one sentence for each shared library or included folder that is not working, and the last few moves made on the server to this computer's projects with what happened to each (old and new place, when, and whether Resolve was relinked; see Proxies and file moves: Following a move on an editor's computer). An empty plan says to tick projects on the dashboard.
+Only the project being synced shows live states; the others show "waiting" or "paused". Proxy downloads show "off" for an upload-only project or a computer that keeps no proxies; other project files show "off" for an upload-only project. The same window lists the projects waiting for their filter list, one sentence for each shared library or included folder that is not working (the only place in the app it is listed; the status sentence names it only when it is what holds syncing, and the dashboard shows it too), and the last few moves made on the server to this computer's projects with what happened to each (old and new place, when, and whether Resolve was relinked; see Proxies and file moves: Following a move on an editor's computer). An empty plan says to tick projects on the dashboard.
 
-- Pending: editor-app-Q17
 
 ### When the project open in Resolve has no home on the server, the editor is asked once
 
@@ -534,7 +499,6 @@ When the project open in Resolve has no home on the server, the editor is asked 
 
 - Ways in: the one-time question, the menu line.
 - When the help for the editing program is off: nothing is asked and the line never appears.
-- Pending: editor-app-Q16
 
 #### Lessons
 
@@ -700,7 +664,7 @@ The install page has a scrolling log showing every step as it happens, and below
 
 ### An install that finished with something missing says NOT READY and lists what
 
-Every required piece the install could not set up becomes a warning. The finish page is then headed "COMPLETED WITH N WARNING(S): NOT READY YET" ("INSTALLED WITH ..." on a wired computer) and says that the computer is NOT ready to sync, not to tell the admin they are set up until the problems are fixed, but to send them this list instead; up to 6 warnings are shown, then "... and N more. All of them are in the install log". A hand-run install ends with a numbered list, "THIS COMPUTER IS NOT READY TO SYNC: N required piece(s) are missing" and "Do NOT tell the admin you are set up yet."; on a Mac with no app installed it reminds that the app is not installed on this Mac and "Do not report yourself ready."
+Every required piece the install could not set up becomes a warning. The finish page is then headed "COMPLETED WITH N WARNING(S): NOT READY YET" ("INSTALLED WITH ..." on a wired computer) and says that the computer is NOT ready to sync, not to tell the admin they are set up until the problems are fixed, but to send them this list instead; up to 6 warnings are shown, then "... and N more. All of them are in the install log".
 
 #### Lessons
 
@@ -766,14 +730,6 @@ A healthy computer never loses its sign-in by time alone. If the server ever ref
 Every one of these opens the sign-in window. When the refusal comes from this computer's clock being far off the server's, the editor is told instead: "This computer's clock is <N ahead of or behind> the server's, which is why your CC Sync sign-in was refused. Fix the clock (Windows: Date and time, Sync now) and syncing will start again." When the sign-in is accepted again, syncing starts by itself.
 
 - Ways in: a notification, the menu, the settings window.
-- Pending: editor-app-Q4
-
-### A computer can be set to sync without anyone signed in
-
-A setting on the computer, on by default, requires someone to be signed in before anything syncs. With it off, the computer reports under a name set on the computer, and with no name set it reports nothing; with no dashboard address it syncs the whole tree on its own (see Sync: What syncs where, "A computer with no dashboard syncs the whole tree"). The menu then offers a plain "Sign in…" with no warning.
-
-- Setting: Require sign-in before syncing. Does: when off, the computer syncs and reports under a name set on it without anyone signed in. Default: on. Who: the editor on that computer. Applies to: a computer. Search words: sign in required, no login, name, report as.
-- Pending: editor-app-Q13
 
 ### Each computer has a permanent identity that survives renaming it
 
@@ -806,7 +762,6 @@ Switching a computer between remote and wired asks first and names the consequen
 - Who: the editor at the computer.
 - Ways in: "Settings…" in the menu; starting the app again when it has no icon.
 - Name and search words: This computer's settings. Search words: settings, this computer, preferences, options, help.
-- Pending: editor-app-Q5
 
 ### The settings window shows the dashboard address this computer uses, and warns when it is unsafe or wrong
 
@@ -824,7 +779,7 @@ Each computer holds its own settings, set at install and changeable on the compu
 - the folder inside the tree suggested for media the editor adds;
 - where each library is on this computer (below).
 
-The settings of the app's own working are below as setting lines. The other parts' settings on this computer are described with the part they belong to: wired or remote, keeping proxies, keeping the computer awake and warning at shutdown, the recovery folder and the sync drive reminders (see Sync); pop-ups about clips outside the tree and how long a shown clip stays quiet, the warning when Resolve's scripting stops answering, attaching synced proxies, projects to leave alone, the shared LUT and stills links and grading from the server's originals (see Resolve on the editor's computer); analysing b-roll and music on this computer, the wait before work while the editor is away and whether it waits for Resolve to close, the free-space floor, where dropped files wait and how long finished drops are kept (see The b-roll archive, Music, and Work shared out across the computers); whether this computer takes shared work (see Work shared out across the computers: What a computer can honestly offer).
+The settings of the app's own working are below as setting lines. The other parts' settings on this computer are described with the part they belong to: wired or remote, keeping proxies, keeping the computer awake, the warning at shutdown, the recovery folder's size, the free space kept on the sync drive and the time for each project, each changed by the editor in this window for their own computer or by an admin from the dashboard, and the download safety limits, changed only by an admin (see Sync); pop-ups about clips outside the tree and how long a shown clip stays quiet, the warning when Resolve's scripting stops answering, attaching synced proxies, projects to leave alone, the shared LUT and stills links and grading from the server's originals (see Resolve on the editor's computer); analysing b-roll and music on this computer, the wait before work while the editor is away and whether it waits for Resolve to close, the free-space floor, where dropped files wait and how long finished drops are kept (see The b-roll archive, Music, and Work shared out across the computers); whether this computer takes shared work (see Work shared out across the computers: What a computer can honestly offer).
 
 The b-roll archive is found on this computer at "Assets/B-roll Archive" inside the computer's tree, music at "Assets/Music" and projects at "Projects", unless a person sets another folder on this computer; with no tree set there is no b-roll default. On a Mac a library with no folder set is looked for as a mounted network volume of that name, or that name followed by -1 or -2 (macOS adds these when a volume of the same name is already mounted). A change takes effect without restarting the app. Setting the b-roll archive to a folder of one's own switches off fetching missing clips when sending to Resolve (see The b-roll archive: Sending a clip to Resolve).
 
@@ -862,7 +817,7 @@ The app keeps a log on the computer of at most about 55 MB in total, older entri
 
 ### The admin sees, read-only, the settings each computer last reported
 
-The per-computer view of the dashboard shows, read-only and blank when not reported: how long the computer lends itself to shared work ("<n> min"; changed on the computer, in its settings); for remote computers, the reminder about a pulled sync drive ("the first warning only", or "every <n> min"; changed on the computer); and, only while YouTube downloads are on, the YouTube terms ("accepted" or "not accepted", plus "downloads off on this computer") and the YouTube sign-in ("signed in", "signed in, needs a refresh", "expired: sign in again", "not signed in", "not used on this computer"), changed on the computer.
+The per-computer view of the dashboard shows, read-only and blank when not reported: how long the computer lends itself to shared work ("<n> min"; changed on the computer, in its settings); and, only while YouTube downloads are on, the YouTube terms ("accepted" or "not accepted", plus "downloads off on this computer") and the YouTube sign-in ("signed in", "signed in, needs a refresh", "expired: sign in again", "not signed in", "not used on this computer"), changed on the computer.
 
 - Who: anyone signed in who may see that computer.
 - When YouTube downloads are off: the YouTube lines are absent.
@@ -896,8 +851,6 @@ After every delete the uninstaller checks what is really gone. If files survive 
 
 - Who: the editor at the computer, or an admin.
 - Ways in: the installed-apps entry on Windows, the uninstaller beside the app on a Mac.
-- Pending: editor-app-Q9
-- Pending: editor-app-Q11
 
 #### Lessons
 

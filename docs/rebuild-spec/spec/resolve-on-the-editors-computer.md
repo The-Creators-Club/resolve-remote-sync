@@ -42,7 +42,6 @@ While the app runs, the same VP9 files on the same timeline are not shown again 
 - On its own: the app decides which originals are VP9 by reading the files on this computer.
 - By hand: the editor silences the warning for one timeline, or switches it off for the computer.
 - Setting: VP9 warning. Does: warns when the open timeline uses VP9 originals that Resolve cannot render. Default: on. Who: the editor at that computer. Applies to: a computer. Search words: VP9, render fails, decoding error, YouTube originals.
-- Pending: resolve-on-the-editors-computer-Q9
 
 ### A timeline that is silent on one computer can be checked
 
@@ -95,7 +94,6 @@ Before showing it the app asks the dashboard where the open project lives; when 
 - On its own: the app decides a clip is outside the tree from its path, and decides which project it belongs to from the project's pairing (see "A Resolve project is tied to a project in the tree").
 - By hand: the editor picks or types each destination, skips, or fixes.
 - Setting: Fix-it window for media outside the tree. Does: raises the window when the open timeline uses a clip outside the shared tree. Default: on. Who: the editor at that computer. Applies to: a computer. Search words: outside tree, fix all, popup, media not syncing.
-- Setting: Quiet time before a clip is shown again. Does: how long a clip already shown stays out of the window. Default: 5 minutes. Who: the editor at that computer. Applies to: a computer. Search words: popup again, snooze, quiet, repeat window.
 
 ### Each clip outside the tree is given a suggested destination
 
@@ -123,15 +121,13 @@ When the dashboard cannot be reached, the last answer it gave is used; with no a
 "SCAN WHOLE PROJECT" reads every clip in every bin of the open project, not only the timeline (see "The product reads the whole media pool, including clips never cut into a timeline"). It works even with the fix-it window switched off, ignores the five-minute quiet time, forgets this session's skips so everything is shown again, and at once repoints any clips waiting to be moved to the shared spelling. It shows progress while it reads, keeps the app usable throughout, and treats a project of 1,300 clips as normal size. Results: "Whole-project scan: all media is in the tree", or the fix-it window for the clips found. Refusals: "<Drive> is disconnected, so CC Sync can't tell where your media is. Plug it back in and try again."; "CC Sync's sync folder isn't set up correctly, so it can't tell which media is in the wrong place." with how to get help; "Whole-project scan failed: <message>".
 
 - Who: the editor at that computer.
-- Ways in: from the app's Resolve status in its settings window. The open timeline is watched on its own, projects not open are checked on their own, and copying a project's media in reads the whole media pool too.
-- Pending: resolve-on-the-editors-computer-Q1
+- Ways in: from the app's Resolve status in its settings window. The open timeline is watched on its own, and projects not open are checked on their own.
 
 ### Clips pointing at a path only another editor's computer has are named to the editor
 
 A clip whose path exists only on another editor's computer can never sync or come online here, and cannot be fixed here. The app tells the editor once per path while it runs, in one notice per batch found: "“<first clip>”[ and <N other clips>] point at paths that only exist on another editor's computer, so they can never sync or come online here. Whoever imported them should re-import through <shared drive> (the app on their computer will offer the fix)." The notice names the first path, up to its first 60 characters, and the full list is in the app's diagnostics.
 
 - Who: the editor at that computer.
-- Pending: resolve-on-the-editors-computer-Q2
 
 ### Projects not open in Resolve are checked for footage that exists only on this computer
 
@@ -145,7 +141,6 @@ The editor is reminded by a notification titled for "footage only on this comput
 Projects are ordered by most clips; names over 60 characters are cut with "...". The app's Resolve status lists the flagged projects other than the one open. The dashboard receives up to 20 project names with clip counts (never paths) and when the last look finished, and reads "not checked yet" until a look has finished.
 
 - Who: the editor at that computer.
-- Setting: Check of projects not open. Does: how often the projects not open in Resolve are checked for footage only on this computer; 0 turns it off and forgets the findings. Default: every 30 minutes. Who: the editor at that computer. Applies to: a computer. Search words: unopened projects, only on this computer, footage scan, other projects.
 
 ### Admins are told when footage used in Resolve is outside the shared tree
 
@@ -378,7 +373,6 @@ While Resolve is confirmed running and its scripting is unavailable, every featu
 If another of the app's windows is open or the window cannot be shown, the advice is shown as a notification instead. Nothing is said while Resolve is only starting up or shutting down.
 
 - Who: the editor at that computer.
-- Setting: Warning when Resolve's scripting is down. Does: how often the editor is warned while Resolve is open but not taking scripting; 0 turns it off. Default: every 5 minutes. Who: the editor at that computer. Applies to: a computer. Search words: scripting down, Resolve not connected, warning, restart Resolve.
 
 #### Lessons
 
@@ -483,7 +477,6 @@ Each Resolve project name (trimmed, capitals ignored, up to 256 characters) is t
 - On its own: the tie, from an exact name match with exactly one project.
 - By hand: an admin sets or changes any tie, and a tie set by hand is never replaced by an automatic one.
 - Ways in: from the question the app asks when an untied project is first opened, and from the list of Resolve projects and their folders on the dashboard.
-- Pending: resolve-on-the-editors-computer-Q12
 
 ### Everyone can see where FIX ALL puts files for each Resolve project
 
@@ -492,9 +485,8 @@ A list on the dashboard reads "Resolve project, then where "Fix all" puts its fi
 For each computer, a person also sees: "open in Resolve[ on <computer>]: <Resolve project>, files go into <folder> (set by an admin / matched by itself, then kept; admins change it in the list of Resolve projects and their folders)"; when nothing matched, "no match", "no project in the tree matched; an admin can map it"; when nothing has been reported, "no Resolve project reported yet". A person with several computers can choose between "last to report" and each computer.
 
 - Who: anyone signed in reads it; an admin changes it.
-- Ways in: from the list of Resolve projects and their folders, from the per-computer view, from the overview, and from a person's own account page.
+- Ways in: from the list of Resolve projects and their folders, and from the per-computer view.
 - Name and search words: Resolve projects and their folders. Search words: Resolve project, fix all folder, destination, mapping, project roots.
-- Pending: resolve-on-the-editors-computer-Q12
 
 ### Nothing is copied or fixed for a project that is no longer open
 
@@ -563,10 +555,9 @@ Resolve keeps the files it uses open, so they cannot be moved, renamed, replaced
 
 Changes made without anyone pressing a button (repointing a clip to the shared spelling, attaching proxies) run for a given project and kind at most once every 15 minutes, and at most 8 times a day per project across all kinds; the limits survive restarts and updates, and a clock put back does not stretch them. A change held back by a limit is carried out by itself as soon as the limit allows, without a restart. Reaching the daily limit is shown to the editor in the app's Resolve status and on the dashboard as a set-up problem on that computer (a computer that keeps rewriting a project is set up wrongly). Waiting changes are kept once each, and checked against Resolve at most once per pass however many projects or clips wait. A large batch never blocks noticing which project is open, new findings, or quitting and updating.
 
-A change counts only when Resolve shows it took; one that changed nothing is not tried again until the file or clip changes. A busy or absent Resolve leads to a later retry, a real refusal is not retried until the file or clip changes, and repeats are summarised rather than listed one by one. Repeating checks ask cheap questions first and remember each answer until the file's size or date changes, while a real deletion still shows within the next report. FIX ALL and other work started by a button are never limited. The product can also tell how many seconds remain before the next change it may make on its own, and shows it beside the set-up problem.
+A change counts only when Resolve shows it took; one that changed nothing is not tried again until the file or clip changes. A busy or absent Resolve leads to a later retry, a real refusal is not retried until the file or clip changes, and repeats are summarised rather than listed one by one. Repeating checks ask cheap questions first and remember each answer until the file's size or date changes, while a real deletion still shows within the next report. FIX ALL and other work started by a button are never limited.
 
 - On its own: when an automatic change may run, from the limits above.
-- Pending: resolve-on-the-editors-computer-Q8
 
 ### The app's settings window shows Resolve's state and what is wrong with the open project's media
 
@@ -638,8 +629,6 @@ Each warning is shown once while it stays the same, and again only after it has 
 
 - Who: happens on its own on the editor's computer.
 - Setting: Shared LUTs in Resolve. Does: keeps Resolve's LUT list pointed at the studio's shared LUT library. Default: on. Who: the editor at that computer. Applies to: a computer. Search words: LUT, shared LUTs, LUT locations, colour.
-- Setting: Shared LUT library location. Does: where the shared LUT library is on this computer. Default: P:\Assets\Luts on Windows, its real local path on a Mac. Who: the editor at that computer. Applies to: a computer. Search words: LUT folder, LUT path, library location.
-- Setting: How often the shared LUTs and stills are checked. Does: how often Resolve's LUT and stills settings are checked and repaired. Default: every 15 minutes. Who: the editor at that computer. Applies to: a computer. Search words: LUT check, stills check, interval.
 
 ### Every editor's computer receives the shared LUT library and stills gallery without ticking anything
 
@@ -652,7 +641,6 @@ Two shared libraries reach every editor's computer by default: the LUTs folder (
 
 Fact about Resolve: it scans its LUT locations once, at launch. If the shared drive was not connected yet, the shared LUTs are missing for the whole session, and Resolve's own log records that the folder was not there. The app notices this for the current Resolve session and, once the folder is reachable, asks Resolve to re-read its LUT list, once per Resolve session, without restarting Resolve or changing its preferences; if that fails (for example no project open) it tries again later.
 
-- Setting: Re-read LUTs Resolve missed at launch. Does: makes Resolve pick up the shared LUTs when it started before the shared drive was there. Default: on (off whenever shared LUTs are off). Who: the editor at that computer. Applies to: a computer. Search words: LUTs missing, rescan LUTs, update lists.
 
 ### LUTs found only on one computer are offered to the team
 
@@ -661,10 +649,7 @@ The app looks in Resolve's own LUT folder and Resolve's other LUT locations on t
 While any are found, the app's menu shows "► N LUT(s) only on this computer: share with the team". Choosing it asks "Share these LUTs with the team?": "<N LUTs> on this computer (<X.X> MB) are not in the shared library. Copying them to <library> puts them on every editor's computer. Your own copies stay where they are.", with up to 12 names ("… and N more"), each going where its pack folders put it, and "SHARE". Up to 200 are listed. Nothing is copied or moved unasked. Sharing copies, never moves: it never overwrites (counted as skipped), never deletes the original, refuses any place outside the shared library ("<name>: refused, <rel> is outside the LUT library"), and leaves nothing half-copied. Then it counts again: "Shared <N LUTs> with the team." plus " <E> could not be copied - see the log.", and asks Resolve to re-read its LUT list if anything was copied. The offer clears once acted on. Refusals: "LUT sharing is not set up on this computer."; "No LUTs to share - the library already has everything here."; "The shared LUT library hasn't synced to this computer yet - try again later."; "Another CC Sync window is open. Close it and try sharing again."
 
 - Who: the editor at that computer.
-- Ways in: from the app's menu, and from the app's settings window.
-- Setting: Resolve's own LUT folder. Does: where Resolve keeps its LUTs on this computer, looked through for LUTs to share. Default: the usual folder for the platform. Who: the editor at that computer. Applies to: a computer. Search words: Resolve LUT folder, local LUTs.
-- Setting: Factory LUT names. Does: extra folder names of Resolve's factory LUTs, never offered for sharing. Default: none beyond Resolve's own list. Who: the editor at that computer. Applies to: a computer. Search words: factory LUTs, built-in LUTs, exclude.
-- Pending: resolve-on-the-editors-computer-Q11
+- Ways in: from the app's menu. The app's settings window shows how many there are.
 
 #### Lessons
 
@@ -740,53 +725,6 @@ Every batch change to a Resolve project ends with such a summary: fixed of total
 
 When the app starts, an empty name reserved by a copy that was interrupted (the app or computer stopped) is deleted on its own when it is certainly empty and nothing is still writing. A half-finished copy is never deleted on its own: the editor is told where it is so they can remove it by hand.
 
-### FIX ALL can rehearse, checking everything and changing nothing
-
-With rehearsal on (off by default), every check runs and then stops. The mode is visible before the click: the fix-it window and the app's settings window show the red line "FIX ALL is in rehearsal mode on this computer and will copy nothing." with "TURN REHEARSAL OFF", which takes effect at once ("FIX ALL will copy files in again.", or "Couldn't save that - see the log."). In a rehearsal the file line reads `Checking "<name>"`, the file bar stays empty and the batch bar counts clips checked; each clip answers "Rehearsal: would copy to <path> and relink N clip reference(s). Nothing was changed." Nothing is uploaded or started. At the end: "REHEARSAL: nothing was copied. N files would be copied into <folder>." (plus " Stopped: K left alone."), up to 12 lines "<name> would be copied to <path>", "… and N more (the rest are in the app's log)", and "FIX ALL is in rehearsal mode on this computer and will copy nothing. Turn it off in the app's settings window." A real run always states how many files it copied.
-
-- Who: the editor at that computer.
-- Setting: FIX ALL rehearsal. Does: makes FIX ALL and copying a project's media in check everything and change nothing. Default: off. Who: the editor at that computer. Applies to: a computer. Search words: rehearsal, dry run, test fix all.
-- Pending: resolve-on-the-editors-computer-Q5
-
-### An editor copies all of a project's scattered media into its folder in one go
-
-For a project that existed before the studio's sync, "BRING AN EXISTING PROJECT'S MEDIA INTO THE SYNCED FOLDER…" copies every clip in the open project's media pool whose file is outside the tree into that project's folder (one copy per distinct file, with the same destinations, safety and checks as FIX ALL), relinks Resolve, and lets syncing upload the originals and bring the proxies down. Refusals, in order:
-
-- "This computer works directly off the server, so there's nothing to copy in."
-- "Syncing is paused. Resume it from the app first."
-- "CC Sync isn't fully set up on this computer yet, so nothing can be copied in." with how to get help.
-- "<Drive> is disconnected, so CC Sync can't copy media in. Plug it back in and try again."
-- "Nothing was copied in or uploaded. <reason>" (a studio-wide stop, the licence, and so on).
-- "Nothing was copied in or uploaded. Sign in from the app first."
-- "Already copying a project's media in. Let it finish."
-- "Copying in failed: <message>"
-- "Can't reach the server, so CC Sync doesn't know where this project lives. Nothing was copied or uploaded. Try again once you're back online."
-- "CC Sync can't tell which project this is, so it won't copy anything in. Open the project in Resolve and set it up on the dashboard first." It never works on the whole tree.
-- "CC Sync got a project location that points outside your sync folder, so nothing was copied or uploaded." with how to get help.
-- "A popup is already open. Close it first."
-
-Then "Checking the NAS…" while the server is asked what it will do: "Couldn't check the server, so nothing was copied or uploaded." with how to get help, or "Nothing to copy in: this project is already tidy." A preview "COPY THIS PROJECT'S MEDIA IN" shows what will happen, with "COPY & UPLOAD" and cancel:
-
-- "Your original files are COPIED, never moved. Everything stays exactly where it is."
-- "  N scattered clip(s) to copy into the project folder (<size>)"
-- "  N original(s) will upload to the NAS (<size>), plus the consolidated clips above once copied in"
-- Either "  N proxy file(s) will download from the NAS (<size>)", or "  !!! WARNING: bringing proxies down from the NAS would DELETE N local file(s)[ and M folder(s)] !!!" and "  Proxies will NOT be brought down this time - fix the mismatch on the NAS first, then run this again."
-- If the server could not be checked: "  (could not check the NAS: <error>)".
-
-Sizes use B, KB, MB, GB, TB (steps of 1,024). The preview refuses to report when a check came back empty ("... refusing to report what it would do (a blank result is not 'nothing to do')"). Proxies come down afterwards only if the preview worked and showed no deletions.
-
-A progress window "COPYING THIS PROJECT'S MEDIA IN" ("Your original files are COPIED, never moved. Everything stays where it is.") stays on top, with the same file line, batch line, bars and buttons as FIX ALL ("SKIP THIS FILE": "Skipping the file being copied now. Carrying on with the rest…"; "CANCEL ALL": "Cancelling. The half-copied file is deleted; everything already copied in stays…"; "STOP AFTER THIS FILE"), and closing it means CANCEL ALL. Each file shows whether it is a cloud placeholder. Then "Uploading originals to the server…" and "Uploading to the server: <project>" with bytes, speed and time left, refreshed every 2 seconds, then "Downloading proxies from the server…". Nothing uploads if nothing was actually copied, and the studio-wide stops are checked again before uploading. The window closes itself when the work ends. Results:
-
-- "<copied>/<total> copied in[, N skipped by you], <F> failed." with how to get help.
-- "Cancelled: <n> of <planned> copied in[, N skipped by you], the rest were left alone. Nothing was moved or deleted." ("Stopped" for a stop after a file.)
-- "Rehearsal finished: <N files> were checked and nothing was copied in or uploaded."
-- "Copied in (<n> copied in[, N skipped by you]), but the upload did not run or did not finish. <reason>"
-- "Copy & upload finished (<n> copied in[, N skipped by you])."
-
-- Who: the editor at that computer.
-- Ways in: from the app's settings window.
-- Pending: resolve-on-the-editors-computer-Q4
-
 ### Every change the product makes in Resolve is recorded so it can be put back
 
 Resolve's own Undo does not cover clip relinks made by script. So for every clip path or proxy the product changes, it records the project open at that moment, the clip's name, its original file, the old and new path, and which feature made it. Changes to one project close together form one undoable change: it ends after 2 minutes with no further change to that project, except that one FIX ALL is always one change however long its copies take. An edit made after an undo starts a new change. Every change lands in the record even when many happen at once, up to 5,000 clip changes in one change; any beyond that are still made, and the editor is told that they cannot be undone. If the record cannot be written, the change still happens and the editor is told plainly that it cannot be undone. Records are kept 60 days, then deleted, along with any project's record folder left empty for a day.
@@ -795,7 +733,6 @@ Resolve's own Undo does not cover clip relinks made by script. So for every clip
 
 At most once every 15 minutes per project, before changing clips, the product saves the project in Resolve and exports a backup copy of it (without stills and LUTs), stamped with the date and time and kept for 60 days; copies and leftovers of interrupted saves older than 60 days are deleted, so their disk use stays bounded. Facts about Resolve: some Resolve builds cannot export a project when asked from outside, and a project open in a collaboration cannot be exported ("Resolve refused to export a backup copy (a project open in a collaboration cannot be exported)"). When there is no backup copy for any reason, the change still goes ahead. The backup copy is not used by the product's undo; a person restores it by hand in Resolve's project manager, and the app's diagnostics say where the copies are.
 
-- Pending: resolve-on-the-editors-computer-Q7
 
 ### The editor undoes the last change the product made in Resolve
 
@@ -814,7 +751,6 @@ A change counts as undone only if something was put back, or everything was alre
 
 - Who: the editor at that computer.
 - Ways in: from the app's settings window. An admin can ask for the same undo from the dashboard (see "An admin undoes, from the dashboard, a change the product made in Resolve on an editor's computer").
-- Pending: resolve-on-the-editors-computer-Q3
 
 ### An admin undoes, from the dashboard, a change the product made in Resolve on an editor's computer
 
@@ -834,9 +770,7 @@ The computer carries out the undo exactly as the editor's own, for that change, 
 A request still waiting after 7 days is given up and reported as failed "(this computer has been unable to do it for a week)". On success the editor is told "<admin> put back the clip paths CC Sync changed in Resolve." (titled "... clip paths put back"). When the editor has withheld project reporting, the project part is hidden from the admin, an undo still finds the one matching change and refuses when it cannot tell which, and the answer does not name the project. Answers are matched to the computer even when it was renamed.
 
 - Who: an admin.
-- Ways in: from the per-computer view, and from the dashboard's guide to recovering from a Resolve problem.
-- Pending: resolve-on-the-editors-computer-Q3
-- Pending: resolve-on-the-editors-computer-Q6
+- Ways in: from the per-computer view. The dashboard's guide to recovering from a Resolve problem points there.
 
 #### Lessons
 
@@ -876,7 +810,7 @@ A remote editor who holds only proxies can bring just enough of a camera raw ori
 
 ### An editor asks for originals from inside Resolve
 
-The app adds entries to Resolve's own Scripts menu: "Bring originals - selected media pool clips", "Bring originals - timeline clips between In and Out", "Bring originals - whole timeline", "Stop originals - selected media pool clips", "Stop originals - timeline clips between In and Out"; the clip under the playhead can be asked for too. The app acts on the request within a couple of seconds.
+The app adds entries to Resolve's own Scripts menu: "Bring originals - selected media pool clips", "Bring originals - timeline clips between In and Out", "Bring originals - whole timeline", "Stop originals - selected media pool clips", "Stop originals - timeline clips between In and Out", "Stop originals - whole timeline"; the clip under the playhead can be asked for, or stopped, too. Every way of asking for originals has a way to stop. The app acts on the request within a couple of seconds.
 
 - Each clip is turned into its file. A multicam or compound clip is turned into its angles' files. A path in the studio's drive spelling or in this computer's own spelling (a Mac's mounted drive) both work.
 - Each file is matched to the ticked project that holds it. Files in no ticked project, and files that are not camera originals (proxies, unfinished, hidden or non-video files), are counted and reported, not asked for. Files in an upload-only project are sent, so the server's refusal reaches the editor.
@@ -895,7 +829,6 @@ The editor gets one notification per request, built from these parts in this ord
 - with no refusal and no success it starts "Nothing was queued:" (or is just "Nothing was queued." when there is nothing else to say).
 
 - Who: the editor at that computer.
-- Pending: resolve-on-the-editors-computer-Q10
 
 #### Lessons
 

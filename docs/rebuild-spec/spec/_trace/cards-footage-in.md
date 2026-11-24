@@ -53,7 +53,7 @@
 - 30-033 | English and original are linked phrase by phrase on their own
 - 30-042 | Word links and glosses inside each phrase
 - 41-022 | English and original are linked phrase by phrase on their own
-- 30-034 | Lining up runs most urgent first, within a daily allowance
+- 30-034 | Footage-in works most urgent first, within the site's daily budget
 - 39-084 | Every decision is shown and can be set by hand
 - 40-010 | Every existing paragraph is placed in its recording
 - 40-011 | The studio's existing transcripts are brought in once with every paragraph's address
@@ -91,6 +91,7 @@
 - Text assumes: B
 - Items: 39-078, 39-088
 - Covers: 39-Q11
+- Answered by the owner 2026-11-24: B, only a recording a person swaps in is levelled
 
 ### cards-footage-in-Q2: When an interview's preview is found to be more than a frame out of sync, what should happen?
 - Kind: other
@@ -101,6 +102,7 @@
 - Text assumes: A
 - Items: 41-026
 - Covers: 41-Q5
+- Answered by the owner 2026-11-24: A, kept with a warning and a way to make it again
 
 ### cards-footage-in-Q3: Should one translator make the English for both interviews and montage clips, and which?
 - Kind: either-or
@@ -111,6 +113,7 @@
 - Text assumes: A
 - Items: 41-021
 - Covers: 41-Q7
+- Answered by the owner 2026-11-24: A, the assistant makes all English; with it off, a person writes it
 
 ### cards-footage-in-Q4: When no computer with a usable graphics card is free, should transcription wait for one, or run slowly at once on whatever computer can reach the footage?
 - Kind: other
@@ -121,6 +124,7 @@
 - Text assumes: A
 - Items: 41-013, 41-040
 - Covers: 41-Q9
+- Answered by the owner 2026-11-24: A, wait for a computer with a usable graphics card
 
 ### cards-footage-in-Q5: Does your rule that a card holds at least two sentences apply to an interviewer's question and to chatter too?
 - Kind: other
@@ -131,6 +135,7 @@
 - Text assumes: A
 - Items: 42-028, 41-018, 42-031
 - Covers:
+- Answered by the owner 2026-11-24: A, the two-sentence floor applies to answer paragraphs only
 
 ### cards-footage-in-Q6: When someone has edited the readable Markdown copy of a transcript in another program, what should happen when the product writes the copy again?
 - Kind: other
@@ -141,6 +146,7 @@
 - Text assumes: A
 - Items: 41-031
 - Covers:
+- Answered by the owner 2026-11-24: A, an outside-edited copy is set aside before a fresh one is written
 
 ### cards-footage-in-Q7: When one drop holds several sessions (gaps of more than 30 minutes), should each session become an interview of its own on its own?
 - Kind: other
@@ -151,6 +157,7 @@
 - Text assumes: A
 - Items: 39-075
 - Covers:
+- Answered by the owner 2026-11-24: A, each session becomes its own interview
 
 ### cards-footage-in-Q8: How close must a device's timecode be to its file dates for the timecode to count as the time of day?
 - Kind: differs
@@ -161,6 +168,7 @@
 - Text assumes: A
 - Items: 39-074, 39-086
 - Covers:
+- Answered by the owner 2026-11-24: A, within 60 seconds
 
 ## Readers' questions and unsettled points
 
@@ -271,6 +279,12 @@
 - 41-021 | montage English by a separate translator: open in Q3
 - CFI-102 | command-line length on Windows: arrangement; the promise (any number of long-named files, partial results survive a crash) is met
 
+- 41-006 | the silence floor as a site setting: a setting only the build would tune (the -30 dBFS figure stays in the text)
+- 41-014 | the gap that counts as missing speech as a site setting and per interview: a setting only the build would tune (the figures stay in the text)
+- 43-042 | the 80% likeness as a setting: a setting only the build would tune (the figure stays in the text)
+
+- 30-034 | the daily allowance counted in assistant calls (300, from 0 to 100,000) and its message: replaced by the site's one daily budget in money (the owner's answer of 2026-11-24 to another piece)
+
 ## Joins with other capabilities
 
 - cards-board / What the assistant may do | Clips dropped in become an interview ready to cut | the first themes and the first sort of every paragraph are the last automatic step
@@ -286,4 +300,5 @@
 - proxies-and-file-moves / Raw camera formats and Blackmagic Proxy Generator | Every take is lined up by sound to within a frame | proxies made for raw camera files
 - footage-sorter-and-camera-cards / Sorting into shoots, people and cameras | Clips dropped in become an interview ready to cut | footage from cards arrives in the same place on its own
 - youtube / File names and what a file carries | Montage material is downloaded clips with a credit record | a download's channel, title, address and date as its credit
+- whole-product / The assistant | Footage-in works most urgent first, within the site's daily budget | the site's one daily budget in money, set by an admin, with the expected cost shown before each task
 - whole-product / The assistant | Clips dropped in become an interview ready to cut | the site-wide switch and what is left when it is off

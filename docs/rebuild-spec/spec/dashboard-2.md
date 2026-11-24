@@ -18,7 +18,6 @@ Saving answers "saved." or, when a destination was just switched on, "Saved. The
 
 - Who: an admin.
 - Ways in: the alert settings, and the short "who should we tell" step of the setup checklist.
-- Pending: dashboard-2-Q5
 - Name and search words: Alerts. Search words: alerts, mail, e-mail, notify, webhook, warnings.
 
 ### The mail password is typed once and never shown back
@@ -43,7 +42,6 @@ An admin may also choose, on purpose, to tell nobody. That choice is recorded, e
 
 - Who: an admin.
 - Ways in: the setup checklist, and the full alert settings.
-- Pending: dashboard-2-Q5
 
 ### The dashboard says whether alerts are really reaching anyone
 
@@ -60,8 +58,7 @@ After each check the server's status also says how many alerts were sent, that s
 While no destination is set (and the admin has not chosen to tell nobody), a warning stands among the open problems: "Nobody is being told when this server finds a problem..." with the fix: set an address or a web address in the alert settings, then press "Send a test".
 
 - Who: an admin.
-- Ways in: the alert channel's own status line, the standing problem among the open problems, and the facts the server re-checks on its own.
-- Pending: dashboard-2-Q4
+- Ways in: the alert channel's own status line beside the alert settings, and the standing problem among the open problems.
 
 ### An admin sends a test alert
 
@@ -154,51 +151,43 @@ The subject is "CC Sync weekly: N computer(s), E problem(s), W thing(s) to look 
 3. "BUILDS": how many computers run each version ("<version>: 6 of 8 computers"), then each out-of-date or unknown computer ("<who> has been on <build> for <span>; current for <platform> is <version>").
 4. "WHAT CHANGED THIS WEEK (n entries)": up to 40 lines from the history of changes, then "... and N more in the history of changes." or "nothing."
 5. "ALERTS SENT THIS WEEK": up to 50, with failures marked "(SEND FAILED: ...)".
-6. "DATA MOVED THIS WEEK": how much each kind of transfer moved for each computer.
-7. "SHARED WORK: q queued, r running, a abandoned this week".
-8. "WHAT IS PROTECTED (X of 9 confirmed, Y missing, Z unverifiable)", then each line as its state and title, its detail and the projects or computers concerned, and for any line not confirmed "WHAT TO DO:" and its repair. It reports the last protection check and never checks on the spot. When no check has ever run: "(no protection pass has run on this server yet)". When it cannot be read: "WHAT IS PROTECTED: this section could not be read this week. Treat it as unchecked, not as fine."
-9. "RECOVERABLE DELETED FILES", with each computer's size and count of deleted files that can still be recovered.
-10. "CHECKED AND FOUND NOTHING WRONG (k of N)" with "ok - <what>" for each clean check, then "COULD NOT BE CHECKED (n)".
-11. "NOT SENT AS ALERTS (n, switched off in the alert settings; still checked and listed above)" with "off - <what>" for each switched-off kind.
-12. The closing line "This report is composed from what the dashboard already knows. Anything it could not read is named above rather than left out."
+6. "SHARED WORK: q queued, r running, a abandoned this week".
+7. "WHAT IS PROTECTED (X of 9 confirmed, Y missing, Z unverifiable)", then each line as its state and title, its detail and the projects or computers concerned, and for any line not confirmed "WHAT TO DO:" and its repair. It reports the last protection check and never checks on the spot. When no check has ever run: "(no protection pass has run on this server yet)". When it cannot be read: "WHAT IS PROTECTED: this section could not be read this week. Treat it as unchecked, not as fine."
+8. "RECOVERABLE DELETED FILES", with each computer's size and count of deleted files that can still be recovered.
+9. "CHECKED AND FOUND NOTHING WRONG (k of N)" with "ok - <what>" for each clean check, then "COULD NOT BE CHECKED (n)".
+10. "NOT SENT AS ALERTS (n, switched off in the alert settings; still checked and listed above)" with "off - <what>" for each switched-off kind.
+11. The closing line "This report is composed from what the dashboard already knows. Anything it could not read is named above rather than left out."
 
-- Pending: dashboard-2-Q3 (the data moved section)
-- Pending: dashboard-2-Q2 (which scheduled messages stay)
 
 ### An admin can ask for a daily "still here" message so that silence means the server is down
 
 The daily "still here" message is off unless an admin switches it on, and is only sent when a destination is set. It goes once per calendar day in the site's time zone. Its subject is "CC Sync: all quiet - N computer(s), E problem(s)" when nothing serious is open, otherwise "CC Sync: still here - ...". The body explains "IF THESE STOP ARRIVING, THE SERVER ITSELF IS DOWN", lists how many computers are known, the problems open and the things to look at, and says how to turn the message off in the alert settings. It is never itself a problem, never "cleared" and never among the open problems.
 
-- Pending: dashboard-2-Q2
 
 ### The assistant checks the server at set hours and mails what needs a person
 
-An admin can switch on a server check: "the assistant reads everything this server knows is open, stuck or failing and mails you what needs a person, at these hours in the site's time zone. It only reads; a reply to its email can carry out the actions it offers." The report goes to the alert recipients, with numbered suggested actions that a reply can carry out.
+An admin can switch on a server check: "Assistant reads everything this server knows is open, stuck or failing and mails you what needs a person, at these hours in the site's time zone. It only reads; a reply to its email can carry out the actions it offers." The report goes to the alert recipients, with numbered suggested actions that a reply can carry out.
 
 It is off unless an admin switches it on. It runs at up to four hours a day, 06:00 and 18:00 unless set otherwise; the hours are 0 to 23, typed comma-separated (for example "6,18"), with repeats removed and sorted, "at most 4 checks a day", and a blank field saves the usual hours, never "never". If the server was down at one of those hours, the check runs when the server comes back, and a restart never runs it twice. It never runs while switched off or with no alert destination. Only one runs at a time: a second is refused with "a server check is already running" or "a server check has been running since <time>"; one that has been running for more than 90 minutes is taken as dead and blocks nothing. It never holds up the server's other work.
 
 - Who: an admin.
 - When the assistant is off: the server check is neither run nor shown anywhere, and every other alert works as described.
-- Pending: dashboard-2-Q1
 
 ### An admin runs the server check now
 
 "Run now" starts a check whatever the schedule: "Server check started. The report arrives by mail in a few minutes." (recorded in the history of changes), or "the server check did not start: <why>". It is refused with "the server check is off. Turn it on and save first." or "no alert channel is set up, so the report would go nowhere." It also starts looking for replies at once.
 
 - Who: an admin.
-- Pending: dashboard-2-Q1
 
 ### The server check says when the assistant cannot do its part
 
 The check needs the assistant to be switched on for the site and connected. When it is not, the admin is told why in plain words (switched off on this server, not set up on this server, or no key entered), each pointing to the assistant's settings, with "It cannot run its analysis: <why>. Each check will mail a plain summary instead." and the check sends its plain report instead.
 
-- Pending: dashboard-2-Q1
 
 ### In the server check the assistant only reads and never sees a secret
 
 The assistant may read and search but never change, run or fetch anything. It is shown what the dashboard knows: the open problems, the alerts of the last 48 hours, the counts of open problems, the state of every fact the server re-checks, the state of the server's own background work, every computer's state, live transfers and the queue, open shared work with counts by kind and state, the published builds, and the actions offered by the previous check and what became of them. It may also read how the product itself works when it needs to. A part that cannot be read is marked as such. Nothing from the site's settings or stored secrets is given to it: any field named like a password, token, secret or key, and any value that looks like a key, is blanked first. It has 20 minutes to answer.
 
-- Pending: dashboard-2-Q1
 
 ### The server check lists only what needs a person, most important first
 
@@ -206,11 +195,10 @@ The assistant lists what needs a person, most important first, each with its evi
 
 An action is offered only when it is one of the actions a reply can carry out, with exactly its details, has a number from 1 to 99 not used twice, and passes that action's own check against the present state of the studio. Duplicates are dropped. Proposals that fail are listed under "Suggested but not offered:" with the reason.
 
-- Pending: dashboard-2-Q1
 
 ### The server check's mail is a short list of what needs the admin and what a reply can do
 
-The subject is "[CC Sync] Server check: <the assistant's subject, or 'all clear' / 'what needs you'>". The body has the headline, or "All clear: nothing on the server or the fleet needs a person."; then "WHAT NEEDS YOU" with numbered findings "[SEVERITY] title", "Evidence:", "Suggested:", "Actions: [n]" and, where there is one, the ready-to-paste instruction for fixing the product; then "ACTIONS A REPLY CAN CARRY OUT" with "[n] <action> - <why>"; then the actions not offered. It ends with one of:
+The subject is "[CC Sync] Server check: <Assistant's subject, or 'all clear' / 'what needs you'>". The body has the headline, or "All clear: nothing on the server or the fleet needs a person."; then "WHAT NEEDS YOU" with numbered findings "[SEVERITY] title", "Evidence:", "Suggested:", "Actions: [n]" and, where there is one, the ready-to-paste instruction for fixing the product; then "ACTIONS A REPLY CAN CARRY OUT" with "[n] <action> - <why>"; then the actions not offered. It ends with one of:
 
 - 'To carry any of these out, reply to this email, e.g. "do 1 and 3".' and "Reference: CCT-<code>   (valid until <local time>, each action runs once)";
 - with replies off: "Replies are switched off on this server (the server check's reply address in the alert settings), so these can only be done on the dashboard.";
@@ -218,7 +206,6 @@ The subject is "[CC Sync] Server check: <the assistant's subject, or 'all clear'
 
 The reference is random and valid for 48 hours. The server keeps only a fingerprint of it, so it can check a reference but never read one back, and its own copy of the mail shows only the reference's last four characters. Replies are directed to the reply address only when actions were offered and replies are on. The mail is recorded in the list of what was sent.
 
-- Pending: dashboard-2-Q1
 
 ### The server check always reports, even when the assistant could not
 
@@ -226,7 +213,6 @@ When the analysis cannot run (the assistant is not available, did not answer wit
 
 If the check itself fails, the subject is "[CC Sync] Server check: the check failed" and the body "The server check failed before it could finish: <error> ... Nothing was changed. The next check will try again."
 
-- Pending: dashboard-2-Q1
 
 ### An admin sees the server check's state and its past reports
 
@@ -235,14 +221,12 @@ The server check shows: "Server check is on." or "Server check is off."; whether
 Each check is kept with the actions it offered, each action's number, what it does, why, whether it was done and its result, and the reply that acted on it and when; each reply handled is kept with when it arrived, who sent it, which check it answered, the verdict and a detail. Offered actions whose reference has run out are marked expired. Checks, their actions and their replies are deleted after 60 days.
 
 - Who: an admin.
-- Pending: dashboard-2-Q1
 
 ### Replies to the server check can carry out its actions
 
 Replies are read only when the check is on, a reply address is set and alerts go by e-mail. The reply address is one plain e-mail address, "The only mail the server ever reads"; blank turns replies off, and the report is still sent. The server reads replies with the same mail account it sends from. The incoming mail server can be typed, or left blank to be worked out from the outgoing one's name in the usual way providers name them (for Gmail it is known); when it cannot be worked out, the admin is told "replies cannot be read: the incoming mail server, the mail user or the mail password is not set". A reply is picked up within about two minutes; replies from the last two days are considered, read or unread. The certificate check follows the alert e-mail setting. A failure to read is shown as "could not read the inbox (<kind>: <server message>)".
 
 - Who: an admin sets it up. Any alert recipient replies.
-- Pending: dashboard-2-Q1
 
 ### Only a genuine reply from an alert recipient with a current reference is acted on
 
@@ -256,15 +240,13 @@ An accepted reply is recorded before anything is done, so a crash never acts on 
 
 A refused reply is never answered by mail. Instead a warning stands among the open problems, named by the test that failed: "A reply to the server check email from <who> was not acted on: <reason>. Nothing was changed, and no answer was sent, because answering a forged sender sends mail to whoever it pretended to be." The fixes: reply from an address among the alert recipients; when the mail provider did not vouch for the message, use the dashboard's own buttons; reply to the most recent check mail within 48 hours. It closes itself when a later reply from the same sender is acted on, or after 7 days.
 
-- Pending: dashboard-2-Q1
 
 ### A reply says all, none or which numbers, or asks in its own words
 
-Only the reply's own words count; the quoted original and the signature are ignored, and at most 4,000 characters are read. "all", "do all" or "all of them" means every offered action; "none" or "nothing" means none; a list of numbers such as "1, 3", "do 1 and 3" or "1 & 2" means those. Anything else is read by the assistant, which gives up after 3 minutes, to find which numbers to do or skip and what is unclear. When the assistant is not available: "the reply is not a list of numbers, and the assistant is not available to read it (...)". Each chosen action runs once, in order, and each action can run only once across all replies. Each outcome is done, refused (its check said no now), failed, "not done again", or "not understood" (it was not offered).
+Only the reply's own words count; the quoted original and the signature are ignored, and at most 4,000 characters are read. "all", "do all" or "all of them" means every offered action; "none" or "nothing" means none; a list of numbers such as "1, 3", "do 1 and 3" or "1 & 2" means those. Anything else is read by the assistant, which gives up after 3 minutes, to find which numbers to do or skip and what is unclear. When the assistant is not available: "the reply is not a list of numbers, and Assistant is not available to read it (...)". Each chosen action runs once, in order, and each action can run only once across all replies. Each outcome is done, refused (its check said no now), failed, "not done again", or "not understood" (it was not offered).
 
 An accepted reply gets a confirmation with the subject "Re: <original subject>": "What your reply asked for:" then "[n] <action>: done / refused / failed / not done again / not understood - <detail>", or "Your reply did not choose any of the offered actions, so nothing was changed."; then "Not clear from your reply: ...", "Note: ...", "Nothing else was changed.", how to carry out another, and the reference line again. It is recorded in the list of what was sent.
 
-- Pending: dashboard-2-Q1
 
 ### What a reply to the server check can carry out
 
@@ -284,7 +266,6 @@ Each action does exactly what the matching control on the dashboard does, is che
 
 Letting a computer waiting to join the studio in is deliberately not possible by reply.
 
-- Pending: dashboard-2-Q1
 
 #### Lessons
 
@@ -310,7 +291,6 @@ Each setting below is one thing an admin can change for the whole site. Each has
 - Setting: Dashboard address. Does: the address editors' computers and browsers use to reach the dashboard, and that every "open the dashboard" link follows. Default: learned by the server itself where it can. Who: an admin. Applies to: the site. Search words: dashboard address, URL, link, web address, domain.
 - Setting: YouTube downloads. Does: shows or hides YouTube downloads for everyone and starts or stops all their work. Default: off. Who: an admin. Applies to: the site. Search words: YouTube, downloads, videos, part, switch.
 - Setting: YouTube's extra measures against being blocked. Does: lets downloads take extra steps to get past YouTube refusing them; only matters while YouTube downloads are on. Default: off. Who: an admin. Applies to: the site. Search words: YouTube blocked, unblock, refused, download fails.
-- Pending: dashboard-2-Q8
 - Setting: Updates with nobody clicking. Does: every editor's computer installs any newer build offered to it without anyone pressing anything (never an older one). Default: off. Who: an admin. Applies to: the site. Search words: automatic updates, auto update, unattended, upgrade, install updates.
 - Setting: Which assistant to use. Does: pins one of the connected assistants for every feature that uses one; left unpinned, each feature uses the first available in the owner's order of preference. Default: unpinned. Who: an admin. Applies to: the site. Search words: assistant, AI, provider, model, pin.
 - Setting: Who is told about problems. Does: where the server sends what it finds: nobody, by e-mail, or posted to another service's web address. Default: nobody. Who: an admin. Applies to: the site. Search words: alerts, notify, destination, channel, who is told.
@@ -327,13 +307,9 @@ Each setting below is one thing an admin can change for the whole site. Each has
 - Setting: Weekly report. Does: sends the weekly report on the whole studio every Monday at 08:00. Default: on. Who: an admin. Applies to: the site. Search words: weekly report, summary, Monday, digest.
 - Setting: Daily "still here" message. Does: sends one short message a day, so that silence means the server is down. Default: off. Who: an admin. Applies to: the site. Search words: heartbeat, still here, daily, all quiet, server down.
 - Setting: Server check. Does: lets the assistant check the server at set hours and mail what needs a person. Default: off. Who: an admin. Applies to: the site. Search words: server check, assistant report, triage, daily check.
-- Pending: dashboard-2-Q1
 - Setting: Server check hours. Does: the hours of the day (up to four) at which the server check runs. Default: 06:00 and 18:00. Who: an admin. Applies to: the site. Search words: check hours, schedule, when, times.
 - Setting: Reply address for the server check. Does: the one address whose incoming mail the server reads, so that a reply can carry out the check's actions; blank means replies are not read. Default: blank. Who: an admin. Applies to: the site. Search words: reply address, reply by email, actions, inbox.
 - Setting: Incoming mail server for replies. Does: where the server reads replies to the server check from. Default: blank, worked out from the outgoing mail server. Who: an admin. Applies to: the site. Search words: incoming mail, inbox server, replies, read mail.
-- Setting: Android app package name. Does: names the studio's own Android app, so that phones open dashboard links in it without an address bar. Default: blank, meaning no Android app. Who: an admin. Applies to: the site. Search words: Android, app, package, phone app.
-- Setting: Android app signing fingerprints. Does: the fingerprints of the keys the studio's Android app is signed with, one per line. Default: blank. Who: an admin. Applies to: the site. Search words: fingerprint, Android, signing, certificate, app link.
-- Pending: dashboard-2-Q9
 - Name and search words: Settings. Search words: settings, preferences, configure, options, setup.
 
 ### Saving settings checks every field first and one bad field changes nothing
@@ -369,14 +345,12 @@ Every save, import, undo and setup-checklist save that changes a setting is reco
 "Undo the last change" asks "Put back the <n> setting(s) changed by <person> <ago> (<exact time>)?" and puts back exactly the earlier values that change replaced, through every check a save goes through. It undoes exactly that change, never a newer one made meanwhile: if someone saved since, it is refused with "the newest change is no longer the one you confirmed (someone saved since): reload the page". With nothing recorded it is refused ("no site setting change is recorded to undo"). It is disabled until the history has loaded. Before undoing, the admin is told which kinds of reporting from computers the undo would switch off. The undo is itself recorded, so it can be undone.
 
 - Who: an admin.
-- Pending: dashboard-2-Q6
 
 ### An admin exports the settings as text and imports them by pasting
 
 An admin can export the site's settings as a plain-text settings file, and import one by pasting it, up to 65,536 characters. Pasting nothing is refused ("could not import", asking for the settings file first). Before anything is written the product works out the differences: "Nothing in that text differs from the current settings. Nothing was changed." or "This will change <n> setting(s), including <setting> from <old or (blank)> to <new or (blank)>, ... [, and <k> more]. Apply it?" (the first three named), together with which kinds of reporting from computers it would switch off. Applying goes through every check a save does, reloads the page, keeps the replaced values, and appears in the history so it can be undone like a save; a failure says "could not import: <reason>". Lines the dashboard does not hold are ignored; text with nothing it recognises is refused; text that cannot be read is refused with the reason. The studio's projects folder is always named "Projects", and an import naming it otherwise is refused.
 
 - Who: an admin.
-- Pending: dashboard-2-Q7
 
 ### The setup checklist names a real next step for every item
 
@@ -387,7 +361,11 @@ A new site is taken through a setup checklist. Every item is a real check of the
 
 ### An admin connects the assistant with a short guided setup
 
-The assistant's settings list only the ways of reaching an assistant that are connected, plus "add new". Adding one is a picker, then a guided setup: a notice to accept, a download that is installed only when it is verified as the publisher's own, a sign-in in the browser with a code to paste back, and a test. A way to point at a copy the admin installed and vouches for themselves stays offered. The setup survives the page being refreshed, and a successful sign-in is seen at once by its test and by every feature that uses it.
+The assistant's settings list only the ways of reaching an assistant that are connected, plus "add new". Adding one is a picker, then a short guided setup ending in a test. The usual way is a paid key, typed once and never shown back.
+
+The other way is running the assistant on a subscription. It is off on every new site, and the guided setup is the one place it is switched on or off: switching it on means accepting the notice inside that setup, then a download that is installed only when it is verified as the publisher's own, a sign-in in the browser with a code to paste back, and the test; switching it off is done from the same setup. No other switch, tick box or setting turns it on. A way to point at a copy the admin installed and vouches for themselves stays offered inside the same setup.
+
+The setup survives the page being refreshed, and a successful sign-in is seen at once by its test and by every feature that uses it.
 
 - Who: an admin.
 - When the assistant is off: none of this is shown.
@@ -419,7 +397,7 @@ An admin sees the server's version and the app's version against the newest offe
 
 Every signed-in page shows "updated <time ago>": when the server last answered it successfully, by the server's own clock, re-read every 30 seconds while the page is in view. It never claims to be fresh while it cannot reach the server.
 
-When the server cannot read how syncing of project folders stands, the page adds the warning "the data on this page may be stale". On a phone only the warning is shown, never the time. When the server cannot tell, no warning is shown. On the overview the same condition reads "The server cannot reach the project-folder syncing. The numbers below may be old. Nothing is lost: every computer keeps syncing." with a "What to do" link to the help on putting it right.
+When the server cannot read how syncing of project folders stands, every page adds the warning "the data on this page may be stale" with a "What to do" link to the help on putting it right. On a phone only the warning is shown, never the time. When the server cannot tell, no warning is shown.
 
 When a page's exchanges with the server start failing, a warning held at the bottom of the page reads "THIS PAGE HAS STOPPED UPDATING (last update <N seconds / minutes / hours ago>). Nothing below is current." followed by the reason:
 
@@ -431,8 +409,6 @@ When a page's exchanges with the server start failing, a warning held at the bot
 
 The warning never covers anything on the page, and it goes by itself the moment any exchange with the server succeeds. Text from the server is always shown as plain text.
 
-- Ways in: the freshness line on every page, and the line on the overview.
-- Pending: dashboard-2-Q11
 - Phone and desk: on a phone only the stale warning shows, never the "updated" time.
 
 ### Pages keep themselves current and catch up the moment they are shown again
@@ -531,7 +507,6 @@ The first three close themselves after 24 hours without happening again.
 The dashboard offers itself as an app that can be installed, carrying the site's product name and the description "The fleet dashboard: who is syncing, what is transferring, what is wrong." Installed, it opens on the overview in its own window with no browser bars (or minimal ones where the device insists), in any orientation, with proper icons for phones, including ones a phone may crop to a circle or a rounded square. Where the browser offers installation, an "install this app" button is shown; pressing it opens the browser's own install dialog once and the button goes away. Nothing is shown when the dashboard is already running as an installed app, or when the browser makes no such offer (Safari, Firefox). Installation and the offline page need the dashboard to be reached over https (or on the same computer); over plain http on the studio's network nothing is offered and nothing is said.
 
 - Who: anyone signed in.
-- Pending: dashboard-2-Q10
 - Phone and desk: browsers that do not offer installation show no button.
 
 ### When the dashboard cannot be reached the installed app says so
@@ -548,13 +523,12 @@ The dashboard is reachable over https wherever phones use it, and every "open th
 
 An admin can check an address for installing the dashboard as an app. The checks run in order and stop at the first failure, one line each (OK, FAIL or SKIP):
 
-1. the address is secure (https; otherwise "no secure context: no offline worker, no install prompt, no Android app");
+1. the address is secure (https; otherwise "no secure context: no offline worker, no install prompt");
 2. its certificate is accepted;
 3. the app description can be read signed out and has a start page and icons (otherwise "the browser will not offer to install it");
 4. the offline page's helper is served and allowed;
-5. the Android statement can be read (empty passes: "no Android package configured yet");
-6. the address answers as the dashboard, with a version (otherwise "whatever is behind this address, it is not the dashboard");
-7. every sign-in cookie is marked secure, or the ones that are not are named with the fix.
+5. the address answers as the dashboard, with a version (otherwise "whatever is behind this address, it is not the dashboard");
+6. every sign-in cookie is marked secure, or the ones that are not are named with the fix.
 
 It ends "STOPPED at <check>. Fix that and run this again." when one fails.
 
@@ -566,17 +540,6 @@ At phone width (390 pixels) and tablet width (768 pixels), measured against what
 
 - Phone and desk: tables become labelled rows on a phone.
 
-### The studio's own Android app opens the dashboard without an address bar
-
-A studio can have an Android app made for its dashboard address. It opens that dashboard full screen in the phone's browser engine, with the dashboard's own name, colours, start page and icons; it sends no notifications, falls back to a browser tab when it needs to, and works on Android 5 and later. When the app is made, the owner is given its package name and signing fingerprint to enter in the settings. An app made without the studio's own signing key gets a throwaway test key, with the warning "Do not ship this app: its fingerprint changes on every build, and an app signed with a new key cannot update an installed one."
-
-In the settings an admin enters the app's package name and its signing fingerprints, one per line, and saves both together. A package name needs two or more parts separated by dots, each starting with a letter or underscore. Each fingerprint must be 32 pairs of hex digits separated by colons; a leading "SHA256:" is accepted, case does not matter, and duplicates are dropped. While moving to a new key, the old fingerprint is kept beside the new. A mistake saves nothing and shows the error with what the admin typed kept. Saved: "Saved. This site now serves an asset-links statement." or, with either part missing, "Saved. Both a package name and at least one fingerprint are needed before this site serves a statement." The server then tells Android, openly and without sign-in, that the app may open the dashboard without an address bar.
-
-"Check" shows what the site is serving right now ("serving", "<n> statement for <package> with N fingerprint(s)", or "empty": "An app installed against this origin will open with a URL bar until both a package name and a fingerprint are saved above."), the site's own address, and a link to Android's own checker for that address ("Google decides, not this page..."), which the admin opens themselves; the server never contacts it. No link is shown when the site's address is blank or not a web address ("Set the dashboard address to this site's https address before you build the app..."). Without a correct statement the app still opens, but with an address bar, and nothing says why.
-
-- Who: an admin.
-- Pending: dashboard-2-Q9
-
 #### Lessons
 
 - Met: DSH-131, DSH-132, DSH-133, DSH-134, DSH-135, DSH-136, DSH-137.
@@ -585,7 +548,7 @@ In the settings an admin enters the app's package name and its signing fingerpri
 
 ### Nothing is reachable without signing in except what must be
 
-Only the pages named as open are reachable without signing in: the sign-in page itself, the offline page, what a phone needs to install the dashboard as an app, the Android statement, and the links handed to clients. Each such exception belongs to the page it exists for and goes with it; nothing else is reachable signed out.
+Only the pages named as open are reachable without signing in: the sign-in page itself, the offline page, what a phone needs to install the dashboard as an app, and the links handed to clients. Each such exception belongs to the page it exists for and goes with it; nothing else is reachable signed out.
 
 ### A change that did not come from the dashboard's own page is refused
 

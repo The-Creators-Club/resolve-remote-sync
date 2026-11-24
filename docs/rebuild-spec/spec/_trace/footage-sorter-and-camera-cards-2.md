@@ -52,7 +52,7 @@
 - 38-082 | A scan never changes a file and never writes off footage on a doubtful listing
 - 38-083 | Footage that vanishes from a drive raises one question per folder
 - 35-008 | Each clip's camera label is decided on its own
-- 35-020 | The studio's calendar is connected, read-only, so footage can be placed by shoot ; Without a connected calendar, events can come from a calendar export file
+- 35-020 | The studio's calendar is connected, read-only, so footage can be placed by shoot
 - 35-021 | The studio's episodes, naming rules and roster
 - 35-022 | The Sorter places each calendar event in a folder on its own
 - 35-023 | The Sorter places each calendar event in a folder on its own
@@ -76,7 +76,7 @@
 - 37-034 | A person reviews suggestions with their evidence before accepting them
 - 37-035 | A person reviews suggestions with their evidence before accepting them
 - 37-036 | Selected clips switch among their own suggested folders in one step
-- 37-037 | Selected clips switch among their own suggested folders in one step
+- 37-037 | left out: cut by the owner (2026-11-24, footage-sorter-and-camera-cards-2-Q7)
 - 37-038 | A search also shows the matching shoots and folders
 - 37-039 | The Sorter suggests a folder for each clip
 - 37-040 | The missing-footage checks
@@ -107,7 +107,7 @@
 - 38-025 | Each clip's camera label is decided on its own
 - 38-040 | The studio's calendar is connected, read-only, so footage can be placed by shoot
 - 38-041 | The studio's calendar is connected, read-only, so footage can be placed by shoot
-- 38-042 | Without a connected calendar, events can come from a calendar export file
+- 38-042 | left out: cut by the owner (2026-11-24, footage-sorter-and-camera-cards-2-Q4)
 - 38-043 | The Sorter places each calendar event in a folder on its own
 - 38-044 | The Sorter places each calendar event in a folder on its own
 - 38-045 | The Sorter places each calendar event in a folder on its own
@@ -145,7 +145,7 @@
 - 36-046 | Field recordings not yet on the NAS are found on every computer and drive
 - 36-049 | The Sorter proposes where each sound recording belongs
 - 36-050 | The Sorter proposes where each sound recording belongs
-- 36-052 | Recordings still unplaced can be transcribed in full for a fee
+- 36-052 | Every sound recording is listened to for names and introductions
 - 36-053 | Each recording gets one verdict
 - 36-054 | Approved recordings are filed beside their video, and duplicates are set aside
 - 36-055 | Loose video is placed into shoots by the same matching
@@ -168,6 +168,7 @@
 - Options: A: one record, recognising a recording by the camera's own recording id when it has one, an image sequence by folder name, file count and size, and anything else by name, size and time within 3 seconds. B: one record by name, size and time only. C: keep both records.
 - Recommend: A, because one record gives one answer to "is this backed up", and the camera's id is the surest identity where it exists.
 - Changes for a person: with A a clip has one list of copies and one verdict everywhere; with C the two lists can still disagree.
+- Answered by the owner 2026-11-24: A, one record; a recording known by its camera's id, else name, size and time within 3 seconds.
 - Text assumes: A
 - Items: 38-032, 38-081, 38-013, 36-002, 35-014
 - Covers: 38-Q7
@@ -178,6 +179,7 @@
 - Options: A: every verified copy the product makes always reaches the record; the switch only stops this computer's drives and their files being listed. B: the switch stops both, so copies made there stay on that computer.
 - Recommend: A, because a copy the product made is the safety answer for a card, and one rule is simpler than a page that behaves differently from the background.
 - Changes for a person: with A an admin always sees field copies made on a laptop whose drive listing is off; with B those copies count only on that laptop.
+- Answered by the owner 2026-11-24: A, copies the product makes always reach the record; the switch only stops drive listings.
 - Text assumes: A
 - Items: 10-025, 10-024, 10-023
 - Covers: 10-Q1
@@ -188,6 +190,7 @@
 - Options: A: both follow the studio's time zone setting (UTC+8 for this studio). B: keep the fixed UTC+8.
 - Recommend: A, because one place a setting comes from, and a customer elsewhere would otherwise see every shoot at the wrong hour.
 - Changes for a person: nothing for this studio; a studio in another zone sees its own times.
+- Answered by the owner 2026-11-24: A, calendar and recorder times follow the studio's time zone setting.
 - Text assumes: A
 - Items: 36-029, 36-043, 35-020
 - Covers: 36-Q7
@@ -198,7 +201,8 @@
 - Options: A: keep the export file as a fallback, reading every repeat. B: remove it; shoots come only from the connected calendar.
 - Recommend: B, because one way in is enough and the connected calendar already keeps working offline from its last fetch.
 - Changes for a person: with B a studio must connect its calendar for suggestions; the "iCal export" state in the header goes.
-- Text assumes: written in place and marked pending; removed if you choose B
+- Answered by the owner 2026-11-24: B, the calendar export file is removed; shoots come only from the connected calendar.
+- Text assumes: B (the passage is deleted)
 - Items: 38-042, 35-020, 37-094, 37-095
 - Covers: 38-Q11
 
@@ -208,6 +212,7 @@
 - Options: A: an admin manages episodes, rules and the roster in the Sorter's settings, and a broken rule is shown as broken. B: keep hand-edited files on the server.
 - Recommend: A, because every setting then has one place, and a customer's admin never needs to reach the server's files.
 - Changes for a person: with A an admin edits these in the browser and sees mistakes at once.
+- Answered by the owner 2026-11-24: A, episodes, rules and roster managed by an admin in the product.
 - Text assumes: A
 - Items: 35-021, 38-047
 - Covers: 35-Q8
@@ -218,6 +223,7 @@
 - Options: A: all three are actions on the Sorter's page for an admin, each with a rehearsal first. B: leave them out.
 - Recommend: A, because your ruling that every roster person appears as a greyed destination needs the interviewee folders made somehow, and the page is the one place to do it.
 - Changes for a person: with A an admin loads the planning sheet and fills the season's folders from the browser.
+- Answered by the owner 2026-11-24: A, all three are admin actions on the Sorter's page, each rehearsed first.
 - Text assumes: A
 - Items: 35-026, 38-047, 38-088, 38-089
 - Covers: 35-Q5, U-38-6
@@ -228,7 +234,8 @@
 - Options: A: keep dragging onto a folder, Assign to… with the folder picker, accepting a suggestion (one clip's, Accept suggestions, and the suggestions menu, which your ruling requires), assigning from a recording's detail, and dropping files from the file manager. Drop double-clicking a folder, the [ and ] keys, the clip menu's alternatives and "Use this instead". B: keep all of them.
 - Recommend: A, because each remaining way covers a different situation and the dropped ones repeat the suggestions menu or the picker.
 - Changes for a person: with A someone used to [ and ] or double-clicking uses the suggestions menu or drags instead.
-- Text assumes: written with every way in and marked pending; the dropped ones are removed if you choose A
+- Answered by the owner 2026-11-24: A, the trimmed ways in; double-click, the [ and ] keys, the clip menu's alternatives and "Use this instead" go.
+- Text assumes: A (the dropped ways in and the [ and ] keys are deleted)
 - Items: 37-033, 37-054, 37-036, 37-037
 - Covers: 37-Q12
 
@@ -239,7 +246,7 @@
 - Recommend: A, because one path is fewer parts and the hour plus the re-check just before each item keeps footage as safe as the hand-run gate.
 - Changes for a person: with A nobody runs anything at a command line; an admin moves footage from the browser.
 - Answered by the owner 2026-11-24: moves happen on their own, no approval.
-- Text assumes: the owner's answer. A sorted clip moves into its folder by itself as soon as its checks pass, with no approval, no dry run a person runs and no one-hour gate; a person sees every move and moves a clip elsewhere or puts it back by hand. There is no deliberate wait before a move (no lesson asks for one): what a person sees as about to move is only what is waiting its turn, its checks or a safe copy.
+- Text assumes: the owner's answer. A sorted clip moves into its folder by itself as soon as its checks pass, with no approval, no dry run a person runs and no one-hour gate; a person sees every move and moves a clip elsewhere or puts it back by hand. There is no deliberate wait before a move (no lesson asks for one): what a person sees as about to move is only what is waiting its turn or its checks.
 - Items: 38-002, 38-028, 38-029, 38-030, 35-038, 36-040
 - Covers: 38-Q1
 
@@ -249,6 +256,7 @@
 - Options: A: one review inside the Sorter holding everything both have. B: keep both.
 - Recommend: A, because one review gives one decision per recording and the separate page's sign-in gap goes.
 - Changes for a person: with A everything about a recording is in one place, behind the usual sign-in.
+- Answered by the owner 2026-11-24: A, one review inside the Sorter.
 - Text assumes: A
 - Items: 36-030, 36-056, 36-057, 36-058, 37-100, 37-101, 38-051
 - Covers: 36-Q2
@@ -259,7 +267,8 @@
 - Options: A: only the product's own transcription, run as heavy work on the studio's computers, with no keys or bills. B: keep the paid option alongside.
 - Recommend: A, because the product already transcribes speech for every recording and a paid service adds a key, a bill and a cost forecast.
 - Changes for a person: with A nobody can spend money here; unplaced recordings are transcribed in full by the studio's own computers instead.
-- Text assumes: written in place and marked pending; removed if you choose A
+- Answered by the owner 2026-11-24: A, only the product's own transcription; the paid service is removed.
+- Text assumes: A (the paid passage is deleted; whole recordings are transcribed by the product itself)
 - Items: 36-052
 - Covers: 36-Q6
 
@@ -269,9 +278,19 @@
 - Options: A: fold it into the same proposals and review as sound recordings. B: drop it.
 - Recommend: A, because it is the same matching and the same review, so it costs nothing extra and finds homes for undated clips.
 - Changes for a person: with A a loose clip gets a proposed shoot like a recording; with B it is assigned only by hand.
+- Answered by the owner 2026-11-24: A, loose video proposals join the same review.
 - Text assumes: A
 - Items: 36-055
 - Covers: 36-Q5
+
+### footage-sorter-and-camera-cards-2-Q12: Should a clip wait to be moved until a checked copy of it exists somewhere else?
+- Kind: other
+- Today: nothing like this exists; moves were approved by an admin. With moves now happening on their own, the coordinator raised whether a clip should first have a verified backup copy elsewhere. No item or lesson of this piece asks for it.
+- Options: A: no wait; a sorted clip moves as soon as its checks pass. B: a clip moves only once the record holds a verified copy of it elsewhere that counts as a backup, and shows "waiting for a safe copy" until then.
+- Recommend: A, because a move on the NAS is only a rename on one disk, checked before and after, that never deletes or overwrites, so it puts no footage at risk, and a wait would leave freshly offloaded footage unsorted until the nightly cloud backup.
+- Changes for a person: with A footage lands in its folder minutes after it is sorted; with B it can sit in staging for up to a day.
+- Text assumes: A
+- Items: 35-038, 36-040, 38-029
 
 ## Readers' questions and unsettled points
 
@@ -349,11 +368,11 @@
 - Sorted footage moves into its folder on its own | clean clips move while clashing clips are held back whole (SRT-133)
 - An interrupted move is picked up where it stopped | the rescan and the moved and not-moved list after a failure or restart (SRT-134)
 - A destination folder is renamed or moved in the plan | a folder holding footage can be dragged or renamed; its footage follows on its own (SRT-140)
-- Sorted footage moves into its folder on its own | moves happen by themselves once a clip is sorted (owner's answer 2026-11-24), under six stated promises: never deletes, copies over or overwrites; checked just before and after each item; a clashing clip held back whole and shown while clean clips move; nothing moves before a verified backup copy exists ("waiting for a safe copy", new); nothing moves while the NAS looks wrong ("Moves paused", new); every move recorded and undoable by hand
+- Sorted footage moves into its folder on its own | moves happen by themselves once a clip is sorted (owner's answer 2026-11-24), under six stated promises: never deletes, copies over or overwrites; checked just before and after each item; a clashing clip held back whole and shown while clean clips move; nothing moves while the NAS looks wrong ("Moves paused", new); every move recorded and undoable by hand
 - What was moved can be seen, moved elsewhere or put back | the list of moves with Put back and Try again, so every automatic move can be overruled by hand (owner's answer 2026-11-24 and his rule that everything can be set by hand)
-- Where each file of a sorted clip goes | no deliberate wait before a move; what is about to move is visible only while it waits its turn, its checks or a safe copy (no lesson asks for a wait)
+- Where each file of a sorted clip goes | no deliberate wait before a move; what is about to move is visible only while it waits its turn or its checks (no lesson asks for a wait)
 - Every sound recording is listened to for names and introductions | runs by itself on every recording; whole recording; "we are" introductions; names only mentioned never credited (SRT-144)
-- Recordings still unplaced can be transcribed in full for a fee | finishing with the product's own transcription when credit runs out (SRT-150)
+- Every sound recording is listened to for names and introductions | every recording transcribed in full by the product's own transcription, with words matched against camera clips (footage-sorter-and-camera-cards-2-Q10)
 - Approved recordings are filed beside their video, and duplicates are set aside | approving actually files the recording, through the admin's move (SRT-145)
 - Field recordings not yet on the NAS are found on every computer and drive | found from the record of every copy instead of a separate hand-run search of whole drives
 - Loose video is placed into shoots by the same matching | its proposals wait in the same review (footage-sorter-and-camera-cards-2-Q11)
@@ -392,6 +411,17 @@
 - SRT-103 | its half "an interrupted repair resumes where it stopped": an arrangement; the promise (names stored exactly) is met
 - SRT-129 | its half "a card copy started on the page begins on that computer": belongs with copying a card in footage-sorter-and-camera-cards-1; the promise about Windows paths is met
 - SRT-107 | "carried in the cloud backup": met by putting the record's copies in the folder the NAS carries to the cloud
+
+- 36-052 | the paid outside speech-to-text service, its key, its cost notice and the deleting of the service's copies: cut by the owner (2026-11-24, footage-sorter-and-camera-cards-2-Q10); transcribing whole recordings and matching their words with camera clips' words is kept
+- 38-042, 35-020, 37-094, 37-095, 37-096 | the calendar export file, its "iCal export" states and messages: cut by the owner (2026-11-24, footage-sorter-and-camera-cards-2-Q4)
+- 37-033, 37-054, 37-037 | double-clicking a folder row, the [ and ] keys, the clip menu's alternatives and "Use this instead" as ways to assign: cut by the owner (2026-11-24, footage-sorter-and-camera-cards-2-Q7)
+- 36-007 | the rescan period for tracked drives (24 hours) as a setting: a setting only the build would tune; the figure stays in the text
+- 36-008, 37-092 | a watched folder's rescan interval (every 60 minutes, 5 minutes to 7 days) as a setting and a field in the dialog: a setting only the build would tune; the 60 minutes stays in the text
+- 36-021 | the nightly NAS walk time (04:30) as a setting: a setting only the build would tune; the time stays in the text
+- 36-020 | the daily backup time of the record (04:00) as a setting: a setting only the build would tune; the time stays in the text
+- 35-020, 36-029, 37-095 | the calendar refresh interval (every 15 minutes, 5 minutes to 24 hours, the "Refresh every" choice in the calendar settings): a setting only the build would tune; the 15 minutes stays in the text
+- 36-043 | believable recorder years (2024 to 2027) and the time window for sound matching (15 minutes) as settings: settings only the build would tune; the figures stay in the text
+- 36-046 | the shortest field recording (30 seconds) as a setting: a setting only the build would tune; the figure stays in the text
 
 ## Joins with other capabilities
 

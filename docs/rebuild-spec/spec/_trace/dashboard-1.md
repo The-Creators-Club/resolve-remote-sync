@@ -38,7 +38,7 @@
 - 11-026 | An editor or an admin ticks a project for a computer
 - 11-028 | An editor, an admin or the editor's own computer unticks a project
 - 11-037 | Each person's sync queue shows their ticked projects in order
-- 11-038 | Each person's sync queue shows their ticked projects in order
+- 11-038 | left out: cut by the owner (2026-11-24, dashboard-1-Q9)
 - 13-024 | Choosing whose plan and which computer a tick changes
 - 13-026 | A tick box always does what it showed
 - 13-044 | Recent tick changes can be undone within an hour
@@ -46,7 +46,7 @@
 - 13-075 | An admin sets what each computer syncs in one grid ; An admin ticks or unticks a whole column at once
 - 14-029 | An admin sets what each computer syncs in one grid
 - 14-032 | An admin ticks or unticks a whole column at once
-- 14-041 | A person's page shows each of their computers
+- 14-041 | left out: cut by the owner (2026-11-24, dashboard-1-Q1)
 - 15-109 | Ticking warns when the proxies may not fit but never refuses
 - 16-026 | Ticks reach the computers within about a minute and every project is handled on its own
 - 16-042 | An admin sets what each computer syncs in one grid
@@ -98,7 +98,7 @@
 - 15-089 | Accounts no computer has reported for
 - 16-055 | An admin forgets a computer
 - 20-019 | A renamed or cloned computer keeps what is its own
-- 20-023 | A person's computers beyond twenty drop out of view
+- 20-023 | left out: cut by the owner (2026-11-24, dashboard-1-Q12)
 - 20-024 | An admin forgets a computer
 - 01-015 | Diagnostics reach an admin on their own and when asked
 - 01-017 | What an admin and an editor can see about a computer, and how fresh it is
@@ -145,6 +145,7 @@
 - Text assumes: all ways in written, marked pending, so that the ones you drop can be deleted.
 - Items: 13-026, 13-049, 13-075, 14-041, 13-120, 16-042, 11-037
 - Covers: 13-Q1, 16-Q4
+- Answered by the owner 2026-11-24: A: the Projects page and the admin plan grid only
 
 ### dashboard-1-Q2: Should what is moving right now be shown on the Overview as well as on the Transfers page?
 - Kind: several ways in
@@ -155,6 +156,7 @@
 - Text assumes: A.
 - Items: 13-043, 11-008
 - Covers: 13-Q2
+- Answered by the owner 2026-11-24: A: the Overview shows only the moving readout
 
 ### dashboard-1-Q3: Should every problem, alert and check live in one list on the Overview, instead of being repeated in a health summary and in each source's own list?
 - Kind: several ways in
@@ -165,6 +167,7 @@
 - Text assumes: A.
 - Items: 13-028, 13-029, 13-041, 13-103, 20-086
 - Covers: 13-Q3
+- Answered by the owner 2026-11-24: A: one ranked list on the Overview
 
 ### dashboard-1-Q4: Where should the studio-wide stop be found?
 - Kind: several ways in
@@ -175,6 +178,7 @@
 - Text assumes: A.
 - Items: 13-023, 13-031, 13-122
 - Covers: 13-Q4
+- Answered by the owner 2026-11-24: A: one Overview shortcut and a banner while stopped
 
 ### dashboard-1-Q5: Should the project list appear only on the Projects page?
 - Kind: several ways in
@@ -185,6 +189,7 @@
 - Text assumes: A.
 - Items: 13-025
 - Covers:
+- Answered by the owner 2026-11-24: A: the project list on the Projects page only
 
 ### dashboard-1-Q6: Should there be one way to make an existing folder a project?
 - Kind: several ways in
@@ -195,6 +200,7 @@
 - Text assumes: A.
 - Items: 11-039, 11-040
 - Covers: 11-Q3
+- Answered by the owner 2026-11-24: A: one way, Use this folder, both recorded
 
 ### dashboard-1-Q7: From where can an admin forget a computer?
 - Kind: several ways in
@@ -205,6 +211,7 @@
 - Text assumes: A.
 - Items: 13-040, 13-071
 - Covers:
+- Answered by the owner 2026-11-24: A: one Forget wherever an admin sees the computer
 
 ### dashboard-1-Q8: Should "Ask this computer why" be offered on a person's page as well as in the computer's details?
 - Kind: several ways in
@@ -215,6 +222,7 @@
 - Text assumes: both written, marked pending.
 - Items: 13-039, 13-120
 - Covers:
+- Answered by the owner 2026-11-24: A: only in the computer's details
 
 ### dashboard-1-Q9: Should the sync queue offer a picker of projects not yet ticked?
 - Kind: unreachable
@@ -225,6 +233,7 @@
 - Text assumes: written in place, marked pending, to be deleted if cut.
 - Items: 11-038
 - Covers: 11-Q5
+- Answered by the owner 2026-11-24: A: cut the picker
 
 ### dashboard-1-Q10: When the NAS seems to have lost many projects at once, should an admin be able to take them off the lists anyway?
 - Kind: unreachable
@@ -235,6 +244,7 @@
 - Text assumes: A, marked pending.
 - Items: 20-004, 20-003
 - Covers: 20-Q5
+- Answered by the owner 2026-11-24: A: keep it as a button on the banner
 
 ### dashboard-1-Q11: Should every request aimed at one computer behave the same way: wait up to 14 days, follow a rename, never go to a clone?
 - Kind: built twice
@@ -245,6 +255,7 @@
 - Text assumes: A.
 - Items: 12-005, 20-039
 - Covers: 20-Q1
+- Answered by the owner 2026-11-24: A: one rule, 14 days, follows a rename, never to a clone
 
 ### dashboard-1-Q12: Should a person's computers beyond the twenty most recently heard from silently lose their details?
 - Kind: other
@@ -255,6 +266,7 @@
 - Text assumes: the limit written in place, marked pending, to be deleted if A.
 - Items: 20-023
 - Covers: 20-Q6
+- Answered by the owner 2026-11-24: A: no limit
 
 ### dashboard-1-Q13: Should diagnostics and finished transfers each be kept by age alone?
 - Kind: other
@@ -265,6 +277,7 @@
 - Text assumes: A.
 - Items: 20-039, 20-055
 - Covers: 20-Q8
+- Answered by the owner 2026-11-24: A: age only, 30 days and 7 days
 
 ### dashboard-1-Q14: Should a file that finished arriving at the server always name the computer that sent it?
 - Kind: other
@@ -275,6 +288,7 @@
 - Text assumes: A.
 - Items: 16-036, 02-037
 - Covers: 16-Q6
+- Answered by the owner 2026-11-24: A: credited to the computer that sent it
 
 ### dashboard-1-Q15: Should every reader see the same help documents everywhere, with nothing extra for admins on the vendor's own copy?
 - Kind: dev only
@@ -285,6 +299,7 @@
 - Text assumes: A (left out).
 - Items: 14-038, 13-116
 - Covers: 14-Q7
+- Answered by the owner 2026-11-24: A: the same documents for everyone
 
 ### dashboard-1-Q16: Should a computer's diagnostics keep reaching the admin in all three ways?
 - Kind: several ways in
@@ -295,6 +310,7 @@
 - Text assumes: A.
 - Items: 01-015, 12-058, 20-039
 - Covers: 01-Q7
+- Answered by the owner 2026-11-24: A: keep all three
 
 ### dashboard-1-Q17: How often should a running computer be heard from?
 - Kind: differs
@@ -305,6 +321,7 @@
 - Text assumes: A.
 - Items: 01-017, 09-029, 12-024, 12-005
 - Covers:
+- Answered by the owner 2026-11-24: A: about every 30 seconds, every few seconds while moving
 
 ## Readers' questions and unsettled points
 

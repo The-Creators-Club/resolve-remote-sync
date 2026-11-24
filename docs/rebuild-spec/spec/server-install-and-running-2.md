@@ -15,6 +15,8 @@ Facts about the NAS that make this the simplest arrangement:
 - On a Synology, DSM's own web server holds the usual web ports, so nothing else can take every address on them. Asking for every address on a Synology is refused, telling the person to keep the dashboard on the NAS itself and publish it on the private network.
 - A NAS's own file sharing for Windows and macOS (the studio's mapped drive) stays on the studio's own network as the NAS provides it. That is the NAS's service, not the dashboard.
 
+This is about reaching the dashboard. Which way footage itself travels between the NAS and an editor's computer far from the studio is chosen from measurements of real transfers (see Sync: Speed and routes), and nothing here rules a way in or out.
+
 - Who: anyone signed in, from a computer or phone joined to the studio's private network.
 - Name and search words: private network access. Search words: remote access, VPN, reach the dashboard, from home, network.
 
@@ -110,9 +112,7 @@ No admin web page that the server, or anything the product installs on the NAS o
   - Everything that already used the page keeps working.
   - When the change needs a restart of what serves the page to take hold, the admin is told to restart it, and where.
   The same check runs when an editor's computer is installed, and an install never stops because of it.
-- By hand: the outcome (protected, secured, failed, unknown) is shown to the admin on the set-up wizard's health of the server, and a failed or unknown result is a problem the server found. The admin can see the login the product set, once, when they ask for it; it is never shown again or written anywhere a person could read it.
-- Ways in: on its own, and from the set-up wizard.
-- Pending: server-install-and-running-2-Q1
+- By hand: the outcome (protected, secured, failed, unknown) is shown to the admin in the set-up wizard, which has no button of its own for this, and a failed or unknown result is a problem the server found. The admin can see the login the product set, once, when they ask for it; it is never shown again or written anywhere a person could read it.
 
 ### The admin connects the server to the NAS once in the set-up wizard
 
@@ -174,7 +174,6 @@ The identity the server trusts is also what editors' computers check the NAS by.
 
 - Who: an admin.
 - Setting: the NAS's identity. Does: decides which NAS the product will send passwords, keys and account changes to. Default: the identity seen at first connection, recorded. Who: an admin. Applies to: the site. Search words: NAS certificate, fingerprint, NAS identity, trust NAS.
-- Pending: server-install-and-running-2-Q3
 
 ### What the product says when a TrueNAS refuses or a connection drops
 
@@ -213,16 +212,14 @@ The server writes the studio's tree as one account of its own on the NAS, which 
 - If the account is in the editors' group it is taken out, and the person is told if it is still listed there afterwards.
 
 - Setting: the server's account numbers on the NAS. Does: the user and group the server writes the studio's tree as. Default: user 3000, group 3001. Who: an admin. Applies to: the site. Search words: NAS user, uid, gid, owner, permissions.
-- Pending: server-install-and-running-2-Q4
-- Pending: server-install-and-running-2-Q5
 
 ### Each editor gets their own account on the NAS
 
-Each editor gets an account on the NAS, in the editors' group, with a home folder, a random password the editor never needs to know, and the keys their computers reach the NAS with. Files an editor writes can be changed by the other editors. The account appears within about 30 seconds of the editor being added. Accounts are never deleted by this.
+Each editor has an account of their own on the NAS, in the editors' group, with a home folder and a random password the editor never needs to know. It is what lets the editor's computers move footage to and from the NAS, and it is what an admin sees for that editor in the NAS's own list of users: beside each editor, the dashboard says which account on the NAS is theirs and that it exists only so their computers can move files. Files an editor writes can be changed by the other editors. The account appears within about 30 seconds of the editor being added. Accounts are never deleted by this.
 
-- Each of an editor's computers that is approved (see Accounts, privacy and the legal paperwork: How a computer proves who it belongs to) has its key added beside the keys already there, so every computer keeps its access. A key that could not be written stays offered to the admin, with the reason.
-- Every step that changes the NAS stops at the first failure and reads its result back before reporting success: the key is read back after it is written, and group membership after it is set.
-- Running the set-up again for an existing editor re-adds them to the editors' group.
+- Signing in on one more computer never disturbs a person's other computers: each keeps its access to the NAS, and nobody has to do anything on the NAS for it (see Accounts, privacy and the legal paperwork: How a computer proves who it belongs to).
+- Every step that changes the NAS stops at the first failure and reads its result back before reporting success. A change that did not hold is shown to the admin with the reason.
+- An existing editor's account that is found out of order (not in the editors' group, its home folder wrong) is put right again.
 - On TrueNAS, the account is also enabled for Windows file sharing.
 - On Synology:
   - Refused before anything is created or changed: Synology's built-in account names (admin, guest, anonymous, root, system, http, in any letter case); names starting "sc-", which look like Synology package accounts; an existing account numbered outside 1024 to 169999; and an existing account not in the editors' group, which the product will not take over (the person is told to add it to the group on the NAS first or pick another name).
@@ -232,34 +229,35 @@ Each editor gets an account on the NAS, in the editors' group, with a home folde
 
 Facts about Synology accounts: every account's main group is the NAS's "users" group, so the editors' group is an extra one; account names match regardless of letter case; an account counts as locked when it has expired; and asking Synology for an existing account by name can answer that it is missing, so the product finds accounts by listing them. A failure to look an account up stops the step with the NAS's reason.
 
-- On its own: the account is made and kept up when an admin adds an editor or approves a computer.
+- On its own: the account is made and kept up when an admin adds an editor.
 
-### Editors on the NAS can only transfer files, by key, inside the studio's tree
+### An editor's computer may only move files on the NAS inside the studio's tree
 
-An editor's account on the NAS can only transfer files. It cannot sign in to a shell, it accepts no password for transfers (only a key from one of the editor's approved computers), and it starts in the studio's tree and cannot leave it. If the dashboard cannot be reached, nobody's access changes.
+What an editor's computer may do on the NAS is move files, inside the studio's tree, and nothing else. No editor has a shell on any NAS, no forwarding or tunnels through it, and no way out of the studio's tree. If the dashboard cannot be reached, nobody's access changes.
 
 How each kind of NAS gets there:
 
-- On TrueNAS, the product adds rules for the editors' group to the NAS's sign-in service: file transfer only, no password sign-in, no forwarding or tunnels, no terminal. The administrator's own settings in that service are kept, and an unchanged rule set is reported as unchanged. These rules do not confine editors to one folder: what they can reach is governed by the folders' permissions. The product also asks TrueNAS to switch off password sign-in for each editor's account; TrueNAS refuses this for accounts that use Windows file sharing, and that refusal is expected and reported as such.
-- On Synology, nothing is added: only Synology's administrators can sign in interactively, so editors never can, and Synology has no switch for password sign-in (the password is used only for Windows file sharing and the dashboard's sign-in). The person is told to keep Synology's file-transfer service on and its terminal access restricted (Control Panel, Terminal and SNMP).
+- On TrueNAS, the product adds rules for the editors' group to the NAS's sign-in service: file transfer only, no forwarding or tunnels, no terminal. The administrator's own settings in that service are kept, and an unchanged rule set is reported as unchanged. These rules do not confine editors to one folder: what they can reach is governed by the folders' permissions, which the product sets.
+- On Synology, nothing is added: only Synology's administrators can sign in interactively, so editors never can. The editor's password is used only for Windows file sharing. The person is told to keep Synology's terminal access restricted (Control Panel, Terminal and SNMP).
 - Synology shows a file-transfer connection its shared folders as the top level, without the volume they live on, and nothing outside them (the system's temporary folder cannot be reached). On TrueNAS a path on the NAS is the same path over a file-transfer connection.
 
-### An editor's key sign-in needs their home folder kept to themselves
+### The NAS refuses an editor whose home folder is open to others
 
-Both kinds of NAS refuse key sign-in when the editor's home folder (or, on Synology, the hidden folder and file holding the key) can be written by anyone but the editor, or is not owned by them. The product sets these permissions and then checks them, warning the admin when the NAS will still refuse.
+Facts about both kinds of NAS: a sign-in that relies on anything kept in an editor's home folder is refused when that folder (or, on Synology, the hidden folder and file inside it) can be written by anyone but the editor, or is not owned by them. The product sets these permissions and then checks them, warning the admin when the NAS will still refuse.
 
 - On TrueNAS the home folder is made the editor's alone, with any extra access rules removed. The NAS's sign-in log records such a refusal.
-- On Synology the home folder itself must never have its permissions changed by hand, because that deletes Synology's access rules on it; only the hidden key folder (editor only) and the key file (editor read and write only) are set. Synology logs nothing for this refusal: the editor only sees "Authentication failed". The admin is told to repair the key folder directly and the home folder by having Synology re-apply inherited access, never by changing its mode.
+- On Synology the home folder itself must never have its permissions changed by hand, because that deletes Synology's access rules on it; only the hidden folder (editor only) and the file in it (editor read and write only) are set. Synology logs nothing for this refusal: the editor only sees "Authentication failed". The admin is told to repair the hidden folder directly and the home folder by having Synology re-apply inherited access, never by changing its mode.
 
 ### On a Synology the file-transfer service must be on and allowed to editors
 
-With Synology's file-transfer service off, an editor's key sign-in succeeds and the connection is then closed, with nothing in any log. The product turns the service on (on port 22 unless the site says otherwise) and says so, or reports it already on with its port. Synology grants file transfer to everyone by default, but an "application privilege" rule can deny it: a rule denying it to everyone or to the editors' group stops the install, telling the person to remove it on Synology's Application Privileges screen. Rules for single accounts or other groups are not checked. If the rules cannot be read, the person is told to check that screen by hand, and the install goes on. On TrueNAS there is nothing to turn on.
+A fact about Synology: with its file-transfer service off, an editor's computer signs in and the connection is then closed, with nothing in any log. Where editors' computers move footage through it, the product turns the service on (on port 22 unless the site says otherwise) and says so, or reports it already on with its port. Synology grants file transfer to everyone by default, but an "application privilege" rule can deny it: a rule denying it to everyone or to the editors' group stops the install, telling the person to remove it on Synology's Application Privileges screen. Rules for single accounts or other groups are not checked. If the rules cannot be read, the person is told to check that screen by hand, and the install goes on. On TrueNAS there is nothing to turn on.
 
 - Setting: the Synology file-transfer port. Does: the port editors' computers reach the NAS's file transfer on. Default: 22. Who: an admin. Applies to: the site. Search words: SFTP port, file transfer, Synology, port 22.
+- Pending: server-install-and-running-2-Q7
 
 ### When an editor leaves their computers lose the NAS
 
-When an editor is removed or suspended, or one of their computers is forgotten, that computer's key is removed from the NAS so it can no longer reach it. When the admin asks for the account to be locked as well, TrueNAS locks the account and Synology expires it at once. On Synology, if the key was removed but the account could not be expired, the admin is told exactly that.
+When an editor is removed or suspended, or one of their computers is forgotten, that computer can no longer reach the NAS, and the editor's other computers are not disturbed. When the admin asks for the account to be locked as well, TrueNAS locks the account and Synology expires it at once. On Synology, if the computer's access was removed but the account could not be expired, the admin is told exactly that.
 
 - Who: an admin.
 
@@ -268,7 +266,6 @@ When an editor is removed or suspended, or one of their computers is forgotten, 
 When a studio already has editor accounts on its NAS, the product lists every account in the editors' group so they can be brought in once, each matched to a person. On Synology, a group that does not exist yet answers that there are no editor accounts yet.
 
 - Who: an admin.
-- Pending: server-install-and-running-2-Q6
 
 #### Lessons
 
@@ -278,7 +275,7 @@ When a studio already has editor accounts on its NAS, the product lists every ac
 
 ### Transfers with a Synology stay within what DSM can serve
 
-A fact about Synology: DSM's own secure file-transfer server cannot serve transfers that use large pieces or many at once. Every transfer between an editor's computer and a Synology stays within 64 KiB pieces and 16 at a time. Nobody sets this: the product keeps to it on a Synology on its own, and nothing transferred with a Synology ever comes down damaged because of it.
+A fact about Synology: DSM's own secure file-transfer server cannot serve transfers that use large pieces or many at once. Every transfer that goes through it stays within 64 KiB pieces and 16 at a time. Nobody sets this: the product keeps to it on a Synology on its own, and nothing transferred with a Synology ever comes down damaged because of it.
 
 ### Installing gets the media tools the server needs
 

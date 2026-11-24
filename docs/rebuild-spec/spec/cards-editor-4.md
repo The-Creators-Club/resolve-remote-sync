@@ -6,7 +6,7 @@ This part covers what the assistant does inside the editor (proposals, the join 
 
 ### What remains of these features when the assistant is switched off
 
-With the site's assistant switch off, none of the controls in this sub-topic that call the assistant is on any screen: there is no Shorten button, panel, Alt+H, Alt+B or Shift+B, no suggestion markers or score shading on the lane; no "Ask [the assistant]" button in the toolbar or the phone's header, and no chat panel; no "Montage" button, Alt+M or montage drawer; no sparkle button, "Summarise" button or "A new summary is ready" row. What stays:
+With the site's assistant switch off, none of the controls in this sub-topic that call the assistant is on any screen: there is no Shorten button, panel, Alt+H, Alt+B or Shift+B, no suggestion markers or score shading on the lane; no "Ask Assistant" button in the toolbar or the phone's header, and no chat panel; no "Montage" button, Alt+M or montage drawer; no sparkle button, "Summarise" button or "A new summary is ready" row. What stays:
 
 - Every edit these features would propose can still be made by hand in the editor.
 - Cards a past shortening put on the shelf stay on the shelf under their shortening's category, and summaries already written into a cut list stay in the file.
@@ -25,15 +25,9 @@ With the site's assistant switch off, none of the controls in this sub-topic tha
 - When the help for the editing program is off: nothing is brought back from an editing program, so no proposal comes from one.
 - Exact: yes
 
-### Something outside the editor can offer a set of edits to preview and accept
-
-An offer is a titled list of edits with a reason, made for one cut list by something other than the editor. The editor lists the offers for a cut list, oldest first, previews one exactly as any proposal is previewed, and applies it as one undo step only when the person accepts it. It can also be dismissed ("that proposal is gone" when it already is). An offer holds 1 to 2000 edits, every one of a kind the editor knows; a title is required (cut to 200 characters) and the reason is cut to 4000 characters. Up to 50 open offers are kept per cut list (the oldest dropped). An offer lasts one day.
-
-- Pending: cards-editor-4-Q11
-
 ### Each join between two cuts can be checked for meaning and grammar
 
-When join checks are available (dock lane, tall enough track): a dot on each seam between two cuts in the same section (when the seam and the next cut have room), coloured by its verdict. Hover (mouse) or tap opens a pop-up: "Checking the join…", "The join reads well", "Meaning changed" or "Grammar break", "quick check" when only the quick check has answered, the note, the joined original words, and their fresh English, or "[the assistant] is reading the joined words again…".
+When join checks are available (dock lane, tall enough track): a dot on each seam between two cuts in the same section (when the seam and the next cut have room), coloured by its verdict. Hover (mouse) or tap opens a pop-up: "Checking the join…", "The join reads well", "Meaning changed" or "Grammar break", "quick check" when only the quick check has answered, the note, the joined original words, and their fresh English, or "Assistant is reading the joined words again…".
 
 - Phone and desk: hover opens the pop-up with a mouse, a tap opens it on touch.
 - When the assistant is off: only the quick check answers, every pop-up carries "quick check", and no join is marked "The join reads well".
@@ -41,9 +35,9 @@ When join checks are available (dock lane, tall enough track): a dot on each sea
 
 ### Shortening only suggests, and everything it takes out goes to the shelf
 
-Nothing is cut until the editor accepts a suggestion; nothing is ever deleted, removed material always goes to the shelf under the review's shelf category, "shortened <target> <YYYY-MM-DD>". Each accept is its own change with its own undo. If the page that asked closes or reloads before the assistant answers, the work is stopped: "stopped: the page that asked went away before [the assistant] answered, so nothing was changed"; a stopped section keeps what it had. Server unreachable: "the server could not be reached (<why>); nothing changed".
+Nothing is cut until the editor accepts a suggestion; nothing is ever deleted, removed material always goes to the shelf under the review's shelf category, "shortened <target> <YYYY-MM-DD>". Each accept is its own change with its own undo. If the page that asked closes or reloads before the assistant answers, the work is stopped: "stopped: the page that asked went away before Assistant answered, so nothing was changed"; a stopped section keeps what it had. Server unreachable: "the server could not be reached (<why>); nothing changed".
 
-A shortening is a set of removals only: it never reorders, never inserts and never changes a word. Every removal, once accepted, moves onto the shelf under the shortening's own category, named "shortened <target> <date>" (for example "shortened 12:00 2026-09-11"), so it stays in the file, playable and restorable. Refusals common to every step: "open a cut list first - the chat edits a .cut.md, not a live timeline"; "this cut list is open read only, so nothing can be changed in it"; "shortening needs [the assistant]: <why>". Every step answers with a sentence rather than failing.
+A shortening is a set of removals only: it never reorders, never inserts and never changes a word. Every removal, once accepted, moves onto the shelf under the shortening's own category, named "shortened <target> <date>" (for example "shortened 12:00 2026-09-11"), so it stays in the file, playable and restorable. Refusals common to every step: "open a cut list first - the chat edits a .cut.md, not a live timeline"; "this cut list is open read only, so nothing can be changed in it"; "shortening needs Assistant: <why>". Every step answers with a sentence rather than failing.
 
 Closing the tab stops the assistant work it started within seconds, and a shortening a person is waiting on never waits behind background work.
 
@@ -67,7 +61,7 @@ Closing the tab stops the assistant work it started within seconds, and a shorte
 - "Or drag to a length" slider, 30% to 100% of the cut's current length in whole percent; the line under it reads "<m:ss> · <pct>% of <now>". Dragging writes the length into the box. Untouched, it sits at the typed target, or 70%. A repaint never interrupts a drag.
 - "Steer (optional)" box (placeholder "keep everything with the daughter"), up to 2000 characters, passed to the assistant as the editor's own words.
 - Section scope: "Shorten: All <n> sections" / "<k> of <n> sections" opens a tick list of the titled sections with their lengths; "None ticked is the whole cut." With some ticked, the current length is their sum; otherwise the whole timeline including gaps.
-- Hint: "Say how long the cut should run. [the assistant] plans a budget per section first; nothing is cut until you say the plan looks right, and nothing leaves the cut until you accept it."
+- Hint: "Say how long the cut should run. Assistant plans a budget per section first; nothing is cut until you say the plan looks right, and nothing leaves the cut until you accept it."
 
 {{40-076}}
 
@@ -79,32 +73,30 @@ Every step of a shortening touches only the sections ticked (none ticked is the 
 
 ### Every card can be scored once, and a slider then previews on the lane which cards would go at any length
 
-- Without scores: "Build the scores once and this slider shows what would go at any length, on the lane, as you drag. One long [the assistant] call reads every card; it cuts nothing." and "Build the scores" ("Scoring…" while busy; the line says "Scoring every card once. This is the long call, and it cuts nothing."). Done: "<n> cards scored: drag the slider and the lane shows what would go at that length".
+- Without scores: "Build the scores once and this slider shows what would go at any length, on the lane, as you drag. One long Assistant call reads every card; it cuts nothing." and "Build the scores" ("Scoring…" while busy; the line says "Scoring every card once. This is the long call, and it cuts nothing."). Done: "<n> cards scored: drag the slider and the lane shows what would go at that length".
 - The assistant gives each card a keep score from 0 (nobody would miss it) to 1 (keep firmly), a kind, the cards it depends on (at most 20) and a reason. A card whose words changed later counts as unscored. New scores replace the old ones whole.
-- Refusals: more than 3000 cards, "this cut list has more than 3000 cards, more than one scoring call can read; shorten it a section at a time"; "there are no cards to score"; already scoring, "the scores for this cut list are already being built - wait for them"; none scored, "[the assistant] scored none of the cards, so nothing was saved and the slider still needs them".
+- Refusals: more than 3000 cards, "this cut list has more than 3000 cards, more than one scoring call can read; shorten it a section at a time"; "there are no cards to score"; already scoring, "the scores for this cut list are already being built - wait for them"; none scored, "Assistant scored none of the cards, so nothing was saved and the slider still needs them".
 - With scores: a line ("Drag the slider: the lane shows what would go at each length, from the scores", or "<n> card(s) would go · lands <m:ss> · from the scores, not a pass", or "nothing the scores would cut · ..."), "<n> of <m> cards changed since they were scored / have no score; they stay at every length. Score again to count them.", "Ask for the real cut at <m:ss>" (plans at the slider's length), "Clear the preview" (when it removes anything), "Score again", and "A guess from the scores, drawn in gold on the lane. The real pass reads the words and suggests; nothing is cut until you accept."
 - The preview drops whole cards, lowest keep score first (ties: longer card first), until the target is reached. It never drops a card with a note, the last card of a section, a card a kept card depends on, or an unscored card. It is recomputed when the cut changes, drawn as a gold hatched strip on the lane with no tabs, and cannot be accepted.
 
 {{40-087}}
 
 - Exact: yes
-- Pending: cards-editor-4-Q3
 
 ### Planning first gives each titled section a budget that the editor can change before any words are cut
 
 - Only sections with a title count. None: "this cut list has no section headings, so there is no structure to budget. Add headings first, or ask the chat to cut it down in words."
-- One plan at a time per cut list: "a shortening is already being planned for this cut list - wait for it". No answer from the assistant: "[the assistant] gave no answer, so nothing was planned".
+- One plan at a time per cut list: "a shortening is already being planned for this cut list - wait for it". No answer from the assistant: "Assistant gave no answer, so nothing was planned".
 - The assistant is told the target, the current length, the difference, which sections are in play, pinned sections, the style for what counts as fluff, each section and each card (cards with a note are marked protected). Its plan is checked against the real sections, with the editor's pins winning, and summed.
 - A new plan replaces (closes) any open review of the cut list; what earlier reviews put on the shelf stays there.
 - Budget step box: "Looks right: cut the words" and "Pin a section Keep or Drop and the plan is worked out around it. Nothing has moved yet." The target form folds to one line ("target <m:ss>", the steer in quotes, "Change the plan"); unfolded it shows "Plan again" and "Keep this plan".
 - Unknown review: "that shortening is not on this cut list any more".
 
-The assistant is given the target, the current length, how much must go, the studio's rubric of what to keep and what to cut first, and each section's card count and length, and answers per section keep, thin (to about N seconds) or drop, each with a reason, plus a two-or-three-sentence note to the editor. A section it left out is kept whole ("[the assistant] said nothing about this section, so it is kept whole"); a thin with no length, or a length not below the section's own, becomes keep ("the thinning target did not make sense"). Where the plan lands is always the product's own sum (dropped sections count 0, thinned ones their target, kept ones their length), never the assistant's arithmetic. An answer that is not a plan: "[the assistant] answered with <type> instead of a budget, so nothing was planned". The plan is recorded in the edit chat as a turn "shorten to <t>". The editor can edit the plan table; edited rows are taken as written and re-summed, and pins sent with the table win. Planning gives up after 10 minutes.
+The assistant is given the target, the current length, how much must go, the studio's rubric of what to keep and what to cut first, and each section's card count and length, and answers per section keep, thin (to about N seconds) or drop, each with a reason, plus a two-or-three-sentence note to the editor. A section it left out is kept whole ("Assistant said nothing about this section, so it is kept whole"); a thin with no length, or a length not below the section's own, becomes keep ("the thinning target did not make sense"). Where the plan lands is always the product's own sum (dropped sections count 0, thinned ones their target, kept ones their length), never the assistant's arithmetic. An answer that is not a plan: "Assistant answered with <type> instead of a budget, so nothing was planned". The plan is recorded in the edit chat as a turn "shorten to <t>". The editor can edit the plan table; edited rows are taken as written and re-summed, and pins sent with the table win. Planning gives up after 10 minutes.
 
 A keep, drop or free pin stays through every recalculation and every reload until the editor changes it.
 
 - Exact: yes
-- Pending: cards-editor-4-Q2
 
 ### An episode can carry its own description of what counts as fluff
 
@@ -154,7 +146,6 @@ Every card cut inside is shown to the assistant as its kept words with a mark at
 
 - Setting: Mark them on the lane and the cards. Does: shows or hides the shortening's marks on the lane, the card list, the section rail and the edit view. Default: on. Who: anyone, for their own browser. Applies to: a computer. Search words: suggestions on lane, marks, shorten markers, hide suggestions.
 - Exact: yes
-- Pending: cards-editor-4-Q3
 
 ### The Read tab shows the budgeted sections as prose with the words that would go struck through
 
@@ -216,7 +207,7 @@ The whole review is kept with the cut list's chat history, so a reload, a second
 
 ### An editor opens the edit chat from the toolbar or, on a phone, from the header
 
-Toolbar button "Ask [the assistant]" (speech-bubble icon, tooltip "Say what to change; [the assistant] suggests, and nothing changes until you apply one", shown pressed while open). On a phone (up to 700 px wide): an icon button in the editor's header row and another in the edit view's top bar, never floating over content. One panel per page. On desktop it sits over the inspector column (or, if that is hidden, in a 420 px column at the right between the header and the dock); on a phone a full-screen sheet with the composer above the keyboard, closed by the back gesture. Close: X button (hint Esc), Esc (when the text box is not focused; Esc in the box only leaves it), or the toolbar button. Focus returns to the opener. Touch targets 44 px; 16 px text in the box so an iPhone does not zoom on focus.
+Toolbar button "Ask Assistant" (speech-bubble icon, tooltip "Say what to change; Assistant suggests, and nothing changes until you apply one", shown pressed while open). On a phone (up to 700 px wide): an icon button in the editor's header row and another in the edit view's top bar, never floating over content. One panel per page. On desktop it sits over the inspector column (or, if that is hidden, in a 420 px column at the right between the header and the dock); on a phone a full-screen sheet with the composer above the keyboard, closed by the back gesture. Close: X button (hint Esc), Esc (when the text box is not focused; Esc in the box only leaves it), or the toolbar button. Focus returns to the opener. Touch targets 44 px; 16 px text in the box so an iPhone does not zoom on focus.
 
 - Ways in: the toolbar button on a desk, the header button and the edit view's top-bar button on a phone.
 - Name and search words: the edit chat: ask assistant, chat, change the cut in words, edit by talking.
@@ -226,7 +217,7 @@ Toolbar button "Ask [the assistant]" (speech-bubble icon, tooltip "Say what to c
 
 ### The chat offers three strengths of assistant, each its own conversation
 
-Header "Ask [the assistant]" and a picker of three strengths: fastest, stronger, most capable, each with its price as a tooltip; remembered on the device, default most capable. Changing it reloads the state for that strength's conversation.
+Header "Ask Assistant" and a picker of three strengths: fastest, stronger, most capable, each with its price as a tooltip; remembered on the device, default most capable. Changing it reloads the state for that strength's conversation.
 
 The chat's strength is a property of the panel: once picked it stays until changed. Each strength is its own conversation, so switching strength reads the material again at that strength's price. An admin can set the chat's default strength for the whole server; a strength the editor has picked on their device always wins over it. Each strength moves to the newest version of the assistant on its own (see The whole product: The assistant), and every call records which version answered.
 
@@ -237,7 +228,7 @@ The chat's strength is a property of the panel: once picked it stays until chang
 
 A dot shows running, warm or cold.
 
-- Problems (the box and Send are disabled while any holds): "the chat is not available: <why>"; "open a cut list first - the chat edits a .cut.md, not a live timeline"; "the chat needs [the assistant] on this server: <why or 'not installed'>".
+- Problems (the box and Send are disabled while any holds): "the chat is not available: <why>"; "open a cut list first - the chat edits a .cut.md, not a live timeline"; "the chat needs Assistant on this server: <why or 'not installed'>".
 - While a turn runs: "<status>, <n> s", counting each second (no progress bar). Statuses: "reading the transcripts, part k of n", "thinking", "checking the suggestions against the cut list".
 - Otherwise "Warm, <n> turns in" or "Cold: the next message reads everything", then "<n> transcripts" (", changed since" when the conversation holds older ones), "no transcripts", or "transcripts could not be read", and any note. Tooltip: "<strength>: it still has this cut list in mind" or "...the first message reads the transcripts and the whole cut list", and "<n> transcripts in <k> parts".
 - The state is reloaded after every turn.
@@ -252,12 +243,12 @@ Whether the assistant is available is shown from the last real check, and showin
 
 - Composer placeholder "Say what to change, in your own words", or "Apply one of these, or say how to change them" when the newest turn has proposals waiting. Enter sends; Shift+Enter is a new line (not while an input method is composing). Buttons "New conversation", "Send", and "Stop" while a turn runs (stops it on the server and in the page).
 - One message at a time; the message appears at once and the reply streams in with a blinking caret.
-- Refusals: "the request is not a chat message"; empty, "type what you want changed"; over 4000 characters, "that message is over 4000 characters: say it in fewer words"; no cut list, "open a cut list first - the chat edits a .cut.md, not a live timeline"; assistant unavailable, "the edit chat needs [the assistant]: <why>"; a turn already running for this cut list, "[the assistant] is still working on the last message".
+- Refusals: "the request is not a chat message"; empty, "type what you want changed"; over 4000 characters, "that message is over 4000 characters: say it in fewer words"; no cut list, "open a cut list first - the chat edits a .cut.md, not a live timeline"; assistant unavailable, "the edit chat needs Assistant: <why>"; a turn already running for this cut list, "Assistant is still working on the last message".
 - Errors: "Stopped. Nothing was asked of the cut list."; "the chat stopped answering before it finished"; "the chat did not answer: <why>". Closing the page stops the turn.
-- The answer is one to three sentences and up to 4 proposals (title, why, steps). Not usable: "[the assistant] answered with something that is not an instruction, so nothing was changed". Empty: "[the assistant] answered with nothing to say and nothing to suggest. Try asking again in other words."
-- Empty history text: "Say what to change, in your own words: "drop the second pangolin story and move the handbook cut to the end". [the assistant] answers with suggestions; nothing changes until you apply one, and each one is a single undo step."
+- The answer is one to three sentences and up to 4 proposals (title, why, steps). Not usable: "Assistant answered with something that is not an instruction, so nothing was changed". Empty: "Assistant answered with nothing to say and nothing to suggest. Try asking again in other words."
+- Empty history text: "Say what to change, in your own words: "drop the second pangolin story and move the handbook cut to the end". Assistant answers with suggestions; nothing changes until you apply one, and each one is a single undo step."
 
-Further refusals: "the cut list changed under you - the page has reloaded, ask again"; "[the assistant] answered with <type> instead of an instruction, so nothing was changed"; "the [the assistant] session was lost twice running: give it a moment and retry"; "the [the assistant] session could not be opened: the provider refused the id twice running".
+Further refusals: "the cut list changed under you - the page has reloaded, ask again"; "Assistant answered with <type> instead of an instruction, so nothing was changed"; "the Assistant session was lost twice running: give it a moment and retry"; "the Assistant session could not be opened: the provider refused the id twice running".
 
 While the editor is offline the chat refuses to send and never keeps a message to send later.
 
@@ -268,10 +259,10 @@ While the editor is offline the chat refuses to send and never keeps a message t
 - It is given every interview and clip transcript of the episode, the cut list (frame rate, every card with speaker, time, colour, words, highlights and note; gaps; sections, headings and notes with times, card counts and lengths), the staged shelf by category, saved sequences and alternates.
 - With each message the page sends the playhead time, the selected cards in click order and the current view; the card under the playhead is worked out from the time, and the assistant is told which card and how far in (or "not on a card"), the selected cards with their words and section, and what became of the last turn's proposals ("last turn: proposal "<title>" was applied" / "last turn: none of the <n> proposals was applied").
 - Warm for an hour after a completed turn; cold otherwise, or when the transcripts or house style changed. A cold message is slow because it reads everything again; a warm one sends only what changed in the cut list.
-- Why a new conversation was opened, shown as "opened a new conversation: <why>": "the first message of the session reads the transcripts and the cut list"; "the house style changed since the last message, so it and the cut list were read again"; "the transcripts changed since the last message, so they and the cut list were read again"; "the conversation had gone cold (over an hour), so the cut list was read again"; "the conversation could not be dated, so the cut list was read again"; "the [the assistant] session was lost (new machine or a rebuilt server), so the cut list went in again". Lost twice: "the [the assistant] session was lost twice running: give it a moment and retry". Refused twice: "the [the assistant] session could not be opened: the provider refused the id twice running".
+- Why a new conversation was opened, shown as "opened a new conversation: <why>": "the first message of the session reads the transcripts and the cut list"; "the house style changed since the last message, so it and the cut list were read again"; "the transcripts changed since the last message, so they and the cut list were read again"; "the conversation had gone cold (over an hour), so the cut list was read again"; "the conversation could not be dated, so the cut list was read again"; "the Assistant session was lost (new machine or a rebuilt server), so the cut list went in again". Lost twice: "the Assistant session was lost twice running: give it a moment and retry". Refused twice: "the Assistant session could not be opened: the provider refused the id twice running".
 - Transcripts that cannot be read do not stop the turn: "the transcripts could not be read (<why>), so nothing can be brought in from them this turn".
 - Two browsers on the same cut list and strength share one conversation.
-- "New conversation" (tooltip "Start over: the next message reads the transcripts and the whole cut list again"; disabled while busy, refused while a turn runs with "[the assistant] is still working on the last message") keeps the history and adds the divider "new conversation: the next message reads the transcripts and the whole cut list again".
+- "New conversation" (tooltip "Start over: the next message reads the transcripts and the whole cut list again"; disabled while busy, refused while a turn runs with "Assistant is still working on the last message") keeps the history and adds the divider "new conversation: the next message reads the transcripts and the whole cut list again".
 - The chat never changes a transcript.
 
 On a cold start the assistant reads every transcript of the episode (all interviews and montage source clips), then its rules, the house style and the whole cut list, then the editor's message. With no transcripts, it is told that the cards are the only material there is. Every message sends the cut list as it is now; a card the conversation has already seen in full is shortened to its first 60 characters (highlights still shown), and a trimmed or split card is sent in full again. A cold message gives up after 15 minutes, a warm one after 10.
@@ -299,19 +290,19 @@ A proposal may name cards in the cut or on the shelf, the card under the playhea
 | move | cards before/after a card, to the start or end (the end when nothing is said), or at the playhead | "moved <n> card(s) <where>" | "those cards are already there"; "a card cannot be moved before or after itself"; "that card is the one the playhead is in, so there is nowhere to move it to"; "no card was named to move"; "the card under the playhead is not in the cut list any more"; "the card to move before/after is not in the cut list any more" |
 | delete | takes cards out onto the shelf under their section's name | "deleted <n> card(s) (onto the shelf under its section)" | "no card was named to delete" |
 | stage | shelves cards, optional category | "staged <n> card(s) [under <cat>]" | a category that is not text |
-| unstage | a shelf card back into the cut at a place | "put a staged card back into the cut <where>" | "[the assistant] named a staged card that is not on the shelf (<uid>). Nothing was changed." |
+| unstage | a shelf card back into the cut at a place | "put a staged card back into the cut <where>" | "Assistant named a staged card that is not on the shelf (<uid>). Nothing was changed." |
 | trim | keeps the words from one phrase to another (either may be left out), at most a head and a tail trim, cutting at the middle of the silence between words; the card's words become the kept words, highlighted unless told not to | "trimmed a card to keep "<from> to <to>" [(highlighted)]" | "a trim needs the words to keep: keep_from, keep_to, or both"; "<to> comes before <from> in that card, so there is nothing between them"; "that card already begins and ends on those words, so there is nothing to trim" |
 | split | blades a card just before the first word of a phrase; each half gets its own words and the highlights that fit | "split a card before "<phrase>"" | "'<words>' is the start of that card, so there is nothing to split off before it" |
-| gap | sets the black before a card, in seconds turned into frames at the cut's rate; 0 removes it | "put <n> s of black before "<card>"" / "removed the gap before "<card>"" | "[the assistant] asked for a gap of <x>, which is not a number of seconds. Nothing was changed."; "there is no gap before "<card>" to take out" |
+| gap | sets the black before a card, in seconds turned into frames at the cut's rate; 0 removes it | "put <n> s of black before "<card>"" / "removed the gap before "<card>"" | "Assistant asked for a gap of <x>, which is not a number of seconds. Nothing was changed."; "there is no gap before "<card>" to take out" |
 | color | sets or clears a Resolve clip colour: Orange, Apricot, Yellow, Lime, Olive, Green, Teal, Navy, Blue, Purple, Violet, Pink, Tan, Beige, Brown, Chocolate, or empty to clear | | "<colour> is not a Resolve clip colour. Nothing was changed." |
 | note | writes or clears a card's note (cut or shelf) | | |
 | highlight | marks or clears words of a card (cut or shelf); they must be its own | | ""<text>" is not in that card. Its words are: "<first 80 chars>"" |
 | section add | a section heading (Blue) or note heading (Green) before a card, at the playhead's exact frame, or at the end (the end when nothing is said) | | "a heading needs a title" |
 | section from | gathers the named cards where the first sits under a new section heading | "grouped <n> card(s) under the new section "<title>"" plus "(the cards after it stay under it until the next heading)" | "no card was named to group"; "none of those cards is in the cut list any more"; "the first card of the group is not in the cut list any more" |
-| section remove, rename, move | headings found by title, any case; move before a card's section (the section that card begins, or the next one), above another section, at the playhead, or to the end; a heading added earlier in the same proposal can be renamed, moved or removed later in it | | "there is no heading called "<title>" in this cut list. Nothing was changed."; "more than one heading is called "<title>", so it is not clear which one was meant. Nothing was changed."; "[the assistant] named no heading. Nothing was changed."; "a rename needs the new title"; moving a note ("is a note, not a section"); "a section cannot be moved above itself" |
-| insert | new material from a transcript paragraph by its ref, optionally narrowed from one phrase to another (looked for in the original line first, then the English), optionally naming the person when two share a ref; placed like a move, at the playhead (splitting the card under it when both halves would be at least the minimum card length), or onto the shelf under a category; the words are placed in the clip's word timing like a highlighted selection, and the narrowed words are highlighted on the new card | "inserted <n> s of <speaker> ("<from ... to>") <where>" plus "(the whole paragraph: the words could not be narrowed)" or "(the highlight would not fit the words, so it was left off)" | no ref; "this episode has no transcripts to insert from"; "there is no paragraph ^<ref> in this episode's transcripts"; "^<ref> is <A>'s, not <B>'s: name the block you meant"; "^<ref> is in more than one transcript (A and B), so it is not clear which was meant: say whose it is"; "that block is a question, and questions are never in the edit" (always enforced); "'<name>' has no word timings yet, so there is no span to cut - transcribe that clip first"; "that paragraph has no words in it"; "'<words>' is not in paragraph ^<ref>. Its words are: '...'"; "[the assistant] asked to shelve the new card under <x>, which is not a category name." |
+| section remove, rename, move | headings found by title, any case; move before a card's section (the section that card begins, or the next one), above another section, at the playhead, or to the end; a heading added earlier in the same proposal can be renamed, moved or removed later in it | | "there is no heading called "<title>" in this cut list. Nothing was changed."; "more than one heading is called "<title>", so it is not clear which one was meant. Nothing was changed."; "Assistant named no heading. Nothing was changed."; "a rename needs the new title"; moving a note ("is a note, not a section"); "a section cannot be moved above itself" |
+| insert | new material from a transcript paragraph by its ref, optionally narrowed from one phrase to another (looked for in the original line first, then the English), optionally naming the person when two share a ref; placed like a move, at the playhead (splitting the card under it when both halves would be at least the minimum card length), or onto the shelf under a category; the words are placed in the clip's word timing like a highlighted selection, and the narrowed words are highlighted on the new card | "inserted <n> s of <speaker> ("<from ... to>") <where>" plus "(the whole paragraph: the words could not be narrowed)" or "(the highlight would not fit the words, so it was left off)" | no ref; "this episode has no transcripts to insert from"; "there is no paragraph ^<ref> in this episode's transcripts"; "^<ref> is <A>'s, not <B>'s: name the block you meant"; "^<ref> is in more than one transcript (A and B), so it is not clear which was meant: say whose it is"; "that block is a question, and questions are never in the edit" (always enforced); "'<name>' has no word timings yet, so there is no span to cut - transcribe that clip first"; "that paragraph has no words in it"; "'<words>' is not in paragraph ^<ref>. Its words are: '...'"; "Assistant asked to shelve the new card under <x>, which is not a category name." |
 
-Common refusals: "[the assistant] named no card."; "[the assistant] named a card that is not in the cut list (<id>)."; "[the assistant] named a staged card that is not on the shelf (<id>)."; ""<new:x>" is not a card this proposal has made."; "the page did not say where the playhead is, so there is nothing here to point at"; "the playhead is not on a card right now, so there is nothing under it to name"; "nothing is selected on the page right now"; ""@selected" is more than one card here, and this op takes one"; "a selected card is no longer in the cut list"; "[the assistant] asked for something this cut list cannot do (<name>)."; "that card has no word timing, so its own words cannot be found in it"; ""<words>" is not in that card. Its words are: ..."; ""<words>" is in that card, but not on any word that can be timed". Most end "Nothing was changed." A proposal that fails keeps showing, marked invalid with the reason naming the step ("step <i> of <n> (<op>): ..."); one that changes nothing: "that would change nothing".
+Common refusals: "Assistant named no card."; "Assistant named a card that is not in the cut list (<id>)."; "Assistant named a staged card that is not on the shelf (<id>)."; ""<new:x>" is not a card this proposal has made."; "the page did not say where the playhead is, so there is nothing here to point at"; "the playhead is not on a card right now, so there is nothing under it to name"; "nothing is selected on the page right now"; ""@selected" is more than one card here, and this op takes one"; "a selected card is no longer in the cut list"; "Assistant asked for something this cut list cannot do (<name>)."; "that card has no word timing, so its own words cannot be found in it"; ""<words>" is not in that card. Its words are: ..."; ""<words>" is in that card, but not on any word that can be timed". Most end "Nothing was changed." A proposal that fails keeps showing, marked invalid with the reason naming the step ("step <i> of <n> (<op>): ..."); one that changes nothing: "that would change nothing".
 
 A change that keeps given word ranges of a card and shelves the pieces dropped is used only by shortening, never by the chat. Any part of a paragraph the assistant keeps or inserts is highlighted exactly as the words that will play, and a highlight that cannot fit never costs the card.
 
@@ -320,7 +311,7 @@ A change that keeps given word ranges of a card and shelves the pieces dropped i
 
 ### Every proposal is checked and previewed before the editor sees it
 
-Each turn returns up to 4 proposals. Each is checked and previewed in the exact words applying it would report; one that fails a check is still shown, with its reason. Checks: "[the assistant] asked for something this cut list cannot do (<op>). Nothing was changed."; "[the assistant] named a card that is not in the cut list (<uid>). Nothing was changed."; "[the assistant] asked to bring in a paragraph without saying which one. Nothing was changed."; a heading with no title; and each change's own checks above. Nothing is applied. With nothing said and nothing proposed: "[the assistant] answered with nothing to say and nothing to suggest. Try asking again in other words."
+Each turn returns up to 4 proposals. Each is checked and previewed in the exact words applying it would report; one that fails a check is still shown, with its reason. Checks: "Assistant asked for something this cut list cannot do (<op>). Nothing was changed."; "Assistant named a card that is not in the cut list (<uid>). Nothing was changed."; "Assistant asked to bring in a paragraph without saying which one. Nothing was changed."; a heading with no title; and each change's own checks above. Nothing is applied. With nothing said and nothing proposed: "Assistant answered with nothing to say and nothing to suggest. Try asking again in other words."
 
 {{31-048}}
 
@@ -347,7 +338,6 @@ One gesture undoes every change the proposal made. It is refused unless the cut 
 {{31-050}}
 
 - Exact: yes
-- Pending: cards-editor-4-Q5
 
 ### The edit chat works only on an open cut list that can be written
 
@@ -357,13 +347,13 @@ One gesture undoes every change the proposal made. It is refused unless the cut 
 
 ### The montage builder is a drawer where a montage is described in words
 
-- A drawer titled "Montage builder". Ways in: toolbar button "Montage" (shows "Alt M", tooltip "Describe a montage and [the assistant] cuts it from the corpus", pressed while open); Alt+M toggles it. Close button (shows "Esc") and Escape close it; focus returns.
+- A drawer titled "Montage builder". Ways in: toolbar button "Montage" (shows "Alt M", tooltip "Describe a montage and Assistant cuts it from the corpus", pressed while open); Alt+M toggles it. Close button (shows "Esc") and Escape close it; focus returns.
 - Desktop: a 468 px drawer at the right, from under the header down to the top of the lane, at least 600 px tall (it reaches over the lane's right-hand end when the panels are shorter, or up over it when the lane is docked on top). Phone (700 px or narrower): the whole screen.
 - Every key typed in the drawer is kept from the editor's shortcuts.
 - "Describe the montage" text box (5 rows, at most 8000 characters, spell-checked), with an example placeholder. Ctrl+Enter (or Cmd+Enter) sends; plain Enter is a new line. With a proposal showing, the box shrinks to 64 px.
 - Buttons: primary "Cut the montage" (shows "Ctrl Enter"; secondary once a proposal is showing) and "Revise it" (enabled only after a montage exists in this conversation; tooltip "Change the last montage: same conversation, a sentence, seconds" or "Cut a montage first, then ask for changes"). Both disabled when the assistant is unavailable, the status could not be read, or the episode has no corpus (the tooltip says why).
 - While working: a busy "Cutting" / "Revising" and a red "Stop".
-- Status line (with an icon by tone): "asking the server…"; "starting…"; "reading the corpus, part <k> of <n>…" / "reading the corpus…"; "cutting the montage…" / "revising the montage…"; "finding the words in each clip…"; a lost-session note in front; failure or cancellation reasons; "the montage builder needs [the assistant] on this server: <reason>"; "this episode has no corpus yet: transcribe some clips into [the episode's montage sources] first"; "the corpus is already in this conversation: ask for a change and it comes back in seconds"; "say what the montage should be, and [the assistant] reads the corpus once (<n> clips)"; "<n> cuts in <n> sections (answered in <s> s): look it over below, then insert it or discard it".
+- Status line (with an icon by tone): "asking the server…"; "starting…"; "reading the corpus, part <k> of <n>…" / "reading the corpus…"; "cutting the montage…" / "revising the montage…"; "finding the words in each clip…"; a lost-session note in front; failure or cancellation reasons; "the montage builder needs Assistant on this server: <reason>"; "this episode has no corpus yet: transcribe some clips into [the episode's montage sources] first"; "the corpus is already in this conversation: ask for a change and it comes back in seconds"; "say what the montage should be, and Assistant reads the corpus once (<n> clips)"; "<n> cuts in <n> sections (answered in <s> s): look it over below, then insert it or discard it".
 - Session line: "Conversation <first 8 characters of its id> · <n> turns" and "Start a new conversation" (tooltip "Forget this conversation: the next montage reads the corpus again"; hidden while working). After a reset: "a new conversation: the next montage reads the corpus again". A reset while one is running is refused: "a montage is being cut: stop it first".
 - Local messages: "say what the montage should be first" (empty box), "the montage builder could not be reached: <reason>".
 - While the drawer is open it checks progress every second while a montage is being cut, every 10 s otherwise, every 5 s after a failed check. A change of cut list resets the drawer.
@@ -373,7 +363,6 @@ One gesture undoes every change the proposal made. It is refused unless the cut 
 - Phone and desk: a drawer at the right on a desk, the whole screen on a phone.
 - When the assistant is off: no Montage button, Alt+M does nothing, and there is no drawer.
 - Exact: yes
-- Pending: cards-editor-4-Q4
 
 ### Describing a montage gets a cut list of it from the episode's montage sources, and a follow-up revises it
 
@@ -396,14 +385,14 @@ A conversation keeps the material it was started with and its most recent turns,
 
 - The corpus is the episode's transcribed montage clips. With none: "this episode has no corpus yet: transcribe some clips into [the episode's montage sources] first".
 - The corpus goes into one conversation with the assistant once, part by part; later requests are a sentence in the same conversation, so a revision comes back in seconds. A conversation that did not finish reading the corpus is started again from the first part. The conversation is remembered per cut list (and corpus) on the server, not in the cut list.
-- A conversation the assistant no longer knows (a new machine or a rebuilt server) is reopened once: "the [the assistant] session was lost (new machine or a rebuilt server); re-reading the corpus". Lost twice: "the [the assistant] session could not be opened: the provider refused the id twice running" or "the [the assistant] session was lost twice running - give it a moment and retry".
+- A conversation the assistant no longer knows (a new machine or a rebuilt server) is reopened once: "the Assistant session was lost (new machine or a rebuilt server); re-reading the corpus". Lost twice: "the Assistant session could not be opened: the provider refused the id twice running" or "the Assistant session was lost twice running - give it a moment and retry".
 - Revise refusals: "there is no montage to revise yet: cut one first"; "the corpus has changed since the last montage, so there is no montage to revise in this conversation: cut it again".
 - The assistant's quotes are found in the clips' words to the frame, falling back to the whole transcript segment; a quote found nowhere is kept as unmatched; a clip not in the corpus is listed as dropped. A corpus re-transcribed meanwhile: "the corpus changed while the montage was being cut - ask again and it reads the new one". No placeable cuts: "the model proposed no cuts this server could place - try saying it another way"; no sections: "the model's answer has no sections - try saying it another way".
-- Other failures: "the montage builder needs [the assistant]: <reason>"; "the corpus could not be read into the conversation: <reason>"; "the model run produced no usable output: <reason>"; "the montage helper answered without the corpus prompts"; "the montage helper answered with something that is not a montage"; "the montage took longer than <n> min and was stopped".
+- Other failures: "the montage builder needs Assistant: <reason>"; "the corpus could not be read into the conversation: <reason>"; "the model run produced no usable output: <reason>"; "the montage helper answered without the corpus prompts"; "the montage helper answered with something that is not a montage"; "the montage took longer than <n> min and was stopped".
 - Limits: one describe or one revise gives up after 15 minutes, and the whole job is stopped after 60 minutes ("the montage took longer than 60 min and was stopped"); at most 200 sections, 2000 cuts per section, quotes of 2000 characters; a request of at most 8000 characters ("a montage note is at most 8000 characters"); one montage at a time per cut list ("a montage is already being cut for this cut list"); at most two at once across the server ("<n> montages are being cut already - try again when one is done"); "that cut list is not in the episode"; "the server is shutting down".
 - "Stop" ends it: "stopped: nothing was changed". Stopping the server stops every running montage. Nothing is written to the cut list until the person inserts.
 
-Refusals before starting: "say what the montage should be first"; "the montage builder needs [the assistant]: <why>"; the cut list's read-only reason or "this cut list is open read only"; "the montage builder writes a cut list, so it needs one open"; "a describe is already running". States shown: opening (with "part k of N"), describing, writing, done (cuts, sections, unmatched, dropped clips, seconds), failed.
+Refusals before starting: "say what the montage should be first"; "the montage builder needs Assistant: <why>"; the cut list's read-only reason or "this cut list is open read only"; "the montage builder writes a cut list, so it needs one open"; "a describe is already running". States shown: opening (with "part k of N"), describing, writing, done (cuts, sections, unmatched, dropped clips, seconds), failed.
 
 - Exact: yes
 
@@ -417,19 +406,27 @@ Before anything is inserted, the montage is shown in the drawer: its sections an
 
 ### The assistant writes a one- or two-sentence summary of a section into the cut list, undoably
 
-{{32-057}}
+
+  - The sparkle button asks the assistant for a summary of the section's words (each cut as "<person>: <words>", up to the next heading of any kind; note rows do not end a section). Disabled with "Nothing in this section to summarise", "Section summaries are not available here", or "The summary needs Assistant on the server: <reason>".
+  - Refusals before sending: "Nothing transcribed between this marker and the next, so there is nothing to summarise."; "The summary did not start: <reason>".
+  - When this page's answer comes back it is written into the cut list as ONE undoable edit under the heading, together with a fingerprint of the words it was written from: "Summary of "<title>" written into the cut list. Ctrl+Z takes it out." Section gone: "The summary came back, but its section is no longer in this cut list." A failed run: "The summary did not come back: <reason>".
+  - Under each heading: the stored summary, a gold "Out of date" chip when the words changed since, and a "Remove this summary" button ("Summary removed from the cut list. Ctrl+Z brings it back.").
+  - An answer this page did not ask for (another device, a reload) that the cut list does not have: "A new summary is ready", the text, "Keep it" (or "Use this one" when a summary exists; it writes it: "Summary written into the cut list. Ctrl+Z takes it out.") and "Discard".
+  - The panel checks for running summaries every 1.5 s, even while shut when this page is waiting for its own answer, for up to about 10 minutes. "Summaries could not be read: <reason>" on the status line when that fails.
+  - A change of cut list forgets all summary state.
+  - The summary is ONE sentence, two at most, 35 words in all, plain English, no preamble. An empty answer is a failure ("Assistant returned nothing"). One summary per section runs at a time (asking again joins it); at most two run at once across the server ("other summaries are still being written; try again in a moment"). Limits: title 300 characters, section text 60 000 characters. A summary gives up after 5 minutes. Answers wait on the server for 30 minutes for a page to take them; the server writes nothing itself.
 
 - Ways in: the overview's sparkle button, a folded section's "Summarise" button, and the "A new summary is ready" row for an answer this page did not ask for.
 - When the assistant is off: no summary is asked for or offered; summaries already written into the cut list stay in the file.
 - Exact: yes
-- Pending: cards-editor-4-Q4
 
-### Which strength of assistant each feature of the editor uses
+### Which strength of assistant each feature of the editor uses, and what it costs
 
 The edit chat's chosen strength (fastest, stronger or most capable) is the one that answers every call the chat and shortening make: planning, cutting the words, reading the joins back and scoring. The montage builder and section summaries use the same choice, so no assistant feature of the editor runs at a strength the person cannot see and change. The transcript search keeps its own choice (see part 3 of this editor). A strength the product does not recognise is quietly given the feature's default, and every call records which version of the assistant answered and what it cost.
 
+Every assistant task started in the editor shows what it is expected to cost before it runs: building the scores, planning a shortening, cutting the words of the sections in play, a chat message (a cold one, which reads everything, costs more than a warm one, and says so), cutting or revising a montage, and a section summary. Each counts against the site's one daily budget for the assistant (see The whole product: The assistant); once the day's budget is spent, the task is refused with that budget's own sentence and nothing in the cut list changes. No feature of the editor has an allowance of its own.
+
 - When the assistant is off: there is no choice of strength, since nothing calls the assistant.
-- Pending: cards-editor-4-Q4
 
 #### Lessons
 
@@ -540,12 +537,6 @@ When a cut list is renamed, a device still holding the old name is moved to the 
 
 Every device on a cut list shares the one cut list, its staged shelf and its notes, while what a person is looking at stays with each device: the selected card, the card at the top, the view (lane or cards), the lane's position, zoom and scroll, the cursor and the playhead. Opening a cut list on a device puts it back where that device left it; a device's first visit to a cut list starts at the most recent place any device saved. Places are remembered for the 24 most recent devices of each cut list.
 
-### Places saved on a cut list are shared across devices
-
-Up to 50 saved places per cut list are shared across every device, so a place saved on the desk can be gone to from the phone. A device is named by up to 32 characters.
-
-- Pending: cards-editor-4-Q13
-
 ### Every signed-in person sees who is working in which episode
 
 The list of episodes opens without loading any of them, and two people can each open and edit a different episode, or the same one, at the same time. On the dashboard's list of episodes, every signed-in person sees who is working in which open episode: "<who> is in it now" (within the last minute), "<who> was last in N min ago", or "<who> opened it <how long ago>". A person counts as working in an episode while they really are, offline or on a phone that has gone to sleep included, and an episode stays occupied while any of its devices holds edits not yet sent. Closing an episode asks first, naming who was last in it and when: "Close <episode>? <who> was last in N min ago. Anything an offline browser has not sent yet stays in that browser until it reconnects."
@@ -618,13 +609,6 @@ Every edit that lands is sent once only. Every edit that could not be made is li
 
 When the server stops answering, the editor says once "server unreachable: editing the offline copy, edits will sync when it is back". When it answers again, the editor says once "server back: live cut list", followed by ", syncing N edits" when edits are waiting. The pill changes at the same moment.
 
-### A full panel says "You are offline. Keep editing."
-
-A full panel version of the offline message, reading "You are offline. Keep editing.", stands in place of the toast.
-
-- Exact: yes
-- Pending: cards-editor-4-Q12
-
 ### Inserting still works when the server cannot be reached
 
 - When the server does not answer (offline, no answer, or while it restarts), a selection or pick with its own timing is placed on the page itself by the same rules (12 frames of handle, held off neighbouring speech, words under the span), using the clip's word timings fetched when the transcript opened (waited for up to 5 s if still arriving) or the lane's. When the browser reports it is offline, it does not try the server first.
@@ -657,7 +641,6 @@ One switch, remembered on this device and surviving a restart. While on: nothing
 - Setting: Work offline. Does: stops every exchange with the server on this device, as on a plane, keeping edits on the device until switched off. Default: off. Who: anyone, for their own device. Applies to: a computer. Search words: work offline, plane mode, no network, offline by choice.
 - Phone and desk: the header badge is icon-only on a phone.
 - Exact: yes
-- Pending: cards-editor-4-Q9
 
 ### The episode list shows which cut lists are kept on this device and opens them with no network
 
@@ -685,7 +668,6 @@ Any cut list of any episode can be kept this way, and several can be kept side b
 - Name and search words: On this device: offline, download, storage, keep, device.
 - Phone and desk: a centred dialog on a desk, a bottom sheet on a phone or touch screen.
 - Exact: yes
-- Pending: cards-editor-4-Q6
 
 ### The panel shows whether the open cut list is on this device, how big each part is, and how it will be kept
 
@@ -702,7 +684,6 @@ Working out the sizes starts no work on the server: missing audio or preview vid
 
 - Setting: Include video. Does: keeps each clip's preview video on the device too, so the video window plays offline with seeking. Default: on. Who: anyone, for their own browser. Applies to: a computer. Search words: offline video, keep video, include video, download size.
 - Exact: yes
-- Pending: cards-editor-4-Q6
 
 ### Keeping a cut list shows progress and says plainly how it ended
 
@@ -754,7 +735,6 @@ What a device keeps lives in one of three places, chosen by itself: inside the W
 
 - Ways in: the On this device panel, while a cut list is open.
 - Exact: yes
-- Pending: cards-editor-4-Q6
 
 ### Waiting edits save themselves to a file without being asked
 
@@ -771,7 +751,6 @@ Inside the apps, the editor keeps several devices in step exactly as it does in 
 
 - Name and search words: the Timeline Cards app: Windows app, Android app, desktop app, phone app.
 - Exact: yes
-- Pending: cards-editor-4-Q8
 
 ### The apps notice within seconds that the server is gone and work offline
 
@@ -805,7 +784,6 @@ When a background top-up runs, the cut list open at that moment is kept on the d
 
 - Setting: Keep cut lists I open on this device. Does: in the apps, keeps every cut list opened with the server up on the device, topping it up every ten minutes. Default: on. Who: anyone using the app, on that device. Applies to: a computer. Search words: keep automatically, auto download, offline copy, keep on device.
 - Exact: yes
-- Pending: cards-editor-4-Q7
 
 ### In the Windows and Android apps, kept cut lists are real files in a folder the person can open and move
 
@@ -824,7 +802,6 @@ The same change of folder, with the same move-or-leave question, is also on the 
 On Android, **Open folder** opens the projects folder in the phone's file manager; where Android gives the app no way to do that, the button is not offered.
 
 - Phone and desk: on Android only.
-- Pending: cards-editor-4-Q10
 
 ### The Windows app installs per person or runs portable, and runs once
 

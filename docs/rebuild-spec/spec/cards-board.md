@@ -1,6 +1,6 @@
 # Timeline Cards: the board
 
-The board is where the film is planned before it is cut. Every paragraph of an episode's interviews becomes a card, the cards sit in columns that are the film's themes, and the owner and the editors drag cards and columns around until the order reads as the film they want. It arrives sorted into proposed themes as the last step of getting footage in, or starts empty, and it is worked by hand, with the assistant called in only when a person asks. The board is a Markdown file, complete in itself, and it hands its order to the Timeline Cards editor, never straight to an editing program. The board is part of Timeline Cards: when a site switches Timeline Cards off, nobody but an admin sees the board, and the admin sees it only as Timeline Cards' switch in settings. When the assistant is switched off, the board works fully by hand, a new board starts empty beside its transcripts, and no assistant control appears on it.
+The board is where the film is planned before it is cut. Every paragraph of an episode's interviews becomes a card, the cards sit in columns that are the film's themes, and the owner and the editors drag cards and columns around until the order reads as the film they want. It arrives sorted into proposed themes as the last step of getting footage in, or starts empty, and it is worked by hand, with the assistant called in only when a person asks. The board is a Markdown file, complete in itself, and it hands its order to the Timeline Cards editor, never straight to an editing program. The board is part of Timeline Cards, which is off on a new site until an admin switches it on: while Timeline Cards is off, nobody but an admin sees the board, and the admin sees it only as Timeline Cards' switch in settings. When the assistant is switched off, the board works fully by hand, a new board starts empty beside its transcripts, and no assistant control appears on it.
 
 ## What the board is
 
@@ -67,12 +67,11 @@ A person hands the board to the Timeline Cards editor, and its order becomes a c
 
 | On the board | In the cut |
 |---|---|
-| A theme column that plays | A section, in the same order, with the theme's name and a colour from the editor's fixed rotation of section colours by its position, Blue first |
+| A theme column that plays | A section, in the same order, with the theme's name and a colour from the editor's fixed rotation of section colours by its position among the sections that play, Blue first, so the cut and the hand-over to the editing program always agree |
 | The cold-open group | The first section |
 | The alternates column | An alternates section, its cards placed and ready to swap in |
 | "Uncategorised" | A shelf category after the cut |
-| A set-aside group | A shelf category after the cut, named after the theme it belongs to |
-| Every other theme | Also an empty shelf category of the same name after the cut |
+| A set-aside group that holds cards | A shelf category after the cut, named after the theme it belongs to |
 | A paragraph card | A cut on its interview's clip, with its speaker, colour and text, playing its highlighted part, or the whole paragraph when nothing is highlighted, through to its last word however long it is |
 | A note card | A note; an empty one reads "(empty card)" |
 | A card whose paragraph cannot be found | An "unmatched" note holding the card's text and a link to its paragraph |
@@ -82,8 +81,6 @@ A paragraph card is tied to its paragraph and its timed words, so it lands witho
 Handing over is one way: cutting never changes the board. Handing the board over again into a cut that already exists never overwrites it. It is shown as a preview of a merge: the cards the board has added, the cards it has moved and the cards it no longer holds, and the person takes what he wants. The cut's own edits and trims are kept. What the editor then does with the cut is described in Timeline Cards: the editor (Editing, undo and the cut list, and Notes and the staged shelf).
 
 - Who: anyone signed in who can open the board.
-- Pending: cards-board-Q6
-- Pending: cards-board-Q7
 
 #### Lessons
 
@@ -163,14 +160,13 @@ A person selects one card or many, with the same keys and gestures as in the Tim
 
 ### Setting cards aside and tagging the cold open
 
-One key press or one touch sets aside one card or every selected card. Each set-aside card goes to the set-aside group of the theme it belongs with most, named after that theme, and arrives on the cutting editor's shelf under that name. A set-aside card counts as handled.
+The same key and the same gesture that move a cut to the shelf in the editor (see Timeline Cards: the editor: Notes and the staged shelf) set aside one card, or every selected card at once. Each set-aside card goes to the set-aside group of the theme it belongs with most, named after that theme, and arrives on the cutting editor's shelf under that name. A set-aside card counts as handled.
 
 Tagging a card for the cold open copies it into the cold-open group at the head of the board while the card itself stays where it was. The copy is marked as a copy, and does not count as a second appearance of the paragraph. Groups within a column carry visible numbers.
 
 - Who: anyone signed in who can open the board.
 - On its own: a set-aside card goes to the group of its most relevant theme.
 - By hand: a person drags a set-aside card to any other set-aside group, or back into play.
-- Pending: cards-board-U1
 
 ### Making, naming and removing themes
 
@@ -179,7 +175,6 @@ A person adds a column anywhere, names it and renames it at any time. Two column
 - Who: anyone signed in who can open the board.
 - On its own: a column emptied by a change stays on the board, empty, as a placeholder.
 - By hand: a person deletes an empty column when he no longer wants it.
-- Pending: cards-board-Q4
 
 ### No change can lose or double a card
 
@@ -198,8 +193,6 @@ A board being worked on is never rebuilt from scratch, because that would throw 
 - On its own: each new paragraph is proposed for the theme it fits best, at the end of that theme's order. Its card takes its speaker's colour.
 - By hand: a person takes, declines or drags each proposal, or takes them all into one chosen theme, or leaves some out (chatter can be left out), or ignores the proposals and drags paragraphs from the transcript himself. A paragraph not taken stays off the board and does not go to "Uncategorised". The person can give the new cards another colour, and is told whether the colour was the speaker's own or a new one.
 - When the assistant is off: nothing is proposed; the interview's transcript appears beside the board with its paragraphs marked as not yet on it.
-- Pending: cards-board-Q2
-- Pending: cards-board-Q8
 
 ### Putting the themes in story order with one action
 
@@ -207,7 +200,6 @@ One action on a board in use puts the "Personal Stories" column first and the "E
 
 - Who: anyone signed in who can open the board.
 - By hand: columns can be dragged into any order afterwards.
-- Pending: cards-board-Q3
 
 ### The board's notes
 
@@ -241,7 +233,6 @@ Having read every paragraph of every interview of the episode, the assistant pro
 - On its own: the themes, their names, descriptions and evidence are decided by the assistant from the paragraphs, as the last automatic step of getting the episode's footage in, and the first sort follows into those themes.
 - By hand: the proposal stays beside the board. A person drops any proposed theme, renames any, adds his own with a description that paragraphs are matched against, and asks for the sort to be made again into the themes he keeps. While nobody has arranged the board, the new sort replaces the first. Once a person has arranged it, a theme he adds or drops moves only the cards it touches, as proposals.
 - When the assistant is off: no themes are proposed, and a new board starts empty.
-- Pending: cards-board-Q1
 
 ### The first sort places every paragraph in one theme
 
@@ -306,12 +297,11 @@ The notes record what was applied, in which new version, and which beat of his s
 
 When a person asks whether the edit works, what the story is, how sections connect, or for bridges between sections, the assistant reads the ordered board against the whole pool of paragraphs. It reads and reports only: it never changes the board or the pool, and every suggestion names cards so a person can drag them himself. It reads the whole order end to end and then every unused paragraph end to end, with no skimming or sampling, using the original Mandarin where a card's meaning turns on it. The check is made afresh every time.
 
-The report is kept with the episode as a dated document. It opens with the date, which version of the board was read, the card count, the count of distinct quotes and the running time, then its five parts and the bridges (see "The story check's five parts" and "Bridges for weak joins" below). When an earlier report exists, the assistant reads it first and notes what changed, and never overwrites it silently. With the report, the person is shown a short summary: the total and per-section running times, a two or three sentence verdict, how many joins are weak, the headline finding about the structure and where the report is.
+The report is kept with the episode as a dated document. It opens with the date, which version of the board was read, the card count, the count of distinct quotes and the running time, then its five parts and the bridges (see "The story check's five parts" and "Bridges for weak joins" below). Every run makes a new dated report beside the earlier ones, which are all kept, the newest shown first. When an earlier report exists, the assistant reads it first and notes what changed. With the report, the person is shown a short summary: the total and per-section running times, a two or three sentence verdict, how many joins are weak, the headline finding about the structure and where the report is.
 
 - Who: anyone signed in who can open the board.
 - When the assistant is off: there is no story check.
 - Name and search words: story check. Search words: story check, does it work, structure, joins, bridges, report.
-- Pending: cards-board-Q5
 
 ### Running time is shown from real durations, and never used to cut
 
@@ -325,7 +315,8 @@ Anything the board or the assistant does that takes more than a second (a sort, 
 
 #### Lessons
 
-- Met: BRD-023, BRD-024, BRD-025, BRD-026, BRD-027, BRD-028, BRD-029, BRD-030, BRD-031, BRD-032, BRD-033, BRD-034, BRD-036.
+- Met: BRD-023, BRD-024, BRD-025, BRD-026, BRD-027, BRD-029, BRD-030, BRD-031, BRD-032, BRD-033, BRD-034, BRD-036.
+- Not yet met by any behaviour above: BRD-028 (the first sort runs before the owner picks themes: the owner's answer of 2026-11-24).
 
 ## The owner's editorial rules
 
@@ -473,7 +464,7 @@ A column is one of these kinds, which a person sees on the column itself:
 | Kind | What it is | In the cut |
 |---|---|---|
 | Theme | A section of the film | Plays |
-| Set-aside group | Cards set aside, named after the theme they belong with; one per theme | A shelf category of that name |
+| Set-aside group | Cards set aside, named after the theme they belong with; one per theme | A shelf category of that name, when it holds cards |
 | Alternates | Alternative takes, not in the cut | An alternates section beside the cut, matched and ready to swap in |
 | Cold open | Copies of cards tagged for the cold open | Plays first |
 | Uncategorised | Paragraphs with no content | A shelf category |

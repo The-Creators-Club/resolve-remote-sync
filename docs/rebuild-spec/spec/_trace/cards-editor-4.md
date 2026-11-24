@@ -38,7 +38,7 @@
 - 31-050 | Chat messages carried over from the studio's earlier Timeline Cards are shown read only
 - 31-051 | left out: for the builders only
 - 32-057 | The assistant writes a one- or two-sentence summary of a section into the cut list, undoably
-- 34-007 | Something outside the editor can offer a set of edits to preview and accept
+- 34-007 | left out: cut by the owner (2026-11-24, cards-editor-4-Q11)
 - 40-044 | Describing a montage gets a cut list of it from the episode's montage sources, and a follow-up revises it
 - 40-045 | The montage builder's answer is placed as cards, and nothing it proposed is silently lost
 - 40-046 | The assistant reads the episode's corpus once per conversation, so a revision comes back in seconds, and every failure says why
@@ -79,7 +79,7 @@
 - 29-010 | A sync pill in the header always says whether edits are saved ; While working offline by choice the pill says so
 - 29-014 | Errors never blank the screen: they say what is kept and offer to sign in, retry or keep working
 - 29-015 | Offline, a standing toast tells the person to keep editing ; Each change between live and offline is announced once
-- 29-016 | A full panel says "You are offline. Keep editing."
+- 29-016 | left out: cut by the owner (2026-11-24, cards-editor-4-Q12)
 - 29-066 | The editor opens with no network once it has been opened on that device ; What works offline and what needs the server
 - 29-067 | What works offline and what needs the server
 - 29-068 | The panel says where things are kept and whether they will stay ; In the Windows and Android apps, kept cut lists are real files in a folder the person can open and move
@@ -91,7 +91,7 @@
 - 32-031 | A person can choose to work offline even with the server up
 - 32-032 | What works offline and what needs the server
 - 32-033 | A copy of the waiting edits can be saved to a file and restored from it
-- 32-034 | In the apps, cut lists that are opened are kept on the device by themselves
+- 32-034 | left out: cut by the owner (2026-11-24, cards-editor-4-Q7)
 - 32-036 | Timeline Cards has its own apps for Windows and Android that show the editor from the studio's server
 - 32-043 | Every editor window open on one cut list stays in step with the others
 - 33-038 | The note editor warns about changes from another device, a vanished gap, and a refused save
@@ -110,7 +110,7 @@
 - 34-018 | When the server cannot save edits, the person is told and nothing is lost
 - 34-019 | A cut list renamed on one device is followed by every other device
 - 34-023 | left out: an arrangement (the promise is under "Several people and devices edit one cut list live, and every edit is saved before it counts")
-- 40-042 | Each device comes back to where it was, and a device new to a cut list starts at the latest place ; Places saved on a cut list are shared across devices
+- 40-042 | Each device comes back to where it was, and a device new to a cut list starts at the latest place
 - 40-060 | When the cut list moved on while edits waited, the editor asks once whether to keep them ; What works offline and what needs the server
 - 40-086 | The review stays current, and is the same in every window and on the phone
 - 33-052 | In the Windows and Android apps, kept cut lists are real files in a folder the person can open and move
@@ -143,6 +143,7 @@
 - Text assumes: A; the offline launch times are written into "The editor opens with no network once it has been opened on that device"
 - Items: 31-040, 31-051, 27-030, 29-069, 33-057, 33-101, 33-109
 - Covers: 31-Q7, 29-Q9, 33-Q12
+- Answered by the owner 2026-11-24: A: all the builders' tools stay left out
 
 ### cards-editor-4-Q2: Shortening needs section headings, and a cut list without them is sent to the edit chat to "cut it down in words". Keep it that way, or should shortening also work on a cut list with no headings?
 - Kind: either-or
@@ -153,6 +154,7 @@
 - Text assumes: A
 - Items: 31-025, 31-047
 - Covers: 31-Q1
+- Answered by the owner 2026-11-24: A: shortening stays section by section, the chat cuts a cut list with no headings
 
 ### cards-editor-4-Q3: Shortening has two length sliders: one previews from the scores before any review and cannot be accepted, the other marks the suggestions during a review and can accept them. Keep both?
 - Kind: built twice
@@ -163,6 +165,7 @@
 - Text assumes: A
 - Items: 31-024, 31-031, 40-087
 - Covers: 31-Q2
+- Answered by the owner 2026-11-24: A: both sliders kept, each in its own step
 
 ### cards-editor-4-Q4: The montage builder and section summaries run at a fixed strength of assistant that nobody can choose. Should they follow the strength chosen in the edit chat, as shortening does?
 - Kind: other
@@ -173,6 +176,7 @@
 - Text assumes: A
 - Items: 32-047, 32-057, 40-044
 - Covers: 40-Q10
+- Answered by the owner 2026-11-24: A: shortening, the montage builder and summaries follow the chat's chosen strength
 
 ### cards-editor-4-Q5: The edit chat shows the history of a cut list's chat from the studio's earlier Timeline Cards, read only, before the new messages. Is that worth carrying over?
 - Kind: other
@@ -183,6 +187,7 @@
 - Text assumes: A
 - Items: 31-050
 - Covers: 31-Q5
+- Answered by the owner 2026-11-24: A: the earlier chat history is carried over and shown read only
 
 ### cards-editor-4-Q6: A cut list can be kept on a device from two places with different switches and wording. Should there be one panel, "On this device", holding everything?
 - Kind: either-or
@@ -193,6 +198,7 @@
 - Text assumes: A
 - Items: 32-029, 32-030, 32-033, 33-046, 33-047, 33-048
 - Covers: 32-Q1
+- Answered by the owner 2026-11-24: A: one panel, On this device
 
 ### cards-editor-4-Q7: Inside the apps, a second, quieter automatic keep of the open cut list's audio exists but never runs, because the automatic keep of the whole cut list does the job. May it go?
 - Kind: dormant
@@ -203,6 +209,7 @@
 - Text assumes: A, written as the one automatic keep
 - Items: 32-034, 33-056
 - Covers: 32-Q2
+- Answered by the owner 2026-11-24: A: the audio-only automatic keep goes, the one automatic keep of the whole cut list stays
 
 ### cards-editor-4-Q8: Should the Windows and Android apps open the editor from the dashboard's own address, with live editing between devices working inside the apps exactly as in a browser?
 - Kind: dormant
@@ -213,6 +220,7 @@
 - Text assumes: A
 - Items: 32-036, 33-088
 - Covers: 32-Q3
+- Answered by the owner 2026-11-24: A: the apps open the editor from the dashboard and edit live as a browser does
 
 ### cards-editor-4-Q9: Should there be one "work offline" switch wherever the editor runs, instead of the editor's own and the app's own?
 - Kind: built twice
@@ -223,6 +231,7 @@
 - Text assumes: A
 - Items: 33-092, 32-031, 14-037, 33-055
 - Covers: 33-Q2
+- Answered by the owner 2026-11-24: A: one work-offline switch wherever the editor runs
 
 ### cards-editor-4-Q10: On Android, "Open folder" says it worked but opens nothing. Should it open the folder, or not be offered on Android?
 - Kind: unreachable
@@ -233,6 +242,7 @@
 - Text assumes: A
 - Items: 33-108
 - Covers: 33-Q6
+- Answered by the owner 2026-11-24: A: Open folder opens the folder where Android allows, and is not offered where it cannot
 
 ### cards-editor-4-Q11: Something outside the editor can offer a set of edits for a person to preview and accept, but nothing in the product ever makes such an offer. Keep that door, or let it go?
 - Kind: unreachable
@@ -243,6 +253,7 @@
 - Text assumes: written as live and marked pending; if A, the passage is deleted
 - Items: 34-007
 - Covers: 34-Q2, U-34-1
+- Answered by the owner 2026-11-24: A: cut; proposals come only from the product's own features
 
 ### cards-editor-4-Q12: A full-panel "You are offline. Keep editing." exists beside the offline toast but is never shown. May it go?
 - Kind: unreachable
@@ -253,6 +264,7 @@
 - Text assumes: written as live and marked pending; if A, the passage is deleted
 - Items: 29-016
 - Covers: 29-Q2
+- Answered by the owner 2026-11-24: A: cut; the toast stays
 
 ### cards-editor-4-Q13: The retired page shared up to 50 saved places per cut list across devices. Should places saved by hand be shared across devices in the new editor?
 - Kind: unreachable
@@ -263,6 +275,7 @@
 - Text assumes: written as live and marked pending; if A, the passage is deleted
 - Items: 40-042
 - Covers: 40-Q4
+- Answered by the owner 2026-11-24: A: cut; each device keeps only its own place
 
 ## Readers' questions and unsettled points
 
@@ -332,7 +345,7 @@
 ## New in this text
 
 - What remains of these features when the assistant is switched off | the owner's assistant switch: what each feature leaves on screen with it off
-- Which strength of assistant each feature of the editor uses | CE2-094, CE1-027 and cards-editor-4-Q4: one choice for chat, shortening, montage and summaries; each call records which version answered
+- Which strength of assistant each feature of the editor uses, and what it costs | CE2-094, CE1-027 and cards-editor-4-Q4: one choice for chat, shortening, montage and summaries; each call records which version answered
 - The chat's status line says whether it can work, whether the assistant still has the cut list in mind, and what it is doing | CE2-088, CE2-089: availability from the last real check, "too slow to start", no paid call
 - The editor types what to change in plain words and sends it, and the assistant answers with up to four proposals | CE3-061: the chat refuses offline and keeps nothing for later
 - Planning first gives each titled section a budget that the editor can change before any words are cut | CE1-032: pins survive every recalculation and reload
@@ -364,10 +377,12 @@
 - Waiting edits save themselves to a file without being asked | the tick-box labels, the Downloads line and the iPhone reason come from words the studio already knows ("[ SAVE A COPY ]" written as Save a copy)
 - Every signed-in person sees who is working in which episode | the dashboard list's lines and the close question come from words the studio already knows
 
+- Which strength of assistant each feature of the editor uses, and what it costs | the owner's answer of 2026-11-24 (one daily budget in money, the expected cost shown before each task): every assistant task in the editor shows its cost first and counts against that one budget
+
 ## Parts of items left out
 
 - 29-053 | the reader's remark that the waiting line names the assistant's maker
-- 31-041, 31-042, 31-043, 31-044, 31-045, 31-047, 31-021, 31-023, 31-024, 31-025, 40-069, 40-070, 40-073, 40-075, 40-078, 40-046 | the assistant's name in on-screen words, replaced by [the assistant]; "a rebuilt store" and "a rebuilt container" written as "a rebuilt server"
+- 31-041, 31-042, 31-043, 31-044, 31-045, 31-047, 31-021, 31-023, 31-024, 31-025, 32-057, 32-047, 32-050, 40-069, 40-070, 40-073, 40-075, 40-078, 40-046 | the assistant's name in on-screen words, written as Assistant (the owner's answer of 2026-11-24); "a rebuilt store" and "a rebuilt container" written as "a rebuilt server"
 - 31-042 | prices "per million tokens": written as each strength's price; the server pinning one strength over the picker (ruling CE2-094)
 - 29-014 | the disabled "Retry now" with the tip "Reconnect is not wired in this build": a builders' state
 - 31-056 | "stored translations kept first": draft translations are cut by the owner
@@ -397,7 +412,7 @@
 ## Joins with other capabilities
 
 - whole-product / The assistant | The chat offers three strengths of assistant, each its own conversation | each strength moves to the newest version by itself; the assistant switch
-- whole-product / The assistant | Which strength of assistant each feature of the editor uses | what each call records and costs
+- whole-product / The assistant | Which strength of assistant each feature of the editor uses, and what it costs | what each call records and costs
 - cards-board / The owner's editorial rules | An episode can carry its own description of what counts as fluff | the studio's shortening rubric and where an episode's style notes are written
 - cards-board / The owner's editorial rules | The chat follows a house style of seven editorial rules, which an episode can replace with its own | where the episode's chat style note is written
 - cards-footage-in / Montages | Describing a montage gets a cut list of it from the episode's montage sources, and a follow-up revises it | which clips are the episode's montage sources and their transcripts
@@ -405,7 +420,7 @@
 - cards-editor / Sections and the overview | The assistant writes a one- or two-sentence summary of a section into the cut list, undoably | the overview's sparkle button and a folded section's summary
 - cards-editor / Editing, undo and the cut list | Several people and devices edit one cut list live, and every edit is saved before it counts | the cut list's history of every revision
 - cards-editor / Notes and the staged shelf | Shortening only suggests, and everything it takes out goes to the shelf | shelf categories
-- cards-editor / Search and the transcript panel | Which strength of assistant each feature of the editor uses | the search's own strength choice; offline search and inserting from the panel
+- cards-editor / Search and the transcript panel | Which strength of assistant each feature of the editor uses, and what it costs | the search's own strength choice; offline search and inserting from the panel
 - cards-editor / Opening episodes and keeping the editor running | Every signed-in person sees who is working in which episode | the episode list, the projects sheet and opening an episode
 - cards-to-resolve-and-exports / Bringing Resolve's changes back into the cut | Every suggestion from the assistant and every import arrives as a proposal the editor previews and accepts in whole or in part | changes brought back from Resolve arrive as proposals
 - accounts-privacy-legal / Passwords, sessions and failed sign-ins | Errors never blank the screen: they say what is kept and offer to sign in, retry or keep working | an expired sign-in and signing in again

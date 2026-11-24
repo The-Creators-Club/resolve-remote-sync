@@ -14,9 +14,9 @@
 - 42-008 | A new cut shows the multicam's angle and arrives ungraded
 - 42-024 | What the hand-over understands in a Resolve timeline
 - 33-042 | A note on a gap arrives as on-screen text over the gap
-- 39-013 | Timeline markers can be added, moved, renamed and recoloured live
-- 39-014 | Cuts can be given a clip colour live
-- 39-015 | The page's undo takes back live edits by walking Resolve's own undo
+- 39-013 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 39-014 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 39-015 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
 - 39-023 | Audio fades and gain arrive in Resolve as set on the cards
 - 40-047 | A note on a gap arrives as on-screen text over the gap
 - 40-048 | A note on a gap arrives as on-screen text over the gap
@@ -42,8 +42,8 @@
 - 39-025 | The editor is told exactly what arrived
 - 39-026 | The dry run counts everything and shows the plan cut by cut
 - 39-027 | The cut list records the timeline it built
-- 39-031 | Sending, comparing and updating from a command line
-- 39-070 | A draft made on a timeline can be built as a new timeline
+- 39-031 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q5)
+- 39-070 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
 - 42-007 | left out: for the builders only
 - 42-009 | A sent cut arrives as a new timeline that matches it frame for frame
 - 42-013 | What is asked of the editor before a hand-over
@@ -53,21 +53,21 @@
 - 43-045 | The dry run counts everything and shows the plan cut by cut ; Sections and notes arrive as markers
 - 43-046 | The dry run counts everything and shows the plan cut by cut
 - 43-049 | left out: for the builders only
-- 39-004 | Edits on a timeline open in Resolve are made by Resolve's own keyboard commands
-- 39-005 | Every live edit first checks that Resolve is where the page thinks it is
-- 39-006 | Moving cards reorders the cuts in Resolve with the fewest moves
-- 39-007 | Deleting ripple-deletes the cut in Resolve and keeps the piece on an offcuts timeline
-- 39-008 | A text cursor in a card splits the cut in Resolve at that word
-- 39-009 | Removing selected words takes that stretch out of the cut in Resolve
-- 39-010 | An edge of a cut can be pulled to the playhead in Resolve
-- 39-011 | A transcript passage can be inserted at Resolve's playhead
-- 39-012 | A cut can be laid above the main track without moving anything
+- 39-004 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 39-005 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 39-006 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 39-007 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 39-008 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 39-009 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 39-010 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 39-011 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 39-012 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
 - 39-030 | A cut list being edited never changes Resolve until it is sent
-- 39-069 | Edits staged against a timeline wait as a draft until applied
-- 40-041 | A staged draft is shared by every device and can be saved by name
+- 39-069 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 40-041 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
 - 42-019 | left out: for the builders only
 - 42-020 | left out: an arrangement (the promise is under "A sent cut arrives as a new timeline that matches it frame for frame")
-- 42-021 | left out: an arrangement (the promise is under "Deleting ripple-deletes the cut in Resolve and keeps the piece on an offcuts timeline")
+- 42-021 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
 - 42-022 | left out: an arrangement (the promise is under "What the hand-over understands in a Resolve timeline")
 - 42-023 | left out: an arrangement (the promise is under "Sections and notes arrive as markers")
 - 32-007 | A header chip says whether the Resolve timeline still matches the cut list
@@ -75,7 +75,7 @@
 - 32-014 | An import becomes a proposal the editor previews before accepting
 - 32-016 | An import is matched to the cut list cut by cut
 - 34-041 | Accepted changes become ordinary edits on the cut list
-- 39-002 | The cards can follow the timeline open in Resolve
+- 39-002 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
 - 39-057 | The editor always sees how far the Resolve timeline has drifted from the cut list
 - 39-058 | A cut list can be rewritten from its timeline in Resolve, keeping what only the cut list knows
 - 42-001 | The saved project is read when Resolve is closed
@@ -89,8 +89,8 @@
 - 39-028 | What is asked of the editor before a hand-over ; A send is refused before anything is placed when it cannot succeed
 - 39-065 | The page says which computer's Resolve it is using ; Resolve on an editor's computer takes part in Timeline Cards through the app
 - 39-066 | Work for Resolve is done one piece at a time and the editor is told when it could not be
-- 39-067 | When Resolve's computer goes away the cards show its timeline as last seen
-- 39-068 | The editor can pick a saved timeline to view or go back to following Resolve
+- 39-067 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
+- 39-068 | left out: cut by the owner (2026-11-24, cards-to-resolve-and-exports-Q2)
 - 32-009 | The Export tab downloads the cut as a timeline file or as the script
 - 32-010 | Each export format carries some of the cut and says what it lost
 - 32-011 | An exported timeline links each clip to its original media where it can
@@ -102,7 +102,7 @@
 - 33-084 | The Final Cut Pro XML export
 - 33-085 | The CMX3600 EDL export
 - 33-086 | left out: for the builders only
-- 33-087 | The cut can be exported as one audio file ; An import becomes a proposal the editor previews before accepting
+- 33-087 | An import becomes a proposal the editor previews before accepting
 - 40-021 | The script export is the words of the cut as spoken
 - 39-024 | A note on a gap arrives as on-screen text over the gap
 - 41-039 | A finished cut gets English subtitles timed to its speech
@@ -118,6 +118,7 @@
 - Text assumes: A
 - Items: 32-005, 39-018, 39-021, 39-022, 39-023, 39-024, 39-028, 39-029, 42-007, 42-013
 - Covers: 32-Q5, 39-Q2, 42-Q1
+- Answered by the owner 2026-11-24: A: one hand-over, into Resolve running on the sender's own computer with the project open; nothing writes into saved projects from outside Resolve
 
 ### cards-to-resolve-and-exports-Q2: Should Timeline Cards still let a person work directly on a timeline open in Resolve from the cards (moving, deleting, splitting, trimming, inserting and marking it live, or staging those edits and applying them), or is the cut list, sent as a new timeline and updated from Resolve's changes, the only way a cut is edited?
 - Kind: either-or
@@ -128,6 +129,7 @@
 - Text assumes: written in place and marked pending; deleted if B
 - Items: 39-002, 39-004, 39-005, 39-006, 39-007, 39-008, 39-009, 39-010, 39-011, 39-012, 39-013, 39-014, 39-015, 39-068, 39-069, 39-070, 40-041
 - Covers: 39-Q1, 39-Q12, U-39-5, U-39-8
+- Answered by the owner 2026-11-24: B: editing Resolve's timeline live from the cards and staged drafts go; the Live tab (following the playhead) stays
 
 ### cards-to-resolve-and-exports-Q3: If the live view stays, when the computer running Resolve goes away, should the cards show the timeline as it was last saved in the project (when that can be read) and otherwise as last seen, with one message?
 - Kind: built twice
@@ -138,6 +140,7 @@
 - Text assumes: A
 - Items: 39-067
 - Covers: 39-Q13
+- Answered by the owner 2026-11-24: A (moot: the passage went with Q2)
 
 ### cards-to-resolve-and-exports-Q4: Should Resolve on every editor's computer take part in Timeline Cards whenever Timeline Cards and the help for the editing program are on, with a switch per computer to keep one out?
 - Kind: dormant
@@ -148,6 +151,7 @@
 - Text assumes: A
 - Items: 09-028, 10-032, 10-033, 10-034, 19-048
 - Covers: 09-Q5, 10-Q6
+- Answered by the owner 2026-11-24: A: on by default wherever Timeline Cards and the help for the editing program are on, with a per-computer switch
 
 ### cards-to-resolve-and-exports-Q5: Should sending, comparing and updating a cut list also be possible from a command line at the server, or only from the editor?
 - Kind: several ways in
@@ -158,6 +162,7 @@
 - Text assumes: written in place and marked pending; deleted if A
 - Items: 39-031
 - Covers: 39-Q16
+- Answered by the owner 2026-11-24: A: only in the editor
 
 ### cards-to-resolve-and-exports-Q6: The tools made for the people building the product (driving Resolve's own windows and menus from a command line, writing or rewriting a timeline straight into a Resolve project library, the library command lines, a switch that prints where each failed cut landed, and exporting a cut list file to all three formats from a command line) are left out of the specification for the new build to make its own. Agreed?
 - Kind: dev only
@@ -168,6 +173,7 @@
 - Text assumes: A
 - Items: 39-089, 42-007, 42-019, 42-025, 43-049, 33-086
 - Covers: 39-Q15, 33-Q8
+- Answered by the owner 2026-11-24: A: all builders' tools go
 
 ### cards-to-resolve-and-exports-Q7: Should the cut be downloadable as one audio file, as it plays in the editor?
 - Kind: dormant
@@ -178,6 +184,7 @@
 - Text assumes: written in place and marked pending; deleted if A
 - Items: 33-087
 - Covers: 33-Q7
+- Answered by the owner 2026-11-24: A: no audio export
 
 ### cards-to-resolve-and-exports-Q8: When a cut list names no start timecode, should its timeline start at 01:00:00:00 both in Resolve and in every export?
 - Kind: differs
@@ -188,6 +195,7 @@
 - Text assumes: A for the hand-over; the exports' exact text is left as it is until you answer
 - Items: 43-043, 34-037, 33-082, 39-018
 - Covers:
+- Answered by the owner 2026-11-24: A: 01:00:00:00 everywhere, exports included
 
 ### cards-to-resolve-and-exports-Q9: The script export puts a long dash between each speaker and the timecode, but your rule is that nothing a person reads has a long dash. Should the script use a hyphen with spaces there?
 - Kind: other
@@ -198,6 +206,7 @@
 - Text assumes: B (the exact text is carried as it is until you answer)
 - Items: 32-013, 40-021
 - Covers:
+- Answered by the owner 2026-11-24: A: a hyphen with spaces
 
 ## Readers' questions and unsettled points
 
@@ -247,10 +256,6 @@
 
 - cards-to-resolve-and-exports-U1 | Eight of Resolve's clip colour names and the whole marker colour order were never checked against a real Resolve | the text lists them as the items give them | 43-047, 42-011, 33-083
 - cards-to-resolve-and-exports-U2 | Only one version of Resolve was looked at for how a saved project is laid out and what a timeline holds; which other versions read the same is not known | the text assumes reading a saved project works for the version the studio runs, and names what it cannot understand | 42-001, 42-024
-- cards-to-resolve-and-exports-U3 | Which colours of a marker read back from Resolve mean a note, a plain marker and a section rests on cards-editor-1-Q7 | the text assumes that question's recommendation: Green a note, Red a plain marker, any other colour a section, and a kind already held never changed by colour | 39-058
-- cards-to-resolve-and-exports-U4 | No item shows the product placing name titles in Resolve, though two rulings say where they sit and how they hand over | the text writes the rulings as what a name title must do whenever the product places one | none (lessons CRX-097, CRX-098)
-- cards-to-resolve-and-exports-U5 | How long a stretch of empty timeline marks a timeline's real end ("a gap of minutes") | the text says "the first long stretch of empty timeline", shown and settable by hand | none (lesson CRX-095)
-- cards-to-resolve-and-exports-U6 | The default limit under which a pause between captions is bridged | the setting exists with no default written | none (lesson CRX-105)
 
 ## Conflicts between an item and a lesson
 
@@ -267,7 +272,7 @@
 - CRX-075 | 42-021 | the item refuses an edit when no OffCuts timeline exists; the ruling says nothing removed is ever lost; the text makes the offcuts timeline when missing
 - CRX-036 | 42-022 | the item never moves existing markers with moved cuts; the lesson asks that markers follow their cuts; wrote the lesson
 - CRX-034, CRX-064 | 39-057 | the item follows the sent timeline by name; the lessons ask that it be followed by id and that a lost track be said; wrote the lessons
-- owner's requirements (the editor is the one place a cut is made, and only the hand-over knows the editing program) | 39-002, 39-004 to 39-015, 39-069 | rulings CRX-028, CRX-029, CRX-031, CRX-074 to CRX-078 were made for editing Resolve live from the cards; written as ruled and marked pending on Q2
+- the owner's answer of 2026-11-24 (Q2) | 39-002, 39-004 to 39-015, 39-069 | rulings CRX-028, CRX-029, CRX-074 and CRX-075, and lessons CRX-018, CRX-021, CRX-022, CRX-031, CRX-036, CRX-076 to CRX-078, CE1-067, CE3-028, CE2-100, were met by editing Resolve's timeline live and by staged drafts; his answer cuts both, so these are listed not yet met
 
 ## New in this text
 
@@ -278,18 +283,16 @@
 - A hand-over can be taken back | a send can be taken back from the dialog or the cut list's record, removing its timeline
 - What is asked of the editor before a hand-over | a person with several computers running Resolve picks which one the cut goes to
 - Every sent timeline goes into the Timelines bin | the Timelines bin at the root, made when missing (CRX-064)
-- Edits on a timeline open in Resolve are made by Resolve's own keyboard commands | a Mac editor is told before trying that live editing needs Windows
 - The Resolve and exports dialog | what the dialog, its entries and the Export tab show with the help for the editing program off
 - Where Resolve's projects are kept is set once for the site | the project library and the default project become admin settings, from a value set only where the server is installed
 - Resolve on an editor's computer takes part in Timeline Cards through the app | on by default wherever Timeline Cards and the help for the editing program are on, with a per-computer setting
 - Several projects can be rendered from one queue that survives Resolve crashing | written from ruling CRX-092
 - Before a queue starts each job that differs from the studio's render defaults is listed | written from ruling CRX-093, with the studio's defaults as a setting
 - Clips inside compound clips are checked online before a render is queued | written from ruling CRX-094
-- A timeline's real end is found before it is rendered | written from CRX-095, with the end settable by hand
+- A timeline's real end is found before it is rendered | written from CRX-095, one minute by default, with the end shown and settable each time
 - Every render is checked before it is used | written from CRX-089 and CRX-090
 - A compound clip the product makes carries its clip's name and colour | written from ruling CRX-096
-- Name titles sit clear of the speaker | written from ruling CRX-097
-- Name titles hand over on a direct cut between two speakers | written from ruling CRX-098
+- Name titles a person adds in Resolve are left as they are | written from rulings CRX-097 and CRX-098 as settled by the owner: the product places none and never moves or loses one
 - A finished cut gets English subtitles timed to its speech | written from rulings CRX-102, CRX-104, CRX-105 and lessons CRX-099, CRX-100, CRX-107, CRX-108, with two settings
 - Subtitles already on a Resolve timeline are used rather than made again | written from ruling CRX-101
 - Two-language on-screen text splits its lines by count, Chinese above English | written from ruling CRX-103
@@ -303,7 +306,6 @@
 - 40-047 | the temporary working timeline and the message naming it (an inside)
 - 40-048 | the count of notes that "could not be placed at all" (CRX-037: a marker moves to the next free frame) and the message naming the library route (an arrangement)
 - 33-042 | a gap under 5 s getting a title when Resolve honours the in and out marks (a shorter gap gets the Green marker, one rule), notes always as markers when written into a saved project (an arrangement), and a 1-frame gap note dropped when its frame is taken (CRX-037)
-- 39-015 | undo entries kept from an older build, which rebuild the stretch, and their messages (one part older than another)
 - 32-002 | the toolbar "Send to Resolve" button and the header's red button (ruling CRX-065)
 - 32-003 | the lead "through the existing conform", the footer "This server can only show the plan.", "via <how>", and writing "into the project library" (an arrangement)
 - 32-004 | the refusals and notes about a project library not set up, not writable or not readable, and the refusal for a taken name (an arrangement, CRX-059)
@@ -315,12 +317,14 @@
 - 39-029 | saving, closing and reopening the project to write underneath it, and all its messages (not done: nothing writes outside Resolve); the facts about Resolve are kept
 - 39-031 | refusals about libraries a run may write and about closing a project, and the backup path (an arrangement)
 - 39-058 | "no agent has pushed a timeline here -- the library is the other way" and "the project library answered with no timeline", reworded as where the timeline is read from (an arrangement); the marker colour rule follows cards-editor-1-Q7
-- 39-066 | "closing and reopening the project always go" (not done), and the wording of a queue between parts
+- 39-066 | "closing and reopening the project always go" (not done), refusals and wording about edits (cut by the owner, Q2), "the edit was not sent" reworded for a send, and the wording of a queue between parts
+- 39-030 | the live-view refusals, closing and reopening the project and Resolve's transcription progress (cut by the owner, Q1 and Q2)
+- 33-082 | an unreadable or absent timeline start means 01:00:00:00, not 00:00:00:00 (the owner's answer, Q8)
+- 32-013 | the long dash in each cut's header line becomes a hyphen with spaces (the owner's answer, Q9)
+- 39-065 | "or edit live" in the note before any computer connects (cut by the owner, Q2)
+- 33-087 | the audio-file export (cut by the owner, Q7)
 - 39-067 | "showing the timeline as last seen at HH:MM -- no push since this server started" (the server's own restart, an arrangement)
-- 39-069 | applying a draft into the saved project, its "OffCuts" timeline, close and reopen, preview and undo of that apply and their messages (an arrangement, pending Q1 and Q2)
-- 39-070 | "in the saved project if need be" and the reopen note (an arrangement)
 - 39-003 | asking Resolve every minute for its own transcriptions of a clip that has none (the product makes its own transcripts)
-- 39-004 | telling the person the helper that sends keys must be installed (an inside)
 - 42-008 | copying each new cut from an existing linked cut of the clip, and refusing a clip never on a timeline or audio-only (how a saved project is written)
 - 42-009 | choosing a template timeline in a saved project (how a saved project is written)
 - 42-011 | refusing the whole conform for one unknown colour (now refused naming the cut)
@@ -361,3 +365,10 @@
 - The app on each editor's computer / Signing in, the computer's identity and the licence | Resolve on an editor's computer takes part in Timeline Cards through the app | the computer's sign-in and verified identity
 - The dashboard / Each computer's state | Each computer shows whether its Resolve is taking part and if not why | the per-computer view
 - The dashboard / Stopping and resuming the fleet | A computer says what stops its Resolve taking part | a stop by the admin
+
+## Settled by the owner 2026-11-24
+
+- cards-to-resolve-and-exports-U3 | marker colours read back from Resolve: Green a note, Red a plain marker, any other colour a section (accepted from the editor's part 1)
+- cards-to-resolve-and-exports-U4 | the product never places name titles; name titles a person adds in Resolve are left where they are, never moved or lost by a later hand-over
+- cards-to-resolve-and-exports-U5 | a stretch of empty timeline of one minute or more marks its real end, by default; shown and settable by hand each time
+- cards-to-resolve-and-exports-U6 | pauses between captions under one second are bridged, as a setting

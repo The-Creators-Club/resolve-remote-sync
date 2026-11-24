@@ -16,7 +16,7 @@
 - 05-019 | Nothing is copied when the copy could not end up in the right place
 - 05-023 | FIX ALL copies the listed clips in and repoints Resolve at the copies
 - 05-026 | A clip can be skipped for 30 minutes and never for longer
-- 05-028 | An editor copies all of a project's scattered media into its folder in one go
+- 05-028 | left out: cut by the owner (2026-11-24, resolve-on-the-editors-computer-Q4)
 - 09-023 | Projects not open in Resolve are checked for footage that exists only on this computer ; A clip outside the shared tree raises a window offering to fix it
 - 10-035 | Every clip path in a Resolve project is written one way for the whole studio
 - 15-065 | Admins are told when footage used in Resolve is outside the shared tree
@@ -81,16 +81,16 @@
 - 16-019 | Every editor's computer receives the shared LUT library and stills gallery without ticking anything
 - 01-047 | The editor undoes the last change the product made in Resolve
 - 01-048 | An admin undoes, from the dashboard, a change the product made in Resolve on an editor's computer
-- 01-051 | An editor copies all of a project's scattered media into its folder in one go
+- 01-051 | left out: cut by the owner (2026-11-24, resolve-on-the-editors-computer-Q4)
 - 02-018 | An editor asks for originals from inside Resolve
 - 02-019 | An editor asks for originals from inside Resolve
-- 04-072 | The editor scans the whole open project for media outside the tree ; An editor copies all of a project's scattered media into its folder in one go ; The editor undoes the last change the product made in Resolve
-- 04-073 | FIX ALL can rehearse, checking everything and changing nothing
+- 04-072 | The editor scans the whole open project for media outside the tree ; The editor undoes the last change the product made in Resolve
+- 04-073 | left out: cut by the owner (2026-11-24, resolve-on-the-editors-computer-Q5)
 - 04-078 | FIX ALL copies the listed clips in and repoints Resolve at the copies
 - 04-079 | A clip can be skipped for 30 minutes and never for longer
 - 04-080 | FIX ALL copies the listed clips in and repoints Resolve at the copies
 - 04-082 | What the editor is told when FIX ALL finishes
-- 04-084 | An editor copies all of a project's scattered media into its folder in one go
+- 04-084 | left out: cut by the owner (2026-11-24, resolve-on-the-editors-computer-Q4)
 - 05-012 | Every change the product makes in Resolve is recorded so it can be put back
 - 05-013 | The project is saved and a backup copy kept before the product changes it
 - 05-014 | Changes the product makes in Resolve unasked are limited and retried by themselves
@@ -101,9 +101,9 @@
 - 05-021 | The copy FIX ALL makes is safe
 - 05-022 | The copy FIX ALL makes is safe
 - 05-024 | The copy FIX ALL makes is safe ; FIX ALL copies the listed clips in and repoints Resolve at the copies
-- 05-025 | FIX ALL can rehearse, checking everything and changing nothing
+- 05-025 | left out: cut by the owner (2026-11-24, resolve-on-the-editors-computer-Q5)
 - 05-027 | Leftovers of an interrupted copy are cleaned up or reported
-- 05-043 | Changes the product makes in Resolve unasked are limited and retried by themselves
+- 05-043 | left out: cut by the owner (2026-11-24, resolve-on-the-editors-computer-Q8)
 - 10-042 | An editor asks for originals from inside Resolve
 - 12-050 | An admin undoes, from the dashboard, a change the product made in Resolve on an editor's computer
 - 12-051 | An admin undoes, from the dashboard, a change the product made in Resolve on an editor's computer
@@ -131,6 +131,7 @@
 - Text assumes: A
 - Items: 01-044, 01-045, 01-049, 01-051, 01-056, 05-028
 - Covers: 01-Q5
+- Answered by the owner 2026-11-24: A, the open timeline, Scan whole project and the check of projects not open; no timed media-pool sweep
 
 ### resolve-on-the-editors-computer-Q2: How should the editor be told about clips that point at a path only another editor's computer has?
 - Kind: differs
@@ -141,6 +142,7 @@
 - Text assumes: A
 - Items: 01-049
 - Covers: 01-Q6
+- Answered by the owner 2026-11-24: A, one notice per batch, each path once
 
 ### resolve-on-the-editors-computer-Q3: Undoing a change the product made in Resolve can be done by the editor and by an admin, from two places on the dashboard. Keep all of them?
 - Kind: several ways in
@@ -151,6 +153,7 @@
 - Text assumes: A, with both dashboard places listed and marked pending
 - Items: 01-047, 01-048, 04-069, 04-072, 05-015, 05-016, 12-051, 13-111
 - Covers: 05-Q1
+- Answered by the owner 2026-11-24: A, one undo button for the editor and the per-computer view for an admin
 
 ### resolve-on-the-editors-computer-Q4: Should there be one tool for getting scattered media into the tree, instead of FIX ALL and "Copy this project's media in" side by side?
 - Kind: either-or
@@ -161,6 +164,7 @@
 - Text assumes: A (the "Copy this project's media in" passage is written, marked pending, to be deleted)
 - Items: 01-051, 04-072, 04-084, 05-018, 05-028, 05-029
 - Covers: 05-Q2
+- Answered by the owner 2026-11-24: A, one tool: FIX ALL, filled from the timeline or Scan whole project
 
 ### resolve-on-the-editors-computer-Q5: Should FIX ALL's rehearsal mode stay?
 - Kind: dormant
@@ -171,6 +175,7 @@
 - Text assumes: B is written, marked pending, to be deleted if A
 - Items: 04-073, 05-025
 - Covers: 05-Q3
+- Answered by the owner 2026-11-24: A, rehearsal cut
 
 ### resolve-on-the-editors-computer-Q6: When an admin's undo is waiting on an editor's computer, should the admin see the real reason it waits?
 - Kind: dormant
@@ -181,6 +186,7 @@
 - Text assumes: A
 - Items: 05-016, 05-017, 12-051
 - Covers: 05-Q4
+- Answered by the owner 2026-11-24: A, waiting with the real reason, no parked state
 
 ### resolve-on-the-editors-computer-Q7: The product saves a backup copy of a Resolve project before changing it, but its own undo never uses the copy. Keep making it, and should a person be able to restore it through the product?
 - Kind: other
@@ -191,6 +197,7 @@
 - Text assumes: A
 - Items: 05-013
 - Covers: 05-Q6
+- Answered by the owner 2026-11-24: A, keep the backup, restore by hand in Resolve
 
 ### resolve-on-the-editors-computer-Q8: A count of seconds until the next automatic change is allowed exists but is shown nowhere. Keep it?
 - Kind: unreachable
@@ -201,6 +208,7 @@
 - Text assumes: B is written, marked pending, to be deleted if A
 - Items: 05-043
 - Covers: 05-Q9
+- Answered by the owner 2026-11-24: A, the seconds count cut
 
 ### resolve-on-the-editors-computer-Q9: The VP9 warning says the timeline "plays fine now only because Resolve is using the H.264 proxies" even when no proxy exists or is attached. Should that sentence fit the case?
 - Kind: other
@@ -211,6 +219,7 @@
 - Text assumes: A
 - Items: 06-034
 - Covers: 06-Q5
+- Answered by the owner 2026-11-24: A, the sentence only when proxies are playing
 
 ### resolve-on-the-editors-computer-Q10: When an editor's request for originals made from Resolve's menu is dropped, should they be told?
 - Kind: other
@@ -221,6 +230,7 @@
 - Text assumes: A
 - Items: 02-018, 02-019
 - Covers: 02-Q4
+- Answered by the owner 2026-11-24: A, the editor is told when a request is dropped
 
 ### resolve-on-the-editors-computer-Q11: Sharing an editor's own LUTs with the team can be started from the app's menu and from its settings window. Keep both?
 - Kind: several ways in
@@ -231,6 +241,7 @@
 - Text assumes: A, with both listed and marked pending
 - Items: 01-059, 04-013, 05-036
 - Covers:
+- Answered by the owner 2026-11-24: A, the app's menu only
 
 ### resolve-on-the-editors-computer-Q12: Where each Resolve project's files go can be read and set from several places. Which stay?
 - Kind: several ways in
@@ -241,6 +252,7 @@
 - Text assumes: A, with every place listed and marked pending
 - Items: 11-036, 13-046, 13-057, 20-050
 - Covers:
+- Answered by the owner 2026-11-24: A, the list and the per-computer view; set in the list and at first set-up
 
 ## Readers' questions and unsettled points
 
@@ -294,7 +306,7 @@
 - RSV-091 | 05-014 | the item writes a reached limit only to the log; the lesson reports it as a set-up problem. Wrote the lesson.
 - RSV-136 | 04-078 | the item never stops a copy for lack of room; the lesson refuses without room and asks before quitting mid-copy. Wrote the lesson.
 - RSV-144 | 05-012 | the item lets a change that could not be recorded go unnoticed; the lesson makes it a visible warning. Wrote the lesson.
-- RSV-135 | 05-025 | the item tells only the log that rehearsal is on; the lesson makes the mode visible before the click. Wrote the lesson (the behaviour itself is pending).
+- RSV-135 | 05-025 | the item tells only the log that rehearsal is on; the lesson makes the mode visible before the click. The owner then cut rehearsal (Q5), so the lesson's rehearsal half has nothing to apply to; a real run still states how many it copied.
 - RSV-066 | 04-083 | the item puts clips off silently when the window cannot be shown; the lesson records an automatic skip apart from an editor's and counts it. Wrote the lesson.
 - RSV-053 | 12-034 | the item ties a project on its own with two shared meaningful words; the ruling ties only on an exact name match with one project. Wrote the ruling (20-051's exact match, ignoring capitals, accents and hyphens).
 - RSV-040 | 22-039 | the item asks the editor to add the shared project library to Resolve by hand; the lesson has the product write the entry while Resolve is closed. Wrote the lesson, with the hand step as what the finish page shows when the entry could not be added.
@@ -330,7 +342,7 @@
 - FIX ALL copies the listed clips in and repoints Resolve at the copies | refusing without room, asking before closing or quitting mid-copy, answering within 2 seconds (RSV-133, RSV-136)
 - Leftovers of an interrupted copy are cleaned up or reported | the editor is told where a half-finished copy is, where the items only wrote it to the log
 - Every change the product makes in Resolve is recorded so it can be put back | a change that cannot be recorded is told to the editor (RSV-144)
-- An admin undoes, from the dashboard, a change the product made in Resolve on an editor's computer | the real reason for waiting (pending)
+- An admin undoes, from the dashboard, a change the product made in Resolve on an editor's computer | the real reason for waiting
 - An editor grades from the server's originals and switches back to proxies | the macOS switch (RSV-146)
 - A remote editor brings one grading frame of a camera raw original | written from RSV-147
 - The product's own graphics work gives way to Resolve | written from RSV-149
@@ -349,7 +361,6 @@
 - 20-071 | at most 4 requests per report, the field lengths, and following quiet former names: pipe limits and insides
 - 12-050 | up to 16 answers at once: a pipe limit
 - 05-026 | the permanent count of up to 5,000 skips, and the mention of a folder-wide choice that is no longer honoured: an inside and a past
-- 05-025 | that rehearsal is set only in the app's settings file, read at start: written as an ordinary visible setting (pending Q5)
 - 02-018 | that a multicam is matched only if seen on a timeline (RSV-103), that the pick is "recorded on the server" (arrangement), and dropping in silence (pending Q10)
 - 02-019 | the "HTTP {status}" code in a refusal: an inside
 - 04-082 | menu positions in messages ("Tray > Settings > OPEN LOG", "Settings, RESOLVE, [ UNDO LAST FIX ]"): reworded without positions
@@ -361,17 +372,19 @@
 - 21d-016 | that the password is kept on the installer's computer: an arrangement
 - 01-060 | that the step counts as done when either LUTs or stills were set: replaced by RSV-032 (done only after a real connection)
 - 22-032 | that a wired computer never gets the step (answered by RSV-032)
-- 05-028 | the word "consolidate" and the phrase "the NAS proxy sync": reworded for a person
 - 15-065 | the list of ways the open project can be tied to a project (manual pairing, ticked or known name, confident match): replaced by the single tie of "A Resolve project is tied to a project in the tree"
 - 12-034 | the two-shared-words automatic match: replaced by RSV-053
 - 05-017 | the message naming the wrong reason: replaced by the real reason (pending Q6)
 - 22-039 | "Problems? Contact" kept; the log path wording simplified to the place of the install's log
+- 01-044 | as a setting: the quiet time of 5 minutes before a shown clip is shown again: a setting only the build would tune (the behaviour and its figure stay in the text)
+- 05-029 | as a setting: how often projects not open are checked (every 30 minutes): a setting only the build would tune (the behaviour and its figure stay in the text)
+- 01-052 | as a setting: the interval of the scripting-down warning (5 minutes; STOP WARNING ME remains): a setting only the build would tune (the behaviour and its figure stay in the text)
+- 09-019 | as a setting: the shared LUT library's location, how often LUTs and stills are checked (every 15 minutes), the re-read of LUTs missed at launch, Resolve's own LUT folder, and extra factory LUT names: a setting only the build would tune (the behaviour and its figure stay in the text)
 
 ## Joins with other capabilities
 
 - Sync / What syncs where | An editor asks for originals from inside Resolve | the pick of originals for a computer and its download
 - Sync / Wired or remote | An editor grades from the server's originals and switches back to proxies | which computers hold proxies and which work directly off the server
-- Sync / Studio-wide stops and the editor's pause | An editor copies all of a project's scattered media into its folder in one go | the stops checked before copying and uploading
 - Sync / The sync drive | The product watches the open timeline and sorts every clip by where its file is | knowing the sync drive is out
 - Proxies and file moves / What a proxy must be | What Resolve checks when a proxy is attached | proxies carrying the original's name and timecode
 - Proxies and file moves / Following a move on an editor's computer | The product watches the open timeline and sorts every clip by where its file is | the offer to point a clip at a file this computer moved

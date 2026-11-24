@@ -8,7 +8,7 @@ The server is the part of CC Sync that lives on the studio's NAS: it holds the d
 
 The server runs on exactly two kinds of NAS, both fully supported from the same release, with every feature working the same on both:
 
-- **TrueNAS**, version 25.04 or later. TrueNAS 26 and later no longer offer the older management interface that versions before 25.04 offer exclusively; the server works with both interfaces and needs no setting to tell them apart. A TrueNAS older than 25.04 still works, and the admin is told: "TrueNAS <version> predates 25.04, which works but is not a supported version. Upgrade to 25.04 or later." A TrueNAS newer than the versions this release was tested against draws a note to check the supported versions before upgrading the NAS. A version that cannot be read is said so. None of these is a refusal.
+- **TrueNAS**, version 25.04 or later, TrueNAS 26 included, with no setting needed. A TrueNAS older than 25.04 is refused with the reason: "TrueNAS <version> predates 25.04, which this product does not run on. Upgrade to 25.04 or later." A TrueNAS newer than the versions this release was tested against draws a note to check the supported versions before upgrading the NAS; it is not refused. A version that cannot be read is said so.
 - **Synology DSM 7.2 or later.** A DSM that does not offer the web interfaces the server needs (sign-in, users, groups, group membership, user homes, secure file transfer, shared folders) is refused with "this DSM does not offer what CC Sync needs to set up editors: set them up in DSM's Control Panel instead"; a box that does not answer the question at all is told "this does not look like a DSM 7 box".
 
 The kind of NAS is chosen once (set-up offers the two; TrueNAS is the default). A blank or any other value is refused with "unknown NAS kind '<x>': allowed values: truenas, synology"; the server never guesses or falls back to TrueNAS. A step that one kind of NAS does not allow to be done from outside is refused with a message telling the admin what to do on the NAS's own screens instead.
@@ -17,7 +17,6 @@ Everything that needs to act on the NAS itself (editor accounts, access groups, 
 
 The NAS's version and name are shown to the admin wherever the NAS reports them.
 
-- Pending: server-install-and-running-1-Q5
 - Setting: Kind of NAS. Does: tells the server whether the studio's NAS is a TrueNAS or a Synology, which decides how it sets up accounts, folders and snapshots. Default: TrueNAS. Who: an admin. Applies to: the site. Search words: NAS kind, TrueNAS, Synology, DSM, storage.
 
 ### What a NAS must have before the server goes on it
@@ -89,7 +88,7 @@ On first start, and again whenever it starts, the server makes sure of these, cr
 - the folders of the studio's tree it relies on: the projects folder, the shared assets folder with the studio's shared libraries (by default the LUT library and the Resolve stills gallery), the b-roll archive with folders for its previews, and the music library. Every part's folders are created whether or not the part is switched on, so the server always starts. A failure to make the shared libraries is a note that the shared LUTs and stills may not appear; a failure to make the b-roll archive's or music library's folders makes that part unavailable with the reason, and the rest runs;
 - the server's own private folders, readable only by the account the server runs as;
 - the editors' group on the NAS ("editors" unless the site names another). An existing group is left alone and reported; a new one is created and reported with its number (on TrueNAS also enabled for Windows file sharing; on Synology numbered from 65536, and a group someone else created in the meantime is accepted). A failure to read or create it is reported with the NAS's reason;
-- on a Synology, secure file transfer granted to the editors' group. If that fails, the admin is warned that editors' transfers will fail with "channel closed".
+- on a Synology, secure file transfer granted to the editors' group, where editors' transfers go through DSM's own file-transfer server. If that fails, the admin is warned that editors' transfers will fail with "channel closed".
 
 Every folder the server creates, parent folders included, gets the site's owner, group and permissions, writable by the server and by editors over the share:
 
@@ -110,7 +109,6 @@ Some switchable parts need extra software on the server: music and YouTube downl
 
 - Who: an admin.
 - On its own: fetches what a switched-on part needs, from which parts are on.
-- Pending: server-install-and-running-1-Q9
 
 ### The set-up wizard walks the first admin through setting up the server
 
@@ -132,7 +130,6 @@ Until every required task is done, an admin who signs in without asking for a pa
 - Who: an admin; before any account exists, see the next behaviour.
 - Ways in: the set-up page an admin lands on; the same list in settings.
 - Name and search words: Set-up. Search words: setup, wizard, first run, checklist, getting started.
-- Pending: server-install-and-running-1-Q1
 
 ### Before any account exists anyone may start set-up, and after that only an admin
 
@@ -231,7 +228,6 @@ The dashboard makes and looks after each editor's account on the NAS under the s
 - Ways in: see Accounts, privacy and the legal paperwork: Who may sign in.
 - Setting: Checking each editor's sign-in key on the NAS. Does: when on, the list of people looks up each editor's key on the NAS every time it is shown; off makes the list faster. Default: on. Who: an admin. Applies to: the site. Search words: sign-in key, editors list, NAS check, people page.
 - Setting: What editors may do on the NAS. Does: whether editors' NAS accounts may only transfer files or also have a full remote shell. Default: only transfer files. Who: an admin. Applies to: the site. Search words: editor shell, file transfer only, NAS access, remote shell.
-- Pending: server-install-and-running-1-Q6
 
 ### A new project's folders are laid down on the NAS
 
@@ -244,7 +240,6 @@ An admin creates a project at the place in the tree the studio's layout gives (f
 
 - Who: an admin.
 - Setting: Who may see each project. Does: whether each project is private to its own people or shared by all editors. Default: private to its own people. Who: an admin. Applies to: the site. Search words: project privacy, project group, access, private projects.
-- Pending: server-install-and-running-1-Q6
 
 ### A project keeps a permanent identity
 
@@ -263,7 +258,6 @@ Every action that changes the NAS first shows which NAS (its address and kind), 
 Actions that sweep across a whole tree or cannot be undone (re-applying ownership across the whole tree, revoking an editor's access, creating a project's folders) additionally show the preview first and ask the admin to type the NAS's short name (the first part of its name, or the whole address when it is a number; letter case does not matter). A wrong answer stops with "Nothing was changed". A preview never asks.
 
 - Who: an admin.
-- Pending: server-install-and-running-1-Q14
 
 ### A shared Resolve project database on the NAS is set up safely
 
@@ -275,7 +269,8 @@ Where the studio keeps a shared Resolve project database on the NAS, the server 
 
 On a Synology, set-up asks DSM whether its secure file transfer service is on, since editors' computers transfer files through it, and shows "check this" with where to switch it on in DSM when it is off.
 
-- Pending: server-install-and-running-1-Q2
+- Pending: server-install-and-running-1-Q22
+
 
 #### Lessons
 
@@ -302,7 +297,7 @@ It tells the admin to give the server's data folder to the account the server ru
 
 ### Secrets an admin enters are checked and never shown back
 
-The secrets an admin enters (the server's way in to the NAS, the mail server's password, the assistant's keys, any secret the admin chooses to supply in place of one the server made) are entered in set-up or in settings and never shown back:
+The secrets an admin enters (the server's way in to the NAS, the mail server's password, the assistant's paid key, any secret the admin chooses to supply in place of one the server made) are entered in set-up or in settings and never shown back:
 
 - A secret field shows only whether one is set ("set; leave blank to keep it"); leaving it blank keeps what is stored, while blanking a plain field clears it. A secret over 400 characters or holding control characters is refused.
 - Every preview masks secrets: a set one shows as "set", an unset one as "unset".
@@ -385,6 +380,7 @@ Every setting of the site is made in one place, the dashboard (in set-up or in s
 - Who: an admin.
 - Setting: Port the dashboard answers on. Does: the port the dashboard listens on at the NAS's addresses. Default: 8480. Who: the person installing, on the NAS. Applies to: the site. Search words: port, 8480, address, listen.
 - Setting: Syncing only over the private network. Does: when on, computers sync with each other and the server only over the studio's private network, and the server's private address is offered to computers first. Default: off. Who: an admin. Applies to: the site. Search words: private network only, sync route, LAN, remote sync.
+- Pending: server-install-and-running-1-Q22
 
 ### The site's settings can be exported, imported and the last change undone
 
@@ -401,17 +397,17 @@ When a part is switched on but something it needs is not there, the dashboard sa
 - Timeline Cards on with no place for its data: it says it has nothing to serve;
 - the Footage Sorter on with no card pool; cloud-state or backup folders that are not full places on the NAS, or set without a pool; a cloud-state folder inside the pool (not used); no source or destination folders; any folder outside the pool (a move between disks would fail).
 
-The defaults when a site says nothing: the b-roll archive on; music on; YouTube downloads off, and their extra measures against YouTube's blocking off (on only when downloads are also on); automatic updates of editors' apps off. YouTube downloads are always tried on the requesting editor's own computer first.
+A new site starts with every one of the six switchable parts off (the b-roll archive, music, YouTube downloads, Timeline Cards, the Footage Sorter with camera cards) except the help for the editing program, which is on. The extra measures against YouTube's blocking are off (and can be on only when YouTube downloads are on), and automatic updates of editors' apps are off. YouTube downloads are always tried on the requesting editor's own computer first.
 
 - Who: an admin.
-- Setting: Which parts are on. Does: switches each optional part on or off for the site; see The whole product. Default: the b-roll archive and music on, YouTube downloads off. Who: an admin. Applies to: the site. Search words: parts, modules, features, enable, switch on.
-- Pending: server-install-and-running-1-Q10
+- Setting: Which parts are on. Does: switches each optional part on or off for the site; see The whole product. Default: every part off except the help for the editing program, which is on. Who: an admin. Applies to: the site. Search words: parts, modules, features, enable, switch on.
 
 ### Transfers to editors always stay within what the NAS can serve
 
 The server never hands editors' computers a transfer setting the NAS's file service cannot serve (on a Synology, at most 64 KiB pieces, 16 at a time). If such a setting is ever found stored, editors are given the safe values at once, and the admin is told, as a serious problem, "the server settings can cut big downloads short": large proxy downloads (over about 514 MB) end early under it. The fix offered puts the safe values back, and any proxy larger than that which came down under the wrong setting is fetched again.
 
 - On its own: gives editors' computers transfer settings the NAS can serve, from the kind of NAS.
+- Pending: server-install-and-running-1-Q22
 
 #### Lessons
 
@@ -475,7 +471,6 @@ After any restart, the server comes back exactly as it was: set-up resumes where
 
 The extra software a part needs on the server counts as present only when it is exactly the version this release of the product approves. A different version is replaced with the approved one the next time it is fetched, and the previous one is kept beside it (one copy) until the new one works.
 
-- Pending: server-install-and-running-1-Q8
 
 ### Missing or damaged records stop the server with a clear message
 
@@ -515,7 +510,6 @@ The status and health pages answer within seconds while a share or a service on 
 
 On a Synology, the server checks that the tree's folders keep their Synology access rules and that a rule lets editors write there, and shows one of: could not read the folder's rules; its Synology rules are gone (it was changed by hand), with the repair; no rule lets editors write there, with the repair; or intact. TrueNAS has no equivalent.
 
-- Pending: server-install-and-running-1-Q3
 
 #### Lessons
 
@@ -537,7 +531,6 @@ The server keeps point-in-time snapshots of two things on the NAS: the whole pro
 - Who: an admin.
 - Setting: How long hourly snapshots are kept. Does: how long each hourly snapshot of the tree and the server's records stays. Default: 24 hours. Who: an admin. Applies to: the site. Search words: snapshots, hourly, retention, keep.
 - Setting: How long daily snapshots are kept. Does: how long each daily snapshot stays. Default: 30 days. Who: an admin. Applies to: the site. Search words: snapshots, daily, retention, keep.
-- Pending: server-install-and-running-1-Q7
 
 ### Set-up task: protect your data
 
@@ -552,7 +545,6 @@ Before an update, a reinstall, or any change of ownership that walks a whole fol
 If no snapshot can be taken, the change does not go ahead: the admin is told why, how to set up regular snapshots, and may go ahead anyway only by accepting in words that the change has nothing behind it. Every such change ends by saying "this change had a snapshot behind it: yes", or "NO" with the reason, and every attempt (what for, the place, the time, the result) is kept in the history.
 
 - Who: an admin.
-- Pending: server-install-and-running-1-Q12
 
 ### Before every update the studio's data is backed up
 
@@ -594,7 +586,6 @@ The date is written year-month-day ("that is not a date this server can read. Us
 
 - Who: an admin.
 - Ways in: the admin's own record; a successful restore rehearsal.
-- Pending: server-install-and-running-1-Q13
 
 ### The server rehearses a restore to prove the snapshots work
 
@@ -672,7 +663,6 @@ The server watches free space on its own data disk and on the NAS's pools. A ser
 
 Everything the server keeps expires by a stated age or count: snapshots (above), backups (at most 8, 8 GiB), kept versions (the running one and the one to go back to), crash reports (the newest 20), histories (the last 20 restores and rehearsals; the newest 2000 runs of background work), and its own log, kept to at most about 100 MB (the oldest dropped first), so nothing can fill the NAS.
 
-- Pending: server-install-and-running-1-Q15
 
 #### Lessons
 
@@ -692,7 +682,6 @@ Every night the NAS itself copies off site what is needed to rebuild a client re
 
 - Who: an admin.
 - Setting: Nightly off-site backup. Does: switches the nightly off-site copy on or off and sets its time. Default: on, at 04:15. Who: an admin. Applies to: the site. Search words: off-site, cloud backup, nightly, backup time.
-- Pending: server-install-and-running-1-Q16
 
 ### An admin ticks which projects are backed up off site
 
@@ -748,10 +737,8 @@ Any plan to put the studio's camera originals off site states its monthly cost, 
 
 The question "is the dashboard up?" always answers, even when unhealthy, so installers and set-up on an editor's computer can tell whether it is running. Anyone gets only healthy or not, and the version. The server counts as healthy only when its syncing answered in a round that actually talked to it (or the site has none) and its background work is alive and its picture of the studio is not stale; none of the optional parts can make it unhealthy.
 
-A signed-in person or a recognised computer also gets a fuller summary: exactly which version is running; whether syncing answers; whether background work is alive or behind; folder errors; when each kind of check last ran and whether it worked; refused share changes; per operating system, the current version of the editors' app, when it became current, how many computers there are, how many run it, are behind or are refusing it (counts only, no names), or "cannot tell"; computers seen per operating system; the release feed's health; free space on the server's data disk; counts of open errors, warnings and diagnoses (one error when they cannot be counted); Timeline Cards' state and whether its assistant features can run; and the state of each switchable part, "unknown" when never recorded.
 
-- Who: anyone (the short answer); anyone signed in or a recognised computer (the summary).
-- Pending: server-install-and-running-1-Q17
+- Who: anyone.
 
 ### The server answers only on the studio's networks and comes back by itself
 
@@ -772,7 +759,6 @@ Two facts are on the list and checked like the rest: that deleted-file keeping a
 
 - Who: an admin.
 - Name and search words: Facts the product relies on. Search words: invariants, facts, checks, health, always true.
-- Pending: server-install-and-running-1-Q18
 
 ### The admin sees when each kind of background work last ran
 
@@ -818,12 +804,7 @@ When failing work is failing because of the disk or the server's records (a disk
 
 Any crash in the server's work writes a crash report; a crash never stops the dashboard. The newest 20 reports are kept and older ones deleted; each is readable only by the server and names the time, the version, which part of the work crashed, the system, and the error in full, with passwords, keys, sign-in tokens and secrets in addresses removed first. Nothing is sent anywhere. A serious problem on the home page says "This server's own background tasks have crashed N time(s) since it started..." with the fix: press "Download crash reports" on the problem and attach the file; that download is the newest 20 reports in one archive. The problem closes itself once the newest crash is 24 hours old, and a new crash reopens it.
 
-An admin may also have each crash sent to the vendor, with no personal data, and have the server keep a log file of everything it logs, secrets removed, kept to about 5 MB with 3 older copies. Both are off by default.
-
 - Who: an admin.
-- Setting: Send crash reports to the vendor. Does: sends each crash of the server, with no personal data, to the vendor. Default: off. Who: an admin. Applies to: the site. Search words: crash reports, send to vendor, diagnostics, telemetry.
-- Setting: Keep a server log file. Does: keeps a file of everything the server logs, with secrets removed, about 5 MB with 3 older copies. Default: off. Who: an admin. Applies to: the site. Search words: log file, server log, debug, diagnostics.
-- Pending: server-install-and-running-1-Q19
 
 ### Each switchable part's state is shown with its reason
 
@@ -853,11 +834,10 @@ Every problem the server can detect reaches a person on the home page and by mes
 
 ### The server checks itself twice a day and the owner can approve a fix by reply
 
-Twice a day the server has the assistant look over its own state, read only, and mails the admin a report of what it found, with a fallback summary or a note of failure when the assistant cannot run. A reply to that mail acts only when it comes from an address the site allows, the studio's own receiving mail server vouches for it, and it carries an unexpired reference that matches exactly; and it can only press a button the dashboard already offers. The admin's panel says whether this check can run, and if not, why: the assistant is not set up, or its sign-in has lapsed (then runs mail a plain summary until it is signed in again).
+Twice a day the server has the assistant look over its own state, read only, and mails the admin a report of what it found, with a fallback summary or a note of failure when the assistant cannot run. A reply to that mail acts only when it comes from an address the site allows, the studio's own receiving mail server vouches for it, and it carries an unexpired reference that matches exactly; and it can only press a button the dashboard already offers. The admin's panel says whether this check can run, and if not, why: the assistant is not set up, or its sign-in has lapsed (then runs mail a plain summary until it is signed in again). The check runs on the assistant the way the site has set it up, usually a paid key, and its cost counts against the site's one daily budget for the assistant; when that budget is spent, the check mails the plain summary.
 
 - Who: an admin.
 - When the assistant is off: the check mails the plain summary only, and nothing can be approved by reply.
-- Pending: server-install-and-running-1-Q20
 
 ### One check of the whole server side, shown in the dashboard
 
@@ -869,14 +849,13 @@ One check covers everything the server needs and is shown in the dashboard: one 
 - the server's syncing answers, with the project folders it holds;
 - the project tree's top folder exists (and on Synology that the editors' access to it is in place, or a warning when it cannot tell);
 - the editors' group exists and has members, listing them ("exists but has no members yet" is a failure);
-- on Synology, that transfers to editors stay within what DSM's file-transfer server can serve;
+- on Synology, where editors' transfers go through DSM's own file-transfer server, that they stay within what it can serve;
 - the dashboard answers healthy and sees its own syncing.
 
 The state of the NAS's own connection to the private network is read on both kinds of NAS (on TrueNAS from its app, on Synology from its package).
 
 - Who: an admin.
 - Name and search words: Check everything. Search words: health check, doctor, diagnose, test server, verify.
-- Pending: server-install-and-running-1-Q4
 
 ### The server stays quick under load
 

@@ -76,7 +76,7 @@ The Footage Sorter is one of the dashboard's pages, reached from its menu and it
 
 ### What needs an admin and what needs only a sign-in
 
-Only an admin may carry out a move; change a drive's details, read a drive or a folder into the record of every copy, or add, remove or change a watched folder; answer a question about where footage went; change the cloud backup schedule or start a cloud backup; back up the record of every copy; copy between drives or cancel such a copy; make, see and switch off folder links. Anyone signed in may assign clips, edit planned folders, plan moves, start looks through the folders and audits, copy cards and download originals. A person who is not an admin and tries one of the admin acts is told "<what> needs an admin of this dashboard".
+Sorted originals move into their final folders on their own, with no one approving them (see Moving footage on the NAS). Only an admin may change a drive's details, read a drive or a folder into the record of every copy, or add, remove or change a watched folder; answer a question about where footage went; change the cloud backup schedule or start a cloud backup; back up the record of every copy; copy between drives or cancel such a copy; add or remove a source folder; change the Sorter's settings; make, see and switch off folder links. Anyone signed in may assign clips, edit planned folders, put a moved clip back or move it elsewhere, start looks through the folders and audits, copy cards and download originals. A person who is not an admin and tries one of the admin acts is told "<what> needs an admin of this dashboard".
 
 - Who: as above.
 
@@ -96,13 +96,12 @@ The Sorter works with these kinds of folder, all of them places on the server:
 - **The staging folder**: where a card is copied when it is not sorted straight into the final tree. When none is set it is the first source folder.
 - **Folders looked at for their own files only**, never their sub-folders: for example loose sound files beside a drone card's folder. Such a folder that is also a full source folder is looked through in full.
 
-With no final tree set, the destination tree is empty, and exporting a move plan, auditing, card copies straight into the final tree and every other feature that needs one are refused, each saying no final tree is set.
+With no final tree set, the destination tree is empty, no clip is moved into a final folder, and auditing, card copies straight into the final tree and every other feature that needs one are refused, each saying no final tree is set.
 
 - Setting: Source folders. Does: which folders the Sorter looks through for footage to sort. Default: none until set when the part is switched on. Who: an admin. Applies to: the site. Search words: source folders, footage to sort, dump folders, sort from.
 - Setting: Final tree. Does: which folder holds the studio's finished project folders that clips are sorted into. Default: the studio's project tree on the server. Who: an admin. Applies to: the site. Search words: final tree, destination, project folders, sorted tree.
 - Setting: Staging folder. Does: where a card is copied when it is not sorted straight into the final tree. Default: the first source folder. Who: an admin. Applies to: the site. Search words: staging, card copies, holding folder, unsorted.
 - Setting: Folders looked at for their own files only. Does: folders whose loose files are listed but whose sub-folders are not. Default: none. Who: an admin. Applies to: the site. Search words: loose files, top level only, sound files, drone folder.
-- Pending: footage-sorter-and-camera-cards-3-Q1
 
 ### An admin adds or removes a source folder from the sources list
 
@@ -115,7 +114,6 @@ With no final tree set, the destination tree is empty, and exporting a move plan
 - Refusals, each in these words: "give the full path, starting at the drive"; "no such folder: <path>"; "that is a file, not a folder"; "that sits inside the destination <tree>"; "already a source root"; "already covered by <folder>" (it lies inside a source folder already listed); "that contains the existing root <folder>"; on removal, "not a source root", and "that is the only source root" (the last one cannot be removed).
 - Who: an admin.
 - Windows and macOS: on a Mac the dialog's hint names Finder's own way to copy a folder's path instead of Explorer's.
-- Pending: footage-sorter-and-camera-cards-3-Q1
 
 ### Each source folder belongs to the computer it is on
 
@@ -244,7 +242,7 @@ Everything a person can do in the Sorter with a mouse and keys can be done on a 
 
 ### The header shows the library's totals and leads back to the dashboard
 
-The product mark leads back to the dashboard, with a compact "‹ CC Sync" link as well. The totals: clips in the whole library (filed clips not yet loaded included), clips assigned (clips assigned in place and every filed clip count), clips suggested but not yet assigned, the total size assigned and the total size of everything. "Scanning…" shows while a look through the folders runs. The header also carries the not-at-home and backups counts (see The record of every copy), the Sorter's settings and Move….
+The product mark leads back to the dashboard, with a compact "‹ CC Sync" link as well. The totals: clips in the whole library (filed clips not yet loaded included), clips assigned (clips assigned in place and every filed clip count), clips suggested but not yet assigned, the total size assigned and the total size of everything. "Scanning…" shows while a look through the folders runs. The header also carries the not-at-home and backups counts (see The record of every copy), the Sorter's settings, and the moves: how many clips have moved into their final folders, how many are about to, and how many are held back, each opening the list of those clips with why each is held back and a way to put a clip back or move it elsewhere (see Moving footage on the NAS).
 
 - Phone and desk: on a phone and in windows 1,500 pixels wide or less, the suggested count and the total size are left out and the not-at-home and backups counts are shown in short form; every one of them is still in the Sorter's status.
 
@@ -268,7 +266,6 @@ A dialog has a title with a close cross, a body, and a row of buttons (a single 
 - A day as year-month-day with the weekday ("No date" when there is none).
 - A clip's time as hours and minutes exactly as the camera recorded them, in the camera's own local time, never converted between time zones ("--:--" when unknown).
 - The same rules hold on the page a folder link opens.
-- Pending: footage-sorter-and-camera-cards-3-Q4
 
 ### The clip grid stays smooth with tens of thousands of clips
 
@@ -281,7 +278,7 @@ A clip is one recording (a video, a still, an image sequence, an audio file or "
 - its picture, or a placeholder for its kind until the picture arrives, and for a card clip whether its picture has arrived yet;
 - the camera ("other" when unknown), its kind when it is not video, and its length when known;
 - a mark for where the footage physically is (on a card, in staging, in the final folders, or elsewhere), and whether a second copy exists;
-- its backup state (see Backed up and safe to format), the state of a planned copy when there is one, and on how many drives it sits with a warning when it is only on a card or a laptop (see The record of every copy);
+- its backup state (see Backed up and safe to format), whether it is about to move into its final folder or is held back (and why), and on how many drives it sits with a warning when it is only on a card or a laptop (see The record of every copy);
 - how many copies of it are known elsewhere, whether one is at home, and for a card clip where it is already filed;
 - its name ("(unnamed)" when none), the recording time, the last part of its source folder, and its size;
 - at its foot, either its destination (the last two parts of the path, "(root)" for the root) with a ✕ that unassigns that clip, or its suggestion with a ＋ that accepts it, never both;
@@ -290,7 +287,7 @@ A clip is one recording (a video, a still, an image sequence, an audio file or "
 The clips shown can be limited to some of these places. Opening one clip's full details lists its files ("unknown clip" when it has gone).
 
 - On its own: a suggested destination for each unassigned clip (see Sorting into shoots, people and cameras).
-- By hand: ＋ accepts the suggestion, any folder can be assigned instead, and ✕ unassigns. A clip assigned by hand keeps that assignment whatever later suggestions say.
+- By hand: ＋ accepts the suggestion, any folder can be assigned instead, and ✕ unassigns. A clip that has already moved into its final folder can be put back or moved elsewhere. A clip assigned by hand keeps that assignment whatever later suggestions say.
 
 ### Hovering a card's destination or suggestion explains it
 
@@ -300,7 +297,7 @@ A destination reads "In place: <dest>" when the clip already sits where it is as
 
 ### Hovering a clip card shows where it is and whether it is safe
 
-The card's tooltip gives the name, the source folder ("(root)"), the number of files and size, the recording time, the explanation of its health, then "On card <drive>", "Staging", "Final" or "Elsewhere", and "backed up" (with " to <backup>", or " (the record of copies: copies elsewhere)" when only the record of every copy says it is safe, plus " (matched as a twin of a copy already filed)" when that applies) or "not backed up", and " · destination: <plan state>" when a copy is planned.
+The card's tooltip gives the name, the source folder ("(root)"), the number of files and size, the recording time, the explanation of its health, then "On card <drive>", "Staging", "Final" or "Elsewhere", and "backed up" (with " to <backup>", or " (the record of copies: copies elsewhere)" when only the record of every copy says it is safe, plus " (matched as a twin of a copy already filed)" when that applies) or "not backed up", and " · destination: <about to move | held back: reason>" while it waits to move into its final folder.
 
 - Phone and desk: on a touch screen the same facts are in the clip's details.
 
@@ -343,7 +340,7 @@ The search box ("Search stem, folder, camera, destination, event…"; Ctrl or Cm
 
 ### Clips sort by time, length, size, name or fewest copies, with unfinished work first
 
-Time is the starting sort; ↑/↓ reverses it ("Reverse the sort"). Whatever the direction, clips that still need work come first and finished ones last: a clip the present move plan will skip, or that already survives elsewhere (with no plan, a clip already backed up), sinks to the bottom. Clips whose value is unknown also sink, in either direction. Ties are broken by name in natural order. Length uses lengths learned while previewing too. The sort field is remembered on that browser; the direction is not.
+Time is the starting sort; ↑/↓ reverses it ("Reverse the sort"). Whatever the direction, clips that still need work come first and finished ones last: a clip already moved into its final folder, or already backed up, sinks to the bottom. Clips whose value is unknown also sink, in either direction. Ties are broken by name in natural order. Length uses lengths learned while previewing too. The sort field is remembered on that browser; the direction is not.
 
 ### The destination tree follows the clip the person clicks
 
@@ -394,7 +391,6 @@ Show in the file manager, from the clip's menu, its details and the audio workli
 - Where that cannot be done (a phone, a computer without the app, footage that computer cannot reach), the person is told so and shown the clip's place on the server, with a button to copy it.
 - What a person may be told: "Opened in the file manager"; "nothing to show"; "not on disk any more - rescan?"; "Could not open it: <reason>".
 - Windows and macOS: Explorer on Windows, Finder on macOS.
-- Pending: footage-sorter-and-camera-cards-3-Q3
 
 ### The page summarises the final tree by destination and by day
 
@@ -423,22 +419,18 @@ Except for the first three, keys do nothing while typing in a box or with a dial
 
 ### The Sorter's settings
 
-Every setting of the Sorter is on the Sorter's settings, besides the folders above:
+Every setting of the Sorter is on the Sorter's settings, besides the folders above, and only an admin changes them, except card names. The studio's calendar is read again every 15 minutes, and the crew's list of cards every 15 minutes. A card copy does not start unless it leaves at least 256 MB free on the drive it copies to.
 
 - Setting: Studio time zone. Does: the time zone every recording time and calendar time is read in when footage is matched to the studio's calendar, as a fixed offset with no daylight saving. Default: the site's own time zone, set when the part is switched on. Who: an admin. Applies to: the site. Search words: time zone, offset, clock, calendar times.
 - Setting: Calendar events from. Does: the earliest date of the studio's calendar events that are read. Default: the day the part is switched on. Who: an admin. Applies to: the site. Search words: calendar start, events from, earliest event, date.
-- Setting: Calendar refresh. Does: how often the studio's calendar is read again. Default: every 15 minutes (from 5 minutes to one day). Who: an admin. Applies to: the site. Search words: calendar refresh, how often, events, interval.
 - Setting: Calendars read. Does: which of the studio's calendars the Sorter reads events from. Default: the connected account's main calendar. Who: an admin. Applies to: the site. Search words: calendars, which calendar, events, account.
 - Setting: Time folders. Does: whether each assigned folder gets one folder per day and camera (see Sorting into shoots, people and cameras). Default: off. Who: an admin. Applies to: the site. Search words: time folders, per day, per camera, day folders.
 - Setting: Camera labels. Does: the label each kind of camera gets in time folder names (for example a label for each camera model the studio shoots on, one for drones, one for sound). Default: none until set; the studio's own labels are carried over. Who: an admin. Applies to: the site. Search words: camera labels, A-CAM, camera names, angle names.
 - Setting: Bring the camera's proxies with a card copy. Does: whether a card copy also copies the proxies the camera wrote, into a folder named "proxy" beside the footage. Default: on. Who: an admin. Applies to: the site. Search words: camera proxies, card copy, proxy folder, bring proxies.
-- Setting: Room to leave on the target drive. Does: the space a card copy must leave free on the drive it copies to, or it does not start. Default: 256 MB. Who: an admin. Applies to: the site. Search words: free space, spare room, margin, disk full.
 - Setting: Count an unverified card copy as done. Does: whether a card copy that could not be checked may still count as finished. Default: off. Who: an admin. Applies to: the site. Search words: unverified copy, verify, checked copy, done.
 - Setting: Same name, different file. Does: what a card copy does when a file of the card has the name of a different file already there: keep both (the incoming one is renamed) or skip the incoming file. Default: keep both. Who: an admin. Applies to: the site. Search words: name clash, same name, duplicate name, keep both.
-- Setting: Crew card list refresh. Does: how often the crew's list of cards is read again. Default: every 15 minutes. Who: an admin. Applies to: the site. Search words: crew cards, card tracker, card list, refresh.
 - Setting: Card names. Does: the label written on each card, given to its serial number (see Recognising cards and drives). Default: none. Who: anyone signed in. Applies to: the site. Search words: card names, card labels, serial number, SD card.
 - Name and search words: Footage Sorter settings. Search words: sorter settings, card copy settings, calendar, time folders.
-- Pending: footage-sorter-and-camera-cards-3-Q2
 
 ### Connecting the studio's calendar
 
@@ -446,7 +438,6 @@ The control for connecting the studio's calendar stays on screen, steady, until 
 
 - Who: an admin.
 - Phone and desk: the connection and its settings are reachable on a phone.
-- Pending: footage-sorter-and-camera-cards-3-Q2
 
 ### The field backup page on an editor's computer keeps itself up to date
 
@@ -469,7 +460,7 @@ There are four ways to search, chosen beside the search box:
 - **Exact**: the words as typed, in names and folders.
 - **Loose**: close spellings and parts of words.
 - **Across languages**: an English word finds a Chinese name and the reverse (below).
-- **Ask the assistant**: a question in ordinary words (below).
+- **Ask Assistant**: a question in ordinary words (below).
 
 - Who: anyone signed in.
 - Name and search words: Archive search. Search words: find footage, where is clip, archive, drives, tapes.
@@ -537,7 +528,6 @@ Share folder… ("Make a link for a folder that anyone you send it to can downlo
 - Who: an admin. Anyone else is told "<what> needs an admin of this dashboard".
 - Phone and desk: Share folder… is reachable on a phone.
 - When camera cards with the Footage Sorter is off: its links do not open.
-- Pending: footage-sorter-and-camera-cards-3-Q5
 
 ### An admin sees every folder link and can switch one off at once
 
@@ -545,7 +535,6 @@ Links lists every link ever made that hands footage to people outside the studio
 
 - Who: an admin.
 - Name and search words: Folder links. Search words: shared links, share folder, footage links, switch off link.
-- Pending: footage-sorter-and-camera-cards-3-Q5
 
 ### Someone holding a folder link sees its files and picks which to take
 
@@ -568,7 +557,6 @@ No account or sign-in is needed. The page is hidden from search engines and pass
 - Without a folder picker: "This browser cannot save into a folder you pick. Open this link in Chrome or Edge on a computer for that. Here you can click a file to download it, or take everything as one zip (best for smaller folders)."
 - How it ends: "Done. All <n> files are in the folder (<n> were already there).", "<n> of <m> files are in the folder. <k> could not be downloaded:", "This link stopped working during the download. Ask whoever sent it for a new one, then pick the same folder to carry on.", "Stopped. Press Download into a folder and pick the same folder to carry on from here."; "The folder could not be opened: <reason>".
 - Who: a client or anyone holding the link.
-- Pending: footage-sorter-and-camera-cards-3-Q4
 
 ### A folder link reaches nothing outside its folder, and an unusable link says so
 

@@ -18,7 +18,7 @@
 - 29-033 | The edit view trims one cut, with its header, a trim lane and its words
 - 29-034 | The edit view trims one cut, with its header, a trim lane and its words
 - 30-031 | A cut's words always follow its span, on every device
-- 30-032 | Every cut's words can be refreshed at once
+- 30-032 | left out: cut by the owner (2026-11-24, cards-editor-2-Q7)
 - 32-023 | A person can start a new, empty cut list in an episode
 - 32-024 | A person can duplicate a cut list as it is now
 - 32-025 | A cut list that nobody has open can be renamed, and everything tied to it follows
@@ -50,7 +50,7 @@
 - 34-051 | Numbers and white space in the file follow fixed rules so a file reads and writes back identically
 - 39-032 | A cut list opens as cards with no editing program, and can be opened read-only
 - 39-035 | Each card's words are read again from the transcript every time a cut list opens
-- 39-040 | A cut list changed by hand outside Timeline Cards shows on the page within about a second
+- 39-040 | left out: cut by the owner (2026-11-24, cards-editor-2-Q5)
 - 39-041 | Edits are applied in order, each one a numbered revision, and nothing is ever overwritten
 - 39-042 | Reordering cards keeps each section heading with its own cuts
 - 39-047 | Splitting, trimming, extending and inserting change the cut list exactly to the frame
@@ -137,7 +137,7 @@
 - 39-034 | Facts the editing program knows about a clip win over what the cut list recorded
 - 40-027 | The footage is never touched, and everything made for playback is kept apart from it
 - 40-028 | A clip whose sound is still being prepared is dimmed on the lane ; The editor finds each clip's sound by itself and lists the clips it cannot play ; The browser is given light copies, never the camera originals
-- 40-029 | Sound is always prepared before video, and progress is shown as a count
+- 40-029 | left out: cut by the owner (2026-11-24, cards-editor-2-Q11)
 - 40-030 | The browser is given light copies, never the camera originals ; Every clip is made ready to play without anyone asking
 - 40-031 | Each clip's waveform is made once, fine enough for 1/200 of a second, and reused
 - 40-090 | left out: for the builders only
@@ -153,6 +153,7 @@
 - Text assumes: A
 - Items: 34-024, 34-042, 34-043, 34-045, 34-048, 39-059, 39-060, 39-061, 39-062
 - Covers: 34-Q7, 39-Q7
+- Answered by the owner 2026-11-24: A: every mark and the folder kept exactly, hand editing stays supported
 
 ### cards-editor-2-Q2: When two people edit the same cut list, should Undo take back only your own last edit, or step the file back to its previous version whoever made it?
 - Kind: differs
@@ -162,6 +163,7 @@
 - Changes for a person: with A a shared cut list never loses a colleague's edit to your Undo; with B the Undo button can undo things you did not do.
 - Text assumes: A
 - Items: 28-076, 39-052, 39-063
+- Answered by the owner 2026-11-24: A: Undo takes back your own edits; every saved version is kept
 
 ### cards-editor-2-Q3: Is a gap a row of its own that stays where it was put, or the black before the cut that follows it?
 - Kind: differs
@@ -171,6 +173,7 @@
 - Changes for a person: with A deleting a cut leaves the gap where it was; with B the gap jumps onto the next cut and two gaps in a row merge into one.
 - Text assumes: A
 - Items: 28-072, 28-074, 29-030, 34-025, 34-047, 39-043, 39-048, 39-063
+- Answered by the owner 2026-11-24: A: a gap is its own row that stays where it was put
 
 ### cards-editor-2-Q4: Should a cut list refuse to extend a cut's out point past the end of its clip?
 - Kind: other
@@ -180,6 +183,7 @@
 - Changes for a person: with A an over-long extend is refused with a sentence; with B the cut list can hold a cut that cannot be placed.
 - Text assumes: A
 - Items: 28-069, 34-028, 39-047
+- Answered by the owner 2026-11-24: A: always refused once the clip's length is known
 
 ### cards-editor-2-Q5: When someone changes an open cut list's file by hand, should the editor reload it from the file, or merge the change in as edits?
 - Kind: differs
@@ -189,6 +193,7 @@
 - Changes for a person: with A a hand edit and an editor's work both survive; with B redo is lost and an edit in flight is refused.
 - Text assumes: A (the reload passage is written, marked, to be deleted if A is chosen)
 - Items: 39-040, 34-024
+- Answered by the owner 2026-11-24: A: a hand change is merged in as edits; the reload passage is deleted
 
 ### cards-editor-2-Q6: Should Resolve's changes brought back into a cut list follow the same rules as a hand edit of the file?
 - Kind: built twice
@@ -199,6 +204,7 @@
 - Text assumes: A
 - Items: 34-024
 - Covers: 34-Q1
+- Answered by the owner 2026-11-24: A: Resolve's changes follow the hand-edit rules
 
 ### cards-editor-2-Q7: A "refresh every cut's words now" action exists that nobody can reach. Should it become a button, or go?
 - Kind: unreachable
@@ -209,6 +215,7 @@
 - Text assumes: written and marked, to be deleted if A is chosen
 - Items: 30-032
 - Covers: 30-Q5
+- Answered by the owner 2026-11-24: A: dropped; the passage is deleted
 
 ### cards-editor-2-Q8: Should a person be able to open a cut list read-only from the list of cut lists?
 - Kind: other
@@ -219,6 +226,7 @@
 - Text assumes: A
 - Items: 39-032
 - Covers: 39-Q17
+- Answered by the owner 2026-11-24: A: a person chooses read-only when opening a cut list
 
 ### cards-editor-2-Q9: The editor has two places that show the picture: the Video tab you asked for, and a floating video window that can be moved into its own browser window. Keep both, or make one video panel?
 - Kind: built twice
@@ -229,6 +237,7 @@
 - Text assumes: B as written (the floating window's passages are marked, so they can be folded into the Video tab if A is chosen)
 - Items: 29-060, 32-037, 32-038, 32-040
 - Covers: 32-Q7
+- Answered by the owner 2026-11-24: A: one video panel, the Video tab, which also floats, moves into its own window like every other panel, and shows on a phone
 
 ### cards-editor-2-Q10: Should "Same loudness" level to the middle of the clips used in this cut, or of all the episode's interviews?
 - Kind: differs
@@ -238,6 +247,7 @@
 - Changes for a person: with A adding a clip to the cut can shift every clip's level slightly; with B the levels stay put while cutting.
 - Text assumes: A
 - Items: 33-065, 33-081, 34-015
+- Answered by the owner 2026-11-24: the recommendation as written: the clips used in this cut (the text's reading)
 
 ### cards-editor-2-Q11: Keep the dimmed clip while its sound is being made, and the "N of M" count with the studio's computers' share?
 - Kind: unreachable
@@ -247,6 +257,7 @@
 - Changes for a person: with A a clip that cannot play yet looks different on the lane; without the count nothing else is lost.
 - Text assumes: both written and marked
 - Items: 40-027, 40-028, 40-029, 40-030, 40-031
+- Answered by the owner 2026-11-24: A for the dimmed clip (kept), B for the count (deleted)
 
 ### cards-editor-2-Q12: Two maintenance commands are for the people building the product. May they go?
 - Kind: dev only
@@ -256,6 +267,7 @@
 - Changes for a person: none.
 - Text assumes: left out
 - Items: 40-089, 40-090
+- Answered by the owner 2026-11-24: A: they stay left out
 
 ### cards-editor-2-Q13: When a cut is deleted, should it always go to the cut list's shelf, even when the cut is being edited live in Resolve?
 - Kind: built twice
@@ -266,6 +278,7 @@
 - Text assumes: A (the editor's delete; the live Resolve view is written with the hand-over)
 - Items: 39-043
 - Covers: 39-Q3
+- Answered by the owner 2026-11-24: A: a deleted cut always goes to the shelf
 
 ### cards-editor-2-Q14: Should the gain set on a card be carried into Resolve when the cut is handed over?
 - Kind: other
@@ -276,6 +289,7 @@
 - Text assumes: left out (it is the hand-over's behaviour)
 - Items: 39-048
 - Covers: 39-Q4
+- Answered by the owner 2026-11-24: A: the gain goes with the cut into Resolve
 
 ## Readers' questions and unsettled points
 
@@ -344,6 +358,9 @@
 
 ## Parts of items left out
 
+- 29-060 | "It is not on phones": by the owner's answer to cards-editor-2-Q9 the Video tab is the one video panel, which floats on a phone
+- 32-037 | framed as the one video panel (cards-editor-2-Q9); its exact text is kept
+
 - 19-045 | the 15 seconds the editor is given to save when the server stops: an arrangement; the promise (nothing is lost) is written
 - 28-066 | "a short grain of audio where it lands": replaced by the scrubbing ruling CE1-088
 - 29-060 | the preview file's name and "the pipeline makes it" in the no-preview message (replaced by a plain reason, as the item itself asks); the quarter-second drift (lesson CE3-047)
@@ -369,12 +386,14 @@
 - 39-060 | "by update-project" in the `written` stamp: a tool's name, replaced by its role
 - 39-063 | "Several gap lines before a cut are added into one; a gap always belongs to the cut after it." (cards-editor-2-Q3)
 - 40-028 | the state "the tool for making it missing", the 30-minute give-up, and how a copy is re-encoded: insides
-- 40-029 | the word "fleet" on screen, replaced by the role of the studio's other computers
+- 40-029 | left out: cut by the owner (2026-11-24, cards-editor-2-Q11)
 - 40-030 | made only once a page turns the video window on (ruling CE2-065); the copy carrying its sound (sound is never taken from a video file); the 60 minutes kept as "an hour"
 - 40-031 | at most 2 made at once, and the "tool missing" state: insides
 - CE2-055 | playhead positions sent about ten times a second: the half of the lesson that is an arrangement; the promise (one request in flight, the final position always heard) is written
 
 ## Joins with other capabilities
+
+- Timeline Cards: the hand-over to Resolve, and exports / Sending a cut to Resolve | The gain dialog sets a cut's loudness on top of the automatic levelling | a cut's own gain is carried into Resolve (cards-editor-2-Q14)
 
 - Timeline Cards: the hand-over to Resolve, and exports / Edits sent live and staged edits | Notes on cards and gaps while a cut is worked on a live timeline | how notes travel with a live timeline and its draft cards
 - Timeline Cards: the hand-over to Resolve, and exports / Bringing Resolve's changes back into the cut | The cut list file can be edited by hand, and the editor merges the change | Resolve's changes become edits (cards-editor-2-Q6)

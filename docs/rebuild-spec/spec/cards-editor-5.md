@@ -18,7 +18,7 @@ The phone editor is reached over a secure address, since phone browsers grant fu
 
 - Who: anyone; opening an episode needs a sign-in.
 - Name and search words: the phone app. Search words: install, home screen, phone app, Cards app, offline.
-- Phone and desk: on a desk the same pages are used in a browser window or the Windows app.
+- Phone and desk: on a desk the same pages are used in a browser window or in the editor's own window from the app on the editor's computer.
 
 ### The Android app gives the phone editor a full screen that never moves
 
@@ -268,10 +268,9 @@ The drop is one move, undone in one step, and the head stays on the moved block.
 
 ### The left stick pans and zooms the lane, never the head
 
-Sideways: pan the lane, 14 px per 60 Hz frame at full push (a quarter with LT). Up / down: zoom about the centre of the view; per 60 Hz frame at full push the zoom changes by a factor of e^0.045 (about 4.6 %), up zooms in; a quarter with LT. The controller's zoom runs over the same range as every other way of zooming the lane (see The lane: clicking, trimming, zooming and dragging, in part 1). The pan stays between the start and the end of the timeline. With L3 held, the landing line follows the pan.
+Sideways: pan the lane, 14 px per 60 Hz frame at full push (a quarter with LT). Up / down: zoom about the centre of the view; per 60 Hz frame at full push the zoom changes by a factor of e^0.045 (about 4.6 %), up zooms in; a quarter with LT. The controller's zoom runs from the whole cut in to 400 px per second, the same range as every other way of zooming the lane. The pan stays between the start and the end of the timeline. With L3 held, the landing line follows the pan.
 
 - Exact: yes
-- Pending: cards-editor-5-U1
 
 ### RT is a shuttle: the harder the pull, the faster the playback
 
@@ -289,7 +288,6 @@ Pulled past 0.1: playback starts (if stopped) at a rate from 1x at a light pull 
 
 {{28-043}}
 
-- Pending: cards-editor-5-Q10
 - Exact: yes
 
 ### In the transcript, View, Menu, the sticks and RT
@@ -302,16 +300,27 @@ Pulled past 0.1: playback starts (if stopped) at a rate from 1x at a light pull 
 
 The transcript panel's own messages for the controller's actions. Which button sends which action is the transcript map above: the paragraph step is LT + D-pad Up / Down, the edge is the bumper taps, the head on a sentence is L3, the whole paragraph is R3, playing the paragraph is LT + A, scrolling is the left stick, leaving the find box is B, View or Menu in the box, the list of transcripts is LT + R3 and the list's own map, and showing a cut is Y twice on the lane.
 
-{{30-030}}
+Each action that cannot act fails and the controller rumbles. Button names are those the panel's own messages use.
+- Right stick moves the transcript playhead through the words, as the lane's jog moves the lane head: a word costs the time to the next word's start, at least 0.06 s and at most 0.5 s of stick (a silence is stepped over; a run of words sharing one start is not crossed in one frame). The first push puts the playhead on the sentence cursor's first word, else the first timed word in view, and moves nothing ("the playhead is on this word - the right stick moves it, LT + the right stick selects, A plays from it"); a playhead scrolled out of view is placed again the same way. It pauses the transcript; the view keeps the word at least min(48 px, a quarter of the view) from the edges; the first or last word stops dead (rumble); a plain move drops any selection. No timed words: "this transcript has no word timings on these lines, so there is no playhead to move" (or "this transcript has no timings, so there is no playhead to move").
+- LT + right stick selects what the playhead crosses, from where it stood when selecting began; letting go keeps the selection; holding LT again continues from its moving end; English selected this way stands for its original words. Drawn like the cursor's selection and played whole by Space/A.
+- B (cancel), in order: a multi-sentence cursor back to one sentence ("back to one sentence"); a controller selection dropped, head stays ("the selection is off - the playhead stays where it is, B again takes it off"); a cursor, selection or picks cleared ("the selection is off"); the transcript playhead removed ("the transcript head is off").
+- X: insert at the lane head; LT + X: after the selected card.
+- D-pad: previous/next sentence, starting on the sentence the head is in. Paragraph step: next paragraph's first sentence; back goes to the top of the current paragraph first, then the previous paragraph.
+- Edge: move the start or the end of the cursor selection by a sentence ("LB / RB grow it").
+- Y (home): right after stepping through find hits, selects the current hit's sentence ("the match’s sentence is selected - X inserts it at the head, LB / RB grow it"); a hit on the other language's line selects its paragraph's first sentence ("the match is on the other language’s line: its paragraph’s first sentence is selected (LT + L3 switches the cursor’s language)"). Otherwise the paragraph under the transcript playhead (under the lane head when the transcript has no playhead) ("the block under the playhead - move with the D-pad, then LT + Y selects the run"). With no hit: "there is no match to take yet - type in the find box, then ◀ ▶".
+- LT + Y (range): the first press sets the current sentence as the anchor ("this sentence is the anchor - move along, then LT + Y selects up to the cursor"); the next selects from the anchor to the cursor ("N sentences selected - X inserts them, B collapses").
+- Head on sentence: puts the transcript playhead on the cursor sentence's first word ("the transcript head is on that sentence - A plays on from it"; "that line has no word timing, so the head cannot be placed on it").
+- LT + L3: switches the cursor's language, as X on the keyboard.
+- Whole paragraph: the cursor covers its paragraph. Play paragraph: selects the whole paragraph and plays it from 0.4 s before to 1 s after ("that paragraph has no word timings to play").
+- ◀ ▶: previous/next find hit ("there is nothing to find yet - Menu puts the caret in the find box").
+- A down/up: as Space down/up (tap plays or pauses, hold skims at 2x); a cancelled release ends the hold.
+- RT (shuttle): plays at the given rate while held (starting playback if stopped); releasing returns to 1x and pauses if it was stopped.
+- Scroll: scrolls the paragraphs.
+- Menu: focuses the find box with its text selected; if the box is empty and the search sheet had a word, that word is typed into it first. Leave find: back to the paragraphs.
+- List of transcripts: browse (switch to the list and focus the open transcript's row or the first), list step up/down ("the list is empty: nothing matches its filters"), list open, list back (to the open transcript).
+- Show cut: shows a cut in its transcript and focuses the paragraphs.
 
 - Exact: yes
-
-### LT with D-pad Left or Right in the transcript says there is no results list
-
-LT + D-pad Left / Right in the transcript shows the hint "There is no results list open: Ctrl+Shift+F searches every transcript" and rumbles. (While the search sheet is open the controller follows the results map, where D-pad Up / Down steps the results.)
-
-- Exact: yes
-- Pending: cards-editor-5-Q5
 
 ### On the list of transcripts, the controller walks the list and opens one
 
@@ -332,12 +341,6 @@ LT + D-pad Left / Right in the transcript shows the hint "There is no results li
 {{28-048}}
 
 - Exact: yes
-
-### After an edge drag or a fade, A plays the join
-
-Once an edge drag or a fade made with the controller lands, A plays the join: from 1 s before the new edge to 1.5 s after, then parks.
-
-- Pending: cards-editor-5-Q6
 
 ### What the editor's views do with the controller
 
@@ -425,10 +428,9 @@ Opening a cut list, or making one from the board, takes about one second at most
 
 ### The editor starts on the cards view and switches to the phone layout on a narrow window or a touch screen
 
-The views are the cards, the lane, edit, the transcript and the shelf; the editor starts on the cards. The zoom starts at 40 px per second and runs over the lane's one zoom range (see The lane: clicking, trimming, zooming and dragging, in part 1); a zoom holds the chosen time still on screen and never scrolls before 0. The phone layout is on when the window is 700 px wide or less or the pointer is coarse (a touch screen), and follows changes as they happen. "Retry now" reconnects to the server at once, even after a final error.
+The views are the cards, the lane, edit, the transcript and the shelf; the editor starts on the cards. The zoom starts at 40 px per second and runs from the whole cut in to 400 px per second, for every way of zooming; a zoom holds the chosen time still on screen and never scrolls before 0. The phone layout is on when the window is 700 px wide or less or the pointer is coarse (a touch screen), and follows changes as they happen. "Retry now" reconnects to the server at once, even after a final error.
 
 - Exact: yes
-- Pending: cards-editor-5-U1
 
 ### While the editor is starting, a placeholder of the editor is already on screen
 
@@ -453,7 +455,7 @@ The editor loads and works in current Chrome and Safari on desk and phone; a pag
 ### The header shows the brand, where you are, search, undo, redo and Send to Resolve
 
 - **Brand**: the CC mark and "TIMELINE CARDS"; clicking it switches back to the Cards view (it does not leave the page).
-- **Breadcrumb**: the episode name, "/", then the cut list's title. The title is the list's project name, else its title, else the file's name without its ending, else "No cut list open". A leading episode name is dropped, and anything in the title that marks a list as made by [the assistant] is dropped. The full title is the hover text.
+- **Breadcrumb**: the episode name, "/", then the cut list's title. The title is the list's project name, else its title, else the file's name without its ending, else "No cut list open". A leading episode name is dropped, and anything in the title that marks a list as made by Assistant is dropped. The full title is the hover text.
 - **Search box** (desk only): placeholder "Search the cards", key hint "Ctrl K". Typing filters live (see Find). Esc in a non-empty box clears it.
 - **Undo / Redo** icon buttons (desk only), disabled when there is nothing to undo or redo.
 - **Send to Resolve** (desk only): a red primary "Send to Resolve" when a cut list is open and sending is available; "Sending" with a spinner while it runs; a second press meanwhile is ignored. When no computer can drive Resolve for this page (list open), a quiet label "Resolve: not connected" whose hover says why. With no list open nothing is drawn. Success toast "Sent to Resolve."; failure (error level) "Send to Resolve failed: <message>"; closing the Resolve panel without sending reports nothing. The red button opens the send panel; if that panel is not available it fails with the reason, or "the Resolve panel is not available yet".
@@ -464,25 +466,6 @@ At desk widths the header stays on one line: long names end in an ellipsis, ever
 
 - When the help for the editing program is off: no Send to Resolve button, label or tip is drawn; the header offers the exports in its place (see Resolve is optional).
 - Exact: yes
-
-### A status line at the foot shows the mode and what is happening
-
-A prompt "> MODE" with a blinking caret. Modes: EDIT (live), SYNC (connecting or syncing), OFFLINE, ERROR, TRIM (dragging an edge), PLACE (holding a staged card), PLAY (playing). Context text, first match wins:
-
-- Edge drag: "<speaker> ^ref, in/out edge ±N.NN s", "Snapped to a frame", "Release to trim, Esc cancels".
-- Holding a staged card: "Holding <speaker>, N.N s", "Drop between two cuts, Esc cancels".
-- Offline (or connecting with edits queued): "Edits are kept on this device".
-- Connecting: "Connecting to the server"; syncing: "Sending offline edits".
-- Error: the error sentence, else "The server refused an edit".
-- Playing: "<speaker> ^ref, X s of Y s", "Space pauses, J K L shuttle".
-- Gap selected: "Gap selected, N s[, M items in all]", "Drag an edge to size it, Del takes it out".
-- Cut selected: "<speaker> ^ref selected, N s[, M cuts in all]".
-- No list: "No cut list open".
-
-Right side: "rev N" (the server's confirmed version; hover "The server's confirmed version of this cut list"), a dot with "Synced, nothing queued" (live, nothing waiting) or the long sync label, and a "Shortcuts" button (only when there are shortcuts). It stops announcing to screen readers while playing.
-
-- Exact: yes
-- Pending: cards-editor-5-Q4
 
 ### Toasts: one at a time, with set lifetimes, Dismiss, and an Undo after every edit
 
@@ -535,7 +518,7 @@ At 1440 x 900 and at 412 x 915, every combination of open panels keeps the card 
 
 ### The Windows menu moves a panel, or the whole editor, into a window of its own
 
-{{32-045}}
+Rows: Lane ("The timeline with the words in its clips"), Transcript ("The transcript beside the cut"), Ask Assistant ("Ask Assistant for changes"), Overview ("Sections and markers"), each "Move out" or "Elsewhere" (gold; "In another window: bring it back here"); Cards ("A second view of the cards", "New window"); a separator; "Whole editor" ("This cut list in another window", "New window"); "Bring everything back" (only when other windows are open or a panel is out). Up/Down/Home/End move between rows; Escape closes the menu and returns focus to the Windows button; a press outside closes it; it sits under the Windows button (else centred near the top). "Whole editor" opens this cut list again in a new window.
 
 - When the assistant is off: the Ask row is not in the menu.
 - Name and search words: the Windows menu. Search words: windows, second screen, pop out, move out, bring back.
@@ -588,14 +571,6 @@ Hovering never changes the size or the place of any other element, and a list th
 {{33-061}}
 
 - Exact: yes
-- Pending: cards-editor-5-Q8
-
-### An "All stacks" button in the View sheet
-
-{{33-062}}
-
-- Exact: yes
-- Pending: cards-editor-5-Q7
 
 ### Card text comes in four sizes
 
@@ -618,7 +593,7 @@ Hovering never changes the size or the place of any other element, and a list th
 
 ### In a desktop app window the editor is one whole window whose header is its title bar
 
-Where the editor runs in a window of its own on a desktop (the Windows app), it shows as one window, like Resolve: the editor's header doubles as the window's title bar and drags the window, and the window's own minimise, maximise and close buttons are drawn over the header in the editor's colours.
+Where the editor runs in a window of its own on a desktop (opened from the app on the editor's computer), it shows as one window, like Resolve: the editor's header doubles as the window's title bar and drags the window, and the window's own minimise, maximise and close buttons are drawn over the header in the editor's colours.
 
 ### Standing conditions go to one problems window and never pop up over the cards
 
@@ -656,7 +631,7 @@ At the top: "N episodes", "Carry on with <episode>" (see the next behaviour but 
 Sort, view, year and each folder's open or closed state are remembered on the device; the search text only for that tab. The page works with scripts switched off too: folders fold, buttons work, and the order is A to Z.
 
 - Who: anyone signed in.
-- Ways in: the dashboard's menu, the installed phone app, the Windows app's "Episodes (home)", and "All episodes" inside the editor.
+- Ways in: the dashboard's menu, the installed phone app, the editor window's "Episodes (home)", and "All episodes" inside the editor.
 - Name and search words: the Timeline Cards page. Search words: episodes, episode list, open episode, recent, Timeline Cards.
 
 ### Episode sizes are counted by themselves and kept fresh
@@ -667,7 +642,6 @@ Each episode's size (its bytes, its number of files and its newest change) is co
 
 "Carry on with <episode>" names the last episode this person opened, the top of their recent episodes, on whatever device they opened it, and goes into it. It is kept across restarts of the server, and offered only while that episode still exists.
 
-- Pending: cards-editor-5-Q13
 
 ### Opening an episode goes into the editor at the cut list last left there
 
@@ -726,7 +700,6 @@ The tools the page shows are exactly the ones the server is running for it.
 
 The editor's tools follow the site's switches. With the assistant switched off, no assistant tool appears (the edit chat, shortening by the assistant, assistant searches, the Ask window). With the help for the editing program switched off, nothing that sends to, reads from or follows Resolve appears (see Resolve is optional). A tool that is off is simply not there: no greyed button, no empty panel. If the server cannot be asked, nothing is taken off.
 
-- Pending: cards-editor-5-Q3
 
 ### With no cut list open, the editor offers to open one or a recent one
 
@@ -821,28 +794,20 @@ Inside the editor, the episode's browser lists every transcript and every cut li
 
 - Ways in: the cut's More menu, and the selection's.
 - Exact: yes
-- Pending: cards-editor-5-Q9
 
 ### Cut lists that cannot be written are opened read-only and nothing is written to them
 
 Where a cut list or its episode cannot be written, the editor opens it read-only: every edit is refused with the reason, and nothing is ever written to it. An editor never drops anything a cut list file holds that it does not itself show: every save keeps the rest of the file as it was.
 
-### The Windows app opens the editor in a window of its own
+### The app on the editor's computer opens the editor in a window of its own
 
-On a Windows computer the editor can also be opened in a window of its own, with no browser around it, from the app on the editor's computer: the editor's header is the window's title bar (see "In a desktop app window the editor is one whole window whose header is its title bar"), it signs in to the same dashboard, opens on the episode list, and updates itself with the app, from its settings, keeping its settings and everything kept on the computer. It needs the studio's dashboard to be reachable, as the browser does. Its menu:
+On an editor's computer the editor can also be opened in a window of its own, with no browser around it, from the app on the editor's computer: the editor's header is the window's title bar (see "In a desktop app window the editor is one whole window whose header is its title bar"), it signs in to the same dashboard, opens on the episode list, and updates itself with the app, from its settings, keeping its settings and everything kept on the computer. It needs the studio's dashboard to be reachable, as the browser does. Its menu:
 
 {{33-099}}
 
-- Name and search words: the Windows app. Search words: Windows app, desktop app, window, menu, editor app.
+- Name and search words: the editor window. Search words: editor window, desktop, window, menu, app.
+- Windows and macOS: the menu's keys are given as on Windows; on a Mac, Cmd stands for Ctrl and the menu sits in the menu bar.
 - Exact: yes
-- Pending: cards-editor-5-Q2
-
-### A person switches the editor to another episode by naming its folder
-
-Switching is refused with "no folder given" when nothing is named and "no such folder: <path>" when the folder does not exist (surrounding quotes and spaces are ignored). The request answers only once the switch has happened (within about 8 seconds at most). If the folder holds no interviews or clips the switch still happens, with the warning "<root> holds no interviews or clips -- cards will have no transcripts". After a switch, everything shown is the new episode's: its notes, transcripts, colours and media; nothing of the old episode remains.
-
-- Exact: yes
-- Pending: cards-editor-5-Q12
 
 #### Lessons
 
@@ -856,7 +821,7 @@ Switching is refused with "no folder given" when nothing is named and "no such f
 
 When a site switches off the help for the editing program, nothing in the editor names Resolve or any editing program: no Send to Resolve button, label, tip or menu row, no "Resolve: not connected", no live timeline in the Cut lists sheet and no "last sent to" timeline on a cut list's row, no following of Resolve, and no keys taken from a preset in Resolve (the lane uses the editor's own keys). Where Send to Resolve stands, the editor offers the exports instead: an XML, an OTIO and an EDL of the cut, and a text script (see Timeline Cards: the hand-over to Resolve, and exports: Exports). Everything else works exactly the same: the cut, playback, the transcripts and search, the shelf, offline work, and every key, button and gesture.
 
-- When the help for the editing program is off: as above; switching it on again brings every Resolve control back with nothing lost.
+- When the help for the editing program is off: as above; switching it on again brings every Resolve control back with nothing lost. A new site starts with the help for the editing program on (and Timeline Cards itself off until an admin switches it on).
 
 ### With Resolve closed or absent, everything still edits and nothing shows as a fault
 
@@ -869,13 +834,6 @@ With the help for the editing program on, every editing feature works with Resol
 On loading or refreshing, the editor reopens what was last open in that episode and never jumps to whatever timeline is active in Resolve; following Resolve's playhead is off until the person switches it on. It is switched on or off only by its own control in the editor, or by its key in Resolve, which also brings the current card into view. No way of scrolling (wheel, drag, keys, touch, controller) switches it off. While it is on, every change of the card under Resolve's playhead brings that card into view.
 
 - Ways in: the editor's follow control, and its key in Resolve.
-
-### A missing timeline from Resolve is told apart from a fault
-
-With no timeline from Resolve to show, a fault shows as a red banner, while a non-fault (nothing has been sent from Resolve yet, a timeline closed on purpose) shows as an amber note with the episode's own landing shown instead; Resolve open on no timeline at all counts as a fault. Before anything has been read the page shows "starting up".
-
-- Exact: yes
-- Pending: cards-editor-5-Q11
 
 #### Lessons
 

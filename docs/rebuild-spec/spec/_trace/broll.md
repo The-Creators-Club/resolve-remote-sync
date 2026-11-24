@@ -25,7 +25,7 @@
 - 07-028 | Describing needs a graphics card and offers two quality levels, Good and Best
 - 07-029 | Every clip in the archive is described shot by shot, with no further step ; A shot with nothing searchable in its picture gets one of five labels
 - 07-030 | Each clip is flagged for poor exposure or focus
-- 07-031 | Every clip is filed under one subject category
+- 07-031 | left out: cut by the owner (2026-11-24, broll-Q3)
 - 07-032 | What describing needs is downloaded once, checked, resumable and then works offline
 - 12-054 | An admin sees describing on every computer
 - 13-082 | Describing needs a graphics card and offers two quality levels, Good and Best
@@ -38,28 +38,28 @@
 - 24-008 | A problem every clip would share stops the work with one message and keeps the queue
 - 24-011 | Speech in a clip is transcribed so the archive can be searched by what is said
 - 24-012 | Speech in a clip is transcribed so the archive can be searched by what is said
-- 24-014 | The assistant can describe clips instead, for a fee
+- 24-014 | left out: cut by the owner (2026-11-24, broll-Q2)
 - 24-015 | Describing needs a graphics card and offers two quality levels, Good and Best
 - 24-016 | What describing needs is downloaded once, checked, resumable and then works offline
 - 24-017 | A computer says whether it can describe clips, and every reason why not
-- 24-018 | The assistant can describe clips instead, for a fee
-- 24-019 | The assistant can describe clips instead, for a fee
-- 24-025 | An admin can bound how much describing is done ; Long describing work survives restarts and shows live progress
+- 24-018 | left out: cut by the owner (2026-11-24, broll-Q2)
+- 24-019 | left out: cut by the owner (2026-11-24, broll-Q2)
+- 24-025 | An admin can set a time after which no new clip is described ; Long describing work survives restarts and shows live progress
 - 24-026 | An admin sees how far the archive is described
 - 24-032 | left out: for the builders only
 - 24-033 | left out: for the builders only
 - 24-035 | left out: an arrangement (the promise is under Every clip in the archive is described shot by shot, with no further step)
 - 24-037 | left out: an arrangement (the promise is under A computer says whether it can describe clips, and every reason why not)
-- 27-032 | The assistant can describe clips instead, for a fee
+- 27-032 | left out: cut by the owner (2026-11-24, broll-Q2)
 - 23-004 | Some clips never appear in the archive, whether searching or browsing
 - 23-005 | An editor searches the archive by words, and finds both what is seen and what is said
 - 23-006 | An editor narrows a search, and every narrowing applies together
 - 23-007 | With no search words, the archive is browsed newest first
-- 23-008 | An editor chooses between three ways of searching: words, words plus related meaning, or meaning only
+- 23-008 | Search finds the words first, then a few clips related by meaning
 - 23-009 | Search forgives misspellings and partial words when the exact words find little
 - 23-010 | The search page says while it is searching and when a search fails
 - 23-011 | The page's address holds the search and the open clip
-- 23-013 | A category list beside the search box filters by subject
+- 23-013 | left out: cut by the owner (2026-11-24, broll-Q9)
 - 23-014 | A line above the results says what is being shown
 - 23-016 | Results come 24 to a page
 - 23-017 | An empty result says why and offers the likely way out
@@ -75,7 +75,7 @@
 - 24-009 | Each clip gets a browser preview, a poster, a hover strip and a thumbnail ; Each clip's preview is checked complete before it counts
 - 24-010 | Each clip gets a browser preview, a poster, a hover strip and a thumbnail
 - 24-030 | A shoot archived as its proxies gets any missing proxy made first
-- 24-034 | An admin can have previews that will not play remade
+- 24-034 | left out: cut by the owner (2026-11-24, broll-Q19)
 - 01-070 | Dropped files are cleaned away a week after they are no longer needed
 - 04-089 | An editor adds footage by dropping it on the b-roll page or choosing it on their own computer
 - 06-046 | An editing copy is made only when the original is too heavy to edit with
@@ -130,7 +130,7 @@
 - 23-025 | A clip not on this computer yet is fetched first, with progress, and then placed
 - 23-026 | When the app on the editor's computer cannot be reached or refuses, the editor is told what to try
 - 23-027 | One clip is sent at a time from a page
-- 23-029 | The page says whether the app on this computer is ready to do the work
+- 23-029 | left out: cut by the owner (2026-11-24, broll-Q11)
 - 01-071 | A heavy clip sent from a remote computer arrives as its preview at once and upgrades by itself ; The editor is told while any clip is cut on a stand-in ; Every computer learns which archive clips anyone cut against a stand-in
 - 06-033 | Resolve re-reads a clip once its real original arrives
 - 07-005 | A heavy clip sent from a remote computer arrives as its preview at once and upgrades by itself
@@ -173,6 +173,7 @@
 - Changes for a person: with B an editor on a small laptop drops footage and it gets described anyway, somewhere else in the studio; with A they must carry it to a bigger computer.
 - Text assumes: B
 - Items: 07-016, 23-047, 01-068, 07-021, 07-028, 23-056
+- Answered by the owner 2026-11-24: B, the work runs on an able and free computer of the studio's, the dropper's own first
 
 ### broll-Q2: Should the paid option of having the assistant describe b-roll clips stay, now that describing on the studio's own graphics cards is judged good enough?
 - Kind: either-or
@@ -183,6 +184,7 @@
 - Text assumes: written in place and marked pending; removed if you choose B
 - Items: 24-014, 24-018, 24-019, 27-032
 - Covers: 24-Q2
+- Answered by the owner 2026-11-24: B, describe only on the studio's own graphics cards; the paid option is removed
 
 ### broll-Q3: How should a clip's subject category be decided?
 - Kind: either-or
@@ -193,6 +195,7 @@
 - Text assumes: A, with the proposal and the shown suggestion still written and marked pending
 - Items: 24-021, 07-031, 24-001, 24-036
 - Covers: 24-Q1, U-07-8, U-24-6
+- Answered by the owner 2026-11-24: A, the studio's category list and its words decide; no proposal and no shown suggestion
 
 ### broll-Q4: Before a computer downloads the several gigabytes describing needs, should someone be asked?
 - Kind: other
@@ -203,6 +206,7 @@
 - Text assumes: A
 - Items: 07-032, 23-056
 - Covers: 07-Q1
+- Answered by the owner 2026-11-24: A, the person running a drop is asked; shared work downloads with a notification
 
 ### broll-Q5: Should camera raw (Blackmagic RAW, RED, Canon Cinema RAW Light) be accepted into the b-roll archive?
 - Kind: other
@@ -213,6 +217,7 @@
 - Text assumes: A
 - Items: 07-017, 23-049, 24-004, 07-005, 07-026
 - Covers: 07-Q3
+- Answered by the owner 2026-11-24: A, raw is refused in a drop; raw shoots enter as their own proxies
 
 ### broll-Q6: Should one "keep this much free" setting on each computer cover everything the product writes there?
 - Kind: other
@@ -223,6 +228,7 @@
 - Text assumes: A for b-roll and music drops; the other parts keep what their own pieces say until you decide
 - Items: 07-033, 07-018, 09-015
 - Covers: 07-Q2, 07-Q8, 09-Q3
+- Answered by the owner 2026-11-24: A, one floor per computer checked by one rule
 
 ### broll-Q7: Should one "only when I am away" choice cover all background work on a computer?
 - Kind: other
@@ -233,6 +239,7 @@
 - Text assumes: A
 - Items: 07-022, 09-015
 - Covers: 09-Q2
+- Answered by the owner 2026-11-24: A, the shared-work quiet time and Resolve hold-back cover describing
 
 ### broll-Q8: Should search keep its three ways (words, words plus related meaning, meaning only) and the fuzzy tick, or be one search that does the right thing?
 - Kind: either-or
@@ -243,6 +250,7 @@
 - Text assumes: A is written and marked pending; B simplifies it if chosen
 - Items: 23-008, 23-009, 23-006, 23-017
 - Covers: 23-Q2
+- Answered by the owner 2026-11-24: B, one search: words first, up to 5 related by meaning, forgiving when words find little; only what-to-search kept
 
 ### broll-Q9: Should the subject be chosen from the folder tree only, or also from a separate category list beside the search box?
 - Kind: several ways in
@@ -253,6 +261,7 @@
 - Text assumes: all three written, the list marked pending
 - Items: 23-012, 23-013, 23-019
 - Covers: 23-Q1
+- Answered by the owner 2026-11-24: B, the category list goes; the tree and the open clip's path stay
 
 ### broll-Q10: Should the way of searching, what to search and the hidden flags be kept in a shared or reloaded search?
 - Kind: other
@@ -263,6 +272,7 @@
 - Text assumes: B, marked pending
 - Items: 23-011, 23-018
 - Covers: 23-Q7
+- Answered by the owner 2026-11-24: A, what to search and the hidden flags are kept in the address
 
 ### broll-Q11: Should the state of the app on this computer be shown in one place on the b-roll page, and is the list of collection descriptions wanted?
 - Kind: several ways in
@@ -273,6 +283,7 @@
 - Text assumes: both written, marked pending
 - Items: 23-029, 23-048
 - Covers: 23-Q3
+- Answered by the owner 2026-11-24: B, one status in the add-footage panel; the collections panel goes
 
 ### broll-Q12: Should a drop's failures be tried again from one place?
 - Kind: several ways in
@@ -283,6 +294,7 @@
 - Text assumes: all three written and marked pending
 - Items: 23-053, 23-064, 07-019
 - Covers: 23-Q4
+- Answered by the owner 2026-11-24: B, one try again per failed clip and one for all, wherever it failed
 
 ### broll-Q13: Should speech in dropped footage be transcribed?
 - Kind: dormant
@@ -293,6 +305,7 @@
 - Text assumes: A, marked pending
 - Items: 23-055, 23-054
 - Covers: 23-Q5
+- Answered by the owner 2026-11-24: A, dropped footage is transcribed as its collection says, no switch on the drop
 
 ### broll-Q14: Should every signed-in editor be able to change, revoke and delete every client folder, whoever made it?
 - Kind: other
@@ -303,6 +316,7 @@
 - Text assumes: A
 - Items: 23-030
 - Covers: 23-Q6
+- Answered by the owner 2026-11-24: A, every signed-in editor may change, revoke and delete every folder
 
 ### broll-Q15: When the app on the editor's computer cannot be reached, where should the message send them to get it?
 - Kind: other
@@ -313,6 +327,7 @@
 - Text assumes: A ("followed by where to get the app")
 - Items: 23-026
 - Covers: 23-Q8
+- Answered by the owner 2026-11-24: A, the message links to where an editor gets the app
 
 ### broll-Q16: Should a running drop's "done" count count only clips that were indexed?
 - Kind: other
@@ -323,6 +338,7 @@
 - Text assumes: the counts as written, marked pending
 - Items: 23-059
 - Covers: 23-Q9
+- Answered by the owner 2026-11-24: A, done counts only clips indexed; failed, duplicate and skipped shown beside it
 
 ### broll-Q17: May the builders' tools for b-roll go from the product?
 - Kind: dev only
@@ -333,6 +349,7 @@
 - Text assumes: left out
 - Items: 23-002, 24-031, 24-032, 24-033
 - Covers: 23-Q10, 24-Q8
+- Answered by the owner 2026-11-24: A, the builders' tools are left out
 
 ### broll-Q18: Should transcription always follow a collection's "no transcription" setting and its longest-clip cap?
 - Kind: built twice
@@ -343,6 +360,7 @@
 - Text assumes: A
 - Items: 24-006, 24-011
 - Covers: 24-Q3
+- Answered by the owner 2026-11-24: A, transcription always honours the collection's settings
 
 ### broll-Q19: Should an admin be able to have the archive's previews checked and remade where one will not play?
 - Kind: dormant
@@ -353,6 +371,7 @@
 - Text assumes: written and marked pending
 - Items: 24-034
 - Covers: 24-Q5
+- Answered by the owner 2026-11-24: B, the preview repair is removed
 
 ### broll-Q20: When a clip's file is gone from the archive, should it drop out of search on its own?
 - Kind: other
@@ -363,6 +382,7 @@
 - Text assumes: A
 - Items: 24-004
 - Covers: 24-Q10
+- Answered by the owner 2026-11-24: A, hidden from search while its file is gone, back when it returns
 
 ### broll-Q21: Should an editor be warned that a render made on their computer while a clip is a stand-in renders the low-resolution preview?
 - Kind: other
@@ -373,6 +393,7 @@
 - Text assumes: the editor is told while any clip is a stand-in that a render there renders the preview
 - Items: 07-007
 - Covers: 07-Q5
+- Answered by the owner 2026-11-24: A, the editor's app says so beside its count and warns before a render when it can tell
 
 ### broll-Q22: Should fetching a missing clip when sending to Resolve be its own choice, rather than switched off by pointing the archive at another folder?
 - Kind: other
@@ -383,6 +404,7 @@
 - Text assumes: A
 - Items: 07-004
 - Covers: 07-Q6
+- Answered by the owner 2026-11-24: A, fetching follows where the archive is, and the message says why nothing was fetched
 
 ### broll-Q23: Should each problem reach an admin exactly once, in one wording?
 - Kind: built twice
@@ -393,6 +415,7 @@
 - Text assumes: A for the unreadable b-roll archive
 - Items: 15-074
 - Covers: 15-Q1
+- Answered by the owner 2026-11-24: A, one message per problem
 
 ### broll-Q24: May the fallback that takes the studio's own project folder as its own footage, for a site that never set the list, go?
 - Kind: dormant
@@ -403,6 +426,7 @@
 - Text assumes: written and marked pending
 - Items: 21c-013
 - Covers: 21c-Q3
+- Answered by the owner 2026-11-24: A, the fallback goes; blank and unset both mean everything is Downloads
 
 ### broll-Q25: From which places should a b-roll drop be paused, resumed, started now and cancelled?
 - Kind: several ways in
@@ -412,6 +436,7 @@
 - Changes for a person: with B an admin can no longer stop someone's drop.
 - Text assumes: A, marked pending
 - Items: 07-037, 01-068, 04-053, 12-054, 23-063, 23-065
+- Answered by the owner 2026-11-24: A, all three places stay
 
 ### broll-Q26: Should one fetch of a single missing file serve b-roll clips, music tracks and downloaded YouTube originals alike?
 - Kind: several ways in
@@ -421,6 +446,7 @@
 - Changes for a person: the same "syncing N%" and the same waits everywhere.
 - Text assumes: A
 - Items: 07-003
+- Answered by the owner 2026-11-24: A, one fetch behaviour for all three
 
 ### broll-Q27: Where is the b-roll describing quality chosen?
 - Kind: several ways in
@@ -430,6 +456,7 @@
 - Changes for a person: no per-computer setting to look for.
 - Text assumes: A
 - Items: 13-082, 17-053, 24-014, 24-015, 23-054
+- Answered by the owner 2026-11-24: A, the site setting as default and the choice on each drop
 
 ### broll-Q28: Should the computer's file chooser for b-roll close by itself after five minutes on a Mac too?
 - Kind: differs
@@ -439,6 +466,7 @@
 - Changes for a person: on a Mac the chooser goes away instead of losing a choice.
 - Text assumes: A
 - Items: 04-089
+- Answered by the owner 2026-11-24: A, the chooser closes after 5 minutes on both
 
 ## Readers' questions and unsettled points
 
@@ -497,7 +525,7 @@
 
 ## Conflicts between an item and a lesson
 
-- owner's requirements | 07-016, 23-047, 01-068, 07-028 | the items, and ruling BRO-082, have the dropper's own computer do the work; the requirements share heavy work across the studio's computers | wrote the work done on an able and free computer, the dropper's first, marked pending broll-Q1
+- owner's requirements | 07-016, 23-047, 01-068, 07-028 | the items, and ruling BRO-082, have the dropper's own computer do the work; the requirements share heavy work across the studio's computers | wrote the work done on an able and free computer, the dropper's first; confirmed by the owner 2026-11-24 (broll-Q1)
 - BRO-075 | 24-009, 07-026, 07-005 | the items make a 1080-line browser preview; the lesson asks 540 lines, never upscaled | wrote 540 lines
 - BRO-021 | 24-021, 23-012, 23-006, 23-015 | the items leave clips matching nothing uncategorised and offer an "uncategorised" narrowing; the ruling says no clip is left uncategorised | wrote every described clip filed, "Unsorted" as the last resort, and dropped the "uncategorised" narrowing
 - BRO-022 | 24-021 | the item lets a person re-file a clip, moving files in the archive; the ruling says a categorised clip never moves | wrote that a clip keeps its category for good
@@ -508,15 +536,17 @@
 - BRO-122 | 07-006, 07-007 | the items list given-up stand-ins only to the page and tell nobody about the rest; the lesson asks the editor's app to show a count | wrote the count in the app
 - BRO-046 | 24-007, 24-012 | the items only log a failure while transcribing or a rejected transcript; the lesson asks every failure to show why | wrote transcription failures tried again, and a rejection counted as tried
 - BRO-125, BRO-127 | 23-046 | the item has no download from a client link; one ruling says no download, another asks a client link that downloads chosen folders | wrote both: the preview link never downloads, a separate delivery link does
-- BRO-034 | 24-025 | the item's limits are options of a run started by hand; the ruling asks the owner's limit and stop time | wrote them as admin settings
+- BRO-034 | 24-025 | the item's limits are options of a run started by hand; the ruling asks the owner's limit or stop time and the allowance spent | wrote the stop time as an admin setting; with describing only on the studio's own graphics cards (broll-Q2, the owner's answer of 2026-11-24) nothing is spent, so the allowance and the daily clip limit are gone
 - BRO-078 | 07-026 | the item fails a step after a fixed 15 minutes; the lesson asks limits that grow with length and speed | wrote limits that grow
+
+- owner's answer of 2026-11-24 | 23-044, 23-042 | the client page carried its own look; the owner's answer gives it the product's one look with the studio's own name and mark | wrote the one look
 
 ## New in this text
 
 - A site switches the b-roll archive on and off | the switch, what is seen when it is off, and client links answering "not available" while it is off (owner's requirements)
 - Every clip is filed under one subject category | an admin edits the category list and its words from the product, instead of loading a file on another computer
 - An admin sets how each collection is described and transcribed | these are admin settings in the product instead of a file on the computer that indexes; a language setting per collection replaces the language fixed for a run
-- An admin can bound how much describing is done | a daily clip limit and a stop time as admin settings (BRO-034)
+- An admin can set a time after which no new clip is described | a stop time as an admin setting (BRO-034)
 - Describing keeps the computer it runs on usable | a site share of a working computer's capacity, 60% by default (BRO-035)
 - Long describing work survives restarts and shows live progress | nothing to restart by hand: the scheduled restart on one Windows computer is no longer needed
 - Where a clip is filed in the archive, and what it is called | the archive on the NAS is laid out on its own as clips are taken in; an admin no longer builds it by hand from a plan
@@ -530,6 +560,8 @@
 - Client links keep working when something else fails | BRO-134, BRO-135
 - Search never stops because of an update | BRO-137's promise
 - A drop survives the page closing, a restart and the network dropping | the work may continue on another able computer (broll-Q1)
+
+- An editor manages the folder list and makes new folders | the list also holds the Footage Sorter's folder links and the delivery links (the owner's answer of 2026-11-24)
 
 ## Parts of items left out
 
@@ -585,6 +617,10 @@
 - BRO-047 | the half about the server answering "busy, try again" (an arrangement); the promise that finished work is never thrown away is met
 - BRO-029 | names assigned "in one place" is kept only as the promise that no name is taken twice
 
+- 07-041, 09-015 | how long dropped files are kept (7 days): a setting only the build would tune
+- 24-025 | a most-clips-a-day limit: a setting only the build would tune
+- 23-003 | the collection descriptions shown to editors, with the collections panel (broll-Q11)
+
 ## Joins with other capabilities
 
 - Work shared out across the computers / Choosing who runs what | An editor adds footage by dropping it on the b-roll page or choosing it on their own computer | which able and free computer describes a drop
@@ -608,11 +644,9 @@
 - The dashboard / Problems the server finds | Admins are told when the b-roll archive cannot be read | the standing problem
 - The dashboard / Alerts by mail | Admins are warned before a client link expires | the warnings
 - The dashboard / Overview, menus and finding things | Search never stops because of an update | a part shown as not working with its reason
-- The whole product / The assistant | The assistant can describe clips instead, for a fee ; Every clip is filed under one subject category | what disappears when the assistant is off
-- Accounts, privacy and the legal paperwork / How secrets and keys are kept | The assistant can describe clips instead, for a fee | the paid key
+- The Footage Sorter and camera cards / Downloading originals and sharing folders | An editor manages the folder list and makes new folders | the Sorter's folder links appear in the same list as client folders
 
 ## Settled from the present product
 
-- broll-U1 | the figures in the text are the ones the product uses
-
-- broll-U2 | the sound goes to the audio track of the same number as the video track
+- broll-U1 | the figures in the text (8 and 12 GB, 16 and 24 GB on Apple Silicon, about 3.3 and 6.2 GB) are right, from the present product
+- broll-U2 | settled; the sentence on where the sound lands is in the text

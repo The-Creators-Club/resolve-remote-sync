@@ -93,9 +93,9 @@
 - 38-066 | The copy does exactly what the person reviewed
 - 38-067 | Starting a copy, and when it is refused ; There is one card copy, and it starts at once on the computer the card is in
 - 38-069 | After a card copy, the sorting follows the footage
-- 38-074 | left out: a second way of copying a card (into A-CAM and B-CAM transfer folders, with its own windows); the one card copy is written under "There is one card copy, and it starts at once on the computer the card is in" (Q1)
-- 38-075 | left out: the same second way of copying a card, for Blackmagic cards; the one card copy is written under "There is one card copy, and it starts at once on the computer the card is in" (Q1)
-- 38-077 | left out: the switch for falling back to that second way of copying; the fallback when the Sorter cannot be reached is field backup, under "When a card goes in, the Footage Sorter comes up on it" (Q1)
+- 38-074 | left out: cut by the owner (2026-11-24, footage-sorter-and-camera-cards-1-Q1)
+- 38-075 | left out: cut by the owner (2026-11-24, footage-sorter-and-camera-cards-1-Q1)
+- 38-077 | left out: cut by the owner (2026-11-24, footage-sorter-and-camera-cards-1-Q1)
 - 06-052 | What makes a copy count as checked
 - 10-019 | Files already at a destination are checked against the card
 - 10-020 | What makes a copy count as checked ; How a card copy ends, and what the person is told
@@ -143,6 +143,7 @@
 - Recommend: A, one copy that works offline already covers what the fallback was for, with every check the fallback skips.
 - Changes for a person: no A-CAM and B-CAM transfer folders or their windows; field copies to the NAS land in staging; a card copy is never called done while something is unchecked.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, one card copy; the older camera-folder copy, its fallback switch and its watcher are cut
 - Items: 38-074, 38-075, 38-077, 38-058, 38-064, 38-067, 10-001, 10-013, 10-015
 - Covers: 38-Q2, 38-Q3, 38-Q4
 
@@ -153,6 +154,7 @@
 - Recommend: A, it is one way of copying with one set of promises, and the safer one.
 - Changes for a person: nothing to install or set up for card copies; no "copied but nobody checked it" outcome.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, only the product's own copying; the outside Windows copy program goes
 - Items: 06-056, 10-020, 10-021, 38-070
 - Covers: 06-Q1
 
@@ -163,6 +165,7 @@
 - Recommend: A, cards just appear, and a laptop that should not report can still be left out.
 - Changes for a person: cards appear from every computer without anyone switching anything on.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, on wherever the part is on, with a per-computer setting to leave a computer out
 - Items: 01-085, 10-028, 10-029
 - Covers: 01-Q10
 
@@ -173,6 +176,7 @@
 - Recommend: A, a cloud folder on a laptop is not a second physical copy until it has uploaded, so it must never make a card look safe.
 - Changes for a person: a cloud folder no longer appears in the list of places to copy to.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, cloud-storage drives never seen, offered or counted
 - Items: 10-028, 10-010, 10-031
 - Covers: 10-Q2
 
@@ -183,6 +187,7 @@
 - Recommend: A, one list and a button that does what it says.
 - Changes for a person: Remove always works.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, one list of folders per computer, and Remove removes
 - Items: 10-012
 - Covers: 10-Q4
 
@@ -193,6 +198,7 @@
 - Recommend: A, the person with the drive in hand is the one who knows, and one value means no disagreement.
 - Changes for a person: a kind set in one place shows in the other at once.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, both places, one value per drive
 - Items: 10-011, 36-005
 
 ### footage-sorter-and-camera-cards-1-Q7: A card's serial can be named from the card's own view and from the list of serials nobody has named. Keep both?
@@ -202,6 +208,7 @@
 - Recommend: A, the card's view serves the card in hand and the list catches up cards already copied and gone.
 - Changes for a person: none with A.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, both places kept
 - Items: 37-071, 37-098, 36-028, 38-053
 - Covers: 37-Q3
 
@@ -212,6 +219,7 @@
 - Recommend: A, progress where the card is and one place for everything at once.
 - Changes for a person: the banner and details become one view of the card.
 - Text assumes: A (the card's view and its details are one place; field backup shows its own copies on the computer).
+- Answered by the owner 2026-11-24: A, the card's row, the card's view with its details, and the one list of everything copying
 - Items: 37-068, 37-073, 37-088, 10-022
 - Covers: 37-Q11
 
@@ -222,6 +230,7 @@
 - Recommend: B, they answer different moments (browsing, auditing a card, moving) and none can lose footage.
 - Changes for a person: none with B.
 - Text assumes: B.
+- Answered by the owner 2026-11-24: B, all three kept
 - Items: 37-013, 37-042
 - Covers: 37-Q4
 
@@ -232,6 +241,7 @@
 - Recommend: A, the quarantine is the only way duplicates ever stop taking space, and it never deletes.
 - Changes for a person: none with A.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, both kept
 - Items: 38-090
 - Covers: 38-Q9
 
@@ -242,6 +252,7 @@
 - Recommend: A, closing is "take it off my list", and quietly undoing sorting work is a surprise.
 - Changes for a person: a card shown again comes back as it was.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, closing keeps assignments
 - Items: 35-051, 38-060
 - Covers: 35-Q7
 
@@ -252,6 +263,7 @@
 - Recommend: A, recovering from a card image is exactly when the same checks are wanted.
 - Changes for a person: with A, a card image can be copied like a card; with B, it cannot.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, a folder or card image can be read as a card, reading again really reads, the dead controls go
 - Items: 35-052
 - Covers: 35-Q1
 
@@ -262,6 +274,7 @@
 - Recommend: A, two answers to "is it safe" is the one thing this part must never give.
 - Changes for a person: one list of copies per clip.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, one list of copies and one verdict from the record of every copy
 - Items: 35-015, 35-016, 37-067, 38-033, 36-016
 - Covers: 35-Q2, 37-Q1
 
@@ -272,6 +285,7 @@
 - Recommend: A, one setting, and a named zone handles summer time for a studio somewhere else.
 - Changes for a person: one setting instead of two; a customer outside +8 gets correct calendar matching.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, one named studio time zone that everything follows
 - Items: 35-004, 36-023, 21-029
 - Covers: 35-Q4
 
@@ -282,6 +296,7 @@
 - Recommend: A, a card copy only adds and never overwrites, while drive copies reach any drive in the studio.
 - Changes for a person: none with A.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, card copies anyone signed in, drive copies admin only
 - Items: 35-059, 35-063, 35-054
 - Covers: 35-Q9
 
@@ -292,6 +307,7 @@
 - Recommend: A, a refresh changes no data.
 - Changes for a person: none with A.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, anyone signed in may ask for a refresh
 - Items: 36-026
 - Covers: 36-Q10
 
@@ -302,6 +318,7 @@
 - Recommend: A, one job done once, with every clue.
 - Changes for a person: one answer for where a recording belongs, and one place to correct it.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, one placement combining every clue, sharing its lining-up by sound with Timeline Cards
 - Items: 36-051, 36-047
 - Covers: 36-Q1
 
@@ -312,6 +329,7 @@
 - Recommend: A, it is right for every recorder the studio owns, and with the reason shown and the override a new recorder is never silently lost.
 - Changes for a person: with B, a 24-bit recorder's files are placed like any other without being marked by hand.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, the 32-bit rule stays, with the reason shown and the override
 - Items: 36-044, 36-045
 - Covers: 36-Q8
 
@@ -322,6 +340,7 @@
 - Recommend: A, a page that forgets what it did tells an admin nothing after an update.
 - Changes for a person: the last state of each drive is still shown after a restart.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, automatic backup states kept across restarts
 - Items: 36-025
 - Covers: 36-Q9
 
@@ -332,6 +351,7 @@
 - Recommend: A, a second studio must not see this one's names.
 - Changes for a person: nothing for this studio; another studio sets its own.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, every studio-specific name from a site setting
 - Items: 37-097, 10-011, 38-059
 - Covers: 37-Q10
 
@@ -342,6 +362,7 @@
 - Recommend: A, one level fewer, and it is what the Sorter's moves already follow.
 - Changes for a person: none for footage the Sorter files; transfer folders made the older way stay as they are.
 - Text assumes: A (written in part 2).
+- Answered by the owner 2026-11-24: A, one folder per day and camera
 - Items: 38-074, 38-075
 - Covers: 38-Q6
 
@@ -352,6 +373,7 @@
 - Recommend: A, nothing about whether footage is safe should be silent.
 - Changes for a person: a card that stays "used" says why.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, the card says why it was not marked backed up
 - Items: 38-055, 36-027
 - Covers: 38-Q12
 
@@ -362,6 +384,7 @@
 - Recommend: A, one place holds the cards and their use, so nothing has to be fetched, kept in step or keyed.
 - Changes for a person: the crew open the card-use page from the studio's own address; there is no tracker key to set up.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, the card-use page is part of the Footage Sorter
 - Items: 36-026, 38-052, 37-097
 - Covers: U-38-7
 
@@ -372,6 +395,7 @@
 - Recommend: A, a Mac in the field is exactly where a damaged card is found.
 - Changes for a person: a Mac editor can image a card before formatting it.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, imaging offered on macOS and Windows
 - Items: 37-072, 38-087
 - Covers: U-37-8
 
@@ -382,6 +406,7 @@
 - Recommend: A, a copy to the wrong place must never count as "at home" on either.
 - Changes for a person: a Mac with the wrong volume chosen is told so instead of copying there.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, the same NAS check on both systems
 - Items: 10-013
 
 ### footage-sorter-and-camera-cards-1-Q26: When a different file already has the name a card's file would land under, should the card's file be written beside it under a new name, or left uncopied and reported?
@@ -391,6 +416,7 @@
 - Recommend: A, the card's footage then always gets a copy, and nothing already there is touched.
 - Changes for a person: conflicts no longer leave a clip without a copy; there are occasional "name (2)" files.
 - Text assumes: A.
+- Answered by the owner 2026-11-24: A, always write beside, never overwrite, never skip a same-size different file
 - Items: 06-050, 06-051, 38-065, 10-018
 
 ## Readers' questions and unsettled points
@@ -536,6 +562,10 @@
 - 10-013 | the empty marker file the person was told to create: the product confirms the NAS itself (Q25).
 - 06-055 | speed averaged over about 5 seconds is kept; the receipt's internal fields: an inside.
 - 37-073 | "Cancelling - the file being copied finishes first": Stop takes effect within seconds.
+
+- 36-025, 35-064 | the setting for how often automatic backup looks (about every 10 minutes, kept in the text): a setting only the build would tune.
+- 06-054, 36-025 | the setting for how quickly the NAS must answer for a computer to count as at home (15 ms, kept in the text): a setting only the build would tune.
+- 10-018, 35-058 | the setting for the room kept spare on a destination (256 MiB, kept in the text): a setting only the build would tune.
 
 ## Joins with other capabilities
 

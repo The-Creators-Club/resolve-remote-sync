@@ -15,7 +15,6 @@ Telling and making are switched separately for each computer. A computer with bo
 - Who: an editor for their own computer, or an admin for any computer, sets the two switches.
 - Setting: Make proxies on this computer. Does: lets this computer make proxies for clips that lack them. Default: on. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: make proxies, proxy making, encode, proxies on this computer.
 - Setting: Tell me about clips with no proxy. Does: shows the editor a notification and a line naming clips on this computer that nobody else can see because they have no proxy. Default: on. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: missing proxies, proxy notice, no proxy, proxy warning.
-- Pending: proxies-and-file-moves-U1
 
 ### Which files need a proxy and how soon a new one is noticed
 
@@ -25,7 +24,6 @@ A clip counts as having a proxy when a QuickTime or MP4 file of the same name si
 
 The app looks again when it starts, about every 15 minutes after that, at once when the editor asks for proxies to be made now, and at once when the sync folder's drive comes back after being away. It looks only while the sync folder is present, and only in the projects this computer syncs (when that list is known). A newly ticked or newly created project is counted within about a minute; until it has been counted, every view says "counting" for it, never 0.
 
-- Setting: How often to look for clips with no proxy. Does: sets how soon a new original without a proxy is noticed. Default: every 15 minutes. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: proxy scan, look for missing proxies, how often, proxy check interval.
 
 ### Clips waiting for a proxy are made newest first, and failures never crowd out the rest
 
@@ -45,9 +43,8 @@ When clips without a proxy are found, the editor gets a notification titled with
 
 One sentence follows, the first that applies: if every missing clip is in a format only Resolve can read, "Run the Blackmagic Proxy Generator on them."; if proxy making is switched off for this computer, "Ask your admin to generate proxies for them."; if this computer cannot make proxies, that it can only tell, not make; otherwise "I'll make them while you're away from the keyboard."
 
-The notification is shown at most once while the same gap lasts (a new gap starts when the old one closes or the drive comes back), and no more often than the minimum time between notices, which is remembered across restarts.
+The notification is shown at most once while the same gap lasts (a new gap starts when the old one closes or the drive comes back), and at most once a day, remembered across restarts.
 
-- Setting: Minimum time between proxy notices. Does: limits how often the missing-proxy and low-space notices appear. Default: one day (zero means no minimum). Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: proxy notification, how often, notice interval, reminders.
 - When the help for the editing program is off: the sentence about the generator reads that the clips are in a raw camera format CC Sync cannot make proxies from.
 
 ### Proxies are made only while nobody is at the computer
@@ -61,7 +58,7 @@ Making runs below normal priority and with no window, so the computer stays usab
 
 ### Proxy making keeps the drive from filling
 
-Before writing a proxy, the free space on the drive that will hold it is checked against the larger of 20 GB and 5% of that drive. Below it, the clip is skipped (never counted as a failure) and the editor is told "only X GB free on the drive holding <folder> (CC Sync keeps Y GB clear so syncing and Resolve's cache do not run out)". A notification titled with the brand and "low disk space" says "CC Sync stopped making video proxies: <reason>. Free some space and they will resume on their own.", no more often than the minimum time between proxy notices. The editor's computer and the dashboard show "CC Sync stopped making proxies: <reason>. They start again on their own once there is room." This clears on its own with the next clip that has room. If free space cannot be read, making goes ahead.
+Before writing a proxy, the free space on the drive that will hold it is checked against the larger of 20 GB and 5% of that drive. Below it, the clip is skipped (never counted as a failure) and the editor is told "only X GB free on the drive holding <folder> (CC Sync keeps Y GB clear so syncing and Resolve's cache do not run out)". A notification titled with the brand and "low disk space" says "CC Sync stopped making video proxies: <reason>. Free some space and they will resume on their own.", at most once a day. The editor's computer and the dashboard show "CC Sync stopped making proxies: <reason>. They start again on their own once there is room." This clears on its own with the next clip that has room. If free space cannot be read, making goes ahead.
 
 - Setting: Keep this much space free when making proxies. Does: the floor below which no proxy is written, as the larger of a size and a share of the drive. Default: 20 GB and 5% (zero switches either part off). Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: free space, disk full, low space, reserve.
 - See Sync: Disk space.
@@ -77,8 +74,6 @@ An idle computer makes several proxies at once, using the whole computer. Whenev
 
 After 3 failed attempts on the same unchanged file, the clip is given up on and the editor is told: "N clip(s) failed too many times and CC Sync has stopped trying them. It will try again if the file changes, or when you ask for the missing proxies to be made now." A file that changes (different size or time) starts a fresh count. Running out of disk space never counts as a failure. A run that ends with nothing made and some failed shows that failure plainly on that run, never a full queue standing still.
 
-- Setting: Attempts before giving up on a clip. Does: how many times a clip's proxy is tried before it is set aside. Default: 3. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: retries, failed proxies, give up, attempts.
-- Pending: proxies-and-file-moves-Q1
 
 ### An editor makes the missing proxies now, or stops them
 
@@ -169,15 +164,6 @@ Without any step by the editor and without any error window, the app equips the 
 
 - Windows and macOS: Windows on Intel or AMD and every Mac are supported; Windows on ARM is not.
 
-### An editor can rehearse proxy making and FIX ALL without changing anything
-
-Two rehearsal settings, both off: one makes the computer report which files it would make proxies for and make none; the other makes FIX ALL report the copies and relinks it would make and do nothing. They are read when the app starts.
-
-- Setting: Rehearse proxy making. Does: reports what would be made, makes nothing. Default: off. Who: an admin. Applies to: a computer. Search words: dry run, rehearse, proxy test, what would be made.
-- Setting: Rehearse FIX ALL. Does: reports the copies and relinks FIX ALL would make, changes nothing. Default: off. Who: an admin. Applies to: a computer. Search words: dry run, fix all rehearsal, preview fixes, test relink.
-- Pending: proxies-and-file-moves-Q2
-- See Resolve on the editor's computer: Fixing media: copying in, rehearsals and undo.
-
 ### Picking originals shows a picture of each file and plays its proxy
 
 Wherever a person picks original files (for example to bring originals down to their computer), each file has a thumbnail and plays its proxy when clicked. A Blackmagic RAW file without a proxy says "no proxy yet".
@@ -222,7 +208,6 @@ A proxy carries every audio track of its original, in the same order. A proxy ho
 
 When Resolve refuses to attach a proxy, that refusal is remembered for that version of the proxy file and shown once, not offered again and again. A failure because Resolve was closed or did not answer is not a refusal: it is tried again later. The editor sees how many proxies Resolve refused, the first such clip, and the likely cause in plain words (usually that the proxy's timecode does not match the original).
 
-- Pending: proxies-and-file-moves-Q1
 - When the help for the editing program is off: nothing is attached in Resolve and nothing about refusals is shown.
 
 #### Lessons
@@ -303,7 +288,6 @@ After opening the generator, the app waits up to 3 minutes for its window and pr
 
 - Setting: Press Start in the generator. Does: lets the app start the generator's work for the editor. Default: on. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: press start, start BPG, proxy generator start, automatic start.
 - Windows and macOS: the same on both; on either, a generator not found where Resolve installs it stays unused until its location is given.
-- Pending: proxies-and-file-moves-Q3
 
 ### Where the generator is found and what the editor sees of it
 
@@ -311,7 +295,6 @@ The generator is looked for where Resolve installs it; its location can also be 
 
 - Setting: Where Blackmagic Proxy Generator is. Does: tells the app where to find the generator when it is not where Resolve installs it. Default: where Resolve installs it. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: generator location, BPG path, proxy generator, find generator.
 - Windows and macOS: the same on both; on either, a generator not found where Resolve installs it stays unused until its location is given.
-- Pending: proxies-and-file-moves-Q3
 
 ### When raw proxies cannot be made the editor is told which file and why
 
@@ -350,7 +333,6 @@ Just before each proxy is made, the clip is skipped, silently and without counti
 - Blackmagic Proxy Generator is writing its proxy;
 - it has been given up on.
 
-- Setting: Leave new files alone for this long. Does: how long a file must be unchanged before a proxy is made from it. Default: 2 minutes. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: still copying, settle time, new files, wait before proxy.
 
 ### A proxy appears under its real name only when it is finished
 
@@ -687,7 +669,6 @@ If the clip already points at that exact proxy and Resolve still cannot play it,
 
 Each run gives the editor one sentence built from: "Repointed N proxy file(s) to the copies in your sync folder.", "N could not be attached: usually the proxy's timecode does not match the original.", "N got no answer from Resolve and will be tried again." For each clip: "Resolve would not attach this proxy. Usually the proxy's timecode does not match the original.", "Resolve did not answer about this clip, so CC Sync will try it again.", "This clip is not in the project's media pool any more, so there was nothing to attach the proxy to." A pairing Resolve refused is not offered again until the proxy file changes (size or time); a clip Resolve did not answer about is tried again next time.
 
-- Pending: proxies-and-file-moves-Q1
 
 ### A missing clip whose file is already in the tree is relinked, never copied
 

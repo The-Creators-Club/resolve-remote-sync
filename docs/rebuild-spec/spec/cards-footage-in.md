@@ -1,6 +1,6 @@
 # Timeline Cards: footage in, ready to cut
 
-This is the first step of Timeline Cards: a person drops an interview's clips in and does nothing more. The product works out which clips are one interview, which camera or recorder is which angle, lines the angles up by their sound, makes the multicam, transcribes the speech in the language spoken, breaks it into paragraphs, marks the interviewer's questions, gives every paragraph English, times every word and links the English to the original words, makes a small preview, and finally makes the first sort for the board. No step waits for a person to start it, and no editing program, notes program or folder kept in a certain shape is needed. Every decision the product makes on the way can be seen and set by hand, and a value set by hand is never overwritten by a later automatic pass. Timeline Cards is one part a site can switch off: with it off, nobody but an admin sees it (in settings, with its switch), dropped footage is not processed, and nothing already made is deleted.
+This is the first step of Timeline Cards: a person drops an interview's clips in and does nothing more. The product works out which clips are one interview, which camera or recorder is which angle, lines the angles up by their sound, makes the multicam, transcribes the speech in the language spoken, breaks it into paragraphs, marks the interviewer's questions, gives every paragraph English, times every word and links the English to the original words, makes a small preview, and finally makes the first sort for the board. No step waits for a person to start it, and no editing program, notes program or folder kept in a certain shape is needed. Every decision the product makes on the way can be seen and set by hand, and a value set by hand is never overwritten by a later automatic pass. Timeline Cards is one part a site can switch on and off, and it is off on a new site: with it off, nobody but an admin sees it (in settings, with its switch), dropped footage is not processed, and nothing already made is deleted.
 
 ## Cameras, sound recorders and their clocks
 
@@ -38,7 +38,6 @@ The clock chosen for each device is shown beside it.
 
 - On its own: each device's clock (timecode or file dates), from the rules above.
 - By hand: a person can set a device's clock to timecode or to file dates, or give its offset in seconds, in which case it is shown as "forced" and not measured. A hand-set clock or offset is kept through every later pass.
-- Pending: cards-footage-in-Q8
 
 ### One-sided stereo sound is made to play in both ears
 
@@ -50,7 +49,6 @@ The original recording is never altered: the one-channel sound is a file the pro
 
 - On its own: whether a recording is made one-channel, and from which channel, from each channel's loudest point against the silence floor.
 - By hand: a person can force the change for a recorder known to write one side only, which takes whichever channel is louder on average, or leave a recording as it is. Either choice is kept through every later pass.
-- Setting: Silence floor for one-sided sound. Does: sets how quiet a channel's loudest point must be for that channel to count as empty when deciding whether a recording has sound on one side only. Default: -30 dBFS. Who: an admin. Applies to: the site. Search words: mono, one ear, stereo, silent channel, silence floor.
 
 #### Lessons
 
@@ -132,7 +130,6 @@ With the kept video in time order, a gap of more than 30 minutes after everythin
 
 - On its own: where one session ends and the next begins, from gaps of more than 30 minutes.
 - By hand: a person can join sessions into one interview, split a session at a time they choose, lay a whole drop out as one session, or change the session gap. A hand-set split or join is kept through every later pass.
-- Pending: cards-footage-in-Q7
 
 ### The product decides which person each recording belongs to
 
@@ -216,7 +213,6 @@ A cleaner recording of the same interview (a second recording of an online inter
 - Who: anyone signed in who can open Timeline Cards.
 - On its own: the level of the new sound, by EBU R128 loudness normalisation to -23 LUFS.
 - By hand: a person can switch the levelling off, or level alone without swapping, on the interview's page.
-- Pending: cards-footage-in-Q1
 
 ### The product decides the order of the angles
 
@@ -338,8 +334,7 @@ A transcript covers the whole recording, including its end and the interviewer's
 Any stretch over 3 seconds where speech is audible but no words came back is transcribed again on its own, and its text goes into the transcript in its place, marked as recovered. The interview's page lists every dropped stretch with its times and the total, a chart of how much of each minute is covered, and every run of minutes under 35% covered; with no dropped stretch it says so plainly. A stretch that still has no words after this is shown as a hole, and the person is told to look at it before anything else, because it would be a hole on the board.
 
 - On its own: whether a stretch of the transcript is missing, from the gaps against that interview's usual gap, the words a minute, the end against the recording's length and whether voice is heard; and the text put into it, from transcribing that stretch again.
-- By hand: a person can mark a flagged stretch as a genuine pause, remove or correct recovered text, and change the gap length that counts. Each is kept through every later pass.
-- Setting: Gap that counts as missing speech. Does: the shortest silence between transcribed words that is checked for dropped speech. Default: ten times the interview's usual gap, never under 6 seconds. Who: an admin. Applies to: the site. Search words: missing speech, gap, hole, dropped words, coverage.
+- By hand: a person can mark a flagged stretch as a genuine pause, and remove or correct recovered text. Each is kept through every later pass.
 
 #### Lessons
 
@@ -353,7 +348,6 @@ Transcribing a recording needs a computer of the studio's that can reach the rec
 
 While a recording is transcribed the person sees, at least every 3 seconds: which recording of how many, the percentage, minutes done of the total, lines so far, the language and the time left. At the end of a batch the person sees how many were done, failed and skipped, minutes of sound against minutes taken, and each failure with its reason. One failed recording never stops the others. After a batch every recording is checked for a transcript, and each one missing is tried again or listed with its reason; none is silently skipped.
 
-- Pending: cards-footage-in-Q4
 
 ### A person can transcribe clips from the editor
 
@@ -428,7 +422,6 @@ Reworking an interview's paragraphs updates its one transcript in place. An inte
 
 Beside each transcript the product keeps a readable Markdown copy that can be taken elsewhere. Each paragraph in it reads, in order: its question mark when it is an interviewer's question, its English, then the original, then its address; an English interview shows its words once. The product writes the copy and keeps it in step with every change made in Timeline Cards, within a minute. It does not follow changes made to the copy in another program. When the copy has been changed outside the product since it was last written, the changed copy is set aside under a name that says so before a fresh copy is written, and the interview's page tells the person.
 
-- Pending: cards-footage-in-Q6
 
 ### The product breaks each transcript into paragraphs by meaning
 
@@ -448,7 +441,6 @@ Splitting or joining paragraphs that are already on the board never loses their 
 - By hand: a person can split a paragraph at a point they choose, join two paragraphs, and allow one paragraph to be longer than the limit. A break set by hand is kept through every later pass.
 - Setting: Longest paragraph. Does: the most speech one paragraph, and so one card, may hold before it is split. Default: 60 seconds, aiming at about 20. Who: an admin. Applies to: the site. Search words: paragraph length, card length, split paragraphs, 60 seconds.
 - When the assistant is off: paragraphs break at every pause of 1.2 seconds or more, within the same length limits, and a person sets any other break by hand.
-- Pending: cards-footage-in-Q5
 
 ### Splitting a paragraph never changes a single character of what was said
 
@@ -499,7 +491,6 @@ English made or corrected on any computer appears on every other, and saving nev
 - On its own: whether an interview needs English, from the language of its original text, and the English of each paragraph.
 - By hand: a person can write or correct the English of any paragraph, or ask for it to be made again. English set by hand is kept through every later pass.
 - When the assistant is off: no English is made on its own; each paragraph without English says so, and a person can write it.
-- Pending: cards-footage-in-Q3
 
 ### A person's edits are never lost to an automatic redo
 
@@ -546,25 +537,25 @@ How the gloss and the lit English show in the editor is described in Timeline Ca
 When a person selects English in a paragraph or a card, the selection is trimmed to whole words and stands for original words:
 
 - When the paragraph is lined up, the selection touches some English phrases, and the original words are the smallest unbroken run covering every word those phrases translate. Because word order differs between languages the run may include a word no selected phrase names, but it is never scattered and never half a word.
-- When there is no checked line-up (the assistant is off or unavailable, the day's allowance is spent, an answer failed its checks, or it is not done yet), the selection stands for the whole original sentence or sentences it is in, when the English and the original have the same number of sentences (more than one); otherwise for the whole original paragraph. This is always labelled Approximate, with the reason.
+- When there is no checked line-up (the assistant is off or unavailable, the day's budget is spent, an answer failed its checks, or it is not done yet), the selection stands for the whole original sentence or sentences it is in, when the English and the original have the same number of sentences (more than one); otherwise for the whole original paragraph. This is always labelled Approximate, with the reason.
 - A selection in a paragraph not yet lined up asks for that paragraph at once, ahead of everything else; a newer selection withdraws the older request. A paragraph whose last request got no answer is asked again once per visit to the page.
 
 ### A cut's English is the English of the words it plays
 
 A card's English is picked on its own from the part of the transcript the card covers, through the word links, so a cut's English is the translation of exactly the words it plays. English taken from outside the card's time span (60 or more characters of it) is never used. Every card, staged or cut, shows the English for its words (see Timeline Cards: the editor: The English a cut shows).
 
-### Lining up runs most urgent first, within a daily allowance
+### Footage-in works most urgent first, within the site's daily budget
 
-Lining up works through what is new in the background, most urgent first:
+Lining up the English with the original works through what is new in the background, most urgent first:
 
 - an English selection a person is waiting on, ahead of everything;
 - the paragraphs on screen in an open transcript (up to 40, asked again as the person scrolls); closing or switching transcript withdraws them unless someone is waiting on one; an English transcript asks for nothing;
 - a clip selected on the lane, quietly; about 1.5 seconds after the lane head moves to another cut or the cut list changes, the cuts within 12 of it that show an exact English;
 - then everything else.
 
-The assistant calls it makes are limited to a daily allowance, counted per calendar day. When the allowance is spent, lining up stands still with "today's alignment budget is spent (N [assistant] calls)", every waiting selection falls back to Approximate at once, and it resumes the next day. When the assistant is off or unavailable, lining up stands still with "[assistant] is not available on this server (<why>)", waiting selections fall back to Approximate, and it starts again by itself within about a minute of the assistant coming back. When the assistant's own provider has run out for now, it pauses with "the server's [assistant] budget is spent for now". When lining up gets no answer at all, waiting selections fall back to Approximate and the person is told that no answer came. Work waiting or under way carries on after the server restarts; a selection waiting when the server stops is told "the server is stopping". A new line-up shows on the page without reloading.
+Translating, lining up the English with the original and the first sort count against the site's one daily budget for the assistant, in money (see The whole product: The assistant). The episode's footage shows what footage-in has spent so far this day, what is left of the day's budget, and what is waiting for the next day's. Footage-in never fails for lack of budget: when the day's budget is spent, that work waits, every waiting selection falls back to Approximate at once, the interview says it is waiting for the next day's budget, and the work carries on by itself when the new day's budget opens. Work a person is waiting on is always taken before work running on its own.
 
-- Setting: Assistant calls a day for lining up English. Does: the most assistant calls a day spent on linking English to the original; when spent, selections are approximate until the next day. Default: 300 (from 0 to 100,000). Who: anyone who can open Timeline Cards. Applies to: the site. Search words: alignment budget, assistant calls, daily allowance, word links, English.
+When the assistant is off or unavailable, lining up stands still with "Assistant is not available on this server (<why>)", waiting selections fall back to Approximate, and it starts again by itself within about a minute of the assistant coming back. When the assistant's own provider has run out for now, it pauses with "the server's Assistant budget is spent for now". When lining up gets no answer at all, waiting selections fall back to Approximate and the person is told that no answer came. Work waiting or under way carries on after the server restarts; a selection waiting when the server stops is told "the server is stopping". A new line-up shows on the page without reloading.
 
 ### Word-link quality is measured before another way of linking is used
 
@@ -588,7 +579,7 @@ A person drops an interview's clips (camera files and sound recordings, any numb
 - the time of every word, in the interview's own timecode;
 - the links between the English and the original words;
 - a small preview, a listening copy and a waveform;
-- and, last, the first proposal of themes and the first sort of every paragraph onto the board (see Timeline Cards: the board: What the assistant may do). A person can instead start from an empty board.
+- and, last, the themes the assistant proposes and the first sort of every paragraph into them on the board, on its own; the proposal stays beside the board, and a person can drop, rename or add themes and sort again, or start from an empty board (see Timeline Cards: the board: What the assistant may do).
 
 Each piece starts as soon as what it needs is ready, and none waits for a person to start, order or repeat it. The heavy work (lining up, transcribing, previews) is done on a computer of the studio's that is able and free (see Work shared out across the computers). What is dropped survives the page closing, the computer restarting and the network dropping; nothing is done twice and nothing is lost. When the interview is ready, it is ready to cut.
 
@@ -669,7 +660,6 @@ Beside each interview's sound the product makes a small preview: 480 lines tall 
 
 After a preview is made its sound is compared with the interview's sound at 5 points inside each piece. The person is shown the offset in milliseconds, with a clear warning when it is off by more than a frame (1/30 second), or that no clear match was found. A preview that is off is kept, with the warning shown on the interview and on its cards, and a person can have it made again.
 
-- Pending: cards-footage-in-Q2
 
 ### A preview that cannot be made never stops anything else
 
@@ -710,8 +700,7 @@ Where only subtitle lines exist for a recording and no transcript, paragraphs ar
 The interview's page says, per recording, which word source placed its paragraphs.
 
 - On its own: where in the recording each existing paragraph sits, and which word source placed it.
-- By hand: a person can place a paragraph by hand by choosing its stretch, and change the likeness a loose match needs. A placement set by hand is kept through every later pass.
-- Setting: Likeness for placing existing paragraphs. Does: how alike a stretch of a recording must be to an existing paragraph for the paragraph to be placed there. Default: 80%. Who: an admin. Applies to: the site. Search words: import, match, existing transcripts, place paragraph, threshold.
+- By hand: a person can place a paragraph by hand by choosing its stretch. A placement set by hand is kept through every later pass.
 
 ### A transcript taken from another episode times and plays from its source
 

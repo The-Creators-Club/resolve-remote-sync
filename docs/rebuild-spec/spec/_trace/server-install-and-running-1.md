@@ -151,7 +151,7 @@
 - 15-050 | The server says when it cannot write its own records
 - 15-052 | The protection list says what really stands between the studio and a loss
 - 15-086 | Crashes are kept, shown and can be downloaded
-- 15-087 | Crashes are kept, shown and can be downloaded
+- 15-087 | left out: cut by the owner (2026-11-24, server-install-and-running-1-Q19)
 - 15-096 | The server re-checks the facts the product relies on every 15 minutes
 - 15-104 | The server re-checks the facts the product relies on every 15 minutes
 - 16-003 | The admin sees when each kind of background work last ran ; The server says when it cannot write its own records
@@ -177,6 +177,7 @@
 - Changes for a person: with A an admin always meets the same list in the same words; with B two lists can drift apart.
 - Text assumes: A
 - Items: 17-069, 13-114, 14-019
+- Answered by the owner 2026-11-24: A, one page reached from set-up and from settings
 
 ### server-install-and-running-1-Q2: Should set-up check that a Synology's secure file transfer service is switched on?
 - Kind: unreachable
@@ -187,6 +188,7 @@
 - Text assumes: A
 - Items: 16-068
 - Covers: 16-Q8
+- Answered by the owner 2026-11-24: A, keep it as a set-up check
 
 ### server-install-and-running-1-Q3: Should the server check, on a Synology, that the tree's folders keep their access rules?
 - Kind: unreachable
@@ -197,6 +199,7 @@
 - Text assumes: A
 - Items: 21a-028
 - Covers: 21a-Q2
+- Answered by the owner 2026-11-24: A, run it as a regular check and show it
 
 ### server-install-and-running-1-Q4: Should there be one health check of the whole server side, shown in the dashboard?
 - Kind: several ways in
@@ -207,6 +210,7 @@
 - Text assumes: A
 - Items: 21-001, 21-023, 21a-032
 - Covers: 21-Q7
+- Answered by the owner 2026-11-24: A, one check in the dashboard
 
 ### server-install-and-running-1-Q5: Should the server still run on a TrueNAS older than 25.04?
 - Kind: other
@@ -217,6 +221,7 @@
 - Text assumes: B is still written (it works, with a note), and is deleted if he chooses A
 - Items: 16-065, 21d-006
 - Covers: 21d-Q1
+- Answered by the owner 2026-11-24: A, a TrueNAS older than 25.04 is refused
 
 ### server-install-and-running-1-Q6: Should per-project privacy be offered on Synology, where it needs a step by hand in DSM?
 - Kind: differs
@@ -227,6 +232,7 @@
 - Text assumes: A
 - Items: 21a-027, 21-018
 - Covers: 21a-Q1
+- Answered by the owner 2026-11-24: A, offered on both, with the DSM step told on Synology
 
 ### server-install-and-running-1-Q7: Is it acceptable that on Synology regular snapshots may need steps by hand?
 - Kind: differs
@@ -237,6 +243,7 @@
 - Text assumes: A
 - Items: 21a-031, 21-007
 - Covers: 21a-Q5
+- Answered by the owner 2026-11-24: A, steps by hand on Synology, lines stay cannot verify
 
 ### server-install-and-running-1-Q8: Should every piece of extra software the parts need follow the version the product approves?
 - Kind: differs
@@ -247,6 +254,7 @@
 - Text assumes: A
 - Items: 21b-005
 - Covers: 21b-Q1
+- Answered by the owner 2026-11-24: A, every piece follows the approved version
 
 ### server-install-and-running-1-Q9: Should the software for signed-in YouTube downloads be fetched only with YouTube's anti-blocking measures switched on?
 - Kind: dormant
@@ -257,6 +265,7 @@
 - Text assumes: A
 - Items: 21b-001
 - Covers: 21b-Q4
+- Answered by the owner 2026-11-24: A, fetched whenever signed-in YouTube downloads are on
 
 ### server-install-and-running-1-Q10: Should the switches that are off for every studio by default stay (YouTube's anti-blocking measures, automatic updates of editors' apps)?
 - Kind: dormant
@@ -266,6 +275,7 @@
 - Changes for a person: with B a studio could not turn them on.
 - Text assumes: A
 - Items: 21-028, 21c-021
+- Answered by the owner 2026-11-24: A, both kept as settings, off by default
 
 ### server-install-and-running-1-Q11: Can the server's own spare copy of the syncing, off unless started on purpose, go?
 - Kind: dormant
@@ -276,6 +286,7 @@
 - Text assumes: left out
 - Items: 21c-025
 - Covers: 21c-Q4
+- Answered by the owner 2026-11-24: A, cut
 
 ### server-install-and-running-1-Q12: Should a risky change across the whole tree stop when no snapshot could be taken first?
 - Kind: other
@@ -286,6 +297,7 @@
 - Text assumes: A
 - Items: 21d-012, 21-008
 - Covers: 21d-Q2
+- Answered by the owner 2026-11-24: A, stop unless the admin accepts the risk in words
 
 ### server-install-and-running-1-Q13: Should "a restore was tried" be recordable both by an admin's typed date and by the server's own restore rehearsal?
 - Kind: several ways in
@@ -296,6 +308,7 @@
 - Text assumes: A
 - Items: 13-108, 16-047, 16-052, 13-113
 - Covers: 13-Q8, 16-Q5
+- Answered by the owner 2026-11-24: A, keep both ways of recording
 
 ### server-install-and-running-1-Q14: Should every action that changes the NAS show its preview first?
 - Kind: differs
@@ -306,6 +319,7 @@
 - Text assumes: A
 - Items: 21-010, 21-009, 21d-007
 - Covers: 21-Q4
+- Answered by the owner 2026-11-24: A, preview first and the NAS's name only for sweeping or irreversible changes
 
 ### server-install-and-running-1-Q15: At what point should an admin be warned that the server's disk is running out?
 - Kind: built twice
@@ -316,6 +330,7 @@
 - Text assumes: A
 - Items: 15-045
 - Covers: 15-Q3
+- Answered by the owner 2026-11-24: A, one warning at 10 percent or 2 GB, whichever first
 
 ### server-install-and-running-1-Q16: Is the off-site backup part of the server that is always there, rather than part of the Footage Sorter?
 - Kind: other
@@ -325,6 +340,7 @@
 - Changes for a person: with B a studio without the Footage Sorter has no off-site backup.
 - Text assumes: A
 - Items: 36-022, 37-089, 38-078
+- Answered by the owner 2026-11-24: A, part of the always-on server
 
 ### server-install-and-running-1-Q17: Should a signed-in person keep getting the fuller health summary from "is the dashboard up?"
 - Kind: other
@@ -335,6 +351,7 @@
 - Text assumes: B is still written, and is deleted if he chooses A
 - Items: 11-016
 - Covers: 11-Q7
+- Answered by the owner 2026-11-24: A, the fuller summary is cut
 
 ### server-install-and-running-1-Q18: Should the two facts that can never be checked be made checkable?
 - Kind: unreachable
@@ -345,6 +362,7 @@
 - Text assumes: A
 - Items: 15-104
 - Covers: 15-Q12
+- Answered by the owner 2026-11-24: A, both made checkable
 
 ### server-install-and-running-1-Q19: Can sending crashes to the vendor, and keeping a server log file, go?
 - Kind: dormant
@@ -355,6 +373,7 @@
 - Text assumes: B is still written, and is deleted if he chooses A
 - Items: 15-087
 - Covers: 15-Q10
+- Answered by the owner 2026-11-24: A, both cut
 
 ### server-install-and-running-1-Q20: Should the server's twice-daily check run on the assistant the site has set up, with no assistant program installed on the server?
 - Kind: dormant
@@ -365,6 +384,7 @@
 - Text assumes: A
 - Items: 14-028
 - Covers: 14-Q4
+- Answered by the owner 2026-11-24: A, runs on the assistant the site has set up (the subscription way stays as a site choice, a paid key the usual way)
 
 ### server-install-and-running-1-Q21: Can the tools for the product's builders go: the testing switch that turns off the server's security, a helper that deletes test accounts on a Synology, and a one-off command that runs the gathering jobs once?
 - Kind: dev only
@@ -375,6 +395,16 @@
 - Text assumes: left out
 - Items: 15-091, 17-006, 16-069, 16-007
 - Covers: 17-Q12
+- Answered by the owner 2026-11-24: A, they go
+
+### server-install-and-running-1-Q22: The setting "Syncing only over the private network", and the passages that assume editors' transfers go through the NAS's own file-transfer service, wait on the measurements of how footage travels. Keep them as written until the measured choice is made?
+- Kind: other
+- Today: syncing can be limited to the private network, and on a Synology editors' transfers go through DSM's own file-transfer server within its limits.
+- Options: A: keep them as written, to be revised once the speed of each way of moving footage has been measured. B: remove them now.
+- Recommend: A, because the route is chosen by measurement and the text must not rule one in or out before then.
+- Changes for a person: none until the measured choice is made.
+- Text assumes: A
+- Items: 17-061, 15-057, 16-068, 21-026, 21-001
 
 ## Readers' questions and unsettled points
 
@@ -432,7 +462,6 @@
 
 ## Still unsettled
 
-- server-install-and-running-1-U1 | Which of Timeline Cards and the Footage Sorter are on by default for a new site | the text states defaults only for the b-roll archive, music and YouTube downloads | 21c-021, 21-028
 
 ## Conflicts between an item and a lesson
 
@@ -540,3 +569,7 @@
 - The Footage Sorter and camera cards / The record of every copy | The off-site backup's state, schedule and run now | off-site copies known to the record
 - Timeline Cards: the editor / Opening episodes and keeping the editor running | Each switchable part's state is shown with its reason | the editor's own state
 - The whole product | A part switched on but missing something it needs says so | switching parts on and off
+
+## Settled by the owner 2026-11-24
+
+- server-install-and-running-1-U1 | every one of the six switchable parts is off for a new site except the help for the editing program, which is on; YouTube's anti-blocking measures and automatic updates of editors' apps stay off

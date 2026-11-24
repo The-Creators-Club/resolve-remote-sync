@@ -36,9 +36,7 @@ A track's length is always measured by decoding its sound, never taken from what
 
 ### Recordings that are not music stay out of the library
 
-When the library folder is looked over as a whole, recorder takes, voiceover, stings shorter than 30 seconds and recordings longer than 15 minutes are left out, and anything inside a folder named "_stems" is kept apart from tagging, so interviews and field recordings never swamp the music. A track a person drops in is taken whatever its length.
-
-- Pending: music-U2
+When the product looks over a whole folder of mixed audio, recorder takes, voiceover, stings shorter than 30 seconds and recordings longer than 15 minutes are left out, and anything inside a folder named "_stems" is kept apart from tagging, so interviews and field recordings never swamp the music. A track a person drops in by hand is always taken, whatever its length.
 
 ### Tracks named only by a number stay apart from each other
 
@@ -87,7 +85,6 @@ A track's sound is in the library, safe and playable, as soon as it has arrived.
 
 - Who: the person who dropped it, or an admin.
 - Ways in: the music page, and the app on the editor's computer while that computer is working on the drop.
-- Pending: music-Q7
 
 ### When a drop finishes the library refreshes and shows the newest tracks first
 
@@ -118,9 +115,7 @@ Every track in the library carries the same description, measured the same way h
 - its tags in five categories and its four feels (see "The tags and feels a track can carry");
 - what it sounds like, both as a whole and in up to twelve 10-second stretches spread across it (leaving out the first and last 2 %), for search and for similar tracks. A track of 10 seconds or less is judged whole.
 
-A track that cannot be analysed is skipped and the rest carry on.
-
-- Pending: music-Q3
+A track that cannot be analysed is skipped and the rest carry on. Tempo, key and loudness are shown on each track's row in the list.
 
 ### The tags and feels a track can carry
 
@@ -261,9 +256,7 @@ A line reads "<n> tracks · <h>h · <GB> GB" (hours to one decimal, gigabytes to
 
 ### A person can filter by feel, one feel at a time
 
-There is one slider per feel, in this order with these labels: "arousal: calm → intense", "valence: dark → bright", "tension: resolved → tense", "organic: electronic → acoustic". Any further feel the library has is added after these, labelled "low → high". Each runs 0 to 100 in steps of 5. At 0 it reads "off"; at any other value v it reads "top (100 - v)%" and keeps only tracks ranked at or above v on that feel against the rest of the library. Above the sliders: "One at a time: moving a slider clears the others." Releasing a slider sets the others to off and runs the current search again, or the browse list if the box is empty. Only the high end of a feel can be asked for.
-
-- Pending: music-Q1
+There is one slider per feel, in this order with these labels: "arousal: calm → intense", "valence: dark → bright", "tension: resolved → tense", "organic: electronic → acoustic". Any further feel the library has is added after these, labelled "low → high". Each slider has "off" in the middle and can be moved towards either end, in steps of 5 percentiles. Moved towards the high end it reads "<high word>: top N%" (for example "intense: top 20%") and keeps only the tracks ranked in the top N% of the library on that feel; moved towards the low end it reads "<low word>: top N%" (for example "calm: top 20%") and keeps only the tracks ranked in the bottom N%, so a person can ask for the calmest, darkest, most resolved or most electronic tracks as easily as for the most intense. Above the sliders: "One at a time: moving a slider clears the others." Releasing a slider sets the others to off and runs the current search again, or the browse list if the box is empty.
 
 ### A person can filter by tempo and by length
 
@@ -278,7 +271,6 @@ When some tracks have no BPM or no length yet, a tick box "Include tracks with n
 Each tag category (genre, mood, instrument, use case, texture, then any other in alphabetical order) lists its labels with how many tracks carry each, most common first. Clicking a label selects it, one at a time across all categories, and narrows what is shown to tracks carrying that tag: the typed description stays and the search runs again with the tag, or with an empty box the library is browsed by that tag. Clicking the selected label again deselects it. Clicking a tag shown on a track row does the same as clicking that label in its list.
 
 - Ways in: the tag lists beside the results, and the tags on each track row.
-- Pending: music-Q5
 
 ### The library list can be sorted, but search results keep their match order
 
@@ -286,7 +278,7 @@ Sort choices: file name (the default), newest (most recently added first), BPM, 
 
 ### The results are headed by what is shown and how many tracks
 
-A headline plus "<n> track(s)". Headlines: "All tracks"; a summary of the filters that are on, joined by " · " ("<category>: <label>", "<feel> ≥ <v>", "<min>-<max> bpm", "<min>-<max> s"); "“<query>” · any moment" or "“<query>” · whole track"; "Similar to <file name>"; "Just added"; "Searching…"; "Finding similar…"; and the failure headlines.
+A headline plus "<n> track(s)". Headlines: "All tracks"; a summary of the filters that are on, joined by " · " ("<category>: <label>", "<feel word>: top N%", "<min>-<max> bpm", "<min>-<max> s"); "“<query>” · any moment" or "“<query>” · whole track"; "Similar to <file name>"; "Just added"; "Searching…"; "Finding similar…"; and the failure headlines.
 
 ### Empty results say what to try
 
@@ -305,7 +297,7 @@ When the session has expired: "<what> failed: your session expired. Reload the p
 
 ### Each track in the list shows what it is and offers play, similar and send
 
-Each row has a play button; the file name; its length (m:ss), BPM (rounded, when known) and key (when known); its leading tags (top genre, top two moods, top instrument, top use case), each with a hint "<category> · score <s> · <pct>th percentile"; a match figure (search and similar only); a "similar" button; and a "→ Resolve" button, which opens the player under the row without starting playback. The play button opens the player under the row and starts playing; pressing it again on the open track pauses and resumes. Changing the list closes any open player and stops the sound.
+Each row has a play button; the file name; its length (m:ss), BPM (rounded, when known), key (when known) and loudness in LUFS (when known); its leading tags (top genre, top two moods, top instrument, top use case), each with a hint "<category> · score <s> · <pct>th percentile"; a match figure (search and similar only); a "similar" button; and a "→ Resolve" button, which opens the player under the row without starting playback. The play button opens the player under the row and starts playing; pressing it again on the open track pauses and resumes. Changing the list closes any open player and stops the sound.
 
 - When the help for the editing program is off: the row has no "→ Resolve" button; the player it would open offers to save the track's file instead.
 
@@ -314,7 +306,6 @@ Each row has a play button; the file name; its length (m:ss), BPM (rounded, when
 "similar" replaces the list with the 25 nearest-sounding tracks, leaving out the track itself, each with a match figure. Similar tracks are ranked by sound, tags, genre and mood, and are never dominated by the stock library the track came from: what tracks of one source library share only because they come from that library is discounted, for any source with at least 8 tracks in the library. A file's name never affects the results.
 
 - Ways in: the track's row, and its open player.
-- Pending: music-Q6
 
 #### Lessons
 
@@ -338,7 +329,6 @@ A track that cannot be read never breaks the page.
 Each track can have a listening copy at about 128 kbps; the original is played where there is none. No listening copy is made for a track whose original is already at or below about 134 kbps, whatever its form. A listening copy keeps only the sound (cover art dropped), mixes surround down to stereo, keeps mono as mono and keeps the sample rate. A copy more than 3% shorter than its original is refused as cut short, and a copy older than its original is made again. A track's listening copy always plays that track's own sound: a copy made from other audio is never played. Playback can start anywhere in the track without the whole file downloading first, and seeking works in every browser and player, including players that ask for only the end of a file or ask about a file before fetching it. Taking a track out of the library takes its listening copy with it.
 
 - On its own: listening copies are made for new and changed tracks without anyone asking.
-- Pending: music-Q2
 
 #### Lessons
 
@@ -433,7 +423,6 @@ The library is looked over on its own: new and changed files are analysed, and t
 
 - On its own: which tracks have gone, from the files present in the library's folder.
 - By hand: when a removal was held back because it was too large, an admin sees the tracks that would go and can confirm the removal.
-- Pending: music-Q2
 
 ### A file name can never reach outside the library or run anything
 

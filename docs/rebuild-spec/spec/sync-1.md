@@ -27,7 +27,6 @@ When a project is ticked on a computer for full sync:
 
 Nothing comes down that was made on this computer and nothing goes up that came down: originals brought down are never sent back, and proxies are never sent up.
 
-- Pending: sync-1-Q2
 
 ### New footage starts going up about two minutes after it stops changing
 
@@ -114,7 +113,6 @@ If Resolve does not seem to be installed for this user, the app says "DaVinci Re
 - Who: an editor, for the computer they are at.
 - When the help for the editing program is off: no entries are put in Resolve, and originals are picked from the project's page only.
 - Windows and macOS: offered on both. Asking never flashes a window on Windows.
-- Pending: sync-1-Q15
 - Pending: sync-1-U2
 - See Resolve on the editor's computer: Bins, clip sorting and imports, for how clips are matched to their files.
 
@@ -160,7 +158,6 @@ When a clip on a card is already filed elsewhere (the same recording at the same
 
 - Who: whoever may run the Footage Sorter.
 - When the Footage Sorter is off: this is not offered, and folders are included from the project's page.
-- Pending: sync-1-Q20
 
 ### The studio's shared libraries reach every computer without a tick
 
@@ -174,14 +171,6 @@ A library that fails is tried again after 1 minute, then less often, doubling up
 - "<name> could not be set up on this computer[: <reason>]. It keeps trying."
 
 - On its own: every computer the studio has accepted receives both libraries.
-- Pending: sync-1-Q11
-
-### A computer can be set to keep no local copies of proxies
-
-A computer that reads proxies straight from the server can be set not to bring them down. Its downloads then show as "off", and its status says proxies are not downloaded because this computer uses the NAS directly.
-
-- Setting: Keep local copies of proxies. Does: when off, no proxies come down to this computer. Default: on. Who: the editor on that computer. Applies to: a computer. Search words: proxies, local copies, download, NAS directly.
-- Pending: sync-1-Q13
 
 ### The app lists this computer's ticked projects and how each is doing
 
@@ -204,19 +193,6 @@ The app's status shows, when they apply:
 
 A blank, missing or empty value always narrows what is synced, moved or deleted, never widens it: where a value is missing, the action stops instead. A server destination that is empty, or not a full path, is refused when the computer is set up, and nothing uploads or downloads until a valid one is set. Every setting the product offers is honoured everywhere in the product; a setting it cannot honour makes it refuse to start, saying why.
 
-### A computer with no dashboard syncs the whole tree
-
-A computer with no dashboard address set syncs the whole shared tree all the time: there is no list of projects, nothing is ticked or ordered, and no project prompts appear. With a dashboard set, the dashboard decides which projects the computer syncs and in what order.
-
-- Pending: sync-1-Q9
-
-### A project can be shared with a computer by hand while accepting it
-
-While accepting a new computer, an admin can also share one project with it by hand. They are told that the dashboard decides what each editor's computer receives and may undo a share made by hand. Sharing it again when already shared changes nothing.
-
-- Who: an admin.
-- Pending: sync-1-Q10
-
 #### Lessons
 
 - Met: BRO-024, SYN-001, SYN-002, SYN-003, SYN-004, SYN-005, SYN-006, SYN-007, SYN-008, SYN-009, SYN-010, SYN-011, SYN-012, SYN-013, SYN-014, SYN-015, SYN-016, SYN-017.
@@ -227,13 +203,11 @@ While accepting a new computer, an admin can also share one project with it by h
 
 An upload cut off by quitting the app or by an update carries on where it left off (see "Quitting, signing out, updating or a stop ends transfers calmly"). A transfer cut off part-way in any other way, by a dropped or slow connection, sleep, a shutdown, signing out, the editor's pause or any stop, and a download cut off in any way, likewise carries on from where it stopped the next time it can, so a large camera original half-sent from the field over a poor connection is never sent again from the beginning. Leftover pieces of an unfinished transfer are never seen by anyone as files on the server or on a computer.
 
-- Pending: sync-1-Q1
 
 ### Quitting, signing out, updating or a stop ends transfers calmly
 
-Signing out, quitting the app, an update, a studio-wide stop or the editor's pause end every transfer in progress, including a large upload carrying on while another project has its turn. Quitting stops an upload at once, and it carries on where it left off the next time the app runs. An update first waits for the file in flight to finish, up to a set limit, then stops it the same way, and it carries on where it left off once the updated app runs. This is shown calmly, as stopped mid-transfer or stopped before it started, never as a failure. Once one of these begins nothing new starts, and no file is ever sent by two transfers at once: the one ended is finished with before anything takes its place.
+Signing out, quitting the app, an update, a studio-wide stop or the editor's pause end every transfer in progress, including a large upload carrying on while another project has its turn. Quitting stops an upload at once, and it carries on where it left off the next time the app runs. An update first waits for the file in flight to finish, up to a limit the product states, then stops it the same way, and it carries on where it left off once the updated app runs. This is shown calmly, as stopped mid-transfer or stopped before it started, never as a failure. Once one of these begins nothing new starts, and no file is ever sent by two transfers at once: the one ended is finished with before anything takes its place.
 
-- Pending: sync-1-U4
 
 ### Shutting down while files are moving is warned against
 
@@ -243,16 +217,13 @@ The warning reads: "CC Sync is still syncing[ - <size> left[, about N min | abou
 
 - Windows and macOS: on Windows, shutdown, restart and sign-out are held with Windows's own "this app is preventing you from shutting down" screen showing that sentence, and the person can still choose to shut down anyway. On macOS a logout cannot be held: the app closes cleanly; the first Quit of the app while files are moving is held once with a notification showing the sentence, and a second Quit within 2 minutes goes through. A real shutdown or logout counts as a deliberate exit, never a crash.
 - On its own: anything going wrong with the check lets the shutdown or quit go ahead.
-- Setting: Warn at shutdown while syncing. Does: holds shutdown with the warning while files are really moving. Default: on. Who: the editor on that computer. Applies to: a computer. Search words: shutdown, warning, still syncing, turn off.
-- Pending: sync-1-Q1
-- Pending: sync-1-U1
+- Setting: Warn at shutdown while syncing. Does: holds shutdown with the warning while files are really moving. Default: on. Who: the editor in the app's settings for their own computer, or an admin for any computer from the dashboard. Applies to: a computer. Search words: shutdown, warning, still syncing, turn off.
 
 ### The computer is kept awake while files are moving
 
 About every 30 seconds the product checks whether files are really moving (as above). While they are, the computer is kept from idle sleep on Windows and macOS (the screen may still turn off), and it is let go within about 30 seconds of the work finishing, stalling, or the app stopping. A stalled backlog never keeps it awake, and it is never held awake for more than 8 hours in a row. It cannot stop a deliberate sleep (the sleep command or closing a laptop lid). Nothing is held while syncing is paused or stopped, while the computer is not set up, or while the sync drive is out. Anything going wrong lets the computer sleep.
 
-- Setting: Keep the computer awake while syncing. Does: holds off idle sleep while files are really moving. Default: on. Who: the editor on that computer. Applies to: a computer. Search words: sleep, awake, power, idle, laptop.
-- Pending: sync-1-U1
+- Setting: Keep the computer awake while syncing. Does: holds off idle sleep while files are really moving. Default: on. Who: the editor in the app's settings for their own computer, or an admin for any computer from the dashboard. Applies to: a computer. Search words: sleep, awake, power, idle, laptop.
 
 ### A computer about to sleep says what is unfinished and catches up on waking
 
@@ -315,7 +286,6 @@ Refusals:
 A failure reads "could not copy the plan: <reason>".
 
 - Who: an admin, or the person for their own computers.
-- Pending: sync-1-Q8
 
 ### Who may read a computer's plan
 
@@ -367,7 +337,6 @@ Switching to wired asks: "Set this computer to WIRED TO THE SERVER? A wired comp
 
 Afterwards: "This computer is now set to <ROLE>. Takes effect the next time CC Sync starts: open Settings to restart now." or "Couldn't save that: see the log." Until the restart, a red line reads "The role above was changed and takes effect when CC Sync next starts."
 
-- Pending: sync-1-Q14
 
 ### A wired computer syncs nothing and cannot be ticked
 
@@ -396,12 +365,11 @@ A wired computer's finish page is headed "DONE: CONNECTED TO THE NAS" and says t
 
 ### An upload-only tick sends every file up and brings down only the empty folders
 
-For a project ticked upload only on a computer, every file in its folder goes up to the server, not just video. The only thing that comes down is the project's folder structure, empty: the editor sees the project's folders in their own copy of the tree, in the place their own originals go, so they can see where to put them. A folder made on the server later also arrives, empty. Nothing else comes down: no proxies, no project files, no originals (a pick of originals for it is refused), and it includes no folders of other projects. Left out of the upload: anything inside a Proxy folder, operating-system litter and hidden files, unfinished, temporary, lock and partial files, files half-way through a move, YouTube downloads still in progress, the product's own recovery folder, and the hidden bookkeeping other sync tools keep in a folder.
+For a project ticked upload only on a computer, every file in its folder goes up to the server, not just video. The only thing that comes down is the project's folder structure, empty: the editor sees the project's folders in their own copy of the tree, in the place their own originals go, so they can see where to put them. A folder made on the server later also arrives, empty. A file other than a camera original that is changed after it went up goes up again, replacing the server's copy, whose earlier version is kept on the NAS for a year; a camera original is never replaced. Nothing else comes down: no proxies, no project files, no originals (a pick of originals for it is refused), and it includes no folders of other projects. Left out of the upload: anything inside a Proxy folder, operating-system litter and hidden files, unfinished, temporary, lock and partial files, files half-way through a move, YouTube downloads still in progress, the product's own recovery folder, and the hidden bookkeeping other sync tools keep in a folder.
 
 Its status adds "Uploads only. Proxies do not come down for this project." while it is syncing or waiting, and it never reads as out of sync because no files came down. Whether a file belongs to an upload-only project is decided ignoring letter case, slash direction and the two ways Windows and macOS spell accented letters; when the product cannot tell, it uploads camera video only.
 
 - Who: the editor for their own computers, or an admin.
-- Pending: sync-1-Q4
 
 #### Lessons
 
@@ -430,7 +398,6 @@ What comes down to an editor's computer follows the server: a file gone from the
 - A file the server moved into a project this computer does not sync stays in the recovery folder.
 - Removals are recorded in the transfer history as removals, never as downloads.
 
-- Pending: sync-1-Q2
 
 ### The recovery folder empties itself by age and size
 
@@ -443,9 +410,7 @@ A few times a day the oldest contents of the recovery folder are cleared, and ev
 Earlier versions of a project file changed by syncing are kept in the same recovery folder, under the same rules. Nothing is cleared while downloads are halted by a safety stop.
 
 - Setting: Keep removed files on editors' computers. Does: how many days the recovery folder keeps what was moved aside. Default: 14 days. Who: an admin. Applies to: the site. Search words: recovery folder, removed files, keep, days, trash.
-- Setting: Recovery folder size. Does: the most the recovery folder keeps before the oldest batches go. Default: 50 GB. Who: the editor on that computer. Applies to: a computer. Search words: recovery folder, size, trash, space.
-- Pending: sync-1-Q3
-- Pending: sync-1-U1
+- Setting: Recovery folder size. Does: the most the recovery folder keeps before the oldest batches go. Default: 50 GB. Who: the editor in the app's settings for their own computer, or an admin for any computer from the dashboard. Applies to: a computer. Search words: recovery folder, size, trash, space.
 
 ### The editor can open the recovery folder and see what it holds
 
@@ -480,7 +445,7 @@ A project's local copy is deleted only when the product can show nothing would b
 
 - part of the project is included in another project still ticked here: "part of this project ('<sub>') is shared into <other>, which is still selected here";
 - files not yet on the server at the same size and content, of any age or date, files copied in moments ago included: "<N files> have not been uploaded yet (e.g. a, b, c)", or "CC Sync could not reach the server to check whether your footage has been uploaded";
-- files changed after they were uploaded: "<N files> changed after they were uploaded (e.g. ...). Rename them first, so they upload as new files", or that it could not check;
+- camera originals changed after they were uploaded: "<N files> changed after they were uploaded (e.g. ...). Rename them first, so they upload as new files", or that it could not check;
 - files sharing a name with a different file on the server: "<N files> share a name with a different file already on the server, so they will never upload (e.g. ...). Rename them first", or that it could not check;
 - files nothing carries up: "<N files> in this folder are not carried by any sync, so the server will never have them (e.g. ...)", or "CC Sync could not read this project's folder to check what is in it";
 - files dated in the future: "<N files> are dated in the future (a camera clock set wrong), which CC Sync will not upload (e.g. ...). One a few hours ahead uploads by itself once that time passes; otherwise its modified date has to be reset to now (ask whoever looks after your computers) before it can upload";
@@ -494,14 +459,12 @@ The editor sees "► project not ready to remove", "'<project>' is NOT ready to 
 
 A computer stays marked as holding footage the server does not have until each of those files is confirmed on the server, however long that takes. When an editor removes a project's copy, or part of it, while uploads were still owed, the admin is told: which computer, which project, how many uploads were owed and why.
 
-- Pending: sync-1-Q16
 - See Sync, part 2: What is owed.
 
 ### A project whose folder disappears from the NAS is never deleted
 
 A project whose folder has vanished from the NAS is left set up as it was; nothing is deleted. It is marked no longer active on the dashboard. When more than a quarter of the active projects (and never fewer than two) would go inactive in one check, none of them is marked and admins see a serious problem, "a mass project deactivation was refused", saying N projects looked deleted in one check, over the limit, so none were marked gone. A project seen within the last 15 minutes is never counted as gone.
 
-- Pending: sync-1-Q19
 
 #### Lessons
 
@@ -532,9 +495,7 @@ While stopped, nothing is downloaded or moved aside. Uploads keep running. The a
 
 The dashboard sees that it stopped, why, when, and how many files and bytes were moved aside. Technical detail goes to the admin and the log, never to the editor.
 
-- Setting: Download safety limits. Does: how many files one pass may move aside (50, or a quarter of the computer's files), how many in all before a stop (200), and how far the server's list may shrink (by half). Default: 50, a quarter, 200, half. Who: the editor on that computer. Applies to: a computer. Search words: safety, limit, removals, download stop.
-- Pending: sync-1-Q2
-- Pending: sync-1-U1
+- Setting: Download safety limits. Does: how many files one pass may move aside (50, or a quarter of the computer's files), how many in all before a stop (200), and how far the server's list may shrink (by half). Default: 50, a quarter, 200, half. Who: an admin, for any computer. Applies to: a computer. Search words: safety, limit, removals, download stop.
 
 ### Old files are cleared out a slice at a time
 
@@ -549,7 +510,6 @@ A safety stop never clears itself. The editor restarts downloads from the app ("
 
 - Who: the editor at the computer, or an admin.
 - Ways in: from the app on the editor's computer, and from the computer's row on the dashboard.
-- Pending: sync-1-Q6
 
 ### Safety stops survive restarts, and one that cannot be saved still holds
 
@@ -561,14 +521,14 @@ If a stop cannot be saved on the computer, it still holds while the app runs, sa
 
 The app's settings window shows, when they apply:
 
-- "⛔ Your administrator stopped syncing for everyone: <reason>" or "⛔ Syncing is STOPPED on this computer: <reason>";
+- "⛔ Your administrator stopped syncing for everyone: <reason>";
 - "⛔ DOWNLOADS STOPPED (safety): <reason>";
 - "⚠ Not downloading: <reason>. Uploads are still running; free up space and it starts again on its own" (the drive nearly full);
 - "⚠ <the reason syncing is held>", left out when that reason already has its own line.
 
 ### An admin sees each computer's stops and pauses
 
-For each computer the dashboard shows whether downloads have stopped themselves, why and when; whether that computer is stopped and whether the stop is its own or the studio's, with the reason; whether the editor has paused it; how many files the recovery folder holds and their size; how many uploads are held because the server already has a file of that name at a different size, and in which project; and the free space at which downloads pause. When a computer stops reporting one of these, it disappears from the dashboard at once.
+For each computer the dashboard shows whether downloads have stopped themselves, why and when; whether the studio-wide stop has reached it, with the reason; whether the editor has paused it; how many files the recovery folder holds and their size; how many uploads are held because the server already has a file of that name at a different size, and in which project; and the free space at which downloads pause. When a computer stops reporting one of these, it disappears from the dashboard at once.
 
 - See The dashboard: Each computer's state.
 
@@ -618,7 +578,7 @@ When a project's folder loses its project mark, the product puts it back on its 
 Syncing does not start, and the status says why, in this order:
 
 1. paused by the editor: "Syncing is paused.";
-2. stopped on this computer or for the whole studio (see below);
+2. stopped for the whole studio by an admin (see below);
 3. nobody signed in, or the computer not set up yet: its sentence, else "This computer is not set up for syncing yet.";
 4. the licence not accepted;
 5. the sync drive absent: "PAUSED: <drive> is disconnected: plug it back in and syncing resumes on its own", the drive named from the studio's settings;
@@ -626,24 +586,12 @@ Syncing does not start, and the status says why, in this order:
 
 The same reasons, in the same order and the same words, are given everywhere: in the app, on the dashboard and in alerts. Sync never starts with nobody signed in.
 
-- Pending: sync-1-Q12
 
 ### The editor pauses and resumes syncing
 
 "⏸ Pause syncing" and "▶ Resume syncing (paused by you)" (ticked while paused) toggle the pause. Pausing stops every transfer in both directions after the current step, new footage included, and holds until the editor resumes: through sign-in, restarts, updates, a returning drive and the release of any other stop. Pausing is never reported as a fault. Resuming starts again at once, checks every project against the server, and fetches any originals asked for meanwhile. Unplugging the drive or a stop does not change the pause, and none of them undoes it. On a wired computer the pause changes nothing else.
 
 - Who: the editor at the computer.
-- Pending: sync-1-Q5
-
-### The editor stops all syncing on their computer until they clear the stop
-
-"STOP ALL SYNCING ON THIS COMPUTER…" (hidden while a stop is in force) asks: "Stop ALL syncing on this computer? Uploads, downloads AND the shared project files all stop, and they STAY stopped after a restart until you clear the stop. Nothing is deleted. Use this when something looks wrong and you want the files to stop moving." with "STOP ALL SYNCING". The stop is recorded as stopped on this computer. The editor is told "SYNCING IS STOPPED on this computer.\n<reason>\nNothing is uploading, downloading or sharing until it is started again." and the status reads "STOPPED: syncing is STOPPED on this computer[: <reason>]". A failure reads "Could not stop syncing: <message>".
-
-"► Clear the sync stop on this computer (set today at 14:32)" (or "on 2 Sep at HH:MM" in local time, the part in brackets dropped when the time is unknown) releases it at once, with no confirmation, and shows the result; a successful release says "syncing will start again", and clearing when nothing is stopped is refused with "syncing is not stopped". A studio-wide stop cannot be cleared on the editor's computer, and neither control is shown for it.
-
-- Who: the editor at the computer.
-- Ways in: from the app's menu and from its settings window.
-- Pending: sync-1-Q5
 
 ### Sync now runs every transfer this computer has switched on at once
 
@@ -653,17 +601,17 @@ The same reasons, in the same order and the same words, are given everywhere: in
 
 ### While any stop is in force nothing moves
 
-A stop, whether the editor's own or the studio's, halts every transfer on every folder of the computer: uploads, downloads, project files, the shared libraries, included folders, and the first set-up of any new folder. While stopped, nothing that would start syncing is allowed, and if it cannot be told whether syncing is stopped, it is treated as stopped. A stop touches only what this product syncs, never other programs on the same computer, and the product does not try to bring its syncing back up while stopped, paused or wired. Releasing a stop returns each folder only to the state it would otherwise be in, so a project still waiting to be set up stays waiting, and a folder whose never-travel rules are not yet confirmed stays held (see "A project never syncs until these rules are in place for it"). The dashboard is told whether a computer is stopped, by whom (the editor or the studio) and why.
+A studio-wide stop, like the editor's pause, halts every transfer on every folder of the computer: uploads, downloads, project files, the shared libraries, included folders, and the first set-up of any new folder. While stopped, nothing that would start syncing is allowed, and if it cannot be told whether syncing is stopped, it is treated as stopped. A stop touches only what this product syncs, never other programs on the same computer, and the product does not try to bring its syncing back up while stopped, paused or wired. Releasing a stop returns each folder only to the state it would otherwise be in, so a project still waiting to be set up stays waiting, and a folder whose never-travel rules are not yet confirmed stays held (see "A project never syncs until these rules are in place for it"). The dashboard is told whether a computer is stopped or paused, and why.
 
 ### An admin stops syncing on every computer with a reason
 
 An admin can stop all syncing on every computer at once. A reason is required, at least 3 characters after trimming and up to 500; a shorter one is refused with "say why: the reason is shown in every editor's app (at least 3 characters)" and nothing stops. The stop records the reason, who set it and when, and ends by itself after a chosen number of hours: 24 by default, more than 0 and at most 720 (30 days). Every computer learns of the stop, and of its release, the next time it checks in, normally within about 30 seconds. With no reason given the editors see "your administrator stopped syncing across the studio".
 
-Each editor sees "STOPPED: your administrator stopped syncing for the whole studio[: <reason>]", and cannot release it from their computer: "your admin stopped syncing for the whole studio: <reason>. Only they can start it again." A computer that has not heard from the dashboard keeps whatever stop it has. A studio-wide release lifts only the studio-wide stop; an editor's own stop stays. When it is released, syncing starts again (subject to everything else) and the editor is told "Your administrator started syncing again."
+Each editor sees "STOPPED: your administrator stopped syncing for the whole studio[: <reason>]", and cannot release it from their computer: "your admin stopped syncing for the whole studio: <reason>. Only they can start it again." A computer that has not heard from the dashboard keeps whatever stop it has. A studio-wide release lifts only the studio-wide stop; an editor's own pause stays. When it is released, syncing starts again (subject to everything else) and the editor is told "Your administrator started syncing again."
 
 A stop whose end time has passed reads as over and marked as having ended by itself, and the next check-in releases every computer. An end time that cannot be read is not treated as passed, and a stop that cannot be read at all counts as stopped.
 
-- Who: an admin. A stop is for the whole studio; one computer is stopped from that computer.
+- Who: an admin. A stop is for the whole studio; one computer is paused at that computer.
 
 ### An admin keeps a studio-wide stop going or starts syncing again
 
@@ -743,7 +691,6 @@ Updating the app never makes a computer bring down again files it already holds 
 
 The first version of a camera original's name to reach the server is the only one that ever will; a newer local version with the same name stays behind and is reported like this, never sent.
 
-- Pending: sync-1-Q4
 - See Sync, part 2: What is owed, and Clocks and file age.
 
 ### The editor can open the folder of a file that will not upload
@@ -806,8 +753,6 @@ It is repeated every 30 minutes until the drive is back, across restarts: what i
 While reminders run, the editor has "REMIND ME LATER" (silences them for 2 hours: "CC Sync will remind you about this drive again in 120 minutes.") and "STOP REMINDING ME ABOUT THIS DRIVE" (silences them until the drive is back: "CC Sync will stop reminding you about this drive. Your unfinished syncing is still waiting for it, and Settings still says so."). Once silenced, "Reminders about this drive are off until it is plugged back in." replaces the buttons; "There is nothing to remind you about now." when there is nothing to silence; on failure "CC Sync could not do that." with the way to send diagnostics. Silencing never removes the warning line or forgets what is owed, and covers only this outage.
 
 - Who: the editor at the computer.
-- Setting: Drive reminder interval. Does: how often the reminder repeats while the drive is out with work owed. Default: 30 minutes. Who: the editor on that computer. Applies to: a computer. Search words: drive, reminder, unplugged, owed, interval.
-- Pending: sync-1-Q21
 
 ### Choosing the sync folder on macOS checks the drive is really mounted
 
@@ -829,10 +774,7 @@ Before each download the free space on the sync drive is measured. Below 20 GB f
 
 While downloads are paused for space the app also offers "Resume downloads…", saying "CC Sync stopped downloading because: <reason, by default 'this drive is nearly full'>. Your uploads never stopped. Downloading starts again on its own as soon as there is enough room, so you only need this if you have just made space and do not want to wait." with "RESUME DOWNLOADS"; with nothing paused it answers "Nothing to resume".
 
-- Setting: Keep this much free on the sync drive. Does: below this, downloads pause, and they start again at twice it. Off turns this off. Default: 20 GB. Who: the editor on that computer. Applies to: a computer. Search words: free space, disk full, floor, drive, pause downloads.
-- Pending: sync-1-Q7
-- Pending: sync-1-Q18
-- Pending: sync-1-U1
+- Setting: Keep this much free on the sync drive. Does: below this, downloads pause, and they start again at twice it. Off turns this off. Default: 20 GB. Who: the editor in the app's settings for their own computer, or an admin for any computer from the dashboard. Applies to: a computer. Search words: free space, disk full, floor, drive, pause downloads.
 
 ### Originals to come down must fit
 
@@ -859,7 +801,6 @@ The computer's row shows "disk N%" when the drive is not healthy, with the sync 
 - Serious, "a computer is running out of space", when the computer's drive is red by the rule above, it is not wired, and (when known) it holds a full tick: "<who> has X free on its sync drive (P percent). Downloads fill a drive file by file, so this ends with that editor unable to work."
 - Warning, when an editor's computer has under 50 GB free, from a reading no older than 48 hours (an older or undated reading clears it): for computers that take proxies, "Proxy downloads for one project are typically 50 to 300 GB..." with the fix to untick a project or clear space; for wired computers or ones with nothing ticked, "No project footage comes down to this computer... anything else it syncs, such as the shared LUT library, stops when it runs out", with the fix to clear space.
 
-- Pending: sync-1-Q18
 
 ### Setting up warns when the chosen drive has under 200 GB free
 
@@ -877,8 +818,7 @@ Projects are synced one after another, each for up to about 10 minutes at a time
 
 A large upload still running when its project's time is up is never stopped: it carries on while other projects take their turns, and other projects' transfers are never held behind it. The editor then sees "uploading <name> (<percent>%)" for one file or "uploading <N> file(s)" for several, and it still counts in the speed, the time left and in keeping the computer awake. While more than one file is owed, uploads keep the connection fully used. A large upload that fails while running this way is never shown as an error; whatever did not land goes again on the next turn. Fixing media and gathering media into a project wait for their upload to finish instead.
 
-- Setting: Time for each project. Does: how long one project syncs before the next has its go. Default: 10 minutes, never less than 1 minute. Who: the editor on that computer. Applies to: a computer. Search words: turn, project time, fair, queue, order.
-- Pending: sync-1-U1
+- Setting: Time for each project. Does: how long one project syncs before the next has its go. Default: 10 minutes, never less than 1 minute. Who: the editor in the app's settings for their own computer, or an admin for any computer from the dashboard. Applies to: a computer. Search words: turn, project time, fair, queue, order.
 
 ### Uploads go newest first and downloads smallest first, both at once
 
@@ -910,7 +850,6 @@ A pass that fails costs that pass only; the next one runs as usual. If the app's
 
 For each computer the dashboard shows the computer's own answer to "why is nothing moving" (a reason, a detail and since when); the last transfer it found stuck, for how long and whether it had to be stopped; how long each project's turn is there, which sets how long the dashboard waits before calling something stuck; how many times its background syncing had to be restarted in the last 24 hours, the latest one and its error; whether any of its syncing has stopped working, since when, how many restarts were tried, the last error and whether anything is still trying (yes, no or cannot tell); and how many files edited on two computers it holds.
 
-- Pending: sync-1-Q17
 - See The dashboard: Each computer's state.
 
 ### Each direction on a computer's row has its own colour and reason

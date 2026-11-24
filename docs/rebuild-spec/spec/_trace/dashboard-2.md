@@ -26,7 +26,7 @@
 - 15-018 | A message that cannot be sent is tried again and never holds up the checks
 - 15-019 | A failure to deliver is named in plain words
 - 15-020 | A weekly report on the whole studio goes out every Monday at 08:00
-- 15-021 | A weekly report on the whole studio goes out every Monday at 08:00
+- 15-021 | left out: cut by the owner (2026-11-24, dashboard-2-Q3)
 - 15-022 | An admin can ask for a daily "still here" message so that silence means the server is down
 - 15-023 | An admin sees every message that was sent
 - 15-048 | Each alert says what is wrong, what to do and the detail
@@ -76,13 +76,13 @@
 - 12-057 | Admins are told when the server was too busy to answer
 - 15-094 | Admins are told when the server was too busy to answer
 - 13-015 | The dashboard installs as an app on a phone or a desk ; When the dashboard cannot be reached the installed app says so ; A new version reaches every installed app within two visits
-- 13-086 | The studio's own Android app opens the dashboard without an address bar
+- 13-086 | left out: cut by the owner (2026-11-24, dashboard-2-Q9)
 - 14-002 | The dashboard installs as an app on a phone or a desk
 - 14-003 | When the dashboard cannot be reached the installed app says so ; A new version reaches every installed app within two visits
 - 15-103 | Installing needs a secure address and an admin can check each step ; Nothing is reachable without signing in except what must be
-- 17-054 | The studio's own Android app opens the dashboard without an address bar ; Every setting of the site
-- 18-027 | The studio's own Android app opens the dashboard without an address bar
-- 27-027 | The studio's own Android app opens the dashboard without an address bar
+- 17-054 | left out: cut by the owner (2026-11-24, dashboard-2-Q9)
+- 18-027 | left out: cut by the owner (2026-11-24, dashboard-2-Q9)
+- 27-027 | left out: cut by the owner (2026-11-24, dashboard-2-Q9)
 - 27-028 | Installing needs a secure address and an admin can check each step
 - 27-029 | left out: for the builders only (what it checks for a person is written into "Every page works at phone and tablet width")
 - 12-031 | The dashboard warns when a computer reaches it unencrypted over the public internet
@@ -105,6 +105,7 @@
 - Text assumes: A (every passage about it is marked Pending, so B is a deletion).
 - Items: 13-101, 15-116, 15-117, 15-118, 15-119, 15-120, 15-121, 15-122, 15-123, 15-124, 15-125, 15-126, 15-127, 15-128, 15-129, 15-130, 20-110
 - Covers: 13-Q12, 15-Q9
+- Answered by the owner 2026-11-24: A, the server check stays as written, off by default
 
 ### dashboard-2-Q2: Are all the scheduled messages wanted: a message after each check that finds something, the weekly report, the daily "still here", and the server check?
 - Kind: either-or
@@ -115,6 +116,7 @@
 - Text assumes: A
 - Items: 15-017, 15-020, 15-022, 15-116
 - Covers: 15-Q8
+- Answered by the owner 2026-11-24: A, all four scheduled messages stay
 
 ### dashboard-2-Q3: Should the weekly report carry a section on how much data each computer moved, which has never printed because the figure is not recorded?
 - Kind: unreachable
@@ -125,6 +127,7 @@
 - Text assumes: written in its place and marked Pending, so B is a deletion.
 - Items: 15-021
 - Covers: 15-Q11
+- Answered by the owner 2026-11-24: B, the data moved section is dropped
 
 ### dashboard-2-Q4: Whether alerts really reach anyone is said in three places. Which should stay?
 - Kind: several ways in
@@ -135,6 +138,7 @@
 - Text assumes: all three listed as ways in until answered.
 - Items: 15-009, 15-078
 - Covers: 15-Q14
+- Answered by the owner 2026-11-24: A, the status line beside the alert settings and the standing problem stay; the re-checked fact goes
 
 ### dashboard-2-Q5: Should the alert destination be set both in a short step of the setup checklist and in the full alert settings?
 - Kind: several ways in
@@ -145,6 +149,7 @@
 - Text assumes: A
 - Items: 13-100, 13-115, 17-084
 - Covers:
+- Answered by the owner 2026-11-24: A, both the setup step and the full alert settings stay
 
 ### dashboard-2-Q6: Should every change to the site's settings be recorded and undoable, and should the history show the old and new values?
 - Kind: differs
@@ -155,6 +160,7 @@
 - Text assumes: A
 - Items: 14-020, 17-057, 17-087, 20-085
 - Covers: 17-Q9
+- Answered by the owner 2026-11-24: A, every change recorded and undoable, values never shown
 
 ### dashboard-2-Q7: Should a studio be able to name its projects folder, rather than it always being called "Projects"?
 - Kind: other
@@ -165,6 +171,7 @@
 - Text assumes: A
 - Items: 17-058
 - Covers: 17-Q4
+- Answered by the owner 2026-11-24: A, the projects folder is always "Projects"
 
 ### dashboard-2-Q8: With YouTube downloads one part with its own switch, should its extra measures against being blocked keep a second switch of their own?
 - Kind: other
@@ -175,6 +182,7 @@
 - Text assumes: A
 - Items: 17-051
 - Covers: 17-Q11
+- Answered by the owner 2026-11-24: A, the second YouTube switch stays
 
 ### dashboard-2-Q9: Is a separate Android app for the dashboard (with its own proof of ownership set in the settings) still wanted, or is the dashboard installed from the browser enough?
 - Kind: other
@@ -185,6 +193,7 @@
 - Text assumes: written in its place and marked Pending, so B is a deletion.
 - Items: 13-086, 17-054, 18-027, 27-027
 - Covers: 13-Q13, 18-Q8
+- Answered by the owner 2026-11-24: B, no Android app; the dashboard installed from the browser
 
 ### dashboard-2-Q10: Should the dashboard installed as an app carry the site's product name, rather than always "CC Sync"?
 - Kind: differs
@@ -195,6 +204,7 @@
 - Text assumes: A
 - Items: 14-002, 13-015
 - Covers: 14-Q1
+- Answered by the owner 2026-11-24: A, the installed app carries the site's product name
 
 ### dashboard-2-Q11: When the server cannot read how project folders are syncing, should that be said on every page and again on the overview?
 - Kind: several ways in
@@ -205,6 +215,7 @@
 - Text assumes: both listed as ways in until answered.
 - Items: 13-013
 - Covers:
+- Answered by the owner 2026-11-24: B, one warning on every page carrying the "What to do" link
 
 ## Readers' questions and unsettled points
 
@@ -242,6 +253,7 @@
 
 ## Conflicts between an item and a lesson
 
+
 - DSH-097 | 13-100, 15-017 | the items let an admin choose one message per problem by e-mail; the ruling asks for one message per check. Wrote one combined message per check by e-mail and dropped the choice.
 - DSH-101 | 15-014, 20-090 | the items count a failed send as sent, so a warning is never retried and a serious problem only the next day; the lesson asks for retries after about 10 minutes, 1 hour and 6 hours until delivered. Wrote the lesson.
 - DSH-102 | 15-014, 20-090 | the items drop a failed alert from the retry; the lesson asks that it shows as undelivered until it goes. Wrote the lesson.
@@ -250,6 +262,8 @@
 - owner's requirements | 15-003, 17-051 | the items let a value given at install override the dashboard's (the mail password, the optional switches); the requirements ask for one place a setting comes from. Wrote the dashboard as the one place.
 
 ## New in this text
+
+- An admin connects the assistant with a short guided setup | a paid key as the usual way; the subscription way off on a new site and switched on or off only inside the guided setup (the owner's answer of 2026-11-24)
 
 - Setup asks who should be told when something goes wrong | an admin can choose on purpose to tell nobody, which ends the warning (DSH-099)
 - The dashboard says whether alerts are really reaching anyone | the standing warning ends when the admin has chosen to tell nobody (DSH-099)
@@ -300,7 +314,6 @@
 - 13-099 | "Problems still show on the Health page" and other page names reworded
 - 15-020 | page names in the report ("TIMELINE page", "Settings, Alerts") and the trash folder's own name reworded
 - 17-084 | "open Settings, then ALERTS" (a menu position) reworded
-- 13-086 | "app wrapper" wording; the text is in "The studio's own Android app opens the dashboard without an address bar"
 - 17-022 | the words "CSRF token" in the refusal (an inside), reworded
 
 ## Joins with other capabilities

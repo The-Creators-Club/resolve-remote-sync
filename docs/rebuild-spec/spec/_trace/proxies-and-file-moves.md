@@ -23,7 +23,7 @@
 - 06-047 | A computer is equipped to make proxies with nothing for the editor to install
 - 07-024 | What proxy making on a computer is doing, in one line
 - 09-013 | Clips with no proxy are found and their proxies are made ; Which files need a proxy and how soon a new one is noticed ; The editor is notified when clips on their computer have no proxy ; Proxies are made only while nobody is at the computer ; Proxy making keeps the drive from filling ; Proxy making gives way to Resolve ; A clip that keeps failing is set aside so the others are made ; A proxy of camera footage ; A clip is checked again just before its proxy is made ; Resolve clips are pointed at their synced proxies on their own ; A computer is equipped to make proxies with nothing for the editor to install
-- 09-014 | An editor can rehearse proxy making and FIX ALL without changing anything
+- 09-014 | left out: cut by the owner (2026-11-24, proxies-and-file-moves-Q2)
 - 12-053 | The dashboard shows each computer's proxy coverage
 - 06-014 | A proxy's timecode matches its original's in the form Resolve reads
 - 06-012 | A proxy of camera footage
@@ -95,6 +95,7 @@
 - Text assumes: A
 - Items: 06-018, 06-032
 - Covers: 06-Q3
+- Answered by the owner 2026-11-24: A, remembered for that version of the file across restarts, with "make the missing proxies now" retrying all
 
 ### proxies-and-file-moves-Q2: Should the two rehearsal settings (make no proxies but list what would be made, and FIX ALL listing its copies and relinks without doing them) stay in the product?
 - Kind: dormant
@@ -105,6 +106,7 @@
 - Text assumes: B is written, marked pending, so it can be deleted if A is chosen.
 - Items: 09-014
 - Covers: 06-Q6, 09-Q7
+- Answered by the owner 2026-11-24: A, both rehearsal settings cut
 
 ### proxies-and-file-moves-Q3: On a Mac, should CC Sync find, open and start Blackmagic Proxy Generator for raw clips by itself, as it does on Windows?
 - Kind: differs
@@ -115,6 +117,7 @@
 - Text assumes: A
 - Items: 06-028, 06-029
 - Covers:
+- Answered by the owner 2026-11-24: A, the same on both: found, opened and started without the editor's help
 
 ## Readers' questions and unsettled points
 
@@ -128,7 +131,7 @@
 - 16-Q1 | with accounts-privacy-legal
 - 20-Q1 | with dashboard-1
 - U-02-7 | behind the glass
-- U-06-1 | open: proxies-and-file-moves-U1
+- U-06-1 | settled: by the owner 2026-11-24, on by default on every computer (proxies-and-file-moves-U1)
 - U-06-2 | settled: PRX-053, the tree is looked through when the app starts
 - U-06-3 | settled: the labels the items give are used; where they sit is for the new design of the app and the dashboard
 - U-06-4 | settled: about every 2 minutes, from the end of one look to the start of the next
@@ -145,7 +148,6 @@
 
 ## Still unsettled
 
-- proxies-and-file-moves-U1 | whether making proxies is on by default on every computer, or only on some (today a rule ties it to whether the computer keeps its own copies of proxies) | on, on every computer | 06-001, 09-013
 
 ## Conflicts between an item and a lesson
 
@@ -205,7 +207,7 @@
 - 06-047 | "fails twice running" before the computer is withdrawn from shared work: an arrangement of how often equipping is retried
 - 07-024 | music indexing never holds proxy making back: which kind of heavy work goes first belongs to Work shared out across the computers
 - 06-012 | about 7 megabits a second with peaks near 10: replaced by PRX-015
-- 09-013 | the default "makes proxies exactly when it keeps no local copies of proxies": replaced by U1; the 5-second double look as a setting of its own: folded into the 2-minute "leave new files alone" setting, the double look kept as a promise
+- 09-013 | the default tied to whether the computer keeps its own copies of proxies: replaced by the owner's answer (on everywhere); the 5-second double look as a setting of its own: folded into the 2-minute "leave new files alone" setting, the double look kept as a promise
 - 06-009 | the 5-second double look as its own setting with zero switching it off: folded as above
 - 06-025 | "where the history is kept" in the report's heading: names where the build stores a file
 - 06-016 | the long dash in the message: replaced by a colon
@@ -227,6 +229,12 @@
 - 03-040 | "before a round and again just before a project's turn": an arrangement of the sync's own rounds; the promise is that the folder follows before the project syncs anything
 - PRX-084 | the half about which scan's time an answer carries is kept as a promise; nothing left behind
 
+- 09-013 | the setting "How often to look for clips with no proxy" (every 15 minutes): a setting only the build would tune; the figure stays in the text
+- 06-018, 09-013 | the setting "Attempts before giving up on a clip" (3): a setting only the build would tune; the figure stays in the text
+- 06-009, 09-013 | the setting "Leave new files alone for this long" (2 minutes): a setting only the build would tune; the figure stays in the text
+- 06-007 | the setting "Minimum time between proxy notices" (one day, zero for none): a setting only the build would tune; notices are shown at most once a day, and the "Tell me about clips with no proxy" switch stays
+- 09-014 | both rehearsal settings: cut by the owner (2026-11-24, proxies-and-file-moves-Q2)
+
 ## Joins with other capabilities
 
 - Work shared out across the computers / Choosing who runs what | Clips with no proxy are found and their proxies are made | which able and free computer makes a given proxy, and which kind of heavy work goes first
@@ -245,7 +253,6 @@
 - Resolve on the editor's computer / Proxies in Resolve | Resolve finds a proxy by its folder and its exact name | the Prefer Proxies setting and proxies inside Resolve
 - Resolve on the editor's computer / Missing clips, relinking and refreshing | Resolve's clips follow a moved file now or when the project next opens | relinking clips and undoing it
 - Resolve on the editor's computer / Missing clips, relinking and refreshing | A missing clip whose file is already in the tree is relinked, never copied | finding and relinking missing clips
-- Resolve on the editor's computer / Fixing media: copying in, rehearsals and undo | An editor can rehearse proxy making and FIX ALL without changing anything | FIX ALL itself
 - Resolve on the editor's computer / Fixing media: copying in, rehearsals and undo | A whole project is checked and its stray media gathered into its folder | copying media in and its undo
 - The dashboard / Each computer's state | The dashboard shows each computer's proxy coverage | the per-computer view
 - The dashboard / Problems the server finds | Every proxy on the server has its original beside it | where the server's findings are shown
@@ -261,3 +268,7 @@
 - proxies-and-file-moves-U2 | the list of file types is written in
 
 - proxies-and-file-moves-U3 | about every 2 minutes, from the end of one look to the start of the next
+
+## Settled by the owner 2026-11-24
+
+- proxies-and-file-moves-U1 | making proxies is on by default on every computer, under the usual rules (only while nobody is at the keyboard, giving way to Resolve, never filling the drive)

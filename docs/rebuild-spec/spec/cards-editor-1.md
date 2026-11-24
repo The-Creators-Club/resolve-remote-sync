@@ -58,10 +58,9 @@ The language aids let the owner cut interviews in languages he cannot read.
 
 {{29-054}}
 
-Each aid is switched on or off by itself on each device. By default every aid is on for an interview whose language is not among the person's "languages I read", and off for one that is. Where an interview's words have not been analysed, the aids draw nothing and the editor says so quietly in one line; everything else works as usual.
+Each aid is switched on or off by itself on each device. By default every aid is on for an interview whose language is not among the person's "languages I read", and off for one that is, except the faint strike through fillers, which is off until a person switches it on. Where an interview's words have not been analysed, the aids draw nothing and the editor says so quietly in one line; everything else works as usual.
 
-- Setting: Language aids. Does: shows or hides each reading aid (verbs, names and places, numbers and dates, negation and contrast, fillers, safe cut points, sentence numbers) in the lane's clips. Default: on for languages outside "languages I read", off for the others. Who: anyone using the editor. Applies to: a computer. Search words: language aids, reading aids, grammar marks, safe cuts, verbs.
-- Pending: cards-editor-1-U3
+- Setting: Language aids. Does: shows or hides each reading aid (verbs, names and places, numbers and dates, negation and contrast, fillers, safe cut points, sentence numbers) in the lane's clips. Default: on for languages outside "languages I read", off for the others, the strike through fillers off everywhere. Who: anyone using the editor. Applies to: a computer. Search words: language aids, reading aids, grammar marks, safe cuts, verbs.
 - Exact: yes
 
 ### A note on a gap shows inside the gap on the lane
@@ -86,7 +85,6 @@ Each clip on the lane shows its own timed words, spelled exactly as the clip's t
 
 Cards start at the cut list's timeline start timecode (default 01:00:00:00). Each cut's black before it becomes timeline frames. Its source in and out are counted at the clip's real rate: what is known about the clip, else the rate the cut list names for it, else the timeline's rate. Its length on the timeline is its source length scaled to the timeline's rate, so it keeps its real running time, and is never less than one frame. Fades are shown in timeline frames, and the gain set by hand is carried in dB.
 
-- Pending: cards-editor-1-Q8
 
 ### A card shows the words spoken inside its cut, with partly cut words marked
 
@@ -101,22 +99,6 @@ A cut whose clip has no transcript at all is still a card and a clip like any ot
 {{40-015}}
 
 - Exact: yes
-
-### An editor joins neighbouring cards into a stack and opens or closes it
-
-Cards are never gathered into stacks unless the editor asks. Any neighbouring cards, including every card of a box selection, can be joined into one stack at once, read as one card, and a stack can be split apart again at once, back to single cards. A new stack starts closed. Whether each stack is closed or open is remembered per timeline across reloads and restarts, so a closed stack stays closed. If the cut has meanwhile left the timeline, the editor is told "that cut is no longer on the timeline".
-
-The controls:
-
-- J on a selected card toggles its mark: "join" when the card starts a stack, "split" when it is inside one, and back to no mark when it already carries one. The small control on the card shows the same thing: "⤒ join", titled "join this cut to the stack above ... J", or "⤓ split", titled "start a new stack at this cut ... J".
-- J with a box selection, or the "⌃ join" button on the selection bar ("join the selected cards into one stack (J)"), joins the selection into one stack and closes it. A box selection is made with a Shift-drag, or a plain drag that starts on blank space beside the cards; on a phone, in select mode.
-- W opens or closes the stack under the cursor, and so do the chips on the card "⌄ N" ("show these N cuts one by one (W)") and "⌃ N" ("collapse this stack of N cuts into one card (W)"). With a mouse, a click on a closed stack's text opens it; a finger's tap does not.
-- Shift+W, the row "↕ all stacks" and the phone's stack icon close every open stack or open every closed one, whichever there are more of.
-
-- Who: anyone who can open the editor and write to the cut list.
-- Phone and desk: select mode and the stack icon on a phone, a click on a closed stack's text with a mouse.
-- Exact: yes
-- Pending: cards-editor-1-Q13
 
 #### Lessons
 
@@ -164,7 +146,6 @@ Every marker in a cut list is one of three kinds: a section (a section heading),
 
 Each section is told apart by its own identity, never by its place in the list, for dragging, dropping, placing by tap and folding, and that includes a section with no cuts in it.
 
-- Pending: cards-editor-1-Q7
 
 ### Section headings and notes in a cut list show as markers on the lane
 
@@ -178,7 +159,6 @@ Each section is told apart by its own identity, never by its place in the list, 
 
 A drag of a cut across a section boundary changes only the dragged cut's section; no other cut changes section. Deleting a section's first cut keeps the heading. When a cut is split, both halves stay in its section.
 
-- Pending: cards-editor-1-Q7
 - Exact: yes
 
 ### A person adds, renames, recolours, moves and removes headings and note rows, and moves a whole section
@@ -204,7 +184,6 @@ Any punctuation, bracket or line break a person types into a title, a note or a 
 {{29-019}}
 
 - Name and search words: the cards: cards, cut list, reading view, script.
-- Pending: cards-editor-1-Q6
 - Exact: yes
 
 ### Each cut's card shows who speaks, its span, its words, its gain, fades and length
@@ -277,12 +256,11 @@ The Overview button always shows on the top bar on a desk; it is never folded in
 
 ### The assistant writes a one-sentence summary of what each section says
 
-- The assistant writes one sentence (two at most, 35 words) on what a section says, from the cards between its heading and the next, each as "person: words" (in English where English exists). Refusals: "the section summary needs [the assistant]: <why>", "no marker at frame N", "nothing transcribed between this marker and the next"; asking again while one is being written just shows it running; "[the assistant] returned nothing" when nothing came back. A summary is kept per timeline under the section's title (repeated titles numbered #2, #3), so it survives trims and moves; renaming a section loses its summary. A summary whose section's words have changed since is marked stale.
+- The assistant writes one sentence (two at most, 35 words) on what a section says, from the cards between its heading and the next, each as "person: words" (in English where English exists). Refusals: "the section summary needs Assistant: <why>", "no marker at frame N", "nothing transcribed between this marker and the next"; asking again while one is being written just shows it running; "Assistant returned nothing" when nothing came back. A summary is kept per timeline under the section's title (repeated titles numbered #2, #3), so it survives trims and moves; renaming a section loses its summary. A summary whose section's words have changed since is marked stale.
 
 A summary whose section is gone is never guessed onto another section. Each summary fits in a few lines.
 
 - When the assistant is off: no summary is written or offered.
-- Pending: cards-editor-1-Q9
 - Exact: yes
 
 ### Send to moves the selected cuts to the end of a chosen section
@@ -297,7 +275,12 @@ The editor shows the cut's total running time in seconds and, for each section h
 
 ### A proposed montage is shown section by section and inserted where the person chooses as one undoable step
 
-{{32-048}}
+- "Proposed" box: "<n> cuts · <total seconds> · <n> notes"; "Asked: <text>" or "Revised: <text>"; a warning "<n> cuts named a clip that is not in the corpus, and went nowhere: <up to four clip names>."; the sections ("§ 1", "§ 2", ... with their titles), each listing its cuts: clip name (any trailing `[id]` tag hidden), length, a gold "Whole segment" chip when the exact words were not found and the whole transcript segment is used, the words (marked with the clip's language from its transcript, else the language the script looks like, else none), and "Why: <the assistant's reason>". Unmatched quotes show a red "Not found" chip and "Kept as a note: nothing Assistant proposed is thrown away." A new proposal scrolls into view.
+- "Insert it" choice: "At the end of the cut" (default), "At the start of the cut", "Before the selected cut (cut <n>)" (when a cut is selected), and "Before <§ / ◆ heading>" for every heading. A choice that no longer exists falls back to the end; the choice is never rebuilt while it has focus.
+- Footer sentence: "Lands <where>. Its sections become § sections." or "...Inside a section, its sections become note rows, so the cuts after it stay where they are." plus " The cut goes from <m:ss> to <m:ss>." and " One undo takes it all out." If the montage cannot be placed, the reason replaces it and Insert is disabled.
+- "Insert into the cut" (primary): builds the edit against the cut list as it is at that moment and applies it as ONE step, titled "Montage: <first 120 characters of the request>", which syncs like any edit and is one undo. The new cuts are then selected. "inserted <n> cuts <where>. Undo takes it all out again." Refused: "the montage was not inserted: <reason>"; cannot be placed: the reason or "the montage could not be placed: <reason>".
+- "Discard": "discarded: nothing was changed".
+- An inserted or discarded proposal is never offered again, on this page or any other.
 
 - When the assistant is off: there is no montage builder.
 - Exact: yes
@@ -325,7 +308,6 @@ A trim gesture repaints within 125 ms in 95 of 100 tries on a desk computer, and
 
 After any edge edit (dragging a clip's edge on the lane, the controller's bumpers, a hold on the phone, the trim and extend keys), the playhead stays on the same spoken moment of the clip it was in. A trim earlier on the timeline makes the playhead slide back with that moment. If the trim cut away the very moment the playhead was on, the playhead lands on the last frame of that same clip, never on the next clip's first frame. A playhead in a gap keeps its distance into that gap, and a playhead past the end of the cut keeps its time. An edit never carries the playhead forward: when a ripple extend adds material before it, the playhead stays where it is on screen. None of this applies while playing: the playhead is only put back when playback is stopped.
 
-- Pending: cards-editor-1-Q14
 
 ### Mouse, finger and pen each have their own click allowance and edge grab size on the lane
 
@@ -436,7 +418,6 @@ Everywhere, repeating. = zooms the lane in by x1.25; - zooms out by x0.8. The zo
 Zoomed all the way out, the lane shows the whole cut, however long: a cut of two and a half hours fits whole.
 
 - Phone and desk: on a phone, the vertical edit view zooms vertically too, from the detail of one card out to an overview of many cards.
-- Pending: cards-editor-1-Q1
 - Exact: yes
 
 ### The middle button pans, the wheel scrolls, and Alt or Ctrl with the wheel zooms
@@ -445,7 +426,6 @@ Zoomed all the way out, the lane shows the whole cut, however long: a cut of two
 - Wheel: scroll the lane sideways. Horizontal wheel movement is used when present, else vertical; with Shift, vertical is preferred, else horizontal. The distance is the wheel movement in px (a line counts as 16 px, a page as 400 px) divided by the zoom. The scroll stays between the start and the end of the timeline.
 - Alt+wheel or Ctrl+wheel (Ctrl is what a trackpad pinch sends): zoom about the time under the pointer. 100 px of upward wheel zooms in by about x1.28 (a factor of e^(0.0025 per px)); downward zooms out. The zoom runs from the whole cut up to 400 px per second. The page itself never zooms or scrolls from a wheel over the lane.
 
-- Pending: cards-editor-1-Q1
 - Exact: yes
 
 ### A flung pan keeps coasting and slows to a stop
@@ -460,12 +440,6 @@ Escape during a gesture is seen before any other key: a box selection is dropped
 
 - Exact: yes
 
-### A ruler band along the lane scrubs the head
-
-The lane can be split into a "track" band and a "ruler" band; the ruler band scrubs like bare lane, and a press outside both is ignored.
-
-- Pending: cards-editor-1-Q3
-
 ### Safe cut points show whether a cut leaves a whole thought, and Alt+S moves an edge or a pick to the nearest one
 
 The safe-cut aid is aid 4 of the language aids.
@@ -479,7 +453,6 @@ The safe-cut aid is aid 4 of the language aids.
   - else with an armed edge: moves it to the nearest safe cut within 6 s, one undo step: "The <in/out> point moved to the nearest safe cut. Ctrl+Z puts it back." / "No safer cut point near this edge (or its words are still being read)." (also when the nearest is under 0.02 s away). This works even when aid 4 is off;
   - neither: "Arm an edge (click near a cut’s end) or pick words first.".
 
-- Pending: cards-editor-1-Q5
 - Exact: yes
 
 #### Lessons
@@ -526,7 +499,6 @@ Where the editor's keyboard layout in the editing program can be read (Resolve's
 The lane's keys work the same whether Resolve is connected or not, and a layout once learned is kept across restarts.
 
 - When the help for the editing program is off: the lane keeps its own keys and nothing about Resolve's layout is read or mentioned.
-- Pending: cards-editor-1-Q10
 - Exact: yes
 
 ### Every button that has a key shows that key
@@ -630,7 +602,6 @@ While cards are dragged anywhere on the page, a silhouette of the card follows t
 
 Shift+Up arrow (everywhere, repeating): extend the selection one item up (a range from the anchor to the new focus). Shift+Down arrow: one item down. Escape (everywhere): with an edge armed, the first press disarms it; otherwise, with items selected, it clears the selection; with neither, the key is left for the page. Escape never clears the in / out range. A drag in progress on the lane is dropped by Escape before this happens (see "Escape during a lane gesture throws it away").
 
-- Pending: cards-editor-1-Q2
 - Exact: yes
 
 ### R and D move the selection up and down the cut list
@@ -683,7 +654,6 @@ Delete and Backspace (everywhere):
 A held key never confirms a delete: the second press must be a fresh one. The count stays shown through any redraw. Deleting cuts keeps every unselected gap beside them; only black with nothing after it goes. Every delete can be undone. Where the cut list is open read-only, the delete is refused at the first press.
 
 - Phone and desk: on a phone, the delete control sits farthest from the resting thumb.
-- Pending: cards-editor-1-Q4
 - Exact: yes
 
 ### Delete must be pressed twice, and the first press arms it with a countdown
@@ -824,7 +794,6 @@ When only the whole paragraph could be placed, the message also gives that parag
 
 {{33-031}}
 
-- Pending: cards-editor-1-Q6
 - Exact: yes
 
 ### Ctrl+X cuts cuts out of the cut and keeps them on the shelf
@@ -853,5 +822,5 @@ When only the whole paragraph could be placed, the message also gives that parag
 
 #### Lessons
 
-- Met: CE1-033, CE1-034, CE1-035, CE1-036, CE1-037, CE1-038, CE1-039, CE1-040, CE1-041, CE1-042, CE1-043, CE1-044, CE1-045, CE1-046, CE1-047, CE2-018, CE2-019, CE2-020, CE2-021, CE2-022, CE2-023, CE2-024, CE2-025, CE2-026, CE2-027, CE2-029, CE2-031.
-- Not yet met by any behaviour above: CE1-049 (dropping media on the editor is written once, with the transcript panel's intake in part 3), CE1-048 (making a new cut list is written with opening episodes in part 5), CE2-028 (the panels' headers and the top bar are written with the page in part 5), CE2-030 (menus and settings sections are written with the page in part 5).
+- Met: CE1-033, CE1-034, CE1-035, CE1-036, CE1-037, CE1-038, CE1-039, CE1-040, CE1-041, CE1-042, CE1-043, CE1-044, CE1-045, CE1-046, CE1-047, CE2-018, CE2-019, CE2-020, CE2-021, CE2-022, CE2-024, CE2-025, CE2-026, CE2-027, CE2-029, CE2-031.
+- Not yet met by any behaviour above: CE2-023 (the owner's answer of 2026-11-24: the editor has no stacks), CE1-049 (dropping media on the editor is written once, with the transcript panel's intake in part 3), CE1-048 (making a new cut list is written with opening episodes in part 5), CE2-028 (the panels' headers and the top bar are written with the page in part 5), CE2-030 (menus and settings sections are written with the page in part 5).

@@ -78,7 +78,7 @@ An interviewee stays listed whatever fails with their transcript. When their tra
 - The bins rail (described below) under the filters, scrolling with the list; the intake (described below) above the list when it has rows.
 - Each row is a button: a colour stripe in the speaker colour the cut list uses for that clip (the colour of the first cut of any of its clips); the person name; a meta line "Interview" or "Montage" · "1 clip" or "N clips" · length as m:ss (when known) · "[speech-to-text] words" / "subtitles only" / "no timings", or "no transcript yet"; chips: the bin name (only when the bin filter is All), "N in the cut", "N staged"; marked current when it is the transcript open in the panel. A row with no transcript is disabled and cannot be opened. Click (or Enter/Space on it) opens that transcript. An episode with hundreds of rows still scrolls smoothly.
 - States: "Loading the episode's transcripts" with a spinner; on failure the warning line says "the transcripts did not load: <reason>" and the body shows a "Try again" button; with no cut list open: "open a cut list first"; "No transcript matches those filters." when filters hide everything; "This episode has no transcripts yet (<where transcripts are kept>)." when there are none.
-- Drop hint at the bottom (hidden on a phone): "Drop media files here to queue [speech-to-text], proxy, audio or peaks jobs for the fleet".
+- Drop hint at the bottom (hidden on a phone): it says that media files dropped here are made ready to cut.
 - The list opens even when the bins or the intake fail to load.
 
 - Phone and desk: the drop hint shows on a desk only.
@@ -86,44 +86,37 @@ An interviewee stays listed whatever fails with their transcript. When their tra
 
 ### An editor groups transcripts into named bins and files each transcript into at most one
 
-{{30-009}}
+- A clip is in at most one bin; filing it moves it. A transcript with clips is filed by all its clips; one with no clips by its own name.
+- The rail (shown when the bins loaded): an "All bins" chip with the total count, tooltip "Every transcript. Drop one here to take it out of its bin". One chip per bin with its count, tooltip "Show the transcripts in <bin>. Drop one here to file it"; clicking a chip filters the list to that bin. A delete (x) beside each bin chip, tooltip "Delete the bin <name> (its transcripts stay, unbinned)"; result "Deleted the bin <name>; its transcripts are unbinned". When the bin filter names a bin that no longer exists, it resets to All.
+- "New bin" button: opens a name box ("Bin name", at most 60 characters) with "Make" (key hint Enter) and "Cancel". Enter in the box makes the bin; Esc in the box closes it and returns focus to the paragraphs. Refusals: "type a name for the new bin" (empty), "there is already a bin called <name>". Success: "Made the bin <name>. File transcripts with the bin control on each row, or drag them onto it".
+- Bin drop-down on each row (when at least one bin exists): "No bin" plus each bin. Choosing files it there ("Filed <person> in <bin>") or takes it out ("Took <person> out of its bin"). Works by keyboard and touch.
+- Drag a row onto a bin chip: files it there; dropping on "All bins" takes it out of its bin. The chip under the drag is highlighted.
+- Limits: a bin name has its spaces collapsed, may not be empty ("a bin needs a name"), may not hold control characters ("a bin name cannot hold control characters"), and is at most 60 characters; at most 100 bins per episode ("an episode has at most 100 bins: delete one first"), also when filing would create a bin; at most 20,000 filed clips ("too many transcripts are filed in bins"). Making a bin that exists changes nothing.
+- Any failure: "the bins did not change: <reason>".
+- A change made by another program at the same time is never lost, and a crash never leaves the bins half written.
 
-- Who: anyone who can open the editor and write to the episode.
+- Who: anyone who can open the editor.
 - Exact: yes
-- Pending: cards-editor-3-Q6
 
-### Dropping media files on the panel adds them to an intake list and looks for each one in the episode
+### Dropping media files on the panel hands the clips to footage in and lists each one in the intake
 
 - Media files dragged from the desktop onto the panel highlight it (dashed cyan outline, the drop hint lights up). On drop, the panel switches to the list of transcripts and looks for the files in the episode by name and size.
 - While looking: "Looking for <name> under the episode" or "Looking for N files under the episode". With no cut list open: "open a cut list first, then drop the media on its transcripts". Nothing dropped: "nothing was dropped".
 - At most 100 files per drop. A name is ignored if empty, over 255 characters, holding a slash or backslash, "." or "..", or control characters. Only media kinds are taken: mp4, mov, mxf, mkv, m4v, avi, mts, m2ts, wav, mp3, m4a, aac, flac, ogg, opus, webm, braw, r3d. Anything else is reported as skipped. Duplicate names (case-insensitive) are taken once; names already in the intake are not looked for again.
 - Each name is looked for among the episode's media by name (case-insensitive) and, when a size was given, exact size; the first match in name order wins.
-- Each intake row records where the file was found, or that it was not, and whether its clip still needs a transcript.
 - The intake holds at most 200 rows per episode (the oldest drop off) and is forgotten when the server restarts.
 - Result: "Added to the intake." plus, when some were not found, "One is / N are not in [the episode's media] yet: put it/them under the episode folder and drop again."; plus, when some were not media, "<name> is not media, so it was skipped" or "N files that are not media were skipped". Shown as a warning when either applies. Failure: "the intake did not take them: <reason>".
 
-Whatever becomes of the job buttons, a drop on the editor is always matched by name and size within the episode, and each row says plainly whether its file was found, and whether its clip still lacks a transcript or a proxy.
+Every clip that is found is handed to footage in, which makes it ready to cut on its own, exactly as for clips dropped in anywhere else: the editor starts no step by hand and chooses no computer. How that happens, and every decision in it with its override by hand, is described in Timeline Cards: footage in, ready to cut.
 
+The intake box shows in the list of transcripts while it has rows, titled "Intake", with a Clear button that empties the list (work already under way carries on). Each row gives the file name and says plainly:
+
+- whether the file was found in the episode, and where; a row not found shows a "Not in [the episode's media]" chip and "Put it under the episode folder, then drop it again";
+- for a found file, what its clip still lacks (a transcript, a proxy), and that each lack goes away by itself as footage in finishes it.
+
+- Who: anyone who can open the editor.
 - Phone and desk: dropping files is a desk gesture.
 - Exact: yes
-- Pending: cards-editor-3-Q2
-
-### From the intake an editor sends a transcription, proxy, audio or waveform job to the studio's computers, aimed at one computer or any
-
-- The Intake box (in the list of transcripts, when it has rows): title "Intake", a Machine control, and a Clear button (tooltip "Empty the intake (jobs already sent keep running)"). Clear: "Cleared the intake (jobs already sent keep running)"; failure "the intake did not clear: <reason>".
-- Machine control (only when jobs can be sent): when the list of the studio's computers is known, a drop-down "Any free machine" plus each computer ("<machine> (<editor>)"); a computer that is offline or has jobs turned off is listed but disabled with " - offline" / " - jobs are off". When the list is empty or unknown, a text box ("Any free machine": blank for any, a machine name, or editor/machine; letters, digits, spaces, dot, underscore, hyphen, at most 120 characters, else "a target is a machine name, or editor/machine"). The choice is remembered in this browser and preselected next time. The list of computers is at most about 30 s old.
-- Each row: the file name; where it was found, or "Put it under the episode folder, then drop it again". A row not found shows a "Not in [the episode's media]" chip and no job buttons.
-- Job buttons for a found row: [speech-to-text] (only while the clip has no word timings), Proxy 480p, Audio, Peaks. Each sends one job of that kind. A sent kind becomes a chip "<Kind> · job <number>". A button shows busy while sending; a second press of the same one is ignored.
-- When jobs cannot be sent, the buttons are disabled with the reason as tooltip, and the reason shows as a line in the box: when the editor may not write: "this editor was started read-only, and a fleet job writes its output into [the episode's media], so none is sent from here"; with no connection to the studio's computers set up: "no fleet is configured on this server: set <the connection settings>".
-- Refusals when sending: "that is not a fleet job"; "that file is not in the intake: drop it again"; "that file is not in [the episode's media] yet: put it under the episode folder and drop it again"; "the fleet did not take the job (the dashboard is down, or refused it)"; "the fleet answered without a job number".
-- Messages: accepted and schedulable: "<Kind> for <name> went to the fleet[ on <machine>] (job <n>)"; accepted but no computer can take it: "<Kind> for <name> is job <n>, but no machine can take it yet[: <summary>]" (warning; summary at most 400 characters); failure: "the fleet did not take <Kind> for <name>: <reason>".
-- A transcription job asks for a computer that can transcribe, sees the file, and has 6 GB of graphics memory. Proxy and audio results land with the episode's audio and proxies for the editor, named after the clip; waveform results beside them.
-
-Which computer then runs the job, and what an admin sees of it, is described in Work shared out across the computers: Choosing who runs what.
-
-- Who: anyone who can open the editor and write to the episode.
-- Exact: yes
-- Pending: cards-editor-3-Q2, cards-editor-3-Q6
 
 ### Opening a transcript shows its header, and a person with several recordings can choose which recording's timings are used
 
@@ -223,7 +216,6 @@ When the words change, a highlight that still matches exactly is kept. Otherwise
 - Phone and desk: a pop-over of up to 30 rows on a desk, the Find tab with up to 40 results on a phone.
 - Name and search words: card Find: find card, search cut, search shelf, speaker, ref.
 - Exact: yes
-- Pending: cards-editor-3-Q1
 
 ### An editor opens and closes the transcript search sheet from the header, the phone's Find tab or a key
 
@@ -246,12 +238,11 @@ When the words change, a highlight that still matches exactly is kept. Otherwise
 - "In" (which transcripts): All (labelled "All transcripts" in Exact words, "All interviews" in the assistant kinds), one row per interviewee, and "All corpus clips" (shown only when the episode has clip transcripts). Each row shows a count (interviews, that person's paragraphs, or clips). Changing it re-runs Exact words; in the assistant kinds it does not ask, shows a kept answer if any, else "press Search to ask this of <scope>". The scope goes back to All when a cut list of another episode is opened.
 - What each scope covers in the assistant kinds: "All interviews" searches and ranks across every interview of the episode and leaves the corpus clips out; a person searches only that person's interview transcripts, and a passage from anybody else is not an answer; "All corpus clips" searches only the montage source clips, not the interviews. Each scope is its own conversation holding only its own transcripts: a search scoped to one person or to the clips reads only those transcripts, on its first search and on every later one, never the rest of the episode.
 - "Results" (assistant kinds only): 5, 10, 20 or 50, default 5, remembered per device. Changing it re-asks the current question if an answer is on show. The server accepts 1 to 100 and brings any number outside that range within it; anything unreadable counts as 5.
-- "Model" (assistant kinds only): three strengths of the assistant, fastest (default), stronger, most capable, each with its short note, remembered per device. Changing it reloads the status line and, if an answer was on show, asks again, since each strength is its own conversation. The strengths themselves are described in The whole product: The assistant.
-- "New conversation" (assistant kinds only, tooltip "Start this scope's [the assistant] conversation over: the next search reads its transcripts again"): starts the conversation for this scope, strength and kind over, forgets this scope's kept answers for that kind, and says "a new conversation: the next search reads <thing>". Other scopes' conversations are untouched.
+- "Model" (assistant kinds only): three strengths of the assistant, named by what they do with the price of each: fastest (default), stronger, most capable, remembered per device. Changing it reloads the status line and, if an answer was on show, asks again, since each strength is its own conversation. The strengths themselves are described in The whole product: The assistant.
+- "New conversation" (assistant kinds only, tooltip "Start this scope's Assistant conversation over: the next search reads its transcripts again"): starts the conversation for this scope, strength and kind over, forgets this scope's kept answers for that kind, and says "a new conversation: the next search reads <thing>". Other scopes' conversations are untouched.
 
 - When the assistant is off: none of the assistant-only pickers show, and "In" offers its scopes to Exact words only.
 - Exact: yes
-- Pending: cards-editor-3-Q7, cards-editor-3-Q9
 
 ### Exact words searches every transcript of the episode and the open cut list instantly as the editor types
 
@@ -297,10 +288,11 @@ Each fragment is checked like a Closest wording span. A splice shows its total l
 ### The first assistant search of a set of transcripts is slow because it reads them, and the sheet says which
 
 - One conversation per episode, chosen transcripts, strength and kind, shared by every browser working on that episode. It stays warm while it has answered at least once, the transcripts have not changed, and it was last used under an hour ago, also across a restart of the server. A cold one first reads all the chosen transcripts, then answers.
-- Status line, warm: "<model> · by meaning|closest wording · warm, <n> turns in: it still remembers <thing> and your last questions"; cold: "... cold: the first search reads <thing>, about <time>". The "thing" is "every transcript", "the corpus clips" or "<person>'s transcript". The time is estimated from how long past searches took. The status line also shows the seconds since the last question, how much the scope and the whole episode hold, and the expected time warm and cold.
+- Status line, warm: "<strength> · by meaning|closest wording · warm, <n> turns in: it still remembers <thing> and your last questions"; cold: "... cold: the first search reads <thing>, about <time>". The "thing" is "every transcript", "the corpus clips" or "<person>'s transcript". The time is estimated from how long past searches took. The status line also shows the seconds since the last question, how much the scope and the whole episode hold, and the expected time warm and cold.
 - When an answer came from a cold conversation its note says why: "the first search of the session reads <thing>", "a transcript changed since the last search, so <thing> <is/are> read again", or "the conversation had gone cold (over an hour), so <thing> <is/are> read again". The note, or "the same question was already running: this is its answer", appears on the status line.
-- If the assistant lost the conversation, the transcripts are read again once and the question asked again; the note says "the [the assistant] session was lost (new machine or a rebuilt server), so the transcripts were read again". Lost twice: "the [the assistant] session was lost twice running: give it a moment and retry". Could not be opened twice: "the [the assistant] session could not be opened: the provider refused the id twice running".
-- When the assistant is not available: the line says "Searching by meaning needs [the assistant] on the server: <why or 'not installed'>" and Search shows the same as an error.
+- If the assistant lost the conversation, the transcripts are read again once and the question asked again; the note says "the Assistant session was lost (new machine or a rebuilt server), so the transcripts were read again". Lost twice: "the Assistant session was lost twice running: give it a moment and retry". Could not be opened twice: "the Assistant session could not be opened: the provider refused the id twice running".
+- Before Search is pressed, the status line also shows the expected cost of this search in money, from its expected reading (cold or warm), and every assistant search counts against the site's one daily budget for the assistant (see The whole product: The assistant).
+- When the assistant is not available: the line says "Searching by meaning needs Assistant on the server: <why or 'not installed'>" and Search shows the same as an error.
 - Every answer records how much of what the assistant read was already held by the conversation and how much was read fresh, and the status line after an answer says both.
 - Reading the transcripts gives up after 15 minutes per part, a question after 10 minutes, and a whole search after 40 minutes.
 
@@ -316,7 +308,7 @@ The same question means the same words, transcripts, strength, number of results
 
 ### While an assistant search runs the sheet shows what it is doing and an estimated progress bar
 
-{{31-010}}
+The wait panel reads "Searching [for the closest wording in] <scope> [(<strength>)]: <query>", with a progress bar and a line such as "reading every transcript, part 2 of 4, about 60 s (an estimate) · 34 s so far", "the transcripts are read, now asking", "finding the closest words said", "asking". Past 115% of the estimate: "taking longer than the <n> s estimate". The bar runs evenly to 85% at the estimated time, then eases toward 95%, and is never full until the answer lands; it moves smoothly (about four times a second). Progress is refreshed from the server about every 2 s while the sheet is open, and the server's elapsed time wins over the device's clock.
 
 The estimate says where it came from: measured (the middle of this conversation's last 6 searches of the same kind, warm or cold), scaled (from other conversations at the same strength and kind, scaled by size for a cold read), or a default (25 seconds warm, 60 seconds cold for the whole episode, scaled down for a smaller scope). It is never under 5 seconds. A warm search that has to read the transcripts again grows its estimate from that moment.
 
@@ -372,7 +364,7 @@ A result can also be dragged onto the lane and lands where it is dropped, with t
 
 ### The search refuses clearly when there is nothing to search or the request is wrong
 
-Messages: no cut list named, "which cut list?"; no episode folder, "there is no episode folder for this cut list"; empty query, "type what you are looking for"; assistant unavailable, "the transcript search needs [the assistant]: <why>"; "this episode has no corpus clips to search"; "there is no interview transcript for <person> under this episode"; "no such search scope: <scope>"; no transcripts at all, "there are no transcripts under this episode yet: nothing to search"; a transcript asked for that is not there, "that transcript is not in this episode" or "there is no paragraph ^<ref> in it"; any other failure, "the search failed: ...". Search never looks outside the studio's project tree.
+Messages: no cut list named, "which cut list?"; no episode folder, "there is no episode folder for this cut list"; empty query, "type what you are looking for"; assistant unavailable, "the transcript search needs Assistant: <why>"; "this episode has no corpus clips to search"; "there is no interview transcript for <person> under this episode"; "no such search scope: <scope>"; no transcripts at all, "there are no transcripts under this episode yet: nothing to search"; a transcript asked for that is not there, "that transcript is not in this episode" or "there is no paragraph ^<ref> in it"; any other failure, "the search failed: ...". Search never looks outside the studio's project tree.
 
 - Exact: yes
 
@@ -382,21 +374,10 @@ Each interview transcript belongs to its interview's multicam, and a clip's tran
 
 The original-language line of a paragraph is recognised by its script (any non-Latin script making up at least a fifth of the line), so Russian and Ukrainian interviews search as well as Chinese ones. A line's language is decided by its script: Chinese, Russian, Ukrainian, or "Russian or Ukrainian" when it cannot tell, in which case the transcript's own language is used where that is clear. A new or changed transcript is seen by search within a couple of seconds.
 
-### The assistant searches inside one transcript or across the montage source clips for paragraphs about an idea
-
-One such search runs at a time; refused with "semantic search needs [the assistant]: <why>" or "a semantic search is already running".
-
-- Inside one transcript: the assistant returns every relevant paragraph, at most 20, each with a reason under 10 words; a very long transcript is read in pieces and the answers combined. Refused with "that transcript has no paragraphs with ids to search" or "no transcript document for that clip".
-- Across the montage source clips: the question goes into the montage builder's conversation. Results are spans of exact words, each placed in its clip's word timing (a quote matching nothing falls back to the passage it came from, and a clip not among the sources is dropped), at most 20, each with clip, start and end, words, reason, a score from 0 to 1 and how sure the placing is. Status while running: "asking [the assistant] about the corpus...". With no source clips: "there is no corpus under this episode: none of its clips has been transcribed yet". A lost conversation is opened again once ("the [the assistant] session was lost; re-reading the corpus"); twice: "the [the assistant] session could not be opened even after re-reading the corpus".
-
-- When the assistant is off: neither search is offered.
-- Exact: yes
-- Pending: cards-editor-3-Q8
-
 #### Lessons
 
 - Met: CE2-070, CE1-004, CE1-006, CE1-009, CE1-010, CE2-071, CE2-073, CE2-075, CE2-077, CE2-078, CE2-081, CE2-082, CE2-083, CE3-048, CE3-050, CE3-051, CE3-053, CE1-005, CE1-007, CE1-008, CE1-011, CE2-072, CE2-074, CE2-080, CE2-084, CE3-049, CE3-052.
-- Met for another part: CE1-049 (in "Dropping media files on the panel adds them to an intake list and looks for each one in the episode"), CE3-030 (in "A highlighted stretch of transcript becomes a card of exactly those words"), CE2-091 (in "The search sheet has pickers for which transcripts, how many results, which strength of assistant, and a fresh start").
+- Met for another part: CE1-049 (in "Dropping media files on the panel hands the clips to footage in and lists each one in the intake"), CE3-030 (in "A highlighted stretch of transcript becomes a card of exactly those words"), CE2-091 (in "The search sheet has pickers for which transcripts, how many results, which strength of assistant, and a fresh start").
 - Not yet met by any behaviour above: CE1-012 (choosing several transcripts at once in the episode's browser of transcripts and cut lists: no behaviour here shows it, and it belongs with opening episodes), CE3-054 (building a montage by describing it belongs with the board and footage-in montages, not with search).
 
 ## Chinese text and matching
@@ -529,28 +510,37 @@ The English the editor selected travels with the new card and becomes the Englis
 
 ### Selecting English on a card, a shelf item or a search result shows the original words it stands for in a floating toolbar
 
-{{30-037}}
+- A selection inside one English line of a card, a shelf item, or a search result highlights the matching original words in that card's or result's own original line.
+- A floating toolbar ("English selection: the original words") appears over the selection, kept inside the window, on the side away from the original line:
+  - while mapping: spinner, "Lining the English up with the original…", Cancel;
+  - when it cannot map: the reason;
+  - when mapped: arrow, the original words, and "Approximate" (reason as tooltip) when it is;
+  - Start earlier/later and End earlier/later buttons (one word each);
+  - for a card in the cut: Play, Delete words (tooltip "Cut exactly these original words out; the rest closes up"), Highlight, Split here, Copy original. Play plays those words on the lane (moves the lane head there and stops after their end). For a card on the shelf the same buttons without Play. Delete words, Highlight and Split here do what the lane's own word tools do, with their message; after a successful Delete or Split the toolbar closes;
+  - for a search result: Open in the transcript (tooltip "Insert, put on the shelf or play these words from the transcript"; "The transcript panel is not available here." when it cannot) and Copy original;
+  - Close (x).
+- Esc closes the toolbar; clicking elsewhere (losing the selection) closes it unless the pointer is over it; pressing its buttons does not lose the selection. A card removed from the cut list closes its toolbar. A newer selection withdraws the older one's ask.
+- Copy: "The original words are copied." / "The clipboard would not take it."
+- Open in the transcript: the panel opens the clip's transcript at the paragraph and selects the same English there (finding a partial English inside the paragraph's English if needed); "that paragraph has no English line here" or "<clip> has no transcript in this episode" when it cannot.
+- On the lane, an English pick on a clip maps to its spoken words the same way, answering ready, approximate with a reason, pending, or nothing with "open a cut list first", "this clip has no word timings yet", the text's problem, or "the selection holds no words".
 
 The word tools the toolbar shares with the lane (Delete words, Highlight, Split here) are described in Timeline Cards: the editor, Selecting, deleting, inserting and keys.
 
 - Ways in: the transcript's action bar, the floating toolbar on a card, a shelf item or a search result, a drag or hold across a clip's English in the lane.
 - Exact: yes
-- Pending: cards-editor-3-Q5
 
-### A settings row shows the English-to-original progress and sets the daily allowance of assistant calls for it
+### A settings row shows how far the English is lined up with the original
 
 Settings row "English to original alignment":
 
 - status line: "Not available on this server." / "Waiting for the server…" / the pause reason / "Lining up N paragraph(s) in the background." / "N lined up since the server started, F could not be.";
-- "[the assistant] calls a day" number box (0 to 100,000, step 10), saved to the server on change;
-- "N used today, B paragraphs a call".
+- "<amount> spent today, B paragraphs a call": what lining up has cost today, out of the site's one daily budget for the assistant (see The whole product: The assistant).
 
-When the allowance is spent, lining up stands still until the next day and an English selection waiting on it falls back to the whole original sentence, marked approximate.
+Lining up runs on its own, so it stops when the work running on its own has spent its share of the day's budget (the share is shown in the language aids panel, below); it then stands still until the next day and an English selection waiting on it falls back to the whole original sentence, marked approximate.
 
-- Setting: [the assistant] calls a day for lining English up with the original. Does: caps how many assistant calls a day go to lining English up with the original words. Default: 300. Who: anyone who can open the editor. Applies to: the site. Search words: alignment, allowance, assistant calls, budget, English to original.
 - When the assistant is off: the row is not shown, and every English selection takes the whole original sentence, marked approximate.
 - Exact: yes
-- Pending: cards-editor-3-Q3, cards-editor-3-Q4
+- Pending: cards-editor-3-Q11
 
 ### Ten reading aids help an editor cut speech in a language they do not read, each switched Off, on for languages not read, or on for all
 
@@ -563,7 +553,7 @@ The aids show on transcript paragraphs, on cards (including shelf items) and in 
 | 3 | Verbs | "Verbs underlined in both languages" | a solid gold underline; an auxiliary, a copula, or a verb inside a compound noun is not marked |
 | 4 | Safe cut points | "Green: a cut here leaves a whole thought. Red: it strands a clause" | ticks between words of the original (see the lane's safe cut points); also turns on the nudge for picks and dragged edges |
 | 5 | Not, if and but | "Negation, conditions and contrast words flagged" | negation in red with a solid underline; conditions and contrast in red with a dashed underline |
-| 6 | Join check | "After a splice or trim, [the assistant] reads the joined original again" | the join check, below |
+| 6 | Join check | "After a splice or trim, Assistant reads the joined original again" | the join check, below |
 | 7 | Word-by-word gloss | "A literal English word under each original word" | a "Word by word" line under the original (transcript, cards and lane), each gloss lit as its spoken word plays |
 | 8 | Names, places, numbers, dates | "Marked so they can be heard and checked" | names and places dotted cyan underline; numbers and dates dashed cyan underline |
 | 9 | Fillers | "Hesitations and filler words, marked as trimmable" | greyed with a faint strike-through |
@@ -593,17 +583,20 @@ The safe cut points and the key that moves an edge to one are described in Timel
 - Setting: Languages I read. Does: decides which languages the aids set to Not read stay off for. Default: English and Chinese. Who: anyone who can open the editor. Applies to: a computer. Search words: languages I read, reading aids, my languages.
 - When the assistant is off: the gloss, the word links of aid 1 and the join check by the assistant are absent, and their rows are not offered; every other aid still shows.
 - Exact: yes
-- Pending: cards-editor-3-U1
 
-### The language aids settings panel shows what the server can analyse and sets the aids' own daily allowance of assistant calls
+### The language aids settings panel shows what the server can analyse and what the editor's own assistant work has spent today
 
-{{30-039}}
+Settings panel "Language aids":
+- a status line: "The aids service is not on this server." / "Asking the server…" / "Asking the server about language analysis…" / "Language analysis: <what is available> (<languages>)." / "Language analysis is not available: <why>. Only the word lists and the romanisation show." (warning colour);
+- "Languages I read" toggle buttons (tooltip "I read <language>: its aids are off unless an aid is set to All");
+- one row per aid: number, label, hint, and Off / Not read / All buttons (tooltips "Off everywhere", "On for the languages I do not read", "On for every language");
+- "<amount> spent today, <amount> left": what the editor's work running on its own (lining the English up with the original, glosses, word links and join checks) has cost today, and what is left of its share of the site's one daily budget for the assistant. That share is a quarter of the daily budget and is shown beside the two amounts. The budget itself is set by an admin, in money, with the assistant's other settings (see The whole product: The assistant); there is no count of calls.
+- When that share is spent, lining up, glosses, word links and join checks by the assistant wait until the next day and the panel says so. Searches and other work a person starts are not held back by it: they show their expected cost before they run and count against the rest of the day's budget.
 
-- Setting: [the assistant] calls a day for glosses and join checks. Does: caps how many assistant calls a day go to word-by-word glosses, word links and join checks. Default: 200. Who: anyone who can open the editor. Applies to: the site. Search words: glosses, join checks, allowance, assistant calls, budget.
 - Name and search words: Language aids: reading aids, languages I read, gloss, verbs, safe cuts.
-- When the assistant is off: the allowance row and its count are not shown.
+- When the assistant is off: the amounts spent and left are not shown.
 - Exact: yes
-- Pending: cards-editor-3-Q3, cards-editor-3-Q4
+- Pending: cards-editor-3-Q11
 
 ### The aids read each line's grammar, words and names in Russian, Ukrainian, Chinese and English, and fall back to word lists when that analysis is missing
 
@@ -625,7 +618,18 @@ The system is the clip's language, but a word with a letter only the other langu
 
 ### The join check reads every new splice of one speaker again and says on the card and in the lane whether it reads well, changed the meaning, or broke the grammar
 
-{{30-044}}
+- A join is where two consecutive cuts meet and the speech should run on: the same clip (not simply continuing within 0.04 s with no gap) or the same speaker. Two speakers meeting is not checked. A gap row between them still counts; a heading row ends the run. Cuts whose word timings are not known yet are checked when they arrive.
+- Compared: the last words of the first piece (at most 30, from its last sentence start when that leaves at least 3), the first words of the second (at most 30, up to its first sentence end), for the same clip the words dropped between them (at most 60, only when the second piece is later in the clip), and each cut's English when shown. Without word timings, the last/first 160 characters of each cut's text.
+- Quick check (at once, needs no assistant):
+  - meaning: "The cut drops "<word>" (a negation) from between the two pieces: the joined sentence may say the opposite.";
+  - grammar: "The first piece ends on "<word>", which waits for a clause that is not there." (the first piece ends, not at a sentence end, on a condition or contrast word);
+  - grammar: "The first piece ends mid-clause: ..." / "The second piece starts mid-clause: ..." (or "A side of the join strands a clause.").
+  - Nothing found is not "ok"; only the assistant says that.
+- The assistant's check: the joined original is translated afresh and judged ok, meaning (a negation, condition or contrast lost, a reversed claim, the wrong subject) or grammar (a hanging clause, a missing verb or object, disagreement across the join), with a one-sentence note (at most 300 characters).
+- The assistant is asked only for joins an edit made or moved within the last 15 s, when aid 6 is on for that language, about a second after the edit settles; opening a cut list only shows checks already made. A check belongs to the joined words: moving the join makes the old answer stop applying. A check never blocks an edit. Switching cut list withdraws the previous list's waiting checks. It counts against the share of the site's daily budget for the editor's work running on its own.
+- On the second card of a join: a button above the card: "Checking the join" (hollow dot), "Join reads well" (green), "Join: meaning changed" (red), "Join: grammar break" (gold), plus "quick check" when the answer is the quick one. Spoken label "Join check with the card before: <label>" ("the join reads well", "meaning changed: <note>", "grammar break: <note>", "checking the joined words"). Clicking it shows/hides a box with the note, the joined original, and "Now reads: <fresh translation>" (or "Assistant is reading the joined words again."). Pressing it never selects or drags the card. Touch targets are 44 px on touch screens.
+- In the lane: a dot on the seam with the same states and an open box ("Now reads: ..."); a quick answer's dot has a dashed ring.
+- "Checking" shows only after the assistant was asked for this join.
 
 - When the assistant is off: only the quick check shows, with its "quick check" mark, and no join is ever marked "Join reads well".
 - Exact: yes

@@ -23,7 +23,6 @@ When the app offers a different version (see "The app shows the offer and says w
 - Only one install runs at a time. A second click while one runs does nothing.
 - Who: the editor at their own computer.
 - Ways in: the app's menu, and the same button in the app's settings window.
-- Pending: releases-and-updates-Q1
 
 ### An update waits until it will harm no work in progress
 
@@ -59,7 +58,6 @@ The first start on a new version, other than a first-ever install, tells the edi
 - The connection follows the same rule as every other call the app makes to the server: secure, or plain to an address that is on the studio's own network.
 - At least 200 MB plus the version's size must be free on the computer, or the attempt fails as "no space".
 - A download larger than its stated size (or 300 MiB when no size is given) is abandoned. One whose contents do not match the vendor's signed record is thrown away.
-- Pending: releases-and-updates-Q5
 
 ### A failed update is tried again less and less often and then given up on
 
@@ -87,37 +85,19 @@ A person signed in to the dashboard, or a computer with the studio's credentials
 - The file name the person downloads is made from the kind, operating system and version.
 - Who: anyone signed in, and every computer of the studio.
 
-### A new version can be put on a Windows computer by hand
+### The Timeline Cards app on an Android phone updates itself from the server
 
-For a Windows computer already set up, a person at the computer can replace only the app with a given version, keeping the computer's sync identity, its server connection, its drive and its settings. The summary says these were kept.
+On a computer, Timeline Cards opens from the one app on that computer and updates with it: there is no separate Timeline Cards program to install or update there. On an Android phone, Timeline Cards is an installed app of its own, carrying the product's mark, and it checks the studio's server for a newer version and installs it. The check needs the editor to be signed in. With no version of the app on the server, the app is told "no app builds have been published". Only the version listed as the newest can be downloaded. Anything else is "no such app build", and a listed version whose file is missing is "that build is listed but missing". Nothing about the check is kept by the device's browser between checks.
 
-- It shows the version being installed, when it was built, and whether it was made from unfinished work ("fine for testing, not for the fleet"). A version record that describes a different file is ignored and the version is shown as unknown.
-- It stops the app, sets the running version aside, and copies the new one in, trying 5 times 2 seconds apart, then asks the person to close anything that might hold the file (a preview, a virus scan) and run it again. If nothing could be copied, the previous version is put back.
-- It starts the app and checks it after 3 seconds. If the new version exits, the previous one is restored and started: "the new version would not start, this computer is back on v<version>". If nothing runs, it warns that the computer has NO app running and nothing retries before the next sign-in.
-- It starts background syncing if it is not running, or says to run the install again if it cannot.
-- It fills in the server's address and the computer's key only where they are missing, and warns that without an address the app will not check in, take sync choices, or be offered another update. A key given replaces the one held. A blank key is warned about: checking in and project choices are off until one is given.
-- It ends "Upgrade complete" with the version now running, "Upgrade INCOMPLETE", or "INSTALLED BUT NOT RUNNING".
-- A preview mode changes nothing and says what it would do.
-- Only a version signed by the vendor is installed this way.
-- Ways in: this hand-run upgrade, the app's own update, and running the installer again.
-- Pending: releases-and-updates-Q2
-
-### The Timeline Cards app on a computer or phone updates itself from the server
-
-The Timeline Cards app (for Windows and for Android) checks the studio's server for a newer version and installs it. The check needs the editor to be signed in. With no version of the app on the server, the app is told "no app builds have been published". Only the version listed as the newest for its platform can be downloaded. Anything else is "no such app build", and a listed version whose file is missing is "that build is listed but missing". Nothing about the check is kept by the device's browser between checks.
-
-{{33-096}}
-
-{{33-100}}
+Section **UPDATES**: "New versions of this app are published on the server. Checking needs the server, and you signed in." **Check for update** then: "this is the newest version (<v>)" or "version <v> is available (this is <current>)" with **Install <v>**. Installing: "installing <v>: confirm on the screen Android shows". Errors: "set the server first", "you are working offline: go back online to check for an update", "this server has no app builds published", "sign in first", "the server answered <code>", "this build cannot install updates", "the download did not match its checksum: try again", "the server stopped answering" (after 30 s), plus two messages for a broken list of published builds.
 
 {{33-107}}
 
-As on Windows, an Android update that carries no checksum is refused, and on both an update is installed only when it also carries the vendor's signature (see "Nothing is installed that the vendor did not sign"). On Android the signature that lets the update replace the app is Android's own (see "Facts about Android").
+An update published without a checksum is refused ("this update carries no checksum, so it was not installed: publish it again"), and a download that does not match its checksum is deleted. The checksum proves the download arrived whole. The update is installed only when it also carries the vendor's signature (see "Nothing is installed that the vendor did not sign"), and Android itself replaces the app only when it is signed with the app's own key (see "Facts about Android").
 
 - Exact: yes
 - When Timeline Cards is off: the app's updates are not offered and the check answers that no app builds have been published.
-- Phone and desk: Windows closes and reopens the app by itself. Android asks the person to confirm on its own screen, and first to allow the app to install apps.
-- Pending: releases-and-updates-Q3
+- Phone and desk: on a computer Timeline Cards updates with the one app. On an Android phone the person confirms on Android's own screen, and first allows the app to install apps.
 
 #### Lessons
 
@@ -149,8 +129,6 @@ As on Windows, an Android update that carries no checksum is refused, and on bot
 ### Facts about Android
 
 Android replaces an installed app in place, keeping its offline data, only when the update is signed with the same key as the installed one. The first version made creates that key (valid 100 years), and the vendor is told it must be backed up: losing it means the app can never be updated in place again, only removed and installed afresh.
-
-- Pending: releases-and-updates-Q3
 
 #### Lessons
 
@@ -268,7 +246,7 @@ A server update is downloaded only over a secure connection, is at most 256 MiB,
 
 ### The vendor publishes a version once and it reaches every kind of computer
 
-There is one way to publish a new version. The vendor starts it with one command at the vendor's release computer, naming the version. It covers every kind of computer the product supports: the app on the editor's computer for Windows and for macOS (on both kinds of Mac processor), the installer that sets up a new computer for each, the Timeline Cards app for Windows and Android, the server's update when the server changed, and any large file a part needs once (such as what music search needs to understand a description of a track).
+There is one way to publish a new version. The vendor starts it with one command at the vendor's release computer, naming the version. It covers every kind of computer the product supports: the app on the editor's computer for Windows and for macOS (on both kinds of Mac processor), the installer that sets up a new computer for each, the Timeline Cards app for Android phones, the server's update when the server changed, and any large file a part needs once (such as what music search needs to understand a description of a track).
 
 What the vendor gets:
 
@@ -283,7 +261,12 @@ What the vendor gets:
 - A release that stopped part way can be run again: it completes what is missing without redoing or changing anything already published, and says how far the last run got. Running it again after the version has changed is a new release, not a completion.
 - A trial run checks everything and changes nothing.
 - Who: the vendor.
-- Pending: releases-and-updates-Q7
+
+### The vendor sees before publishing whether a release makes syncing slower
+
+Before a version is published, the same measurements of how fast footage travels that chose the way footage moves are run again with the new version: camera originals going up, proxies and originals coming down, and many small project files kept in step, between the studio's server and real editors' computers on the studio's own network, on a home connection in the same country and in other countries, on Windows and on macOS. The vendor is shown the results beside those of the version before, for each kind of transfer and each computer, with every one that got slower marked. A release that makes syncing slower is caught before it ships: the vendor sees it before anything is published, and publishing it anyway is a deliberate, named choice.
+
+- Who: the vendor.
 
 ### A release is refused before anything moves when something is wrong
 
@@ -382,7 +365,6 @@ Every button shows that it is busy and is disabled the moment it is pressed. A r
 
 - Who: an admin.
 - Ways in: from a held-back version in the list of versions, from the choice of an earlier version to go back to, and from the list of what the vendor offers.
-- Pending: releases-and-updates-Q6
 
 #### Lessons
 
@@ -429,7 +411,6 @@ The app shows an offer only on an installed copy, and only while the server offe
 - The offer disappears when the server stops offering it. Signing in at the app also brings an offer.
 - Pressing the menu item responds visibly at once.
 - Ways in: the menu, and the same button in the app's settings window.
-- Pending: releases-and-updates-Q1
 
 ### A studio can let its computers take newer versions without anyone clicking
 
@@ -438,7 +419,6 @@ With this setting on, a NEWER offered version installs by itself on every comput
 - On its own: with the setting on, each computer installs a newer offered version once nothing would be harmed.
 - By hand: an admin turns it on or off. An editor can still choose any offered version from the menu.
 - Setting: Update editors' computers by themselves. Does: lets each editor's computer install a newer offered version with nobody clicking. Default: off. Who: an admin. Applies to: the site. Search words: automatic updates, auto update, unattended, install updates.
-- Pending: releases-and-updates-Q9
 
 #### Lessons
 
@@ -466,8 +446,7 @@ An admin asks one computer to install a version, naming it (up to 32 characters)
 - Every push and withdrawal is recorded among admin actions: who asked, when, the version, and which version the computer was on, so an update can be told from a rollback.
 - Every version of the app, the very first one a computer ever installs included, obeys a pushed update.
 - Who: an admin.
-- Ways in: from the list of computers that are behind on the versions page, from a held-back version ("push to one computer"), from the per-computer view, and from a person's account page.
-- Pending: releases-and-updates-Q12
+- Ways in: from the list of computers that are behind on the versions page, from a held-back version ("push to one computer"), and from the per-computer view.
 
 ### The versions page shows every version the site holds
 
@@ -546,7 +525,6 @@ Each of these is shown as a problem the server found and mailed as an alert (see
 | updates cannot install on this NAS | warning | every version the vendor offers needs a newer server installation than this one | renew the installation on the NAS (see "Some server updates need the installation renewed on the NAS") |
 
 - Who: an admin sees these.
-- Pending: releases-and-updates-Q11
 
 #### Lessons
 
@@ -563,7 +541,6 @@ One failed start of a new version is allowed (antivirus holding the files, for e
 - The crashing version is marked on this computer: neither an unattended update nor an admin's push installs it again, and a newer version is tried as usual. The mark clears only when the computer runs that version, because the editor chose it deliberately. The server is told which version the computer went back from until a check-in is accepted.
 - On its own: going back, decided from the new version's failed starts and crashes in its first 10 minutes.
 - By hand: the editor sees what happened and can choose the version again from the menu. The admin sees "went back from <v>".
-- Pending: releases-and-updates-Q4
 
 ### An admin moves the computers back to an earlier version
 
@@ -576,7 +553,6 @@ Going back is choosing an earlier version to be current. "go back to…" lists o
 - For a recalled version still running somewhere: "recalled <kind> <version> <platform> was withdrawn by the vendor: <reason>. N computer(s) still running it.", with "move them onto" a choice of versions that are not recalled (the current one chosen first). Confirming asks every computer on the recalled version to take the chosen one, and makes the chosen one current if the recalled one still is.
 - Recorded among admin actions, with which computers were asked.
 - Who: an admin.
-- Pending: releases-and-updates-Q6
 
 ### Every version sets a floor no computer goes below
 
@@ -684,7 +660,6 @@ Progress is refreshed every second and shows, in order: queued ("starting the up
 - An update cut off by the server or the NAS restarting is shown afterwards as failed, "interrupted by a restart at step S", and updating and going back work again from the page at once.
 - Nothing temporary from an update is left on the disk, whatever happens.
 - With a full or read-only data disk, the update's state still answers, and an update already applied still restarts into the new version.
-- Pending: releases-and-updates-Q10
 
 ### Some server updates need the installation renewed on the NAS
 
@@ -752,7 +727,6 @@ The vendor publishes one signed list that every site reads: the server's version
 - On its own: with "try first" or "follow the vendor", the site takes each new version after its daily check.
 - By hand: an admin brings any one version in, makes any held version current, or changes the choice at any time.
 - Setting: How the site takes the vendor's new versions. Does: whether new versions from the vendor wait for an admin, arrive held back for trying, or are offered to every computer by themselves. Default: try first. Who: an admin. Applies to: the site. Search words: vendor updates, auto publish, release policy, follow vendor, staged.
-- Pending: releases-and-updates-Q8
 
 ### The server checks the vendor's list every day, and an admin can check now
 
@@ -803,7 +777,6 @@ A version reaches customer sites only as the exact version the vendor names for 
 Then the server version is released, then the apps and installers. If the apps fail, the vendor is told the server half is already out and how to send the rest. A fresh customer installation is fixed to the exact server version released. When it is done, the vendor is told when customers get it: sites that follow the vendor take it at their next check (daily, and about ten seconds after their server restarts), subject to their own trial; sites that try first hold it back for their admin; sites that take versions by hand need their admin to check and take it. A ready-to-run recall line is printed for every version published.
 
 - Who: the vendor.
-- Pending: releases-and-updates-Q7
 
 ### The vendor is told every day when the list for customers falls behind
 

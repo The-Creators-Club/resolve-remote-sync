@@ -14,24 +14,24 @@
 - 17-078 | The dashboard is put back on the private network on its own if it goes missing
 - 17-079 | The admin connects the server to the NAS once in the set-up wizard
 - 18-038 | The dashboard is reached only through the studio's private network
-- 18-039 | Editors on the NAS can only transfer files, by key, inside the studio's tree ; Each editor gets their own account on the NAS
+- 18-039 | An editor's computer may only move files on the NAS inside the studio's tree ; Each editor gets their own account on the NAS
 - 18-043 | The server joins the private network and publishes the dashboard there with https
 - 20-103 | The admin sees how safely each computer reaches the dashboard
 - 21-003 | The server holds a limited key for a TrueNAS and never its administrator password
 - 21-004 | On a Synology the server holds the password of an account made for it
 - 21-006 | Every admin page the product runs needs a login
 - 21a-011 | The dashboard is reached only through the studio's private network
-- 21a-012 | Editors on the NAS can only transfer files, by key, inside the studio's tree
+- 21a-012 | An editor's computer may only move files on the NAS inside the studio's tree
 - 21a-013 | The server works as an account of its own on the NAS
 - 21a-015 | Each editor gets their own account on the NAS
 - 21a-016 | Each editor gets their own account on the NAS
 - 21a-017 | Each editor gets their own account on the NAS
-- 21a-018 | Editors on the NAS can only transfer files, by key, inside the studio's tree
-- 21a-019 | Editors on the NAS can only transfer files, by key, inside the studio's tree
+- 21a-018 | An editor's computer may only move files on the NAS inside the studio's tree
+- 21a-019 | An editor's computer may only move files on the NAS inside the studio's tree
 - 21a-020 | The admin can bring existing editor accounts on the NAS into the product
 - 21a-021 | When an editor leaves their computers lose the NAS
-- 21a-022 | Editors on the NAS can only transfer files, by key, inside the studio's tree
-- 21a-023 | An editor's key sign-in needs their home folder kept to themselves
+- 21a-022 | An editor's computer may only move files on the NAS inside the studio's tree
+- 21a-023 | The NAS refuses an editor whose home folder is open to others
 - 21a-024 | On a Synology the file-transfer service must be on and allowed to editors
 - 21c-001 | The server works as an account of its own on the NAS
 - 21c-016 | The product makes sure it is talking to the studio's own NAS
@@ -54,6 +54,7 @@
 - Changes for a person: with A an admin sees the state but has nothing to press; with B there is a button that does what already happened.
 - Text assumes: A for the action, with the wizard showing the outcome (the "Ways in" line lists both until he answers)
 - Items: 16-058, 21-006
+- Answered by the owner 2026-11-24: A: on its own only; the wizard shows the outcome and has no button for it
 
 ### server-install-and-running-2-Q2: TrueNAS and Synology lock editors down in different ways. Is it right that the text states one result on both and the differences only as facts about each NAS?
 - Kind: differs
@@ -63,6 +64,7 @@
 - Changes for a person: with A a TrueNAS site can no longer give editors a shell on the NAS, and nobody types dashboard addresses.
 - Text assumes: A
 - Items: 21a-011, 21a-018, 21a-019, 21a-022, 21a-023, 21a-024
+- Answered by the owner 2026-11-24: A: one result on both kinds, the differences stated only as facts about each NAS
 
 ### server-install-and-running-2-Q3: On the very first connection to the NAS, should its identity be trusted on its own (and its fingerprint shown), or must the admin confirm it first?
 - Kind: differs
@@ -72,6 +74,7 @@
 - Changes for a person: with A the admin presses nothing extra; with B they confirm the fingerprint once. Either way the studio can no longer turn the check off.
 - Text assumes: A
 - Items: 16-062, 17-079, 21d-008, 21d-009, 21d-017, 21c-016
+- Answered by the owner 2026-11-24: A: the first identity seen during set-up is trusted and shown, a change refused, the check never off
 
 ### server-install-and-running-2-Q4: Should the product make the server's own NAS account on TrueNAS too, as it does on Synology?
 - Kind: differs
@@ -81,6 +84,7 @@
 - Changes for a person: with A a new TrueNAS site has no account to make by hand.
 - Text assumes: A
 - Items: 21a-013
+- Answered by the owner 2026-11-24: A: the product makes the server's account when missing, on both kinds
 
 ### server-install-and-running-2-Q5: When the server's account numbers on a TrueNAS do not match the site's settings, should the install stop until they do?
 - Kind: other
@@ -90,6 +94,7 @@
 - Changes for a person: with A a mismatched site cannot finish installing until the numbers are set.
 - Text assumes: A
 - Items: 21c-001
+- Answered by the owner 2026-11-24: A: the install stops until the numbers match
 
 ### server-install-and-running-2-Q6: Is bringing a studio's existing editor accounts on the NAS into the product still wanted?
 - Kind: unreachable
@@ -99,6 +104,16 @@
 - Changes for a person: with B the admin re-adds each editor and the product takes over their existing NAS account then.
 - Text assumes: A
 - Items: 21a-020
+- Answered by the owner 2026-11-24: A: kept as a one-time carry-over that works on both kinds
+
+### server-install-and-running-2-Q7: Does footage reach editors' computers through the NAS's own file-transfer service at all? This waits on the speed measurements.
+- Kind: other
+- Today: editors' computers far from the studio move proxies and originals through the NAS's own file-transfer service, so on a Synology the install turns that service on and checks no rule denies it to editors.
+- Options: A: keep the passage on the Synology file-transfer service only if the measurements choose a way that goes through it. B: delete it if they choose another way.
+- Recommend: decide from the measurements of how footage travels that the owner's requirements call for, before this passage is built.
+- Changes for a person: with B a Synology admin has no file-transfer service to keep on and no port to set.
+- Text assumes: the passage is written, marked pending, and worded as "where editors' computers move footage through it"
+- Items: 21a-024
 
 ## Readers' questions and unsettled points
 
@@ -134,6 +149,8 @@
 
 ## Conflicts between an item and a lesson
 
+- owner's answer of 2026-11-24 (joining a computer) | 18-039, 21a-016, 21a-017, 21a-018, 21a-021, 21a-023 | the items, and this text before the answer, spoke of an approved computer's key being added on the NAS, password sign-in switched off and keys removed; the owner accepted that signing in on a computer is all it takes to join it and how a computer proves itself to the NAS is the builder's. Rewrote those passages to the promise: what an editor's computer may do on the NAS, that one more computer never disturbs the others, and what the admin sees in the NAS's list of users.
+
 - SRV-118 | 16-062, 21d-009, 21c-016 | the items let a site turn checking of the NAS's certificate off; the lesson says turning it off is never offered. Wrote the lesson.
 - SRV-119 | 21-003, 21c-018 | the items let a studio opt out and store the TrueNAS administrator password; the lesson says the server holds only a scoped key. Wrote the lesson (the opt-out question is with accounts-privacy-legal).
 - SRV-119 | 21a-016, 21a-019 | TrueNAS lets a site give editors a full shell; the lesson says editors' NAS accounts transfer files only. Wrote the lesson.
@@ -153,10 +170,17 @@
 - The admin is warned before the NAS's storage gets too full | written from SRV-128
 - Schedules run on the studio's own clock | written from SRV-129, including the warning when the NAS's clock is wrong and the studio time zone setting
 - Pages stay quick while big downloads and checks run | written from SRV-130
-- Each editor gets their own account on the NAS | a key that could not be written stays offered to the admin (SRV-123); every change is read back (SRV-122)
+- Each editor gets their own account on the NAS | the dashboard explains which NAS account is each editor's and why it exists; one more computer never disturbs the others (SRV-123); every change is read back (SRV-122)
+- The dashboard is reached only through the studio's private network | a sentence saying the way footage travels to far-off computers is chosen from measurements and not ruled here
 - The server works as an account of its own on the NAS | the product makes the account on TrueNAS too (Q4)
 
 ## Parts of items left out
+
+- 21a-016 | the computer's key written to the account, replacing or beside others, and read back: how a computer proves itself to the NAS is the builder's (owner's answer of 2026-11-24)
+- 21a-017 | the key replaced on a second run: same reason
+- 21a-018 | asking TrueNAS to switch off password sign-in, and TrueNAS refusing it for accounts with Windows file sharing: tied to key sign-in, same reason
+- 21a-021 | removing the computer's key: written as the computer no longer reaching the NAS
+- 21a-023 | the words key folder and key file: written as the hidden folder and the file in it
 
 - 17-028 | the installer's setting naming which front ends are believed: with the private network the only way in, the product knows its own front end
 - 18-039 | that a key cannot be checked while the dashboard is down and the connection is refused: how editors' keys are looked up
@@ -174,6 +198,8 @@
 
 ## Joins with other capabilities
 
+- sync / Speed and routes | The dashboard is reached only through the studio's private network | which way footage travels to a far-off computer, chosen by measurement
+
 - broll / Client folders and links | The dashboard is reached only through the studio's private network | the one link reachable from outside the private network
 - dashboard / Problems the server finds | Admins are warned when the server's private-network link is down, about to expire or not publishing the dashboard | where serious problems are shown and alerted
 - dashboard / Problems the server finds | Admins are warned when most computers go quiet at once | the same; the silent-computer ladder is with dashboard-1
@@ -187,3 +213,12 @@
 ## Settled from the present product
 
 - server-install-and-running-2-U1 | nothing checks the NAS's clock at present; the text takes the amount used for a computer's clock
+
+## Changes after the owner's answers of 2026-11-24
+
+- Questions Q1 to Q6 applied (all recommendations); their pending marks removed; the admin-page lock's "Ways in" line removed, since only the automatic way stays and the wizard shows its outcome.
+- "Each editor gets their own account on the NAS" rewritten: no approved computers, no keys added or read back; one more computer never disturbs the others; the dashboard explains each editor's NAS account.
+- "Editors on the NAS can only transfer files, by key, inside the studio's tree" renamed "An editor's computer may only move files on the NAS inside the studio's tree" and stripped of password and key sign-in.
+- "An editor's key sign-in needs their home folder kept to themselves" renamed "The NAS refuses an editor whose home folder is open to others", stated as NAS facts without keys.
+- "When an editor leaves their computers lose the NAS" no longer speaks of removing a key.
+- Routes: "The dashboard is reached only through the studio's private network" gained a sentence that the way footage travels is chosen by measurement; the Synology file-transfer passage is pending on new Q7; the DSM transfer limit is worded for any transfer through DSM's own file-transfer server.

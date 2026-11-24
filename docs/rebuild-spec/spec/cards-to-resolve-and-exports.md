@@ -49,7 +49,6 @@ A send offers the new timeline's frame rate before anything is built. The defaul
 
 - On its own: the rate and start, from the cut list, else 29.97 drop-frame at 01:00:00:00.
 - By hand: both can be changed in the cut list's facts, and the rate can be changed for one send on the Send tab.
-- Pending: cards-to-resolve-and-exports-Q8
 
 #### Lessons
 
@@ -74,8 +73,6 @@ Each cut names its clip, and the clip is looked for in the target project's medi
 
 For every clip of the cut that the project's media pool does not hold, the hand-over brings it into the project first, instead of refusing: the file the clip's transcript was made from, as the editor's computer sees it, is imported and matched back by file name. An interview whose multicam is not yet in the project gets it, built in Resolve from the angles and the line-up Timeline Cards made when the footage came in (see Timeline Cards: footage in, ready to cut: Grouping clips and building the multicam), with the angle names and sync of that line-up, and placed in the `Multicams` bin. The dry run says "-- importing N clip(s) from the corpus first". A send is refused only for a clip that is neither in the project nor has a file the editor's computer can reach, and then every such clip is named at once (see "A send is refused before anything is placed when it cannot succeed").
 
-- Pending: cards-to-resolve-and-exports-Q1
-
 ### Each cut lands as a linked picture and sound pair on the first tracks
 
 Each cut's picture goes on video track 1 and its sound on audio track 1, linked to each other as a hand edit would link them, whichever destination tracks the editor has switched on in Resolve. A placement counts only once it has been read back: its start, its length and its source span, picture and sound both present. Cuts laid end to end butt-join with no gap and no frame lost; each starts at the read-back end of the item before it, and its placed length matches its clip's real rate within 0.04 seconds. A cut's in-point is rounded to the nearest frame and its out-point is the in-point plus its length, so a cut nobody touched never reads as trimmed by a frame. A timeline made from a cut holds exactly one clip per card, in the cut's order, and nothing else.
@@ -92,6 +89,9 @@ Facts about Resolve behind these promises:
 - An append to a track that does not exist reports success, and a clip appended to a chosen track gets no linked sound.
 - A timeline whose picture and sound links are recorded on one side only crashes Resolve when it is opened.
 - Its scripting cannot build a timeline from a transcript, so cuts made from word timings are placed one by one, and each placement is checked.
+- Its scripted append lands on whichever timeline is current, while its scripted delete acts on the timeline it names. So before each placement the new timeline is confirmed to be the current one; if it is not, the send stops, the new timeline is removed and the person is told.
+- Its scripting cannot move a clip, insert in the middle of a timeline, or announce that anything changed, and nothing in its scripting or its shortcuts can insert empty time. Gaps therefore exist only in timelines the product builds whole, from the start.
+- Its select-at-playhead and split act on every track whose auto-select is on, and its scripted delete leaves a clip's linked sound behind on the timeline.
 
 ### A new cut shows the multicam's angle and arrives ungraded
 
@@ -114,7 +114,8 @@ A fact about Resolve: a timeline clip gets a new id on every ripple move, and a 
 
 #### Lessons
 
-- Met: CRX-016, CRX-017, CRX-018, CRX-019, CRX-020, CRX-021, CRX-022, CRX-023, CRX-024, CRX-025, CRX-026, CRX-027, CRX-028, CRX-029, CRX-030, CRX-031, CRX-032, CRX-033, CRX-034.
+- Met: CRX-016, CRX-017, CRX-019, CRX-020, CRX-023, CRX-024, CRX-025, CRX-026, CRX-027, CRX-030, CRX-032, CRX-033, CRX-034.
+- Not yet met by any behaviour above: CRX-018, CRX-021, CRX-022, CRX-028, CRX-029, CRX-031 (the owner's answer of 2026-11-24: cuts on a timeline in Resolve are not moved, deleted or inserted from the cards).
 
 ## Undo, markers, titles, fades and properties
 
@@ -174,32 +175,10 @@ A fact about Resolve: its undo history is project-wide and counts every scripted
 - Who: the person who sent it, or an admin.
 - Ways in: from the Send tab after a send, and from the cut list's record of the timeline it was sent as.
 
-### Timeline markers can be added, moved, renamed and recoloured live
-
-These live edits act on the timeline open in Resolve.
-
-Key M on the lane adds a marker at that frame (default colour Blue, length at least one frame). A fact about Resolve: it allows only one marker per frame. Moving, renaming or recolouring keeps every other field of the marker (note, length, extra data). After a move, delete, trim, extend or insert, each marker past the edit point is put back over the same picture, within the same undo step: a marker inside a moved cut comes back at the same place in the cut; a marker inside removed frames goes with them; a marker the editor added since is never touched; one whose new frame is taken goes to the next free frame, and the note says so. No marker is lost. Nothing is done when the markers are already right. Messages: "that frame is before the timeline starts"; "there is a marker on that frame already"; "Resolve would not add a marker there"; note "<Colour> marker at frame N"; "no marker at the head to remove"; "Resolve would not remove that marker"; note "removed the marker at frame N"; "that marker is not on the timeline any more"; "Resolve would not take that marker off"; "Resolve would not put a marker on frame N" (the marker is put back on its old frame); notes "moved the marker to frame N" / "changed the marker at frame N".
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-### Cuts can be given a clip colour live
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-{{39-014}}
-
-### The page's undo takes back live edits by walking Resolve's own undo
-
-Up to 20 live edits can be undone from the page. Undo refuses if the timeline is not exactly as the edit left it. Otherwise Resolve's undo is pressed one step at a time, checking the timeline after each against the states the edit passed through; a step that changed nothing visible is passed over. Afterwards the edited timeline is made current again, any piece banked to offcuts is deleted from offcuts, and the markers are put back as they were. Messages: "the timeline changed in Resolve since that edit -- use Ctrl+Z in Resolve instead"; "undo reached a timeline state this tool did not produce -- that step was redone; finish with Ctrl+Z in Resolve"; "undo stopped after N step(s) without reaching the previous state -- finish with Ctrl+Z in Resolve" (the entry stays undoable); "nothing to undo"; success "undid <label> in Resolve (N Ctrl+Z)".
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
 #### Lessons
 
-- Met: CRX-035, CRX-036, CRX-037, CRX-038, CRX-039, CRX-040, CRX-041, CRX-042, CRX-043, CRX-044.
+- Met: CRX-035, CRX-037, CRX-038, CRX-039, CRX-040, CRX-041, CRX-042, CRX-043, CRX-044.
+- Not yet met by any behaviour above: CRX-036 (the owner's answer of 2026-11-24: no edit is made to a timeline in Resolve from the cards, so no marker has to follow one).
 
 ## Talking to Resolve: restarts, dialogs and speed
 
@@ -225,7 +204,7 @@ There is never more than one connection to Resolve per computer on Timeline Card
 
 ### Resolve keeps up at any length of timeline
 
-- Following a Resolve timeline of up to 500 cuts updates the cards within a second of a change in Resolve, and never stalls the editor's own clicks in Resolve.
+- Reading a Resolve timeline of up to 500 cuts for the comparison takes under a second and never stalls the editor's own clicks in Resolve.
 - A click on a card moves Resolve's playhead within half a second on several hundred cuts, even while other programs talk to Resolve.
 - Building a timeline or changing several hundred items at once shows its progress as it goes and finishes in minutes.
 
@@ -271,7 +250,6 @@ A send is refused at the press, before anything is built, with a sentence giving
 Nothing is ever written into Resolve's saved projects from outside Resolve. Facts about Resolve behind this: it does not re-read its project library while it has a project open, and silently overwrites anything written underneath it; and a project written from outside Resolve can be left with picture and sound linked on one side only, which crashes Resolve when that timeline is opened (one such write into a real episode left 63 half-linked clips). Reading a saved project, which changes nothing, is allowed at any time (see "The saved project is read when Resolve is closed").
 
 - Who: anyone signed in who may open the cut list, on Resolve on a computer signed in to their own account.
-- Pending: cards-to-resolve-and-exports-Q1
 - When the help for the editing program is off: there is no hand-over to Resolve; the cut leaves Timeline Cards as an export.
 
 ### The Send tab shows a dry run and sends on one press
@@ -292,7 +270,6 @@ Nothing is ever written into Resolve's saved projects from outside Resolve. Fact
 Nothing is built in Resolve until the person has seen the dry run's cut, marker and length counts and pressed Send. What is sent is the editor's saved cut, never the assistant's candidate pool or a board's arrangement. A send that has started always finishes even if the page is closed; a dry run is abandoned when the page goes away. A send gives up after two minutes of waiting for Resolve, and the person then sees "Send to Resolve failed: <reason>".
 
 - Exact: yes
-- Pending: cards-to-resolve-and-exports-Q1
 
 ### The dry run counts everything and shows the plan cut by cut
 
@@ -384,14 +361,6 @@ So that a cut list can be compared with its timeline while Resolve is closed or 
 - Setting: Resolve project library. Does: says where the studio's Resolve projects are kept and how to sign in to read them, so a cut can be compared with its Resolve timeline when no Resolve is running; with none set, the comparison needs Resolve running. Default: none. Who: an admin. Applies to: the site. Search words: resolve library, project database, compare, timeline.
 - Setting: Resolve project for cut lists that name none. Does: the Resolve project a send and a comparison use when a cut list does not name its own. Default: none. Who: an admin. Applies to: the site. Search words: default project, resolve project, send, conform.
 
-### Sending, comparing and updating from a command line
-
-Someone at the server can send a cut list, compare a cut list with a timeline, and rewrite the cut list from a timeline, from a command line. Each is a dry run unless asked to write. Sending: prints the preview list and any problems as "NOTE: ...", then "would write N cut(s) and N marker(s) into <project> as '<name>' -- dry run, NOTHING was written"; refuses with "this file does not say which Resolve project it belongs to ..." and "no project named '<p>' ..."; on success "built '<name>' (<id>): N cut(s)...", "stamped <file>: timeline: <name> (rev N; the previous revision is under Cuts/.history)". Comparing prints one row per difference (file cut number, timeline number, kind, clip, detail), optionally only the first N with "... (N more)", then "N cut(s) in the file, N on <timeline>: <summary>"; refusals "this file names no timeline ... -- conform it first", "no project '<p>' in <db>", "no timeline '<t>' in <db> / <p> -- there is: <names>". Updating refuses another timeline unless forced ("this file was built from '<a>' and these cards are '<b>' -- pass --force to update it from a different timeline"), says "the file and '<t>' are already in step -- nothing to write", previews "DRY RUN -- <file> would become rev N: N cut(s), N section(s). Add --apply to write it." and on writing "written: <file> is rev N, from '<t>' (the previous revision is under Cuts/.history)".
-
-- Exact: yes
-- Who: an admin at the server.
-- Pending: cards-to-resolve-and-exports-Q5
-
 #### Lessons
 
 - Met: CRX-058, CRX-059, CRX-060, CRX-061, CRX-062, CRX-063, CRX-064, CRX-065, CRX-066, CRX-067, CRX-068, CRX-069, CRX-070, CRX-071, CRX-072, CRX-073.
@@ -402,115 +371,12 @@ Someone at the server can send a cut list, compare a cut list with a timeline, a
 
 - Exact: yes
 
-{{39-030}}
-
-### Edits on a timeline open in Resolve are made by Resolve's own keyboard commands
-
-Besides sending a cut list as a new timeline, a person can work on a timeline open in Resolve from the cards: every edit is performed by sending Resolve its own keyboard command. Resolve is brought to the front, the key is sent, and focus is handed back. The keys follow the editor's own Resolve keyboard preset (re-read whenever it changes; the first key bound to each command is used, and any command left unbound uses Resolve's default). If Resolve will not come to the front, nothing is sent. For these edits to work the editor must have Resolve on the Edit page with the timeline visible, Resolve must not be playing, and auto-select must be on for video track 1 and audio track 1 only; each edit that finds otherwise says which of these is wrong.
-
-Facts about Resolve behind this: its scripting cannot move a clip, insert in the middle of a timeline, or announce that anything changed; nothing in its scripting or its shortcuts can insert empty time; its scripted delete acts on the timeline it names but its append lands on the current one; its select-at-playhead and split act on every track whose auto-select is on; a scripted delete leaves the clip's linked sound behind. Resolve's default keys for the commands used: deselect all Ctrl+Shift+A; select clip at playhead Shift+V; ripple cut Ctrl+Shift+X; paste insert Ctrl+Shift+V; match frame F; insert F9; split clip Ctrl+\; ripple trim start to playhead Shift+[; ripple trim end to playhead Shift+]; undo Ctrl+Z; redo Ctrl+Shift+Z; focus the timeline panel Ctrl+4.
-
-Before every edit the open timeline is confirmed to be the one being edited and unchanged; otherwise the edit stops, anything it did is undone, and the person is told. An edit that would need empty time inserted is refused with that reason. A change the editor makes in Resolve shows on the cards within about one second, and moving one card takes seconds. An insert or move lands exactly where chosen, leaves every other cut's position, identity and grade unchanged, and is undone by one Ctrl+Z in Resolve or the page's undo. Deleting a card removes only that card's picture and sound; any change on another track is undone and reported.
-
-- Pending: cards-to-resolve-and-exports-Q2
-- Windows and macOS: sending Resolve its keys works on Windows only. On a Mac these edits are not offered, and the page says so before anything is tried: "editing Resolve's timeline from the cards needs Windows: on this Mac, send the cut as a new timeline".
-- When the help for the editing program is off: none of this exists.
-
-### Every live edit first checks that Resolve is where the page thinks it is
-
-Before any key is sent, Resolve's playhead is moved to the frame the edit needs and read back (one retry). Messages shown:
-
-- playhead will not park: "the playhead would not park at <tc> (it reads <tc> -- is Resolve playing, or off the Edit page?) -- nothing changed"
-- Resolve's current timeline is not the one shown: "the current timeline changed under the mirror -- nothing applied; try again"
-- the track 1 order differs from what the page saw: for a move "the timeline changed while you were dragging -- nothing applied, re-synced"; for the others "the timeline changed -- nothing deleted / split / removed / extended, re-synced"
-- The playhead position the click saw wins over a fresh reading, and after each edit the playhead is put back where it was (except after an insert, which leaves it just past the inserted cut).
-- Edits run one at a time; while one runs, the page is told Resolve is busy and other edits bounce.
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-### Moving cards reorders the cuts in Resolve with the fewest moves
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-{{39-006}}
-
-### Deleting ripple-deletes the cut in Resolve and keeps the piece on an offcuts timeline
-
-Nothing cut from a timeline is ever lost: every piece removed by a delete or a trim stays in the project, and leaves it only when its removal is undone.
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-{{39-007}}
-
-### A text cursor in a card splits the cut in Resolve at that word
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-{{39-008}}
-
-### Removing selected words takes that stretch out of the cut in Resolve
-
-The selection's start and end become frames. The cut is split at each end that falls inside it, the piece between is ripple-cut and banked to offcuts (as a delete is). A selection covering the whole cut becomes a plain delete. Messages: "the selection is empty -- nothing removed"; "the piece to remove is not where the splits left it"; partway: "<error> (N of M step(s) done -- undo in the header takes them back)"; success "removed X.X s from the cut by Resolve in X.Xs (N split(s) + ripple cut) -- N undo step(s) -- banked to offcuts".
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-### An edge of a cut can be pulled to the playhead in Resolve
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-{{39-010}}
-
-### A transcript passage can be inserted at Resolve's playhead
-
-After an insert the playhead sits at the inserted passage's end, so a run of inserts lands in order without splitting each other.
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-{{39-011}}
-
-### A cut can be laid above the main track without moving anything
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-{{39-012}}
-
-### Edits staged against a timeline wait as a draft until applied
-
-Edits can be staged against a timeline open in Resolve instead of performed at once: moves, trims, new cuts, removals, colours, fades and markers. They stay a draft until applied, saved on every change, while Resolve's own changes keep showing on the cards meanwhile. Applying replays them in Resolve one by one as live edits; each leaves the draft only once Resolve confirms it, and after a run the cards show exactly what Resolve holds. A move Resolve did not perform is reported on the page within seconds, and the card goes back to where Resolve has it. A draft that is applied leaves the draft on every device. Removed pieces go to the offcuts timeline, as a live delete's do. If the timeline already equals the draft nothing is done: "'<timeline>' already is the draft: nothing was written". A draft cut loose from its timeline is sent as a new timeline, which the editor then follows, and the original timeline is left untouched.
-
-The draft is kept per timeline and saved the moment each staged edit is made, so switching to another timeline, restarting, or someone else reading the timeline without the staged moves never loses any of it; it can be reopened as a file. Every staged edit and staged marker shows on the card it concerns, in any grouping, including on a card folded into a collapsed group, so the editor can always see it and take it back. A staged edit that cannot apply (for example a move whose cuts are missing from what was read of the timeline) is held, not dropped, and is marked "held" on the card it concerns, so every held count the page shows can be traced to its cards.
-
-Messages: "which timeline's draft? -- no tl was sent"; "nothing to apply -- the cut list is empty"; "a cut with no clip cannot be applied -- every cut needs its mp_uid"; a stale draft is refused and the current draft handed back; "nothing is staged -- there is no draft to apply".
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-### A staged draft is shared by every device and can be saved by name
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
-
-{{40-041}}
-
-### A draft made on a timeline can be built as a new timeline
-
-A draft made while working on a timeline open in Resolve can be sent as a new timeline exactly as a cut list is (see "A sent cut arrives as a new timeline that matches it frame for frame"). A note written on a gap travels with it. Each cut taken from the timeline being viewed keeps that clip's exact saved span. The page is never left waiting: any failure is reported. Success note: "built '<name>': N cut(s), X.X s -- N marker(s)<gap notes clause>"; after it the page moves to the new timeline.
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
+While a cut list is open, the computer with Resolve is used only to know its clips, to say what Resolve has open there (project and timeline, shown in the header, or nothing while Resolve is closed or starting), whether Resolve is reachable, its keyboard preset for the lane keys, and the timeline the cut list was last sent to (for the comparison, never shown as cards). Its playhead is used only by the Live tab. Only sending goes to that computer; anything else is refused: "a project file is edited in the file, not in Resolve -- the '<kind>' was not sent to the agent". Resolve's later changes reach the cut list only through the comparison and the Import tab.
 
 #### Lessons
 
-- Met: CRX-074, CRX-075, CRX-076, CRX-077, CRX-078.
-- Met for another part: CE1-067, CE3-028, CE2-100 (in "Edits staged against a timeline wait as a draft until applied").
+- Not yet met by any behaviour above: CRX-074, CRX-075, CRX-076, CRX-077, CRX-078 (the owner's answer of 2026-11-24: a timeline in Resolve is not edited from the cards, live or staged; a cut is edited as its cut list and handed over as a new timeline).
+- Not yet met by any behaviour above: CE1-067, CE3-028, CE2-100, passed here by the editor's pieces (the owner's answer of 2026-11-24: there are no edits staged for Resolve).
 
 ## Bringing Resolve's changes back into the cut
 
@@ -564,7 +430,6 @@ The whole cut is replaced from the timeline's clips and markers, as one revision
 Updating from a timeline other than the one the cut list names is refused, naming both, until the editor confirms.
 
 - Exact: yes
-- Pending: cards-to-resolve-and-exports-U3
 
 ### The saved project is read when Resolve is closed
 
@@ -577,12 +442,6 @@ What is read for a timeline: its name, its project's name, its frame rate and wh
 - A change to the timeline is noticed within a couple of seconds of Resolve saving it. A change that touches only tracks other than video track 1 is not noticed.
 - Pending: cards-to-resolve-and-exports-U2
 
-### The cards can follow the timeline open in Resolve
-
-While Resolve runs on the editor's computer, a person can open the timeline Resolve has open as cards, following it closely: within about a second of a change in Resolve the cards show the clips on video track 1 (each with its clip, its span in the source, its frame rate and its clip colour) and every timeline marker (frame, colour, name, note, length). Items on track 1 with no media pool clip behind them (titles, generators) show by name with no source span. The playhead follows within about a tenth of a second; when it is over a cut with a transcript, the spoken word under it is highlighted. Asking to jump to a frame moves Resolve's playhead there. Drop-frame is taken from Resolve's own timecode. Changing to another timeline in Resolve switches the cards to it. With a project open but no timeline, the state "no timeline is open" is shown and clips can still be found by name for a send. With no project open, the person is told "no project is open in Resolve". A momentary error is ignored and the last good state stays on screen; after three in a row the error is shown and Timeline Cards reconnects about 2 seconds later. When the page shows something other than Resolve's open timeline, it names Resolve's timeline and offers a one-click "follow Resolve".
-
-- Pending: cards-to-resolve-and-exports-Q2
-
 #### Lessons
 
 - Met: CRX-079, CRX-080, CRX-081, CRX-082.
@@ -591,15 +450,14 @@ While Resolve runs on the editor's computer, a person can open the timeline Reso
 
 ### Resolve on an editor's computer takes part in Timeline Cards through the app
 
-The app on an editor's computer lets that computer's Resolve take part in Timeline Cards: the editor's Timeline Cards session sees what Resolve is showing (project and timeline), and a send or an edit reaches that Resolve. The computer reaches Timeline Cards by itself, through the studio's dashboard, with the computer's own sign-in, so nothing has to be opened on the network to reach it and it can be anywhere the dashboard can be reached; nothing secret to Timeline Cards is kept on the editor's computer. A new sign-in takes effect without restarting.
+The app on an editor's computer lets that computer's Resolve take part in Timeline Cards: the editor's Timeline Cards session sees what Resolve is showing (project and timeline), and a send reaches that Resolve. The computer reaches Timeline Cards by itself, through the studio's dashboard, with the computer's own sign-in, so nothing has to be opened on the network to reach it and it can be anywhere the dashboard can be reached; nothing secret to Timeline Cards is kept on the editor's computer. A new sign-in takes effect without restarting.
 
 - A person drives only the computers signed in to their own account. Each of a person's computers appears separately, as "<person>/<computer>", from the computer's verified identity; a name the computer gave itself is marked unverified.
-- Each computer follows the episode open on that computer: an editor's Resolve follows the episode the editor last opened as a page. Other activity (playing media, looking things up) moves it to another episode only when the editor has not opened the previous episode's page for 2 minutes. Activity in Resolve that changes something (a timeline sent, the playhead moved, the result of an edit) also counts as the editor being in that episode. A request and its answer always reach the same episode.
+- Each computer follows the episode open on that computer: an editor's Resolve follows the episode the editor last opened as a page. Other activity (playing media, looking things up) moves it to another episode only when the editor has not opened the previous episode's page for 2 minutes. Activity in Resolve that changes something (a timeline sent, the playhead moved) also counts as the editor being in that episode. A request and its answer always reach the same episode.
 - When the editor is in no episode, what the computer sends is set aside, and the computer's status says so: "<person> is not in a Timeline Cards episode on this dashboard: open one" on the episode list "and this agent attaches to it". It waits up to 25 seconds for one to be opened before saying it again.
 - A problem inside Timeline Cards comes back to the computer as a sentence, never a crash. The app never connects to Resolve during Resolve's start-up window.
 
 - Setting: Resolve takes part in Timeline Cards on this computer. Does: lets Timeline Cards see and drive this computer's Resolve for the person signed in on it. Default: on, wherever Timeline Cards and the help for the editing program are on. Who: the editor for their own computer, or an admin. Applies to: a computer. Search words: resolve, drive resolve, timeline cards, send to resolve.
-- Pending: cards-to-resolve-and-exports-Q4
 - Windows and macOS: on both; on any other system the computer does not take part.
 - When Timeline Cards is off: the computer's Resolve takes no part and the setting is not shown.
 
@@ -609,14 +467,12 @@ A computer does not start taking part when something stands in the way, and says
 
 1. switched off for this computer;
 2. not signed in: "Sign in from the tray and this computer will pick the page up on its own within a minute";
-3. the studio has stopped work: "syncing is stopped by your admin, so this computer is not taking work of any kind" (a stop prevents starting only; an edit already running in Resolve finishes);
+3. the studio has stopped work: "syncing is stopped by your admin, so this computer is not taking work of any kind" (a stop prevents starting only; a send already running in Resolve finishes);
 4. another program is already driving Resolve on this computer for Timeline Cards: "a Timeline Cards process is already driving Resolve here: <name> (pid <n>): <command line, shortened>. Close it and this computer picks the page up within a minute" (the other program is never closed by the product);
 5. the computer's programs cannot be listed: treated as one running, and the person is told that another program may be driving Resolve and the computer's programs could not be listed, so it is not starting;
 6. the app on this computer must be updated before its Resolve can take part, saying so.
 
 Once the obstacle is gone (signing in, closing the other program, a stop ending) it starts on its own within about a minute. After 5 failed starts in a row it stops trying until the app is restarted.
-
-- Pending: cards-to-resolve-and-exports-Q4
 
 ### Each computer shows whether its Resolve is taking part and if not why
 
@@ -630,8 +486,6 @@ Each computer reports one word and a sentence (up to 255 characters), seen on th
 
 Green needs a successful contact in the last 50 seconds. Also shown: when the dashboard last answered, the current timeline's name, and since when it has been running. Anything shown stopped is restarted within about a minute.
 
-- Pending: cards-to-resolve-and-exports-Q4
-
 ### The Live tab follows Resolve's playhead and moves Resolve to the selected cut
 
 - Exact: yes
@@ -641,29 +495,15 @@ Green needs a successful contact in the last 50 seconds. Also shown: when the da
 
 ### The page says which computer's Resolve it is using
 
-A computer running Resolve counts as present if heard from within the last 40 seconds, and never gives up on network trouble. What the page shows: "no Resolve agent has connected yet" or "Resolve agent away since HH:MM:SS"; "<machine>: Resolve open, no timeline (conform is available)"; "<machine>: Resolve is not reachable (<error>)"; and, before any computer has ever connected, an amber note "no Resolve agent yet -- pick a cut list or canvas; the agent is only needed to conform or edit live". The page also shows when that computer last looked through its media pool. The lane uses the keys of that computer's Resolve keyboard preset, remembered even after the server restarts.
+A computer running Resolve counts as present if heard from within the last 40 seconds, and never gives up on network trouble. What the page shows: "no Resolve agent has connected yet" or "Resolve agent away since HH:MM:SS"; "<machine>: Resolve open, no timeline (conform is available)"; "<machine>: Resolve is not reachable (<error>)"; and, before any computer has ever connected, an amber note "no Resolve agent yet -- pick a cut list or canvas; the agent is only needed to conform". The page also shows when that computer last looked through its media pool. The lane uses the keys of that computer's Resolve keyboard preset, remembered even after the server restarts.
 
 - Exact: yes
 
 ### Work for Resolve is done one piece at a time and the editor is told when it could not be
 
-Resolve on a computer does one piece of work at a time. A send or an edit is refused at once when it cannot be done: no computer present ("<away text> -- the edit was not sent"); Resolve gone, or no timeline open for an edit ("<stale or resolve text> -- the edit was not sent"); for an edit only, Resolve showing another timeline than the page ("<machine> has <timeline> open, not <picked> -- open it in Resolve to edit"); "the agent already has a request in flight -- wait a moment". Work the computer has not started within 2 minutes is dropped ("<away text> -- the edit was dropped"). Work the computer took and never answered is reported ("the Resolve agent went away with that <kind> -- it was never confirmed"); work that never reached it is offered again, never done twice; an answer for work no longer open gets "that request is no longer open". If Resolve never starts on it: "the Resolve engine never picked that edit up (no timeline open?)". Resolve is given up to 8 minutes to finish one piece.
+Resolve on a computer does one piece of work at a time. A send is refused at once when it cannot be done: no computer present ("<away text> -- the cut was not sent"); Resolve gone ("<stale or resolve text> -- the cut was not sent"); "the agent already has a request in flight -- wait a moment". Work the computer has not started within 2 minutes is dropped ("<away text> -- the send was dropped"). Work the computer took and never answered is reported ("the Resolve agent went away with that <kind> -- it was never confirmed"); work that never reached it is offered again, never done twice; an answer for work no longer open gets "that request is no longer open". If Resolve never starts on it: "Resolve never started on that send". Resolve is given up to 8 minutes to finish one piece.
 
 - Exact: yes
-
-### When Resolve's computer goes away the cards show its timeline as last seen
-
-When Resolve on that computer stops answering, the last cards stay on screen marked stale and edits are refused. When the computer is away, and the product knows where Resolve's project library is, the cards come from the project as last saved, refreshed within about 2 seconds of a save: "from the project library, saved HH:MM:SS (<machine has <timeline> open | machine: <error> | away text>)". With no saved project to read, they stay as last seen: "<machine>: <error> since HH:MM:SS -- showing the timeline as last seen at HH:MM". Cards from the saved project show the playhead only if the computer is on the same timeline, and offer no undo. While the computer is present, usable and on the picked timeline it wins, because it also sees unsaved changes. Transcripts and search for clips that computer told the product about keep working while it sleeps ("transcript ready: <clip>").
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q3
-
-### The editor can pick a saved timeline to view or go back to following Resolve
-
-In the options drawer the editor sees the projects in the studio's Resolve project library and the chosen project's timelines, and can pick one to view, or choose to follow whatever Resolve has open. The pick is remembered and shown at once. With no computer ever connected, the default is the current timeline of this episode's Resolve project (the project named exactly like the episode folder, else one whose name starts with it), looked for again at most every 30 seconds. While a picked timeline differs from the one Resolve has open, what Resolve shows is not put on screen. Messages: "pick a library and a timeline"; "no timeline <id> in <db>"; when the product does not know where the project library is, the person is told so.
-
-- Exact: yes
-- Pending: cards-to-resolve-and-exports-Q2
 
 #### Lessons
 
@@ -714,9 +554,18 @@ Another editing program is named on a tile only once importing that format into 
 The cut exports as plain text and as Markdown, in timeline order, each card in the language it was spoken only, without translations: a Mandarin card exports its Mandarin, never the English.
 
 - Exact: yes
-- Pending: cards-to-resolve-and-exports-Q9
 
-{{32-013}}
+
+  - One file named after the cut list's timeline name, else its title, else its project, else the cut list's file name, else "Timeline Cards". Characters Windows refuses (`\ / : * ? " < > |` and control characters) become `_`; trailing dots and spaces are removed; at most 150 characters (counted in UTF-16 units, never splitting a pair).
+  - Markdown starts with `# <name>`.
+  - A section or plain heading becomes `## <title>` (Markdown) or the title underlined with `=` (text). The heading's kind decides this, never its colour.
+  - A `◆` note heading or a note row becomes `> ◆ <text>` (Markdown) / `-- <text> --` (text); an "unmatched" note row is prefixed "unmatched: ".
+  - Each cut: a header line with the speaker in bold, then a hyphen with a space on each side, then the record timecode, with a hard line break (Markdown), or `Speaker <timecode>` (text). The timecode is where the cut sits on the timeline a send would build.
+  - Then the cut's words as spoken: when a cut has lines in a non-Latin script, those are kept and the Latin gloss lines beside them dropped; an all-Latin cut drops only plainly English lines beside non-English ones. Lines that would read as Markdown structure (`# `, `> `, `- `, `1. `, `===`) are escaped.
+  - Then the cut's note: `> 📝 <note>` or `   [note: <note>]`.
+  - A gap's note comes before the cut after it: `> 📝 gap: <note>` or `   [gap note: <note>]`, taken from the gap rows of the cut list.
+  - A cut with no words is left out and counted.
+  - The loss list always says "the words as spoken only: translations are not in the script", plus "<n> cut(s) with no words are left out", plus a sentence when gap notes could not be read (the download still happens).
 
 ### Imported timeline files are recognised and read by these rules
 
@@ -727,9 +576,23 @@ The cut exports as plain text and as Markdown, in timeline order, each card in t
 ### Exports are frame-exact and the same every time
 
 - Exact: yes
-- Pending: cards-to-resolve-and-exports-Q8
 
-{{33-082}}
+Only the cut is exported; the shelf and saved sequences are not.
+  - Frame rate: the rate asked for, else the cut list's own. A rate within 0.01 of 23.976, 29.97, 47.952 or 59.94 is treated as the exact NTSC fraction (24000/1001 and so on); any other rate is read as the nearest fraction with a denominator of at most 1001.
+  - Seconds become frames once, exactly, rounding to the nearest frame with ties to even (an option rounds ties up, matching the hand-over to Resolve frame for frame), so all three formats agree on every frame.
+  - Drop-frame timecode only at 29.97 and 59.94; a cut list marked drop-frame at another rate is written non-drop, with a note.
+  - Timeline start: the cut list's start timecode; none or unreadable means 01:00:00:00, with a note.
+  - Source side: each cut's in and out in frames at the clip's own rate (unreadable rate: the timeline's, with a note), counted from the clip's start timecode (unreadable: from 00:00:00:00, with a note). Source drop-frame is used when the rate allows and the timeline is drop-frame or the clip's start timecode uses ";".
+  - A cut shorter than one frame is exported as one frame, with a note.
+  - Record side: cuts laid end to end after the black in front of them, so nothing drifts. A clip at another rate than the timeline has its record duration rescaled (it may differ by a frame), with a note per clip.
+  - Gaps: every gap is exported as black at its own length, including gaps after the last cut; consecutive gaps are rounded as one run, so totals match the hand-over.
+  - Fades in timeline frames, never longer than the cut.
+  - Markers: section headings (Blue by default), note headings (Green by default; a heading's own colour wins) and note rows (Cream) become markers on whatever follows them.
+  - Edges that fall between frames (more than 0.001 frame off) are reported as "falls between frames: rounded to the nearest frame (<rule>)".
+  - Every export with a cut ends with the note "automatic levelling is the editor's playback only: exported audio plays at source level plus each cut's manual gain where the format carries it".
+  - Each export lists "not carried" sentences naming what the format lost; nothing is lost silently. Cuts are named "cut N (<person or clip>)".
+  - File names come from the timeline name (default the cut list's title, else its project name, else "Timeline Cards"), with characters Windows forbids replaced by "_" and trailing dots and spaces removed ("timeline" if empty). The same cut list always gives the same bytes.
+  - Media paths, when known, are written as file addresses (Windows drive paths, network share paths and Mac paths converted).
 
 ### The OpenTimelineIO export
 
@@ -748,12 +611,6 @@ The cut exports as plain text and as Markdown, in timeline order, each card in t
 - Exact: yes
 
 {{33-085}}
-
-### The cut can be exported as one audio file
-
-An audio file of the cut can be downloaded from the Export tab: the cut as it plays in the editor, cuts in order, gaps as silence, with each cut's fades and gain.
-
-- Pending: cards-to-resolve-and-exports-Q7
 
 #### Lessons
 
@@ -780,11 +637,11 @@ Before a render is queued, every clip inside every compound clip on the timeline
 
 ### A timeline's real end is found before it is rendered
 
-A timeline can hold the cut and, minutes later, clips parked out of the way. Its real end is taken at the first long stretch of empty timeline, and renders stop there; the person sees where that end is and can move it.
+A timeline can hold the cut and, minutes later, clips parked out of the way. Its real end is taken at the first stretch of empty timeline lasting one minute or more, and renders stop there; the person sees where that end is each time and can move it.
 
-- On its own: the real end, at the first long stretch of empty timeline.
-- By hand: the person can set the end for that render.
-- Pending: cards-to-resolve-and-exports-U5
+- On its own: the real end, at the first stretch of empty timeline of at least the set length.
+- By hand: each time, the person sees the end found and can set another for that render.
+- Setting: Empty stretch that ends a timeline. Does: how long a stretch of empty timeline must be for the timeline to count as ending there when it is rendered. Default: 1 minute. Who: anyone signed in. Applies to: the site. Search words: timeline end, parked clips, render length, empty gap.
 
 ### Every render is checked before it is used
 
@@ -800,17 +657,9 @@ Every render is checked for a picture stream, for sound and for the expected len
 
 A compound clip the product creates in Resolve is named after the clip it wraps and takes the clip colour of the related interviewee's multicam.
 
-### Name titles sit clear of the speaker
+### Name titles a person adds in Resolve are left as they are
 
-A name title's visible edge sits 50 px in from the side and from the bottom of the picture, on the side away from where the speaker appears.
-
-- Pending: cards-to-resolve-and-exports-U4
-
-### Name titles hand over on a direct cut between two speakers
-
-On a direct cut from one interviewee to another, the first speaker's name title plays its exit and the second speaker's title plays its entrance.
-
-- Pending: cards-to-resolve-and-exports-U4
+The product never places name titles. Name titles are the editor's own, added in Resolve: placed with the visible edge 50 px in from the side and from the bottom of the picture, on the side away from where the speaker appears, and, on a direct cut from one interviewee to another, with the first speaker's title playing its exit and the second speaker's title its entrance. The product leaves every such title where it is: nothing it does in Resolve moves, shortens or removes a title a person added, and no later hand-over or comparison loses one.
 
 #### Lessons
 
@@ -828,13 +677,12 @@ How lines are made:
 - No line break falls inside a run of Latin letters, digits or `% ' . -`, and no line has a space at either end.
 - Pause markers are left out. A line too short to have a length gets one millisecond.
 - Times carry the clip's start timecode, as Resolve's own subtitle exports do.
-- Captions hold through short pauses: a gap between cues at or under the set limit is bridged; a longer gap stays empty.
+- Captions hold through short pauses: a pause between two cues shorter than the set limit is bridged, so the first caption holds until the next; a longer pause stays empty.
 - Before delivery: every stretch of speech has a subtitle, no cue spans a break in speech, no cues overlap, and none falls past the cut's end; each failure is named with its time.
 - A fact about Resolve: subtitle files it exports carry invisible line-separator characters. Every subtitle file the product writes or passes on is free of them.
 
 - Setting: Subtitle line length. Does: the longest a subtitle line may be, in characters, for English and for Chinese, Japanese, Korean and Cantonese. Default: 95 for English, 42 for Chinese. Who: anyone signed in, for a cut they work on. Applies to: a project. Search words: subtitle length, line length, captions, srt.
-- Setting: Bridge short pauses between captions. Does: a gap between two captions at or under this length is closed so the caption holds; 0 turns bridging off. Default: not yet decided. Who: anyone signed in, for a cut they work on. Applies to: a project. Search words: caption gap, bridge pauses, subtitle hold, srt.
-- Pending: cards-to-resolve-and-exports-U6
+- Setting: Bridge short pauses between captions. Does: a pause between two captions shorter than this is closed so the caption holds; 0 turns bridging off. Default: 1 second. Who: anyone signed in, for a cut they work on. Applies to: a project. Search words: caption gap, bridge pauses, subtitle hold, srt.
 
 ### Subtitles already on a Resolve timeline are used rather than made again
 

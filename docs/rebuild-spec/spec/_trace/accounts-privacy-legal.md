@@ -8,49 +8,49 @@
 - 13-063 | An admin manages the studio's people from one list
 - 13-064 | An admin manages the studio's people from one list ; An admin adds a person in one step
 - 14-042 | A person chooses the name others see
-- 17-023 | The studio chooses how people sign in ; An admin's emergency password door under single sign-on
-- 17-024 | The studio chooses how people sign in ; The sign-in page
+- 17-023 | Every person has one account, and a studio may put its single sign-on in front ; An admin's emergency password door under single sign-on
+- 17-024 | Every person has one account, and a studio may put its single sign-on in front ; The sign-in page
 - 17-036 | Signing in through the studio's single sign-on
 - 17-037 | Signing in through the studio's single sign-on ; Only the people the admin has let in can open the product
 - 17-039 | An admin's emergency password door under single sign-on
-- 17-040 | Signing in through the studio's single sign-on ; The sign-in service's admin mark
-- 17-041 | The studio chooses how people sign in ; An admin adds a person in one step ; A sign-in name has one shape, and a name accepted anywhere works everywhere
+- 17-040 | Signing in through the studio's single sign-on
+- 17-041 | Every person has one account, and a studio may put its single sign-on in front ; An admin adds a person in one step ; A sign-in name has one shape, and a name accepted anywhere works everywhere
 - 20-010 | Only the people the admin has let in can open the product
 - 20-014 | left out: an arrangement (the promise is under A computer becomes a person's when they sign in on it)
 - 21-011 | An admin adds a person in one step
 - 21-012 | A studio can keep editors to file transfers only on the NAS
 - 21c-017 | The admins are named at install, and are never the NAS's own administrator
 - 09-072 | A computer becomes a person's when they sign in on it
-- 11-004 | A computer becomes a person's when they sign in on it ; A computer's sign-in reaches only that computer's own work, as its own person ; A site may let computers report without a sign-in of their own
+- 11-004 | A computer becomes a person's when they sign in on it ; A computer's sign-in reaches only that computer's own work, as its own person
 - 11-052 | left out: an arrangement (the promise is under A computer becomes a person's when they sign in on it)
 - 11-053 | left out: an arrangement (the promise is under A computer becomes a person's when they sign in on it)
-- 11-055 | An admin ends every computer sign-in a person holds, at once
-- 11-056 | An admin sees every computer sign-in and can withdraw one ; An admin issues a computer sign-in by hand
+- 11-055 | An admin ends every sign-in a person holds, at once
+- 11-056 | An admin sees every computer sign-in and can withdraw one
 - 11-059 | left out: for the builders only
 - 12-012 | left out: an arrangement (the promise is under A computer becomes a person's when they sign in on it)
 - 12-025 | A refused computer is told why, and the admin sees it
 - 13-065 | left out: an arrangement (the promise is under A computer becomes a person's when they sign in on it)
 - 13-070 | left out: an arrangement (the promise is under A computer becomes a person's when they sign in on it)
-- 13-073 | An admin sees every computer sign-in and can withdraw one ; An admin issues a computer sign-in by hand ; A site may let computers report without a sign-in of their own
+- 13-073 | An admin sees every computer sign-in and can withdraw one
 - 14-047 | left out: an arrangement (the promise is under A computer becomes a person's when they sign in on it)
 - 15-043 | Changing the server's own secrets signs nobody out
 - 16-059 | A computer's sign-in reaches only that computer's own work, as its own person
 - 17-019 | A computer's sign-in reaches only that computer's own work, as its own person
-- 17-032 | A computer becomes a person's when they sign in on it ; An admin ends every computer sign-in a person holds, at once ; Changing the server's own secrets signs nobody out
-- 17-033 | A site may let computers report without a sign-in of their own
+- 17-032 | A computer becomes a person's when they sign in on it ; An admin ends every sign-in a person holds, at once ; Changing the server's own secrets signs nobody out
+- 17-033 | left out: cut by the owner (2026-11-24, accounts-privacy-legal-Q4)
 - 17-043 | left out: an arrangement (the promise is under A computer's sign-in reaches only that computer's own work, as its own person)
-- 20-013 | An admin ends every computer sign-in a person holds, at once
-- 20-015 | An admin sees every computer sign-in and can withdraw one ; An admin issues a computer sign-in by hand
-- 20-016 | An admin sees every computer sign-in and can withdraw one ; A site may let computers report without a sign-in of their own
+- 20-013 | An admin ends every sign-in a person holds, at once
+- 20-015 | An admin sees every computer sign-in and can withdraw one
+- 20-016 | An admin sees every computer sign-in and can withdraw one
 - 20-040 | A refused computer is told why, and the admin sees it ; Changing the server's own secrets signs nobody out
-- 21c-019 | A site may let computers report without a sign-in of their own
-- 22-014 | An admin issues a computer sign-in by hand
+- 21c-019 | left out: cut by the owner (2026-11-24, accounts-privacy-legal-Q4)
+- 22-014 | left out: cut by the owner (2026-11-24, accounts-privacy-legal-Q5)
 - 22-027 | left out: an arrangement (the promise is under A computer becomes a person's when they sign in on it)
 - 11-003 | Stopping a person takes effect everywhere at once ; A refused computer is told why, and the admin sees it
-- 11-048 | An admin disables an account and turns it back on ; An admin can never stop their own account or the last admin
+- 11-048 | An admin can never stop their own account or the last admin
 - 11-049 | An admin suspends a person and resumes them with nothing lost
 - 11-050 | An admin removes a person from the whole product ; An admin can never stop their own account or the last admin
-- 13-067 | An admin disables an account and turns it back on
+- 13-067 | left out: cut by the owner (2026-11-24, accounts-privacy-legal-Q6)
 - 13-068 | An admin suspends a person and resumes them with nothing lost
 - 13-069 | An admin removes a person from the whole product
 - 14-054 | An admin removes a person from the whole product ; A removed person becomes the same stand-in name everywhere
@@ -86,30 +86,30 @@
 - 17-029 | A browser sign-in lasts 100 days, and warns two weeks before it ends
 - 17-030 | A person sees every browser signed in as them and signs out the others ; An admin sees every browser signed in across the studio and signs a person out ; Signing out, and signing out everywhere
 - 17-035 | The one rule for a new password
-- 17-044 | An account can be marked to change its password at its next sign-in
-- 20-018 | An account can be marked to change its password at its next sign-in ; The studio chooses how people sign in
-- 34-003 | Timeline Cards run by itself asks for its own password
+- 17-044 | left out: cut by the owner (2026-11-24, accounts-privacy-legal-Q8)
+- 20-018 | Every person has one account, and a studio may put its single sign-on in front
+- 34-003 | left out: cut by the owner (2026-11-24, accounts-privacy-legal-Q11)
 - 11-001 | Everything needs a sign-in except a short list of open doors ; Admin-only actions refuse everyone else, and a change must come from the product's own pages
 - 11-002 | An editor sees their own computers in full and everyone else only as counts
 - 11-018 | An editor sees their own computers in full and everyone else only as counts
 - 11-019 | Each project is reachable only by its members
 - 12-055 | A person or an admin asks one of the person's computers to change its settings
-- 13-055 | Each project is reachable only by its members ; A studio can let every editor open every project
+- 13-055 | Each project is reachable only by its members
 - 13-117 | Every person has one page about themselves
 - 13-118 | Every person has one page about themselves
 - 14-040 | Every person has one page about themselves
 - 16-044 | Each project is reachable only by its members
 - 17-017 | Everything needs a sign-in except a short list of open doors
 - 17-034 | Who is an admin, and what an admin sees ; The admins are named at install, and are never the NAS's own administrator
-- 17-038 | The sign-in service's admin mark ; Who is an admin, and what an admin sees
+- 17-038 | Who is an admin, and what an admin sees
 - 19-025 | Every switchable part sits behind the same sign-in and knows who is asking
 - 19-027 | A sign-in name has one shape, and a name accepted anywhere works everywhere
 - 21-014 | Each project is reachable only by its members
 - 23-001 | Every switchable part sits behind the same sign-in and knows who is asking ; Everything needs a sign-in except a short list of open doors ; A visitor who is not signed in is sent to sign in and brought back
 - 34-004 | Timeline Cards and the Footage Sorter are reached only through the dashboard
 - 34-005 | Anything listening on an editor's computer answers only the product's own pages
-- 38-001 | Timeline Cards and the Footage Sorter are reached only through the dashboard ; The Footage Sorter on a single computer, without a sign-in
-- 42-048 | Timeline Cards run by itself asks for its own password ; Timeline Cards and the Footage Sorter are reached only through the dashboard
+- 38-001 | Timeline Cards and the Footage Sorter are reached only through the dashboard
+- 42-048 | Timeline Cards and the Footage Sorter are reached only through the dashboard
 - 01-016 | Diagnostics hide what a computer withholds
 - 01-082 | Four kinds of reporting can be switched off, by a computer or for the whole studio
 - 04-062 | An editor chooses what their computer reports
@@ -155,7 +155,7 @@
 - 27-025 | Every program carries the licence texts it owes, and anyone can read them ; Nothing under a disallowed licence reaches a customer
 - 10-037 | Credentials on an editor's computer are private to that person
 - 12-026 | Changing the server's own secrets signs nobody out
-- 13-061 | A new password or computer sign-in is shown once, to copy ; An admin issues a computer sign-in by hand
+- 13-061 | A new password is shown once, to copy
 - 15-038 | A credential never crosses the internet unencrypted
 - 27-017 | left out: for the builders only
 
@@ -170,6 +170,7 @@
 - Text assumes: A (the three are written as a site setting), marked pending.
 - Items: 17-023, 17-024, 17-036, 17-039, 17-041, 13-063, 13-064, 13-067, 20-018
 - Covers: 17-Q1, 13-Q9
+- Answered by the owner 2026-11-24: B: one account per person kept by the product, kept in step with the person's NAS login, with single sign-on optionally in front
 
 ### accounts-privacy-legal-Q2: Under single sign-on, should the admins keep an emergency password door for when the sign-in service is down?
 - Kind: differs
@@ -180,6 +181,7 @@
 - Text assumes: A, as the lesson requires; the door is written in its own passage, marked pending, to be deleted if he chooses A.
 - Items: 13-017, 17-023, 17-036, 17-039
 - Covers: none
+- Answered by the owner 2026-11-24: B: the emergency password door stays for the admins named at install
 
 ### accounts-privacy-legal-Q3: Should the organisation's sign-in service be able to make someone an admin, or should its "admin" mark go?
 - Kind: other
@@ -190,6 +192,7 @@
 - Text assumes: C, written in its own passage marked pending, to be deleted under A.
 - Items: 17-038, 17-040
 - Covers: 17-Q2
+- Answered by the owner 2026-11-24: A: the sign-in service's admin mark goes
 
 ### accounts-privacy-legal-Q4: Should a computer ever be allowed to report with one sign-in shared by the whole studio, or must every computer have its own?
 - Kind: dormant
@@ -200,6 +203,7 @@
 - Text assumes: B, written as its own passage marked pending, to be deleted under A.
 - Items: 09-072, 11-004, 13-073, 17-033, 20-016, 21c-019
 - Covers: 09-Q14, 11-Q2, 13-Q7, 17-Q5, 21c-Q6
+- Answered by the owner 2026-11-24: A: every computer has only its own sign-in; the shared one is gone
 
 ### accounts-privacy-legal-Q5: Should an admin also be able to make a computer's sign-in by hand for the editor to paste in, or is the editor signing in on the computer the only way?
 - Kind: several ways in
@@ -210,6 +214,7 @@
 - Text assumes: B, written as its own passage marked pending, to be deleted under A.
 - Items: 11-056, 13-073, 20-015, 22-014, 13-061
 - Covers: 22-Q8
+- Answered by the owner 2026-11-24: A: signing in on the computer is the only way; no hand-made computer sign-ins
 
 ### accounts-privacy-legal-Q6: Which ways of stopping a person should an admin have?
 - Kind: either-or
@@ -220,6 +225,7 @@
 - Text assumes: suspend, ending one sign-in and remove are written as decided; disabling, and ending all of a person's computer sign-ins as a separate act, are written marked pending.
 - Items: 11-048, 11-049, 11-050, 11-054, 11-055, 11-056, 13-067, 20-011, 20-012, 20-013, 20-018
 - Covers: 11-Q1, 20-Q3
+- Answered by the owner 2026-11-24: B: suspend, a lost device (end a person's sign-ins), and remove; disable folded into suspend
 
 ### accounts-privacy-legal-Q7: Should an admin be able to suspend any person, even one whose computer has never synced anything?
 - Kind: other
@@ -230,6 +236,7 @@
 - Text assumes: A.
 - Items: 20-012, 11-049
 - Covers: 20-Q7
+- Answered by the owner 2026-11-24: A: any of the studio's people can be suspended
 
 ### accounts-privacy-legal-Q8: Should an account marked "must change password" make the person change it at their next sign-in, or should the mark go?
 - Kind: unreachable
@@ -240,6 +247,7 @@
 - Text assumes: A, written as its own passage marked pending, to be deleted under B.
 - Items: 17-044, 20-018
 - Covers: 17-Q6, 20-Q9
+- Answered by the owner 2026-11-24: B: the mark goes
 
 ### accounts-privacy-legal-Q9: Signing browsers out is offered from the header (sign out, sign out everywhere), from a person's own list of browsers, and from an admin's list of every browser in the studio. Keep all three?
 - Kind: several ways in
@@ -250,6 +258,7 @@
 - Text assumes: A, each written with its ways in, marked pending.
 - Items: 13-019, 13-072, 13-123, 14-046, 17-030, 11-054
 - Covers: 13-Q5
+- Answered by the owner 2026-11-24: B: the header's sign out, the person's own list (with sign out everywhere), and the admin's list
 
 ### accounts-privacy-legal-Q10: Can a site still choose to make the NAS's own administrator account the dashboard's admin?
 - Kind: other
@@ -260,6 +269,7 @@
 - Text assumes: A; the opt-out is not written.
 - Items: 21c-017
 - Covers: 21c-Q5
+- Answered by the owner 2026-11-24: A: the refusal always holds
 
 ### accounts-privacy-legal-Q11: Should Timeline Cards exist only inside the dashboard, behind its sign-in, or also run on its own with its own password?
 - Kind: built twice
@@ -270,6 +280,7 @@
 - Text assumes: the dashboard is the only door (written as decided); the stand-alone password door is written as its own passage marked pending, to be deleted under A. The form with no sign-in is not written (the ruling forbids it).
 - Items: 34-003, 34-004, 42-048
 - Covers: 34-Q3, 42-Q2
+- Answered by the owner 2026-11-24: A: only inside the dashboard
 
 ### accounts-privacy-legal-Q12: Should a studio still be able to let every editor open every project, instead of only the projects they are members of?
 - Kind: other
@@ -280,6 +291,7 @@
 - Text assumes: B, written as its own passage marked pending, to be deleted under A.
 - Items: 13-055, 16-044, 21-014
 - Covers: none
+- Answered by the owner 2026-11-24: A: per-project access only
 
 ### accounts-privacy-legal-Q13: Does the Footage Sorter still need to run as a program on one Windows computer with no sign-in, or only inside the dashboard?
 - Kind: built twice
@@ -290,6 +302,7 @@
 - Text assumes: A for the rule; the single-computer form is written as its own passage marked pending, to be deleted under A.
 - Items: 38-001
 - Covers: none
+- Answered by the owner 2026-11-24: A: only inside the dashboard
 
 ### accounts-privacy-legal-Q14: Should every setting on an editor's computer take effect at once, without restarting the app?
 - Kind: other
@@ -300,6 +313,7 @@
 - Text assumes: B (the account page shows settings waiting for a restart), marked pending.
 - Items: 12-055, 04-062
 - Covers: 04-Q6
+- Answered by the owner 2026-11-24: A: every setting takes effect at once
 
 ### accounts-privacy-legal-Q15: A person downloads their own data from their account page, and an admin downloads anyone's from the people list. Keep both?
 - Kind: several ways in
@@ -310,6 +324,7 @@
 - Text assumes: A.
 - Items: 13-062, 13-118, 14-051
 - Covers: none
+- Answered by the owner 2026-11-24: A: keep both
 
 ### accounts-privacy-legal-Q16: The licence can be opened by itself, from the app's menu and from the app's settings window. Keep all three?
 - Kind: several ways in
@@ -320,6 +335,7 @@
 - Text assumes: A.
 - Items: 04-090, 01-012, 04-063
 - Covers: none
+- Answered by the owner 2026-11-24: A: keep all three
 
 ### accounts-privacy-legal-Q17: Several things the server refuses or skips are written only to its log, where nobody sees them. Should every one of them be shown to an admin?
 - Kind: other
@@ -330,6 +346,7 @@
 - Text assumes: this piece writes no log-only behaviour; per-project access is written as working on every kind of NAS.
 - Items: 16-044
 - Covers: 16-Q1
+- Answered by the owner 2026-11-24: A: each becomes a problem shown to admins with its fix
 
 ### accounts-privacy-legal-Q18: Two things in these items are tools for the people building and releasing the product. Can they go from the specification?
 - Kind: dev only
@@ -340,6 +357,7 @@
 - Text assumes: left out.
 - Items: 11-059, 27-017
 - Covers: none
+- Answered by the owner 2026-11-24: A: both left out
 
 ## Readers' questions and unsettled points
 
@@ -386,20 +404,15 @@
 - U-23-2 | settled: the sign-in page and the return after signing in are written
 - U-23-4 | behind the glass
 - U-26-4 | settled: the person's own page and the people list
-- U-38-1 | open: accounts-privacy-legal-U2
-- U-42-5 | open: accounts-privacy-legal-U3
+- U-38-1 | settled: one Footage Sorter, inside the dashboard (owner 2026-11-24, Q13)
+- U-42-5 | settled: one Timeline Cards, inside the dashboard (owner 2026-11-24, Q11)
 
 ## Still unsettled
-
-- accounts-privacy-legal-U1 | how long records of conversations with the assistant are kept by default | a site setting whose default is left open; nothing is guessed | 20-113
-- accounts-privacy-legal-U2 | whether anyone still uses the Footage Sorter as a program on one Windows computer | the dashboard form is the rule; the single-computer form is written pending (Q13) | 38-001
-- accounts-privacy-legal-U3 | whether Timeline Cards served on its own on the NAS is still installed and used | only the dashboard is a door; the stand-alone form is written pending (Q11) | 42-048, 34-003
 
 ## Conflicts between an item and a lesson
 
 - ACC-001 | 17-037, 20-010 | the items let anyone the sign-in service vouches for in while the studio knows no editors, or cannot read who it knows, and make a name known when a computer reports under it; the lesson has the admin decide every account. Wrote: never assumed, and a report never adds a name.
 - ACC-002 | 17-036, 17-037 | the items match a single sign-on person by the name the service gives; the lesson requires an identifier the person cannot change. Wrote the identifier.
-- ACC-003 | 13-017, 17-023, 17-039 | the items keep a password door for admins under single sign-on; the lesson says every way in refuses a password. Wrote the lesson; the door is pending (Q2).
 - ACC-004 | 11-020, 11-046, 17-041, 21-011, 19-027 | the items give names of 1 to 32, 1 to 31 and 1 to 64 characters, and some parts silently refuse names others accept; the lesson wants one shape that works everywhere. Wrote 1 to 31 (what the NAS accepts) and one shape.
 - ACC-007 | 11-052, 11-053, 12-012, 13-065, 13-070, 20-014, 22-014, 22-027 | the items make an admin approve each computer and each computer's key after the person exists; the ruling grants access with one button and no other step. Wrote one step, and signing in on the computer as all it takes.
 - ACC-018 | 11-049, 13-068, 17-026 | the items say suspending signs nobody out of the browser; the lesson says suspending ends sessions. Wrote the lesson.
@@ -410,6 +423,7 @@
 - ACC-009 | 17-029 | the item lets the installer change the 100 days; the ruling says 100 days. Wrote 100 days with no setting.
 - ACC-031 | 11-021, 17-027 | the items say "about an hour" for 45 minutes or more; the lesson states the wait in whole minutes. Wrote whole minutes up to 60.
 - ACC-055 | 04-090, 22-046 | the items stop syncing until a new licence version is accepted; the lesson asks at once without stopping sync. Wrote the lesson; a first acceptance still holds syncing back.
+- ACC-003 | 13-017, 17-023, 17-039 | the lesson refuses every password under single sign-on; the owner's answer of 2026-11-24 (Q2) keeps the password door for the admins named at install. Wrote his answer; ACC-003 is listed as not yet met.
 - ACC-060 | 21b-004 | the item lets the installer's computer send a copyleft tool to the NAS; the ruling has it fetched by the customer's own machine from its publisher. Wrote the ruling.
 
 ## New in this text
@@ -436,7 +450,6 @@
 - Credentials on an editor's computer are private to that person | private before any byte is written, and a failure is told to the editor and the admin instead of only logged (ACC-067, ACC-069)
 - A credential never crosses the internet unencrypted | the far end's identity checked, no redirects with a credential, mail passwords never unencrypted (ACC-073, ACC-074, ACC-075, ACC-076)
 - No secret appears where people or logs can read it | written from ACC-068, ACC-070, ACC-071, ACC-072
-- An account can be marked to change its password at its next sign-in | the mark acts (pending Q8)
 
 ## Parts of items left out
 
@@ -515,3 +528,8 @@
 - Releases and updates / Customer sites and the vendor's release feed | What a customer receives, and what never | the site's credential for downloading the product
 - The whole product / The assistant | How long the product keeps each kind of record | the assistant switch and its records
 
+## Settled by the owner 2026-11-24
+
+- accounts-privacy-legal-U1 | records of conversations with the assistant are kept 30 days by default, a site setting an admin can change
+- accounts-privacy-legal-U2 | the Footage Sorter exists once, inside the dashboard, behind its sign-in
+- accounts-privacy-legal-U3 | Timeline Cards exists once, inside the dashboard, behind its sign-in

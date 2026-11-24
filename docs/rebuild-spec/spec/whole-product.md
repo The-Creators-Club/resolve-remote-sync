@@ -105,7 +105,7 @@ Progress is shown to the person while the work runs. One part's long work never 
 
 Every studio runs the same product, with every part in it. A part a studio does not use is simply switched off; there is never a separate edition with parts missing. In settings an admin sees every switchable part listed with its switch and its own version number, and switches each one on or off by itself, without touching any other.
 
-On a new site, the help for the editing program is on and the other five switchable parts are off until an admin switches them on. Switching a part off hides it from everyone but an admin and stops its work everywhere, on the server and on every editor's computer, within a minute; nothing it holds is deleted, and switching it on again brings it back as it was. Switching a part on makes it appear for everyone within a minute, with no restart of the server or of any computer.
+On a new site, the help for the editing program is on and the other five switchable parts are off until an admin switches them on. A studio that only wants syncing sees nothing else until an admin switches a part on. Switching a part off hides it from everyone but an admin and stops its work everywhere, on the server and on every editor's computer, within a minute; nothing it holds is deleted, and switching it on again brings it back as it was. Switching a part on makes it appear for everyone within a minute, with no restart of the server or of any computer.
 
 Some features inside a part are also switched on for the whole site rather than per person, and are described where they belong: getting round YouTube's blocking (see YouTube downloads: How YouTube throttles and refuses) and computers taking new versions without anyone clicking (see Releases and updates: Pushing updates and seeing who has what). Each is off on a new site.
 
@@ -124,6 +124,10 @@ Each computer keeps the last copy of the site's settings it was given (from its 
 ### The computers and systems the product supports are one published list
 
 There is one published list of the operating systems, their versions and the kinds of NAS the product supports. Every installer and every set-up check agrees with that list exactly: what the list includes installs, and what it leaves out is refused with the list named.
+
+### How footage travels is chosen from real measurements
+
+How fast footage moves between the server and editors' computers is measured for real, not assumed, as the owner's requirements set out ("How footage travels is chosen by measurement"): with a computer on the studio's own network, a remote editor at home, and computers in other countries, on Windows and on macOS. The way footage travels is the one those measurements show is fastest for far-off computers while keeping every promise about footage, the results are kept with the product and shown to the owner, and the same measurements run again before each release, so a release that makes syncing slower does not ship.
 
 #### Lessons
 
@@ -269,7 +273,7 @@ Wherever a value is meant to be copied (a one-time password, a computer's fresh 
 
 ### Messages name the assistant one way, and nothing it makes carries a product's name
 
-Every message that mentions the assistant names it the way the product shows it on screen, the same everywhere, and no message names a program the person never meets. Documents the product or the assistant creates (a cut list, an export, a script, a report) are named by episode and version only, never with the assistant's name or a product name in the title.
+Every message that mentions the assistant calls it "Assistant", the same everywhere, and no message names the assistant's maker, a model, or a program the person never meets (see "On every screen the assistant is called Assistant"). Documents the product or the assistant creates (a cut list, an export, a script, a report) are named by episode and version only, never with the assistant's name or a product name in the title.
 
 #### Lessons
 
@@ -445,6 +449,12 @@ An admin can switch the assistant off for the whole site. With it off, nothing i
 - Name and search words: The assistant. Search words: assistant, AI, key, connect, provider.
 - When the assistant is off: the rest of this section is not shown to anyone, admins included, except the switch itself.
 
+### On every screen the assistant is called Assistant
+
+Every button, panel, message, setting and help page calls the assistant "Assistant" ("Ask Assistant", "Assistant is busy"), never by its maker's name or a model's name, because a site may connect more than one kind. Where a person chooses how strong an answer should be, each choice is named by what it does ("fastest", "stronger", "most capable") and shows its price (see "A person picks how strong an assistant answers, where offered"). In the Assistant settings, which only an admin sees, each connection is told apart by its place in the order and how it is connected (for example "Assistant 1: paid key", "Assistant 2: subscription"); that label is the "<name>" in the messages below. The only place a maker is named is where an admin must go to the maker for a key or a sign-in: the link and instructions in the set-up.
+
+- When the assistant is off: nothing is called Assistant anywhere, because no assistant control is shown.
+
 ### A site connects the assistant with its own paid key
 
 The assistant is never shipped with the product. The usual way for a site to connect one is a key it has bought from the assistant's maker, paid per use; a site may instead switch on a subscription signed in on the server (see "A site may instead connect an assistant through a subscription signed in on the server"). Every assistant call the site makes is charged to the site's own key or subscription, so what the assistant costs is the site's own, and any spending limit on the maker's side is set there.
@@ -547,7 +557,7 @@ Work for the assistant is done most urgent first: what a person is waiting for, 
 Whether the assistant can be used is worked out once, without a call that costs anything, and shown on the page; checking never stops the page from updating. Every button that needs the assistant is then dimmed, with a one-sentence reason on hover, focus or tap:
 
 - no assistant connected: "no assistant has a working key", with where an admin connects one;
-- the connected assistant cannot do this feature: Timeline Cards' search by meaning, section summaries, montage conversations and edit chat work only with the kind of assistant they were made for, so with another kind they say "this site's assistant is <name>, and Timeline Cards' search by meaning and summaries need <the assistant they were made for>", telling the admin to connect it or pin it in the assistant settings; the YouTube downloader works with any kind;
+- the connected assistant cannot do this feature: Timeline Cards' search by meaning, section summaries, montage conversations and edit chat work only with the kind of assistant they were made for, so with another kind they say "The Assistant connected here cannot do Timeline Cards' search by meaning and summaries: an admin can connect one that can, or pin it, in the Assistant settings"; the YouTube downloader works with any kind;
 - not yet checked on this server: the admin should test it in the assistant settings;
 - slow to start: "the server is busy starting the assistant: try again in a minute";
 - signed out: "an admin must sign it in again".
@@ -558,9 +568,9 @@ When a request fails, the person is told in words, never with a crash: the assis
 
 ### A person picks how strong an assistant answers, where offered
 
-Where Timeline Cards lets a person choose (the transcript search panel and the edit chat), three strengths are offered: "fastest", "stronger" and "most capable", each with a short note that also carries its price to the site where the price is known. Each panel says which is its default: transcript search defaults to the fastest, the edit chat to the most capable. Summaries, the montage builder and search inside one transcript always use the fastest.
+Where Timeline Cards lets a person choose (the transcript search panel and the edit chat), three strengths are offered: "fastest", "stronger" and "most capable", each named by what it does and each with a short note carrying its price to the site. Each panel says which is its default: transcript search defaults to the fastest, the edit chat to the most capable. Summaries, the montage builder and search inside one transcript always use the fastest.
 
-When the maker offers a newer version of one of the three strengths, the choice moves to it by itself, never to anything older than the version the product came with; its label then shows the new version, and its note drops the price when no price is known for it. Looking for newer versions never makes a person wait; until an answer comes, or when it fails, the last known versions stay. A request naming a strength the product does not recognise gets that feature's default; nothing is ever refused for a bad choice.
+When the maker offers a newer version of one of the three strengths, the choice moves to it by itself, never to anything older than the version the product came with; its label stays the name of what it does, and its note carries the new version's price, or "price not known yet" until the price is known. Looking for newer versions never makes a person wait; until an answer comes, or when it fails, the last known versions stay. A request naming a strength the product does not recognise gets that feature's default; nothing is ever refused for a bad choice.
 
 - When the assistant is off: no picker is shown.
 

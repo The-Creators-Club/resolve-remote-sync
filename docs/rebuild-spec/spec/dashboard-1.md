@@ -16,13 +16,12 @@ The Overview is the first page after signing in, and the product's mark with the
 
 An editor sees their own computers in full and summary counts for the rest of the studio. An admin sees every computer. The head of the sync summary reads "N computer(s) · N project(s)".
 
-An admin can look at the Overview as another person, and tick for them: they choose the person, then optionally one of that person's computers. A computer chosen that is not that person's is ignored. An editor can only look at and tick for themself.
+An admin can look at the Overview as another person: they choose the person, then optionally one of that person's computers. A computer chosen that is not that person's is ignored. An editor sees only themself. Projects are ticked on the Projects page, not here.
 
 Admins also get a "Stop the fleet" shortcut, explained as "it pauses syncing on every computer at once until you start it again. Nothing is deleted, and the pause ends by itself after 24 hours." It leads to the one studio-wide stop (see the second part of the dashboard's specification, "Stopping and resuming the fleet"). While the studio is stopped, every page says so.
 
 - Who: anyone signed in; acting for another person and the stop are for admins only.
 - Name and search words: Overview. Search words: home, overview, start page, summary, dashboard.
-- Pending: dashboard-1-Q4
 
 ### Four readouts sum up the studio at a glance
 
@@ -48,7 +47,7 @@ Each switchable part (the b-roll archive, music, YouTube downloads, Timeline Car
 
 A part that is switched on but not working, or working badly, keeps its place in the menu; opening it shows a page saying in plain words that it is not working right now, why, and that admins have been told. It is also named on the list of problems. The dashboard always opens, whatever state any part is in. With the b-roll archive switched off, the health line for it reads "the b-roll platform is switched off on this server". The Timeline Cards editor, when something it needs is missing, shows a page that says so.
 
-A part that is switched off is seen by nobody except an admin, in settings, where it is listed with its switch. No menu entry, link, tab or control of a switched-off part appears anywhere else.
+A new site starts with every switchable part off except the help for the editing program, which is on. A part that is switched off is seen by nobody except an admin, in settings, where it is listed with its switch. No menu entry, link, tab or control of a switched-off part appears anywhere else.
 
 - On its own: the product decides each part's state from whether it started and whether what it needs can still be reached.
 
@@ -139,7 +138,6 @@ Messages:
 
 - Who: anyone signed in.
 - Name and search words: Help. Search words: help, guide, manual, documentation, how does it work.
-- Pending: dashboard-1-Q15
 
 ### Every word on the pages links to the glossary
 
@@ -303,7 +301,6 @@ Requests an admin aims at one computer (update now, resume proxy download, ask t
 For a build that is not yet the studio's current one, it adds ", as an offer of a build being tried on this computer first". Ages read "N s ago" under 90 seconds, "N minutes ago" under 90 minutes, "N hours ago" under 48 hours, and otherwise "N days ago". A computer heard from 24 hours ago or more, or never, is marked as silent. A silent computer is warned about and never a reason to refuse. The admin is also told when the same request was already waiting from an earlier click.
 
 - Who: an admin.
-- Pending: dashboard-1-Q11
 
 ### An admin resumes a computer's stopped proxy download
 
@@ -316,8 +313,7 @@ In a computer's details, "Resume" is offered when its proxy download stopped its
 In a computer's details, "Ask this computer why" asks it to send its diagnostics when it is next heard from, and then shows "asked why" ("waiting for <machine> to report in and send its diagnostics") until the diagnostics have arrived, not merely until the ask was delivered. When diagnostics exist, "Read the answer" opens them (see "An admin reads the diagnostics computers sent"). An unknown computer is refused: "no computer '<machine>' for '<editor>'". The admin is told whether an earlier ask is still unanswered, together with when it will apply (see "An admin asks one computer to do something and is told when it will happen"). Asking is recorded in the history with who asked and when. It is not offered for a lost computer.
 
 - Who: an admin.
-- Ways in: a computer's details, a person's page (for each of their computers).
-- Pending: dashboard-1-Q8
+- Ways in: a computer's details.
 
 ### Fleet-wide trouble is shown above the computers
 
@@ -379,8 +375,7 @@ Refusals, each saying why:
 A tick is recorded in the history with where the project was ticked before and after (nothing is recorded when nothing changed), and reaches the computer within about a minute.
 
 - Who: an editor for their own computers, an admin for anyone's.
-- Ways in: the Projects page (each project's row and each project's own page), the admin's plan grid, a person's page (for each of their computers), the person's sync queue.
-- Pending: dashboard-1-Q1
+- Ways in: the Projects page (each project's row and each project's own page), the admin's plan grid.
 
 ### An editor, an admin or the editor's own computer unticks a project
 
@@ -391,8 +386,7 @@ The editor or an admin can untick from the dashboard. The app on the editor's co
 When a computer asks to untick a project that is not ticked under its own name but is still ticked on another of the person's computers, nothing is removed and it is told: "There is no tick for <project> under this computer's name (<computer>), but it is still ticked for another of your computers. Nothing was removed. If this computer was renamed, wait until the dashboard shows the new name, or untick it on the dashboard." A project ticked nowhere is simply fine. An untick is recorded in the history, naming the computer when a computer did it, and takes effect at once.
 
 - Who: an editor for their own computers, an admin for anyone's, the app on the editor's computer for that computer.
-- Ways in: as for ticking, and the app on the editor's computer.
-- Pending: dashboard-1-Q1
+- Ways in: the Projects page (each project's row and each project's own page), the admin's plan grid, the app on the editor's computer.
 
 ### Choosing whose plan and which computer a tick changes
 
@@ -451,14 +445,11 @@ For the viewer (or the person an admin is acting for, with "acting as <name>: th
 
 For one person, or one of their computers, the sync queue shows each ticked project in the order it is worked through: its name, position, full or upload only, whether the project has gone from the server, whether the computer is working on it right now, how complete it is, the files and bytes still needed, the speed and time left, a status (green when nothing is known), and the borrowed folders it brings in. It also names every computer of the person (listed in the question when unticking for the whole person), the Resolve project open now, the project it was matched to, and whether that pairing was made by the editor, an admin, or worked out by the product.
 
-With a computer chosen, that computer's facts are used; otherwise those of the person's most recently heard-from computer.
-
-A picker of the projects the person has not yet ticked sits under the queue, with a tick for each.
+With a computer chosen, that computer's facts are used; otherwise those of the person's most recently heard-from computer. The queue shows order and progress only; projects are ticked and unticked on the Projects page.
 
 - Who: the person themself, or an admin for anyone.
 - Name and search words: Sync queue. Search words: queue, my projects, order, waiting projects, progress.
 - When the help for the editing program is off: the open Resolve project and its pairing are not shown.
-- Pending: dashboard-1-Q9
 
 ### An admin sets what each computer syncs in one grid
 
@@ -480,7 +471,6 @@ The plan grid shows projects against one person's computers.
 
 - Who: an admin.
 - Name and search words: Sync plans. Search words: sync plans, plan grid, what syncs where, assign projects, ticks per computer.
-- Pending: dashboard-1-Q1
 
 ### An admin ticks or unticks a whole column at once
 
@@ -517,7 +507,7 @@ A tick or untick reaches the computer within about a minute. A project's page li
 
 ### The Projects page lists every project and its health
 
-The Projects page lists every active project. Projects are nested by folder: a project named with slashes ("2026/CCT/Website Highlights") appears in a tree of year and show folders, each project shown by its last part, each folder with its project count. Folders start folded, except the branch holding the project being viewed, which opens by itself; the folds survive refreshes.
+The Projects page lists every active project. Projects are nested by folder: a project named with slashes ("2026/CCT/Website Highlights") appears in a tree of year and show folders, each project shown by its last part, each folder with its project count. Folders start folded, except the branch holding the project the person came back from, which opens by itself; the folds survive refreshes.
 
 For each project the list shows its name and folder, a health status, how much is still needed in total, how many editors are below 100%, and a tick box (see "A tick box always does what it showed"). A project whose folder was moved or lost on the server shows as stopped, with the reason. It shows how many of the folders it borrows from other projects are working and how many are not (broken, missing, or the lending project not active). The whole studio gets one status, the worst of its projects, and whether the server's own syncing can be reached.
 
@@ -526,7 +516,6 @@ A count line reads "N of M ticked for <computer or person>". The list re-reads e
 - Who: anyone signed in.
 - Ways in: the Sync menu.
 - Name and search words: Projects. Search words: projects, project list, episodes, tick projects, all projects.
-- Pending: dashboard-1-Q5
 
 ### Finding a project by typing
 
@@ -629,7 +618,6 @@ On sites that control access per project, the new folder is open only to that pr
 Refusals: the server's projects folder cannot be reached; a bad name; "pick a folder: the Projects root itself cannot be a project"; "folder does not exist"; "this folder is inside an existing project (<path>)"; the folder contains a project (naming it); "that folder name produces an empty identifier"; an archived project there; "a different project already uses this identifier: <name>"; "could not mark the folder as a project: <error>"; "this folder claims to be <project>, which still exists. Resolve the duplicate on the NAS first" (a project copied rather than moved); a Resolve project the person's computers have not reported.
 
 - Who: anyone signed in.
-- Pending: dashboard-1-Q6
 
 ### A new Resolve project with no folder leads the editor to pick or create one
 
@@ -679,7 +667,6 @@ If one look at the NAS would take out more than a quarter of the active projects
 From the banner, an admin can choose to take those projects out anyway, after a question naming how many.
 
 - Who: an admin sees the banner and the choice.
-- Pending: dashboard-1-Q10
 
 ### Proxies left without their original are reported once per folder
 
@@ -702,7 +689,6 @@ An editor sees their own files on every computer they use; an admin sees every e
 - Who: anyone signed in.
 - Ways in: the Sync menu; the Overview's "moving" readout leads here.
 - Name and search words: Transfers. Search words: transfers, moving now, uploads, downloads, progress, speed.
-- Pending: dashboard-1-Q2
 
 ### What is waiting is listed per person, computer, project and direction
 
@@ -741,7 +727,6 @@ Every file copied up or down, by any computer, is recorded when it finishes, wit
 The Transfers page lists them under "Recently completed files: what the apps report, plus files arriving at the server.", newest first, 50 at first: for an admin the person, then the direction, the file and how long ago. Empty: "Nothing completed recently." Entries are kept for 7 days.
 
 - Who: anyone signed in; an editor sees their own.
-- Pending: dashboard-1-Q13, dashboard-1-Q14
 
 #### Lessons
 
@@ -780,16 +765,16 @@ On every signed-in page a person appears under their chosen display name if they
 
 ### A person's page shows each of their computers
 
-A person's own page lists their computers, those that sync to their own drive and those wired to the server, each refreshed every 30 seconds and after its own buttons or an untick in the queue. Each shows:
+A person's own page lists their computers, those that sync to their own drive and those wired to the server, each refreshed every 30 seconds and after its own buttons. Each shows:
 
 - its name with "not heard from", "online" or "not reporting";
 - its role: wired ("works off the server share; syncs nothing", with the share it maps as its drive) or syncing ("syncs projects to its own drive");
 - the app version with "up to date" or "out of date: <current>" (admins get "Update now"; an editor reads "update it from the app on that computer. Your admin can also push it.");
 - its system, its licence acceptance, "not reported" tags for kinds of information it withholds, its last report, and its current one-sentence state;
-- for a syncing computer: "projects on this computer N ticked", each with "full" or "upload only", "Sync fully" (asking the space question when needed) or "Upload only", and "Untick" ("This removes <project> from <computer>. Its copies stay on disk; nothing new comes down and proxy sync stops for it."); "Nothing is ticked for this computer."; and an add row choosing a project with "Tick" and "Upload only";
+- for a syncing computer: "projects on this computer N ticked", each with "full" or "upload only", or "Nothing is ticked for this computer.", with a link to the Projects page, where projects are ticked and unticked;
 - for each project ticked there: what has synced, what has not, and what is missing;
-- the foot: "Remote or wired, pause, stop all syncing, YouTube sign-in: in the app on <computer>.";
-- for admins, "Ask this computer why", unless the computer is lost.
+- a link to the computer's details;
+- the foot: "Remote or wired, pause, stop all syncing, YouTube sign-in: in the app on <computer>.".
 
 No syncing computers: "No computers that sync have reported in as <name>. Install CC Sync on a computer and sign in to it as <name>: it appears here after its first report." with "Get the installer". No wired computers: "No computers wired to the server. A computer becomes one in the app on it, followed by a restart of the app."
 
@@ -798,7 +783,6 @@ An admin can open any person's page and sees the same, for that person.
 - Who: the person themself, or an admin for anyone.
 - Name and search words: My account. Search words: my account, my computers, person, profile, my settings.
 - When YouTube downloads are off: no YouTube sign-in is mentioned.
-- Pending: dashboard-1-Q1
 
 ### A person sees every setting that concerns them and where it is changed
 
@@ -833,20 +817,13 @@ Forgetting is all or nothing: if the server cannot stop sending that computer it
 It asks first: "Forget the computer <m> (<editor>)? Its sync plan, its status and its membership of the studio go, so it stops being sent projects. Files already on it stay there. If its app is still installed and signed in, it will register itself again on its next report." Forgetting is not taking access away: the person keeps their account and their sign-in, and an app still running and signed in on that computer registers it again the next time it reports. To keep it gone, uninstall the app there first, or delete the person (see Accounts, privacy and the legal paperwork: Suspending, disabling and removing a person, where deleting a person removes their accounts, computers, shares and sessions all together or not at all).
 
 - Who: an admin.
-- Ways in: the list of every computer, the lost computers, a silent computer's warning.
-- Pending: dashboard-1-Q7
+- Ways in: wherever a computer's row is shown to an admin, with one "Forget" and the one question above.
 
 ### A renamed or cloned computer keeps what is its own
 
-Each computer is known by its owner and its name, and also by a lasting identity of its own, so the server recognises it when it is renamed. A renamed computer keeps its plan, its history and the requests waiting for it; the rename counts once the earlier name has been silent for five minutes. A person's computers are listed oldest first.
+Each computer is known by its owner and its name, and also by a lasting identity of its own, so the server recognises it when it is renamed. A renamed computer keeps its plan, its history and the requests waiting for it; the rename counts once the earlier name has been silent for five minutes. A person's computers are listed oldest first. A person may have any number of computers, and a computer leaves the list only when an admin forgets it.
 
 When two computers claim one identity (for example two computers set up from one copied disk), both stay visible and flagged, with how to reset the newer one, and neither gets the other's requests. A computer renamed onto another computer's name changes neither plan, and the admin is warned.
-
-### A person's computers beyond twenty drop out of view
-
-Only a person's 20 most recently heard-from computers keep their latest details. An older one loses them, and leaves the list too, unless it still has ticks of its own or still receives projects; then it is kept and shows as lost until someone forgets it. Ticks are never deleted by this.
-
-- Pending: dashboard-1-Q12
 
 ### Accounts no computer has reported for
 
@@ -889,7 +866,6 @@ A value nobody has measured yet is shown as unknown, never as zero. One part tha
 
 - Who: an admin for every computer, an editor for their own.
 - When the help for the editing program is off: nothing about Resolve is shown.
-- Pending: dashboard-1-Q17
 
 ### What is said when a computer has not been heard from
 
@@ -927,7 +903,6 @@ A computer's diagnostics are a plain-text account of its own state: who it is, i
 A send that fails is tried again a few minutes later. Diagnostics longer than 256 KB are cut, never refused. Each one received is recorded in the history. They are kept for 30 days.
 
 - Who: an admin reads them.
-- Pending: dashboard-1-Q16, dashboard-1-Q13
 
 ### An admin reads the diagnostics computers sent
 
@@ -937,7 +912,6 @@ When the server has crash reports of its own: "This server has N saved crash rep
 
 - Who: an admin.
 - Name and search words: Diagnostics. Search words: diagnostics, ask why, computer report, crash reports, troubleshoot.
-- Pending: dashboard-1-Q3
 
 #### Lessons
 
@@ -966,7 +940,6 @@ Dismissing asks "Dismiss this? It is only hidden. If the server finds the same p
 
 - Who: an admin.
 - Name and search words: Problems. Search words: problems, health, what is wrong, issues, notices, alerts.
-- Pending: dashboard-1-Q3
 
 ### Every page shows admins how many problems and alerts are open
 

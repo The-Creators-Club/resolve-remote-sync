@@ -273,7 +273,7 @@ When the server cannot be reached, the computer stops trying for that moment, sa
 
 ### Transfers are fast, and each computer's speed is shown against what its connection can do
 
-On the same connection, uploads and downloads each reach at least 60 MB/s, over the fastest route available between the editor's computer and the NAS. The speed each computer really achieves, going up and coming down, is shown in the app and on the per-computer view, beside a public measure of what that computer's internet connection can carry, so that when an internet route is the limit, that is what a person sees, not a slow product.
+On the same connection, uploads and downloads each reach at least 60 MB/s, over the fastest route available between the editor's computer and the NAS. Both figures are ones a measurement on a real editor's computer, near or far, can confirm. The speed each computer really achieves, going up and coming down, is shown in the app and on the per-computer view, beside a public measure of what that computer's internet connection can carry, so that when an internet route is the limit, that is what a person sees, not a slow product.
 
 - Name and search words: Speed. Search words: speed, slow, bandwidth, MB/s, connection.
 
@@ -281,9 +281,9 @@ On the same connection, uploads and downloads each reach at least 60 MB/s, over 
 
 When several editors sync at once, their transfers run together and together fill the server's connection to the outside; no editor waits for another to finish.
 
-### The app and the dashboard say when a computer's connection goes the slow way round
+### The app and the dashboard say which way a computer's transfers go, and how fast
 
-For each computer the dashboard shows whether its connection to the studio goes direct or the slow way round through a go-between. The app's detail line says when transfers are taking a slow, indirect route to the server. A report that does not mention these leaves the last values in place.
+For each computer the dashboard shows whether its transfers go straight to the studio or by an indirect way, and the speed they reach. The app's detail line says when transfers are taking an indirect way to the server and are slower than that computer's connection can carry. A report that does not mention these leaves the last values in place.
 
 ### A remote editor's downloads take the studio's fastest path, and an admin can choose it
 
@@ -302,13 +302,6 @@ A remote editor's downloads take the fastest of the studio's connections that re
 Footage and project files move only over the studio's own private and local network, never through outside relay services, and the NAS never announces itself publicly. A newly approved computer finds the NAS on the studio's private network by itself.
 
 - Pending: sync-2-Q2
-
-### A computer can be set to sync one project at a time, everything in it included
-
-Normally every ticked project's smaller files (everything other than footage and proxies) keep syncing whichever project the computer is busy with. A computer can instead be set to hold every other project still while one project has its turn, for up to that project's whole turn.
-
-- Setting: One project at a time. Does: holds every other project's files still while one project syncs. Default: off. Who: an admin. Applies to: a computer. Search words: one project, at a time, turn, order, queue.
-- Pending: sync-2-Q1
 
 #### Lessons
 

@@ -71,6 +71,7 @@
 - Text assumes: A
 - Items: 41-034, 42-036, 43-006
 - Covers: 42-Q6, U-42-7
+- Answered by the owner 2026-11-24: A: the first sort runs on its own into the proposed themes; the proposal stays beside the board, and a person drops, renames or adds themes and sorts again
 
 ### cards-board-Q2: When a later interview is added to a board, should its speaker always take the colour remembered for that person, even if the board shows them in another?
 - Kind: differs
@@ -81,6 +82,7 @@
 - Text assumes: A
 - Items: 43-012, 43-004, 43-005
 - Covers: 43-Q3
+- Answered by the owner 2026-11-24: A: one colour per person everywhere, always the remembered one
 
 ### cards-board-Q3: Should the board recognise "Personal Stories" and "Ending" in any letter case when putting themes in story order?
 - Kind: differs
@@ -91,6 +93,7 @@
 - Text assumes: A
 - Items: 43-007, 43-015
 - Covers: 43-Q6
+- Answered by the owner 2026-11-24: A: any letter case everywhere
 
 ### cards-board-Q4: When a change empties a theme, should the theme disappear by itself, or stay as an empty column until you remove it?
 - Kind: other
@@ -101,6 +104,7 @@
 - Text assumes: A
 - Items: 43-014, 43-013, 43-006
 - Covers: 43-Q9
+- Answered by the owner 2026-11-24: A: an emptied column stays until deleted by hand
 
 ### cards-board-Q5: When the story check is run again, should its report replace the previous one, or be kept as a new dated report beside it?
 - Kind: other
@@ -111,6 +115,7 @@
 - Text assumes: A
 - Items: 43-022, 43-019
 - Covers: 43-Q7, U-43-5
+- Answered by the owner 2026-11-24: A: every run makes a new dated report, earlier ones kept
 
 ### cards-board-Q6: When a board becomes a cut, should every theme also get an empty shelf category of the same name after the cut?
 - Kind: unreachable
@@ -118,9 +123,10 @@
 - Options: A: keep it, always. B: cut it: only set-aside groups with cards (and "Uncategorised") become shelf categories. C: make it a choice at hand-over.
 - Recommend: B, because the set-aside groups already give each theme its shelf when it has something on it, and empty categories are clutter.
 - Changes for a person: with A, the editor's shelf lists every section name, empty or not; with B, only categories that hold cards.
-- Text assumes: A, as the items describe it, until you decide
+- Text assumes: B
 - Items: 43-039
 - Covers: 43-Q8
+- Answered by the owner 2026-11-24: B: only set-aside groups holding cards, and "Uncategorised", become shelf categories; no empty category for every other theme
 
 ### cards-board-Q7: Should a section's colour in the cut be counted by its position among all the board's columns, or only among the sections that play?
 - Kind: other
@@ -128,9 +134,10 @@
 - Options: A: count only the sections that play, so the cut and the hand-over always agree. B: count every column, set-aside ones included.
 - Recommend: A, because the colours a person compares are those of the sections that play.
 - Changes for a person: with A, a section keeps the same colour in the editor and in the editing program; with B, a set-aside column shifts the colours after it.
-- Text assumes: the rotation by position, Blue first, without saying which positions count
+- Text assumes: A
 - Items: 43-039
 - Covers: 43-Q4
+- Answered by the owner 2026-11-24: A: counted among the sections that play, so the cut and the hand-over agree
 
 ### cards-board-Q8: When another interview of an episode finishes processing after you have started arranging its board, should the product propose places for its paragraphs, or only put the transcript beside the board for you to drag from?
 - Kind: other
@@ -140,6 +147,7 @@
 - Changes for a person: with A, new cards wait on the board to be taken or declined; with B, you drag every one in yourself.
 - Text assumes: A
 - Items: 42-046, 43-011, 43-012
+- Answered by the owner 2026-11-24: A: a later interview's paragraphs arrive as proposals; nothing else moves
 
 ## Readers' questions and unsettled points
 
@@ -163,12 +171,11 @@
 
 ## Still unsettled
 
-- cards-board-U1 | which key and which touch gesture set cards aside and tag the cold open on the board (the editor's keys for the same acts, if it has them, are not in this bundle) | one key press or one touch, unnamed | 43-030, 43-038
 
 ## Conflicts between an item and a lesson
 
 - BRD-028 | 41-034, 42-035 | the items cap the proposal at 25 themes (a page says 15); the lesson says at most 30. Wrote 30.
-- BRD-028 | 41-034, 42-036 | the lesson (a ruling) says the owner picks themes before any sort; the owner's requirements say the first sort is automatic and overridable. Wrote the owner's requirements, and asked cards-board-Q1.
+- BRD-028 | 41-034, 42-036 | the lesson (a ruling) says the owner picks themes before any sort; the owner's requirements say the first sort is automatic and overridable. Wrote the owner's requirements; confirmed by the owner's answer of 2026-11-24 (cards-board-Q1), so BRD-028 is listed as not yet met.
 - BRD-038 | 43-008, 42-042, 42-044 | the items group a theme's cards speaker by speaker in short sub-columns; the lesson forbids one-interviewee runs and orders by argument. Wrote the lesson, so the 8-or-10 card sub-column height no longer arises.
 - BRD-024 | 42-039, 41-035 | the items place a question in its answer's theme directly above the answer; the lesson says a first sort sets questions aside. Wrote: set aside in the set-aside group of the answer's theme, kept, never dropped.
 - BRD-026 | 43-016 | the item estimates running time from text (3.6 Chinese characters or 18.5 English characters a second) until timed; the lesson requires real played durations. Wrote real durations from the timed words, with "not known" for a card not yet timed.
@@ -222,7 +229,12 @@
 - cards-editor / Editing, undo and the cut list | The board hands its order to the cut | the cut list the board produces
 - cards-editor / Notes and the staged shelf | The board hands its order to the cut | set-aside groups arrive as shelf categories
 - cards-editor / Colours | The board hands its order to the cut | the fixed rotation of section colours, Blue first
+- cards-editor / Notes and the staged shelf | Setting cards aside and tagging the cold open | the key and gesture that move a cut to the shelf in the editor also set cards aside on the board
 - cards-editor / Selecting, deleting, inserting and keys | The board works by touch first, and by keys | the board uses the editor's keys and gestures for select, move, undo
 - cards-editor / Shortening, the edit chat and the assistant | The studio's house style, and an episode's own | changing an episode's house style or rubric starts a new edit chat conversation
 - cards-to-resolve-and-exports / Placing, deleting and linking clips in Resolve | Every interviewee has one colour everywhere | the same colour is used on a person's clips and cuts in the hand-over
 - whole-product / The assistant | The board plans the film from every paragraph of an episode | the site-wide switch that turns the assistant off
+
+## Settled by the owner 2026-11-24
+
+- cards-board-U1 | the same key and gesture that move a cut to the shelf in the Timeline Cards editor set cards aside on the board

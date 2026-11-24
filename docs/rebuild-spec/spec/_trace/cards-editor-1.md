@@ -13,8 +13,8 @@
 - 39-037 | Where each card sits on the lane follows the cut list exactly
 - 40-012 | A card shows the words spoken inside its cut, with partly cut words marked
 - 40-015 | Each card shows who speaks, where, for how long and what was done to it
-- 40-016 | An editor joins neighbouring cards into a stack and opens or closes it
-- 40-017 | An editor joins neighbouring cards into a stack and opens or closes it
+- 40-016 | left out: cut by the owner (2026-11-24, cards-editor-1-Q13)
+- 40-017 | left out: cut by the owner (2026-11-24, cards-editor-1-Q13)
 - 33-028 | The clip colour picker colours one cut, a selection or every cut of one person
 - 33-029 | Shift+C opens the colour picker for the cut that makes sense
 - 34-026 | The clip colours and the marker colours are the editing program's own
@@ -43,7 +43,7 @@
 - 28-010 | Q and W trim the cut under the head to the head, and B, F and Ctrl+B split
 - 28-051 | Mouse, finger and pen each have their own click allowance and edge grab size on the lane
 - 28-052 | Gestures on the lane never scroll or zoom the page, and only one runs at a time
-- 28-053 | A ruler band along the lane scrubs the head
+- 28-053 | left out: cut by the owner (2026-11-24, cards-editor-1-Q3)
 - 28-054 | With a mouse, a press on the lane moves the head, and clicks select
 - 28-055 | Dragging an item's body moves it, or the whole selected block
 - 28-056 | Shift+drag draws a box that selects every item it touches
@@ -112,6 +112,7 @@
 - Text assumes: A
 - Items: 28-007, 28-058, 29-042
 - Covers: 28-Q6
+- Answered by the owner 2026-11-24: A, one range for every way of zooming, from the whole cut in to 400 px per second
 
 ### cards-editor-1-Q2: Should Escape on the keyboard and B on the controller back out in the same order?
 - Kind: built twice
@@ -122,6 +123,7 @@
 - Text assumes: A
 - Items: 28-009
 - Covers: 28-Q8
+- Answered by the owner 2026-11-24: A, both kept as they are
 
 ### cards-editor-1-Q3: The lane could be split into a track band and a ruler band that scrubs, a split that is never switched on. Can it go?
 - Kind: dormant
@@ -132,6 +134,7 @@
 - Text assumes: written in place and marked pending, to be deleted if cut
 - Items: 28-053
 - Covers: 28-Q13
+- Answered by the owner 2026-11-24: A, the ruler band is cut
 
 ### cards-editor-1-Q4: Should Delete take out a marked in and out range wherever the keyboard is, or only while the lane's strip has the keyboard?
 - Kind: other
@@ -142,6 +145,7 @@
 - Text assumes: A
 - Items: 28-011
 - Covers: 28-Q15
+- Answered by the owner 2026-11-24: A, the range is taken out only while the strip has the keyboard
 
 ### cards-editor-1-Q5: Should Alt+S and "To safe cuts" always act when asked, even with the safe-cut aid switched off?
 - Kind: differs
@@ -152,6 +156,7 @@
 - Text assumes: A
 - Items: 30-043
 - Covers: 30-Q3
+- Answered by the owner 2026-11-24: A, a key or button pressed on purpose always acts
 
 ### cards-editor-1-Q6: Should paragraphs and cuts keep showing their short paragraph reference (the "^ref"), as plain text?
 - Kind: other
@@ -162,6 +167,7 @@
 - Text assumes: A
 - Items: 29-019, 29-049, 33-031
 - Covers: 30-Q9, 33-Q11
+- Answered by the owner 2026-11-24: A, the reference stays visible as plain text
 
 ### cards-editor-1-Q7: When a marker comes with only a colour and no kind, which colours mean a note, a plain marker and a section?
 - Kind: built twice
@@ -172,6 +178,7 @@
 - Text assumes: A, with the hand-over's own text saying which colours mean a plain marker
 - Items: 39-049, 40-020
 - Covers: 39-Q5
+- Answered by the owner 2026-11-24: A, one rule: Green a note, Red a plain marker, every other colour a section
 
 ### cards-editor-1-Q8: For a clip shot at a different frame rate from the timeline, should its length on the cards and in Resolve both be its real running time?
 - Kind: built twice
@@ -182,6 +189,7 @@
 - Text assumes: A
 - Items: 39-037
 - Covers: 39-Q6
+- Answered by the owner 2026-11-24: A, the real running time on the cards and in Resolve
 
 ### cards-editor-1-Q9: Shortening works in two ways (a planned review accepted suggestion by suggestion, and a slider driven by scores given once per cut list). Keep both, or one?
 - Kind: either-or
@@ -192,6 +200,7 @@
 - Text assumes: the summaries are written as kept; the shortening ways are written in part 4
 - Items: 40-037
 - Covers: 40-Q2
+- Answered by the owner 2026-11-24: A, only the slider; the section summaries stay
 
 ### cards-editor-1-Q10: Should the lane keep taking its keys from the editor's own keyboard preset in Resolve, now that nothing before the hand-over is meant to need an editing program?
 - Kind: other
@@ -202,6 +211,7 @@
 - Text assumes: A
 - Items: 40-009
 - Covers: 40-Q6
+- Answered by the owner 2026-11-24: A, kept while the help for the editing program is on
 
 ### cards-editor-1-Q11: The builders' own tools can go: a custom key layout nobody can supply, and hand-run commands that recolour section headings, bring cut lists in line with montage names and rates, and make light audio copies in advance. Agreed?
 - Kind: dev only
@@ -212,6 +222,7 @@
 - Text assumes: left out
 - Items: 28-024, 40-088
 - Covers: 40-Q7
+- Answered by the owner 2026-11-24: A, the builders' tools go
 
 ### cards-editor-1-Q12: Should a clip's waveform sit on a shared baseline at the foot of the clips, or centred?
 - Kind: other
@@ -221,6 +232,7 @@
 - Changes for a person: with B the waveform runs through the middle of the words.
 - Text assumes: A
 - Items: 29-044
+- Answered by the owner 2026-11-24: A, a shared baseline at the foot
 
 ### cards-editor-1-Q13: Should cards be joinable into stacks again, one collapsible card made of neighbouring cuts, only when you ask?
 - Kind: other
@@ -230,6 +242,7 @@
 - Changes for a person: with A nothing changes from what you use now; with B the J, W and Shift+W keys and the join, split and stack chips come back on the cards.
 - Text assumes: written in place with its controls and marked pending, to be deleted if you choose A
 - Items: 40-016, 40-017
+- Answered by the owner 2026-11-24: A, no stacks
 
 ### cards-editor-1-Q14: After you trim or extend a clip, should the playhead stay on the same spoken moment of its clip, as it does now?
 - Kind: other
@@ -239,6 +252,7 @@
 - Changes for a person: with A nothing changes; with B the playhead jumps with each trim.
 - Text assumes: A
 - Items: 28-057, 29-046
+- Answered by the owner 2026-11-24: A, the playhead stays on its spoken moment
 
 ## Readers' questions and unsettled points
 
@@ -283,13 +297,12 @@
 
 ## Still unsettled
 
-- cards-editor-1-U3 | whether the faint strike through fillers is one of the hesitation marks the owner declined ("lets ditch all this") | the text keeps the filler strike as one of the language aids | 29-054
 
 
 ## Conflicts between an item and a lesson
 
 - CE2-001 | 28-057, 29-046 | the ruling's words "ripple trims carry the playhead" against the editor's real behaviour, where the playhead stays on its spoken moment after any edge edit and is never carried forward. Wrote the editor's behaviour and asked in cards-editor-1-Q14.
-- CE2-023 | 40-016, 40-017 | the ruling asks for stacks only on request, but the editor in daily use has none. Wrote them in place with their controls, pending cards-editor-1-Q13, which recommends leaving them out.
+- CE2-023 | 40-016, 40-017 | the ruling asks for cards to join into stacks when the editor asks; the owner's answer of 2026-11-24 (cards-editor-1-Q13) leaves stacks out of the editor. Wrote his answer; the lesson is listed as not yet met.
 
 - CE1-053 | 29-019 | the items let a note or section row in the cards be read and dragged but not deleted in place; the ruling asks for a one-click delete there. Added it.
 - CE1-092 | 29-020, 29-044 | the items mark the playhead's card and clip but do not say they are apart from the selection or how soon they follow; added the ruling's quarter second. The ruling's "distinct from the selection colour" is met by a distinct mark (a dot and a frame against a bar and a wash), since CE2-019 makes both red.
@@ -314,7 +327,6 @@
 - Language aids mark verbs, names, numbers, negation, fillers, safe cut points and sentences | each aid a per-device switch with defaults by "languages I read", and the quiet line when nothing is analysed (CE3-004)
 - F9 or Shift+X switches the words in the clips between English and the interview's language | the choice remembered per browser and followed everywhere (CE3-003)
 - A card shows the words spoken inside its cut, with partly cut words marked | a cut with no transcript is still a card labelled "no transcript" (CE2-024)
-- An editor joins neighbouring cards into a stack and opens or closes it | stacks only on request (CE2-023)
 - The clip colours and the marker colours are the editing program's own | contrast of 3:1 on dark surfaces and status colours at 11 to 12 px (CE2-040, CE2-041)
 - Each interviewee has a colour of their own | unique colour per interviewee, montage neighbours differ, the transcript panel outlined in the colour (CE2-042, CE2-043, CE2-044)
 - What a marker is, and which kinds there are | kind kept apart from colour, sections known by identity not place (CE2-032, CE2-037)
@@ -343,8 +355,8 @@
 - 29-043 | "Machine translations are drawn a shade dimmer": cut with draft translations, as part 3 did.
 - 33-070 | "A machine translation is drawn dimmer": the same.
 - 33-071 | that words are fetched per clip, at most 60,000 words per clip, and a failed fetch is tried again later: how the words reach the page and the size of one request. The promise (the words appear as soon as they are known) is written.
-- 40-016 | the automatic stacking rules (a new stack at a different clip, a gap, a marker, 90 seconds, a source jump of more than 0.04 s back or 3 s on): replaced by the ruling CE2-023.
-- 40-017 | the refusal "bad stack mark": a message about a malformed request.
+- 40-016 | left out: cut by the owner (2026-11-24, cards-editor-1-Q13)
+- 40-017 | left out: cut by the owner (2026-11-24, cards-editor-1-Q13)
 - 28-007 | "Keyboard zoom runs from 0.5 to 2000 px per second": replaced by one range, pending cards-editor-1-Q1.
 - 28-058 | "from 0.5 to 400 px per second": the same.
 - 28-011 | "If every target is a gap, the delete goes through on the first press": replaced by the ruling CE1-035.
@@ -374,3 +386,7 @@
 - cards-to-resolve-and-exports / Undo, markers, titles, fades and properties | What a marker is, and which kinds there are | which colours read back from Resolve mean a plain marker
 - cards-to-resolve-and-exports / Sending a cut to Resolve | Where each card sits on the lane follows the cut list exactly | the same lengths arrive in Resolve
 - whole-product / The assistant | The assistant writes a one-sentence summary of what each section says | the site-wide switch that turns the assistant off
+
+## Settled by the owner 2026-11-24
+
+- cards-editor-1-U3 | the faint strike through filler words stays as one of the reading aids, off until a person switches it on

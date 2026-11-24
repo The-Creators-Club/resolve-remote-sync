@@ -10,7 +10,7 @@
 - 26-015 | A video the studio already has is marked with where it is and cannot be picked again
 - 26-016 | The review shows every found video as a card with counts, filters and what the download will cost
 - 26-017 | An editor can paste YouTube links instead of searching
-- 26-054 | Further choices that the page does not offer
+- 26-054 | left out: cut by the owner (2026-11-24, youtube-Q16)
 - 08-014 | YouTube blocks an address that asks too much too fast, so every request is paced ; Live streams are refused, and a download that runs too long or stalls is stopped
 - 08-016 | When YouTube cuts a stream short, the clip is tried once more one quality lower
 - 08-022 | Downloads go out without a YouTube account first, and a signed-in session is used only after a bot check
@@ -38,7 +38,7 @@
 - 08-029 | A download only ever cleans up after its own clip
 - 26-032 | The quality chosen is a ceiling
 - 26-033 | Every clip lands as a single MP4 file with H.264 picture and AAC sound at a constant frame rate ; A clip Resolve holds open when its conversion finishes is still delivered ; When conversion fails, the clip either fails with the reason or is kept as downloaded
-- 26-034 | Clips can be converted to an intra-frame editing format instead
+- 26-034 | left out: cut by the owner (2026-11-24, youtube-Q17)
 - 08-020 | Every clip is named after its channel, title and YouTube id
 - 08-021 | Every clip carries its credits inside it and in a record beside it
 - 26-035 | A search's clips go into a folder named after the topic, made safe for every computer
@@ -54,7 +54,7 @@
 - 08-004 | An editor's computer takes a download only when it can finish it there ; A download runs wherever YouTube will serve it
 - 08-009 | The page always says where each job ran and why
 - 08-011 | left out: an arrangement (the promise is under A download runs wherever YouTube will serve it)
-- 26-049 | A download runs wherever YouTube will serve it ; The page always says where each job ran and why ; The owner of a computer can keep it out of YouTube downloads ; Downloads on editors' own computers can be switched off for the whole site
+- 26-049 | A download runs wherever YouTube will serve it ; The page always says where each job ran and why ; The owner of a computer can keep it out of YouTube downloads
 - 26-050 | The page always says where each job ran and why ; One job is downloaded by one computer at a time, exactly as the job says
 - 26-052 | An editor can stop a download running on their own computer
 - 08-005 | One job is downloaded by one computer at a time, exactly as the job says
@@ -77,7 +77,7 @@
 - 26-024 | Clips that failed can be tried again with one button
 - 26-043 | The editor's recent jobs are listed and can be reopened
 - 26-044 | Opening the page takes the editor straight back to the job they were working on
-- 26-055 | left out: unreachable, and it describes a one-open-search rule the queue makes impossible (youtube-Q19)
+- 26-055 | left out: cut by the owner (2026-11-24, youtube-Q19)
 - 08-007 | The app on the editor's computer shows the download it is running ; While downloading, the page lists every clip with its progress and outcome
 - 26-020 | The job on screen shows its state, a bar and a running commentary
 - 26-025 | While downloading, the page lists every clip with its progress and outcome
@@ -89,8 +89,8 @@
 - 08-039 | Downloaded clips are filed into the open Resolve project's bins by themselves
 - 08-040 | Downloaded clips are filed into the open Resolve project's bins by themselves
 - 08-041 | The editor and the dashboard are told what the filing is doing
-- 08-042 | The owner of a computer can switch the filing off and change its pace
-- 09-017 | Downloaded clips are filed into the open Resolve project's bins by themselves ; The owner of a computer can switch the filing off and change its pace
+- 08-042 | The owner of a computer can switch the filing off
+- 09-017 | Downloaded clips are filed into the open Resolve project's bins by themselves ; The owner of a computer can switch the filing off
 - 12-047 | The editor and the dashboard are told what the filing is doing ; Admins are warned when downloading on the server or a computer is not working
 - 26-041 | An editor can open a downloaded clip's folder, or fetch it from the NAS
 - 04-055 | An editor is warned when downloads on their computer may start failing
@@ -117,9 +117,9 @@
 - 26-008 | The editor chooses the languages to search in, or exactly what they typed
 - 26-014 | The assistant judges every result and drops the ones that do not fit
 - 26-048 | The assistant behind search is the one the site has set up, and every failure is explained
-- 04-033 | Each editor accepts the YouTube terms on each computer before it downloads for them
+- 04-033 | left out: cut by the owner (2026-11-24, youtube-Q20)
 - 08-015 | Only YouTube addresses are ever downloaded
-- 08-033 | Each editor accepts the YouTube terms on each computer before it downloads for them
+- 08-033 | Each editor's acceptance counts for the computer it was given on
 - 26-002 | Before anyone can cause a download, they accept a notice about their responsibilities
 - 26-003 | Two standing lines about copyright and YouTube's limits are always on the page
 
@@ -133,6 +133,7 @@
 - Changes for a person: nothing.
 - Text assumes: left out.
 - Items: 08-036
+- Answered by the owner 2026-11-24: A, left out.
 
 ### youtube-Q2: An editor can give their computer a signed-in YouTube session three ways: the one-click sign-in in a browser window, choosing an exported cookies file, or naming a cookies file in the computer's settings. Which stay?
 - Kind: several ways in
@@ -143,6 +144,7 @@
 - Text assumes: all three written, the setting marked pending.
 - Items: 08-034, 08-035, 04-031, 04-032, 09-018
 - Covers: 08-Q4
+- Answered by the owner 2026-11-24: A, the one-click sign-in and the cookies file chooser stay; the setting naming a file elsewhere goes.
 
 ### youtube-Q3: When an admin gives the server a signed-in YouTube session, should searches use it only after YouTube bot-checks them, as downloads do?
 - Kind: differs
@@ -153,6 +155,7 @@
 - Text assumes: A.
 - Items: 26-028
 - Covers: 26-Q6
+- Answered by the owner 2026-11-24: A, the server's session is used only after a bot check, for searches and downloads alike.
 
 ### youtube-Q4: Should there still be a site switch that turns downloading on editors' own computers off altogether?
 - Kind: dormant
@@ -163,6 +166,7 @@
 - Text assumes: written as a site setting, marked pending; deleted if A.
 - Items: 26-049, 26-050, 26-051, 26-052, 04-034
 - Covers: 26-Q2
+- Answered by the owner 2026-11-24: A, no site switch; the passage is deleted.
 
 ### youtube-Q5: You ruled an "on this computer" switch on the YouTube page, on by default. Each computer also has its own setting keeping it out of downloads. Should they be one setting, shown in both places?
 - Kind: several ways in
@@ -172,6 +176,7 @@
 - Changes for a person: with A, flipping the page's switch on one browser changes that computer for every browser.
 - Text assumes: A.
 - Items: 26-049, 08-002, 09-018
+- Answered by the owner 2026-11-24: A, one setting per computer, shown on the page and in the app.
 
 ### youtube-Q6: A download on an editor's own computer can be stopped from four places: the app's menu, the app's status, the page's STOP, and the page's DOWNLOAD ON THE SERVER INSTEAD. Which stay?
 - Kind: several ways in
@@ -181,6 +186,7 @@
 - Changes for a person: with A, one stop on each side.
 - Text assumes: all four written, marked pending.
 - Items: 04-016, 01-073, 08-006, 26-052, 26-051, 07-015
+- Answered by the owner 2026-11-24: A, one stop in the app's menu and STOP on the page.
 
 ### youtube-Q7: A job can be cancelled from five places on the page (the progress panel, the job's downloads, the review's CANCEL SEARCH, the Queue list and the "Waiting for you" list), and only the review asks first. Keep them all, and which should ask?
 - Kind: several ways in
@@ -191,6 +197,7 @@
 - Text assumes: all five written, marked pending.
 - Items: 26-023
 - Covers: 26-Q1
+- Answered by the owner 2026-11-24: A, a cancel wherever a job is shown, asking first only where unseen results would be lost.
 
 ### youtube-Q8: When a job is cancelled mid-clip, should the clip in flight be stopped at once and thrown away, or finished first?
 - Kind: differs
@@ -201,6 +208,7 @@
 - Text assumes: A.
 - Items: 26-023
 - Covers: 26-Q5
+- Answered by the owner 2026-11-24: A, stop within about two seconds everywhere.
 
 ### youtube-Q9: Failed clips can be retried with RETRY N FAILED on the job, or by pressing DOWNLOAD again on a finished job's review. Keep both?
 - Kind: several ways in
@@ -210,6 +218,7 @@
 - Changes for a person: none with A.
 - Text assumes: A.
 - Items: 26-024
+- Answered by the owner 2026-11-24: A, both stay.
 
 ### youtube-Q10: A downloaded clip's folder can be opened (or the clip fetched from the NAS) from the download history and from a finished clip's row in a job. Keep both?
 - Kind: several ways in
@@ -219,6 +228,7 @@
 - Changes for a person: none with A.
 - Text assumes: A.
 - Items: 26-041, 08-037
+- Answered by the owner 2026-11-24: A, both stay.
 
 ### youtube-Q11: Which projects can a person download into?
 - Kind: other
@@ -229,6 +239,7 @@
 - Text assumes: A.
 - Items: 26-018
 - Covers: 26-Q4
+- Answered by the owner 2026-11-24: A, every active project.
 
 ### youtube-Q12: Clips downloaded on the server, or on another editor's computer, never reach the editor who asked for them unless they fetch each one by hand. Should they?
 - Kind: other
@@ -239,6 +250,7 @@
 - Text assumes: B.
 - Items: 08-037, 08-038, 26-041
 - Covers: 08-Q2
+- Answered by the owner 2026-11-24: B, a job's clips reach the requesting editor's computer on their own.
 
 ### youtube-Q13: Filing downloaded clips into Resolve has its own on-off switch per computer and keeps running when the YouTube part is off. Should it follow the YouTube part?
 - Kind: other
@@ -249,6 +261,7 @@
 - Text assumes: A.
 - Items: 08-039, 08-042
 - Covers: 08-Q5
+- Answered by the owner 2026-11-24: A, the filing follows the YouTube part, with its own per-computer switch.
 
 ### youtube-Q14: A clip the editor removed from Resolve's media pool comes back the next time the app starts, because the file is still in the folder. Should a removed clip stay removed?
 - Kind: other
@@ -259,6 +272,7 @@
 - Text assumes: A.
 - Items: 08-039
 - Covers: 08-Q6
+- Answered by the owner 2026-11-24: A, a removed clip stays removed.
 
 ### youtube-Q15: The periodic test of a known public video is off by default. Keep it?
 - Kind: dormant
@@ -269,6 +283,7 @@
 - Text assumes: A, marked pending.
 - Items: 26-047, 19-030
 - Covers: 26-Q3
+- Answered by the owner 2026-11-24: A, kept, off by default.
 
 ### youtube-Q16: 480p, the "last hour" upload window, a number of results per term and skipping the term review can be asked for but are never offered on the page. Offer them or drop them?
 - Kind: unreachable
@@ -279,6 +294,7 @@
 - Text assumes: written, marked pending; deleted if A.
 - Items: 26-054
 - Covers: 26-Q7
+- Answered by the owner 2026-11-24: A, dropped; the passage is deleted.
 
 ### youtube-Q17: A second conversion target, an intra-frame editing format with uncompressed sound, exists but nothing can choose it. Can it go?
 - Kind: unreachable
@@ -289,6 +305,7 @@
 - Text assumes: written, marked pending; deleted if A.
 - Items: 26-034
 - Covers: 26-Q9
+- Answered by the owner 2026-11-24: A, dropped; the passage is deleted.
 
 ### youtube-Q18: The download history shows everyone who downloaded what, to every signed-in person. Is that wanted?
 - Kind: other
@@ -299,6 +316,7 @@
 - Text assumes: A.
 - Items: 26-001, 26-042
 - Covers: 26-Q10
+- Answered by the owner 2026-11-24: A, the history stays shared, with names.
 
 ### youtube-Q19: The page still carries handling for "a previous search is still open", which the queue makes impossible. Can it go?
 - Kind: unreachable
@@ -308,6 +326,7 @@
 - Changes for a person: nothing.
 - Text assumes: left out.
 - Items: 26-055
+- Answered by the owner 2026-11-24: A, dropped.
 
 ### youtube-Q20: You ruled that each person accepts the YouTube rights statement on each computer, in the app, as well as on the page. Should one acceptance on the page also count for the computer the page is open on?
 - Kind: other
@@ -317,6 +336,7 @@
 - Changes for a person: with B, an editor accepts once per wording per computer, on the page.
 - Text assumes: A, as ruled.
 - Items: 26-002, 08-033, 04-033
+- Answered by the owner 2026-11-24: B, one acceptance on the page, counting for the computer it was given on.
 
 ### youtube-Q21: Should an editor still be able to point their computer at their own copy of the downloading tool, or turn its daily self-updating off?
 - Kind: other
@@ -327,6 +347,7 @@
 - Text assumes: A (left out).
 - Items: 08-031, 08-032, 09-018
 - Covers: 08-Q9
+- Answered by the owner 2026-11-24: A, neither setting; left out.
 
 ## Readers' questions and unsettled points
 
@@ -364,6 +385,7 @@
 
 ## Conflicts between an item and a lesson
 
+- YTD-105 (ruling) | 04-033, 08-033 | the ruling has the page tell the person to accept the terms in the app on their computer first; the owner's answer of 2026-11-24 (youtube-Q20) makes one acceptance on the page count for that computer. Wrote his answer; YTD-105 is listed as not yet met.
 - YTD-047 | 08-020, 26-036 | the items cut the channel to 60 bytes and the title to 140, so a name can reach about 220 bytes; the lesson caps every name at 200 bytes keeping the video id. Wrote the lesson.
 - YTD-045 | 08-029, 26-040 | the items leave partial files and "failed" leftovers inside the project folder and sweep day-old ones away; the lesson forbids any temporary file in a synced folder. Wrote the lesson.
 - YTD-034 | 04-027, 08-023 | the item adds "sign in again" to the warning that YouTube is refusing the session, and files the refused account under "stale"; the lesson says never urge renewing a refused session. Wrote a separate "refused" state with no such urging.
@@ -426,6 +448,15 @@
 - 26-018 | "is not one you are syncing" and "no longer a project you sync" refusals and the "no projects ticked" banner: replaced (youtube-Q11).
 - YTD-047 | long file lists never going on a command line: an arrangement.
 - YTD-051 | a mismatched credits format refusing the job: an arrangement of versions; the promise (identical clip from any computer) is kept.
+
+- 04-033 | the app's own "Accept YouTube Terms" control and its messages: cut by the owner (2026-11-24, youtube-Q20).
+- 08-034 | the per-computer setting naming a cookies file elsewhere: cut by the owner (2026-11-24, youtube-Q2).
+- 01-073, 26-051 | "Stop local downloads" in the app's status and DOWNLOAD ON THE SERVER INSTEAD on the page: cut by the owner (2026-11-24, youtube-Q6).
+- 26-049 | the site switch for downloads on editors' computers: cut by the owner (2026-11-24, youtube-Q4).
+- 08-024 | the per-computer count of identical failures before stopping (default 3, 0 turns it off): a setting only the build would tune; the stop after three is kept.
+- 08-042, 09-017 | how often to look for clips to file (60 seconds): a setting only the build would tune; the figure is kept.
+- 08-042, 09-017 | how long a clip must settle before filing (2 minutes): a setting only the build would tune; the figure is kept.
+- 08-042, 09-017 | how many failed filings before giving up (3): a setting only the build would tune; the figure is kept.
 
 ## Joins with other capabilities
 

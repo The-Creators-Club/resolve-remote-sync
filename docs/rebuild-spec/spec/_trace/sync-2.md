@@ -8,7 +8,7 @@
 - 02-022 | The app and the dashboard show the same live picture of what is moving
 - 02-029 | How a sync that did not simply succeed is shown
 - 03-010 | An interrupted upload never leaves a broken file where a good one is expected
-- 03-021 | The app and the dashboard show the same live picture of what is moving ; The app and the dashboard say when a computer's connection goes the slow way round
+- 03-021 | The app and the dashboard show the same live picture of what is moving ; The app and the dashboard say which way a computer's transfers go, and how fast
 - 03-031 | A file changed in two places at once keeps both versions
 - 03-041 | Syncing comes back by itself when it stops running ; The app and the dashboard show the same live picture of what is moving
 - 04-012 | The app's menu says in one phrase what syncing is doing now
@@ -38,11 +38,11 @@
 - 20-063 | The dashboard lists what each computer still owes, and never claims "nothing" when it cannot tell
 - 03-003 | A change starts syncing within about a minute, and an idle studio barely touches the NAS
 - 02-013 | A remote editor's downloads take the studio's fastest path, and an admin can choose it
-- 03-009 | A computer can be set to sync one project at a time, everything in it included
+- 03-009 | left out: cut by the owner (2026-11-24, sync-2-Q1)
 - 09-008 | A remote editor's downloads take the studio's fastest path, and an admin can choose it
-- 12-038 | The app and the dashboard say when a computer's connection goes the slow way round ; An interrupted upload never leaves a broken file where a good one is expected
+- 12-038 | The app and the dashboard say which way a computer's transfers go, and how fast ; An interrupted upload never leaves a broken file where a good one is expected
 - 16-057 | Footage travels only over the studio's own private network
-- 27-033 | left out: for the builders only (what it states for a person, a relayed route being shown, is written into "The app and the dashboard say when a computer's connection goes the slow way round")
+- 27-033 | left out: for the builders only (what it states for a person, a relayed route being shown, is written into "The app and the dashboard say which way a computer's transfers go, and how fast")
 - 02-002 | A file is sent only once it has stopped changing
 - 02-006 | A new proxy on the server is brought down only once it has stopped changing
 - 02-034 | Files dated in the future are shown to the editor until their date is fixed
@@ -86,13 +86,14 @@
 - Options: A: cut it; every ticked project's files keep syncing. B: keep it as a per-computer setting an admin can turn on.
 - Recommend: A, because nobody uses it and a setting nobody needs is a moving part with nothing to show for it.
 - Changes for a person: with A nothing changes for anyone; with B an admin gains one more per-computer setting.
-- Text assumes: B, written in its place and marked pending, to be deleted if you choose A
+- Text assumes: A (the passage is deleted)
 - Items: 03-009
 - Covers: 03-Q2
+- Answered by the owner 2026-11-24: A, the mode is cut; every ticked project's files keep syncing.
 
 ### sync-2-Q2: Should footage always travel only over the studio's own private network, never through outside relay services, with the NAS never announcing itself publicly?
 - Kind: unreachable
-- Today: a setting meant to keep the NAS's file sharing off outside relays and public announcement exists on the server, but nothing applies it, so nobody can turn it on.
+- Today: a setting meant to keep the NAS's file sharing off outside relays and public announcement exists on the server, but nothing applies it, so nobody can turn it on. This question waits on the speed measurements the owner has asked for (computers in other countries included), since the fastest way to a far-off computer may run through an outside service.
 - Options: A: always so, no setting. B: a setting an admin can turn on. C: drop the idea.
 - Recommend: A, because footage of clients should never pass through someone else's service, and one fixed rule is fewer parts than a switch; it matches your earlier decision that the studio's private network is the only way in.
 - Changes for a person: with A nothing to set; a remote editor whose computer cannot reach the studio's private network directly is shown the slow-route warning instead of silently going through a relay.
@@ -109,6 +110,7 @@
 - Text assumes: left out
 - Items: 27-033
 - Covers: 27-Q6
+- Answered by the owner 2026-11-24: A, the tool is left out; what it proves for a person stays in the promises on speed.
 
 ## Readers' questions and unsettled points
 

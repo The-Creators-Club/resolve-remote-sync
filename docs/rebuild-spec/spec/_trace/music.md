@@ -81,8 +81,9 @@
 - Options: A: high end only. B: each slider can ask for either end, for example calm or intense, with off in the middle.
 - Recommend: B, since calm and dark beds under interviews are a common ask and it costs no extra control.
 - Changes for a person: with B an editor can ask for the calmest or darkest tracks directly.
-- Text assumes: A
+- Text assumes: B
 - Items: 25-008
+- Answered by the owner 2026-11-24: B, each feel slider can ask for either end, off in the middle
 - Covers: 25-Q3
 
 ### music-Q2: Should the library's upkeep happen on its own: analysing new and changed files, making listening copies, and removing tracks whose files have gone?
@@ -93,6 +94,7 @@
 - Changes for a person: with A nobody runs anything; an admin is asked only when a removal looks too large.
 - Text assumes: A
 - Items: 25-019, 25-045
+- Answered by the owner 2026-11-24: A, upkeep happens on its own, a large removal held until an admin confirms
 - Covers: 25-Q5
 
 ### music-Q3: Each track's loudness is measured; should it be shown on the track, or used as a filter?
@@ -101,8 +103,9 @@
 - Options: A: measured, not shown. B: shown beside tempo and key on the track. C: shown and filterable like tempo.
 - Recommend: B, since it is already measured and costs only a figure on the row.
 - Changes for a person: with B an editor sees how loud a track is before placing it; with C they can also narrow by it.
-- Text assumes: A
+- Text assumes: B
 - Items: 25-043
+- Answered by the owner 2026-11-24: B, loudness shown beside tempo and key on the track row
 - Covers: 25-Q6
 
 ### music-Q4: May the builders' check of tagging and search quality go from the product?
@@ -113,6 +116,7 @@
 - Changes for a person: none.
 - Text assumes: left out
 - Items: 25-046
+- Answered by the owner 2026-11-24: A, the builders' check is left out
 - Covers: 25-Q7
 
 ### music-Q5: Should a tag be pickable both from the tag lists and from the tags shown on a track row?
@@ -123,6 +127,7 @@
 - Changes for a person: with B, tags on a row are labels only.
 - Text assumes: A
 - Items: 25-011
+- Answered by the owner 2026-11-24: A, a tag can be picked from the tag lists and from a track row
 
 ### music-Q6: Should "similar" be offered both on a track row and in its open player?
 - Kind: several ways in
@@ -132,6 +137,7 @@
 - Changes for a person: with B, a person listening must look back to the row.
 - Text assumes: A
 - Items: 25-017
+- Answered by the owner 2026-11-24: A, "similar" on the track row and in the open player
 
 ### music-Q7: Should a drop be pausable, resumable and cancellable both from the music page and from the app on the editor's computer?
 - Kind: several ways in
@@ -141,6 +147,7 @@
 - Changes for a person: with B, an editor must open the music page to pause work on their own computer.
 - Text assumes: A
 - Items: 25-035, 04-054, 01-069
+- Answered by the owner 2026-11-24: A, a drop is controlled from the music page and from the app on the editor's computer
 
 ## Readers' questions and unsettled points
 
@@ -164,7 +171,6 @@
 
 ## Still unsettled
 
-- music-U2 | whether leaving out recorder takes, voiceover, short stings and recordings over 15 minutes applies to a person's own drop or only to looking over the library folder as a whole (a lesson also says music of any length, two hours and more, is indexed) | only to the library-wide look-over; a dropped track is taken whatever its length | 25-023, 25-045
 
 ## Conflicts between an item and a lesson
 
@@ -228,3 +234,7 @@
 ## Settled from the present product
 
 - music-U1 | the margin is about 200 MB
+
+## Settled by the owner 2026-11-24
+
+- music-U2 | recorder takes, voiceover, stings shorter than 30 seconds and recordings longer than 15 minutes are left out only when the product looks over a whole folder of mixed audio; a track a person drops in by hand is always taken, whatever its length

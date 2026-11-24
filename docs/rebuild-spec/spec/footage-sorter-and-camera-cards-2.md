@@ -47,7 +47,6 @@ A path spelled with a Mac's decomposed accents and the same path spelled the Win
 
 - On its own: whether two copies are the same recording, from the camera's recording id, else name, size and time as above.
 - By hand: an admin answering "where did these go?" links missing copies to their twins on another drive or the same drive (see "Footage that vanishes from a drive raises one question per folder"); a link set that way is never undone by a later scan.
-- Pending: footage-sorter-and-camera-cards-2-Q1
 
 ### Every place a copy was ever seen is kept
 
@@ -61,15 +60,13 @@ Every computer of the studio tells the record which drives, cards and fixed disk
 
 A new drive is listed as untracked, "Plugged in somewhere and reported, but not tracked yet", with its label, size, free space, computer, drive letter, file system and whether it is plugged in now. A computer's own system drive is never offered as a new drive.
 
-A tracked drive (never a system drive) that is plugged in is scanned on its own, once during that plug-in, when it has never been scanned, its free space differs from its last scan, or its last scan is older than the rescan period. A watched folder on a plugged-in drive is scanned when it has never been scanned or its last scan is older than its own interval. While a tracked drive stays plugged in, new files on it appear in the record within about half a minute without a full rescan, but only once a file is unchanged across two looks, so a file still being copied never appears half-written. A drive is only ever scanned once at a time, and a scan stops by itself when a copy starts reading from that same drive, then runs again afterwards. A scan that could not start is tried again the next time that computer is heard from. Unplugging a drive, or a missing top folder, removes nothing from the record.
+A tracked drive (never a system drive) that is plugged in is scanned on its own, once during that plug-in, when it has never been scanned, its free space differs from its last scan, or its last scan is older than 24 hours. A watched folder on a plugged-in drive is scanned when it has never been scanned or its last scan is older than its own interval. While a tracked drive stays plugged in, new files on it appear in the record within about half a minute without a full rescan, but only once a file is unchanged across two looks, so a file still being copied never appears half-written. A drive is only ever scanned once at a time, and a scan stops by itself when a copy starts reading from that same drive, then runs again afterwards. A scan that could not start is tried again the next time that computer is heard from. Unplugging a drive, or a missing top folder, removes nothing from the record.
 
 Adding a drive or a folder to the record is one action, and from then on, each time it appears on any of the studio's computers, its changes reach the record without anyone asking.
 
 - On its own: which plugged-in drives and folders are scanned, from whether they were ever scanned, their free space and the age of their last scan.
 - By hand: an admin scans any drive, folder, the NAS or the cloud backup at once (see "An admin scans a drive, the NAS or the cloud backup now").
-- Setting: Rescan period for tracked drives. Does: how old a drive's last scan may be before plugging it in scans it again. Default: 24 hours. Who: an admin. Applies to: the site. Search words: rescan, drive scan, period, plugged in.
 - Setting: Tell the studio about this computer's drives. Does: whether this computer lists its drives and their tracked files for the record of every copy. Default: on. Who: an admin, or the person whose computer it is. Applies to: a computer. Search words: drive reporting, drives, privacy, record.
-- Pending: footage-sorter-and-camera-cards-2-Q2
 
 ### An admin tracks a drive by saying what it is and whose it is
 
@@ -91,12 +88,11 @@ Buttons: Cancel; Untrack, when editing ("Stop tracking <drive>? Its recorded cop
 
 A watched folder is one folder on one drive, scanned on its own schedule ("A watched folder is rescanned whenever its drive is visible, for example the field backup on a laptop."). It works on drives that are not tracked whole, and it is the only way a computer's system drive is ever scanned or backed up.
 
-To watch a folder an admin chooses the computer (every computer that reported a drive; "No machine has reported a drive yet."), the drive (shown with sizes), the folder (a drive letter and leading slashes are stripped; blank is the whole drive), an optional name (up to 120 characters) and how often to rescan it, in minutes. "Watch it" refuses without a drive ("Choose the drive first."). A drive must have been seen by some computer first, else the admin is told so, except a system drive that is plugged in right now. Refusals: a whole system drive ("the system drive can only be watched folder by folder, never as a whole"); the same folder twice ("already watching <folder> on <drive>"). On success: "Watching <name>.", and the folder is scanned at once when its drive is plugged in; a failure shows "Could not add the folder: <reason>".
+To watch a folder an admin chooses the computer (every computer that reported a drive; "No machine has reported a drive yet."), the drive (shown with sizes), the folder (a drive letter and leading slashes are stripped; blank is the whole drive), an optional name (up to 120 characters). "Watch it" refuses without a drive ("Choose the drive first."). A drive must have been seen by some computer first, else the admin is told so, except a system drive that is plugged in right now. Refusals: a whole system drive ("the system drive can only be watched folder by folder, never as a whole"); the same folder twice ("already watching <folder> on <drive>"). On success: "Watching <name>.", and the folder is scanned at once when its drive is plugged in, then every 60 minutes while it stays plugged in; a failure shows "Could not add the folder: <reason>".
 
 Each watched folder is listed with its name or folder ("(whole drive)"), "visible now" (its drive is plugged in on the watch's own computer) or "not visible", "<drive> / <folder> · <computer>", "every <n> min · last scan <ago>" or "not scanned yet", how many files the last scan found, and its automatic-backup line. A scan of the whole drive, or of a folder containing the watch, updates it too. An admin can switch its automatic backup on or off, scan it now, or remove it ("Stop watching <folder>? Its copies stay in the record."; then "No longer watching <folder>."). Removing a watch keeps every copy it found.
 
 - Who: an admin adds, changes and removes; anyone signed in sees the list.
-- Setting: Rescan interval of a watched folder. Does: how often a watched folder is scanned while its drive is plugged in. Default: every 60 minutes, at least 5 minutes, at most 7 days. Who: an admin. Applies to: a computer (one of its folders). Search words: watched folder, rescan, interval, field backup.
 
 ### Drives and folders back themselves up to the NAS when they are at home
 
@@ -178,13 +174,11 @@ The laptop keeps its own copy of what the record knew, when it last reached it, 
 The page's record section shows "Waiting to send: <n> copies", "Last tried: <how long ago>" or "not yet", and "Record on this laptop: <n> copies, updated <how long ago>" or "never", with the last attempt's problem or "No dashboard is set up here. Copies are kept on this laptop." Sending and refreshing happen on their own when a copy finishes and every 5 minutes while the page is open and nothing is copying; "Send and refresh now" ("Sending..." while it runs; unavailable while one runs or with no dashboard set up) does it at once, and the page refreshes 1.5 seconds later. Messages: "No dashboard is set up on this computer."; "The dashboard could not be reached. Copies are kept here and sent when it can."; "The record was not refreshed: <error>"; "Could not sync: <error>". When the studio cannot be reached, the laptop's copy stays as it was. Every verified copy the page makes reaches the studio's record, whatever its destination, the NAS included.
 
 - Who: a person at that computer.
-- Pending: footage-sorter-and-camera-cards-2-Q2
 
 ### The NAS's footage tree is walked every night and after each clean move
 
 The whole footage tree of the NAS is walked every night at 04:30 on the NAS's clock, after every move that finished cleanly, and when an admin presses scan now on the NAS. Only one walk runs at a time. It skips the folders the record never looks into and any folders an admin lists to leave out (paths inside the NAS tree, letter case ignored); left-out and unreadable folders are not judged, and the rest of the tree still is. It records the NAS's total and free space. Its progress updates about once a second. Refusals say that no NAS footage tree is set up, so the NAS cannot be scanned; that the NAS tree is not reachable; or that it cannot be read, with the error. When the nightly walk cannot run, that is shown as the last walk's outcome on the activity panel.
 
-- Setting: Nightly NAS walk time. Does: when the whole NAS footage tree is walked each night. Default: 04:30 on the NAS's clock. Who: an admin. Applies to: the site. Search words: NAS scan, nightly, walk, time.
 - Setting: Folders the NAS walk leaves out. Does: folders inside the NAS footage tree that are never walked or judged. Default: none. Who: an admin. Applies to: the site. Search words: exclude, leave out, NAS folders, skip.
 
 ### The drives list shows every drive that holds footage
@@ -268,9 +262,8 @@ While the page is visible it checks for changes about every 30 seconds, every 2 
 
 ### The record survives losing the NAS
 
-Every day, and whenever an admin presses back up now, a consistent copy of the record is taken and checked for damage; a damaged copy is deleted and the error shown. The Sorter's own settings and sorting plan (not its pictures or caches) are copied alongside. They go into the folder the NAS carries to the cloud backup when one is set up, else beside the record. The newest 7 days are kept and older ones deleted. The last result (time, size, whether it worked, error, number of files) is shown with the activity and the cloud backup's status.
+Every day at 04:00 on the NAS's clock, and whenever an admin presses back up now, a consistent copy of the record is taken and checked for damage; a damaged copy is deleted and the error shown. The Sorter's own settings and sorting plan (not its pictures or caches) are copied alongside. They go into the folder the NAS carries to the cloud backup when one is set up, else beside the record. The newest 7 days are kept and older ones deleted. The last result (time, size, whether it worked, error, number of files) is shown with the activity and the cloud backup's status.
 
-- Setting: Daily backup of the record. Does: when each day the record of every copy and the sorting plan are copied into the cloud-carried folder. Default: 04:00 on the NAS's clock. Who: an admin. Applies to: the site. Search words: record backup, ledger backup, daily, restore.
 
 ### The NAS's footage goes to the cloud backup every night
 
@@ -292,30 +285,20 @@ A tape is a place in the record like a drive, identified by its barcode, never b
 
 The Sorter reads shoots from the studio's online calendar (Google Calendar for this studio), with read-only access. Connecting opens the calendar provider's sign-in in a new tab; the page says "Waiting for Google in the other tab…" and waits up to 3 minutes: "Connected to Google Calendar as <account>", or "Gave up waiting. If the tab is still open, finish there and press Connect again." The sign-in link works once and expires after 10 minutes. The tab it returns to says "Connected to Google Calendar", "Signed in as <account>." (or "Signed in."), "You can close this tab. The sorter is already syncing."; or "Not connected" with what the provider said; or "The sign-in link had expired or was not started from this app. Try again from the sorter." When the server has not been set up to sign in to the provider, the calendar settings say "Not configured" with the admin's set-up steps, and offer only Close.
 
-The calendar settings show a status, "Connected as <account> · synced <ago> · <n> events", "Reading the iCal export - not connected to Google" or "Not connected", with any error; one tick per calendar on the account, the main one ticked by default ("Reading your calendars…", "Not connected yet - press Connect.", "Could not list the calendars", "No calendars on that account.", "Press Connect to sign in with Google."); Refresh every 5, 15, 30 or 60 minutes; and From date ("Ignore anything scheduled before this day"). Sync now says "Synced - <n> events"; Save says "Calendar settings saved - <n> events" and stays open. Disconnect asks first, "The sorter will stop refreshing events. Bindings and assignments are untouched.", then forgets the access and the events at once (nothing is revoked on the provider's side). Failures are shown in the dialog.
+The calendar settings show a status, "Connected as <account> · synced <ago> · <n> events", "Not connected", with any error; one tick per calendar on the account, the main one ticked by default ("Reading your calendars…", "Not connected yet - press Connect.", "Could not list the calendars", "No calendars on that account.", "Press Connect to sign in with Google."); and From date ("Ignore anything scheduled before this day"). Sync now says "Synced - <n> events"; Save says "Calendar settings saved - <n> events" and stays open. Disconnect asks first, "The sorter will stop refreshing events. Bindings and assignments are untouched.", then forgets the access and the events at once (nothing is revoked on the provider's side). Failures are shown in the dialog.
 
-While connected, events are fetched again every refresh interval and on request, from the start date to one year after it, from each chosen calendar. Every occurrence of a repeating event within that window is its own event, marked repeating, and a changed single occurrence replaces it. Cancelled and undated events are left out. An all-day event runs from midnight of its first day to midnight after its last. Event times are read and shown in the studio's time zone. If a fetch fails, the error is shown and the last events are used, so the Sorter keeps working offline. If the provider withdraws access, every calendar action says "Google access was revoked or expired" with the reason until someone connects again.
+While connected, events are fetched again every 15 minutes and on request, from the start date to one year after it, from each chosen calendar. Every occurrence of a repeating event within that window is its own event, marked repeating, and a changed single occurrence replaces it. Cancelled and undated events are left out. An all-day event runs from midnight of its first day to midnight after its last. Event times are read and shown in the studio's time zone. If a fetch fails, the error is shown and the last events are used, so the Sorter keeps working offline. If the provider withdraws access, every calendar action says "Google access was revoked or expired" with the reason until someone connects again.
 
-The page header always shows the calendar's state: connected, "● Google · synced <n> min ago" ("just now", "<n> h ago", "<n> d ago", "never synced"; the "ago" text updates every minute), with the account, "<n> events · every <n> min" and "Click for calendar settings" on hovering; failing or revoked, "● Google · reconnect" with the error, and each new failure shown once as "Calendar: <error>" for 9 seconds with Fix; reading an export file, "○ iCal export (manual)" (it does not refresh itself; connecting the calendar would); nothing, "Connect Google Calendar" ("No calendar - suggestions have nothing to go on. Click to connect.").
+The page header always shows the calendar's state: connected, "● Google · synced <n> min ago" ("just now", "<n> h ago", "<n> d ago", "never synced"; the "ago" text updates every minute), with the account, "<n> events" and "Click for calendar settings" on hovering; failing or revoked, "● Google · reconnect" with the error, and each new failure shown once as "Calendar: <error>" for 9 seconds with Fix; nothing, "Connect Google Calendar" ("No calendar - suggestions have nothing to go on. Click to connect.").
 
 - Who: an admin connects, disconnects and changes the settings; anyone signed in sees the status and the calendars and may ask for a sync now.
 - Ways in: the calendar state in the page header, the calendar settings, the refresh on the events list.
 - Setting: Calendars the Sorter reads. Does: which of the account's calendars count as shoots. Default: the account's main calendar. Who: an admin. Applies to: the site. Search words: calendar, shoots, Google, events.
-- Setting: Calendar refresh. Does: how often events are fetched again. Default: every 15 minutes, at least every 5 minutes, at most every 24 hours. Who: an admin. Applies to: the site. Search words: calendar refresh, sync, interval, events.
 - Setting: Calendar start date. Does: events scheduled before this day are ignored; events are read up to one year after it. Default: 1 April 2026. Who: an admin. Applies to: the site. Search words: from date, calendar start, ignore before, events.
-- Pending: footage-sorter-and-camera-cards-2-Q3
-
-### Without a connected calendar, events can come from a calendar export file
-
-When no online calendar is connected, events are read from a calendar export archive (the archive the provider's export gives) that an admin points the Sorter at, naming which calendar in it to read. Times stated in UTC are kept; times naming a zone, or none, are read as the studio's time; date-only events are all-day; an all-day event with no end lasts one day, a timed one with no end has no length, and an end before the start is ignored. Every occurrence of a repeating event within the read window is expanded, as for a connected calendar. A broken archive is reported with a plain reason: not an archive, damaged, unsupported compression, or no calendar of the expected name. It does not refresh itself; Sync now reads it again.
-
-- Who: an admin.
-- Setting: Calendar export file. Does: the exported calendar archive, and the calendar in it, that events are read from when no calendar is connected. Default: none. Who: an admin. Applies to: the site. Search words: iCal, export, calendar file, offline.
-- Pending: footage-sorter-and-camera-cards-2-Q4
 
 ### The events list shows every shoot on the calendar by day
 
-The events list carries a count of all events (hidden at zero), "Calendar events", a refresh ("Refresh the calendar now", which fetches from the connected calendar or reads the export again and says "Calendar refreshed - <n> events", or "Could not refresh the calendar"; disabled while working) and "<n> bound / <total>". A filter box ("Filter events…") matches title, place, bound folder and start time. Events are listed by start under day headings, each with its time range or "all day", its title ("(no title)") and place.
+The events list carries a count of all events (hidden at zero), "Calendar events", a refresh ("Refresh the calendar now", which fetches from the connected calendar and says "Calendar refreshed - <n> events", or "Could not refresh the calendar"; disabled while working) and "<n> bound / <total>". A filter box ("Filter events…") matches title, place, bound folder and start time. Events are listed by start under day headings, each with its time range or "all day", its title ("(no title)") and place.
 
 Each event's folder control shows the bound folder; or the folder read from the title, marked as a guess; or "Bind folder…". On hovering: "Bound to <dest> - click to change"; "Read from the title: <reason> / Already suggesting clips. Click to change, or ✓ to lock it in."; "Bind this event to a destination folder to generate suggestions". "<n> suggested" ("Select the <n> suggested clips") clears the search, camera, date, kind, status, source folder and event filters, selects that event's unassigned suggested clips, scrolls to them and says "<n> clips selected - drag them onto a folder, or press Accept suggestions." Clicking an event's title filters the clips to that event; clicking again removes the filter. Empty: "No events match the filter." or "No calendar events loaded."
 
@@ -324,7 +307,7 @@ Each event's folder control shows the bound folder; or the folder read from the 
 
 ### The studio's episodes, naming rules and roster
 
-Three pieces of studio data tell the Sorter where each shoot's footage belongs. An admin manages them in the Sorter's settings, and a change takes effect within the calendar refresh interval with nothing restarted.
+Three pieces of studio data tell the Sorter where each shoot's footage belongs. An admin manages them in the Sorter's settings, and a change takes effect within 15 minutes with nothing restarted.
 
 - **Episodes**: the season's top folder, each episode, its short names, and the folder layout under an episode (its "B-roll" and "Interviewees" branches and its standard subfolders).
 - **Title rules**: patterns on event titles that skip an event or set its kind, person, episode, the name of its interviewees branch, or send it to a whole destination outside the episode tree. Patterns match any letter case, in any script. A rule that cannot be used is shown as broken, with why, and is not applied.
@@ -340,7 +323,6 @@ With no episodes set up nothing is placed on its own and no misses are listed. A
 - Setting: Title rules. Does: patterns on calendar titles that skip an event or decide its kind, person, episode or folder. Default: none. Who: an admin. Applies to: the site. Search words: rules, patterns, event titles, routing.
 - Setting: Roster. Does: who appears in which episode, by Chinese and English name. Default: empty. Who: an admin. Applies to: the site. Search words: roster, interviewees, people, planning sheet.
 - Setting: Standard subfolders of an episode. Does: the folders every episode is given when its skeleton is planned. Default: "B-roll" and "Interviewees". Who: an admin. Applies to: the site. Search words: subfolders, skeleton, layout, episode folders.
-- Pending: footage-sorter-and-camera-cards-2-Q5
 
 ### The Sorter places each calendar event in a folder on its own
 
@@ -423,7 +405,6 @@ The review is headed "<n> clip(s) · <size> into <n> folder(s)", with notes "<n>
 
 The suggestions menu (enabled when a selected clip has a suggestion) is headed "<n> of <m> selected clip(s) has/have suggestions" and lists every folder that is a suggestion or alternative for any selected clip, most clips first, each with "<event> · <n> of <m> clips (<k> as first choice)" and a way to show that folder in the tree. Choosing one assigns only the selected clips that have it among their own choices: "Assigned <n> clip(s) to <folder> · skipped <k> without that suggestion" for 12 seconds with Undo, which restores every clip exactly as it was. Otherwise: "None of these clips has <folder> as a suggestion." or "The selected clips have no suggestions."
 
-With clips selected and no modifier key, ] moves each selected clip to the next of its own choices (its suggestion, then each alternative, wrapping round) and [ to the previous; a clip on none of its choices goes to the first with ] or the last with [. Then "Next|Previous suggestion for <n> clip(s) · <k> have none" for 12 seconds with Undo. With nothing to do: "No suggestion to move to."
 
 - Who: anyone signed in.
 
@@ -436,8 +417,7 @@ Each change shows at once, with the count and the folders and time folders it pr
 A folder lists the clips assigned to it but not yet there, drawn with a dashed outline at lower opacity, beside the clips already in it.
 
 - Who: anyone signed in.
-- Ways in: dragging clips onto a folder, double-clicking a folder row (not its name) with clips selected, Assign to… with the folder picker, a clip's own suggestion, Accept suggestions, the suggestions menu, the [ and ] keys, the alternatives in the clip menu, "Use this instead" in the clip's details, the audio worklist, and dropping files from the file manager onto a folder. The row under the pointer is highlighted. The root takes no clips.
-- Pending: footage-sorter-and-camera-cards-2-Q7
+- Ways in: dragging clips onto a folder, Assign to… with the folder picker, a clip's own suggestion, Accept suggestions, the suggestions menu, Assign in a recording's detail or the audio worklist, and dropping files from the file manager onto a folder. The row under the pointer is highlighted. The root takes no clips.
 
 ### Files dragged in from the file manager are found in the library and join the plan
 
@@ -489,7 +469,6 @@ Two actions fill the plan from the studio's data, each with a rehearsal first th
 - **Plan a folder for every interviewee on the roster**: every person on the roster gets a held folder "<Chinese> <English>" in their episode's Interviewees folder (shown greyed, not created until a clip lands). The episode's Interviewees folder is the one that already holds clips (shortest path wins), else any such folder (flagged "nothing is filed here, check this"), else the standard place; an admin can pin one per episode. A person already filed under that episode (a folder holding clips whose path contains their Chinese name, or their English name of 5 or more characters) is left alone, and a near-identical existing folder is reused. A person on the roster of several episodes shows greyed in the others. It reports people, already filed, to plan, skipped rows, folders per episode, "<n> folder(s) still empty - held as placeholders: shown greyed out in the tree, and NOT created on disk until a clip lands in one.", and "No assignment was touched." It needs a roster (an empty one is refused) and the episodes.
 
 - Who: an admin.
-- Pending: footage-sorter-and-camera-cards-2-Q6
 
 ### The missing-footage checks
 
@@ -557,7 +536,7 @@ Every planned folder is created, even with nothing moving into it, so an episode
 
 A file whose destination already holds the identical file (same size, and for files of 64 MB or less the same content) is not moved and is listed as "already there"; of two identical files headed for the same place (the same card staged twice) only one moves, and the other is listed. Anything not identical (a different file already at the destination, or two different files for one name) is a **collision**; an unreadable file counts as not identical. A collision is never resolved on its own.
 
-Under each destination folder a person can see what is headed for it before it arrives: assigned clips not yet there are drawn dashed and dimmed, and the time folders they will make are shown (see "Footage is filed in day-and-camera time folders"). There is no deliberate wait before a move: a sorted clip moves as soon as its checks pass, so what a person sees as "about to move" is whatever is still waiting for its turn, for its checks, or for a safe copy.
+Under each destination folder a person can see what is headed for it before it arrives: assigned clips not yet there are drawn dashed and dimmed, and the time folders they will make are shown (see "Footage is filed in day-and-camera time folders"). There is no deliberate wait before a move: a sorted clip moves as soon as its checks pass, so what a person sees as "about to move" is whatever is still waiting for its turn or for its checks.
 
 - Setting: Layout inside a destination folder. Does: whether a clip's files are laid out by the studio's convention or keep their layout from the card. Default: the studio's convention. Who: an admin. Applies to: the site. Search words: layout, proxy folder, convention, keep layout.
 
@@ -576,7 +555,6 @@ Every move keeps these promises:
 - **It never deletes, never copies over and never overwrites.** An existing file at a destination is never replaced, a source folder emptied by a move is left in place and listed, and nothing is ever removed.
 - **It is checked just before and just after each item.** Just before, the destination is still free and the source still there at its recorded size; just after, the destination exists with the right size and the source is gone.
 - **A clip that clashes is held back whole and shown to a person, while the clean clips move.** Every held-back clip is listed in "Held back" with each reason and its clashing files (up to 500 shown, with the total), and stays exactly where it is until a person decides: sorts it elsewhere, or clears the clash and presses Try again.
-- **Footage that is not yet safely copied does not move.** A clip moves only once the record holds a verified copy of it, other than the one being moved, that counts as a backup (on one of the studio's own drives or in the cloud backup). Until then it is held with "waiting for a safe copy", and moves by itself once one exists.
 - **Nothing moves while the NAS looks wrong.** No move starts while the NAS's footage tree cannot be reached or read, while its last walk was unfinished or treated as a bad scan, or while what is on disk differs from what the checks found ("the disk changed since it was checked: nothing was moved"). The Sorter shows "Moves paused: <reason>" and carries on by itself once the NAS looks right again.
 - **Every move is recorded and can be seen and undone by hand** (see "What was moved can be seen, moved elsewhere or put back").
 
@@ -588,6 +566,7 @@ The first failure stops that run and undoes nothing. The failed clip is held bac
 - On its own: where each file lands, from the clip's folder, its layout and its time folder.
 - By hand: a person sees every move and moves any clip somewhere else or puts it back (see "What was moved can be seen, moved elsewhere or put back"); a place set by hand is never changed by a later automatic pass.
 - Who: anyone signed in sees moves and held-back clips; the move itself needs nobody.
+- Pending: footage-sorter-and-camera-cards-2-Q12
 
 ### What was moved can be seen, moved elsewhere or put back
 
@@ -687,7 +666,7 @@ The clues, each proposing a folder with a score:
 | What is said matches one of the studio's interview transcripts, compared in runs of four words (each Chinese character counts as a word), counted from 6 % and 25 shared runs | 0.85, rising to 0.95 from 25 % and 120 shared runs; 0.55 from 12 % and 60 runs; else 0.3. The top 4 transcripts are shown: "<n>% of what was said is in the transcript of <name> (<episode>)" |
 | A roster name heard on the recording | 0.72, or 0.35 when only part of an English name was heard; a name on two episodes gives a 0.4 note with no folder. The quote (up to 90 characters) and its time are shown |
 | Someone introducing themselves | 0.6 with a folder, 0.3 without ("Said: …"; up to 6 introductions, quotes up to 120 characters) |
-| The calendar's suggestion, when the recording has a believable date | 0.7 if high confidence, else 0.35 |
+| The calendar's suggestion, when the recording has a believable date (a year from 2024 to 2027) | 0.7 if high confidence, else 0.35 |
 | The recorder's clock overlaps the clips of a shoot folder (the recording's span padded by 15 minutes; clips that started up to 4 hours earlier count), ranked by real overlap, then padded overlap, with clip and camera counts | 0.8 when exactly one folder really overlaps, else 0.4 |
 | Its sound matches the cameras' sound in a shoot folder | 0.6 plus half the best peak, at most 0.99 |
 
@@ -706,24 +685,15 @@ New interview transcripts are taken into account within about 15 seconds of appe
 - On its own: whether a filed recording disagrees with where it is filed, from identical files and transcripts.
 - By hand: a person sees every candidate with its evidence, sets the folder and the start, and approves, rejects or reassigns (see "A person decides a recording's folder and start"); a decision set by hand is never overwritten by a later pass.
 - When Timeline Cards is off: the studio's interview transcripts are not compared; every other clue still works.
-- Setting: Believable recorder dates. Does: which years count as a real recorder date; a recording dated outside them is placed by its sound and words only. Default: 2024 to 2027. Who: an admin. Applies to: the site. Search words: recorder clock, wrong date, field audio, years.
-- Setting: Time window for sound matching. Does: how far either side of a recording's estimated time the cameras' sound is searched. Default: 15 minutes. Who: an admin. Applies to: the site. Search words: sound matching, waveform, window, recorder.
 
 ### Every sound recording is listened to for names and introductions
 
 Every sound recording that arrives is listened to on its own, as heavy work on one of the studio's computers able and free (see Work shared out across the computers), with no one starting it. The whole recording is used, not only its start, so a name said late is still found. Recordings with an identical copy elsewhere go last, otherwise smallest first. Work is kept as it goes: a recording already heard is not heard again unless asked, and a file that moved (same name, size, and length within 1 second) reuses what was heard. Missing files and files under 5 seconds are skipped.
 
-A roster person's Chinese name (3 or more syllables) matches when heard with the same sounds, even written with other characters; an English name matches whole, or by two of its parts of 5 or more letters; a single usable part is a weak "partial" match; a name in two episodes is marked ambiguous. Self-introductions are recognised from "我是", "我叫", "這位是", "我們今天訪問", "my name is", "I am called", and "we are" followed by an organisation. A name only mentioned, not used to introduce someone, is never credited as the speaker. Guesses are marked as guesses, and recordings that cannot be attributed are reported as such. Each finding keeps its quote and its time. Listening never assigns anything.
+A roster person's Chinese name (3 or more syllables) matches when heard with the same sounds, even written with other characters; an English name matches whole, or by two of its parts of 5 or more letters; a single usable part is a weak "partial" match; a name in two episodes is marked ambiguous. Self-introductions are recognised from "我是", "我叫", "這位是", "我們今天訪問", "my name is", "I am called", and "we are" followed by an organisation. A name only mentioned, not used to introduce someone, is never credited as the speaker. Guesses are marked as guesses, and recordings that cannot be attributed are reported as such. Each finding keeps its quote and its time. Every recording is transcribed in full, with its language identified and speakers told apart, and camera clips with at least 20 seconds of sound are transcribed too. A recording and a camera clip that share enough of their words (runs of 4 words, or 6 characters in Chinese and Japanese; at least 3 runs and 5 % of the shorter) give the recording's folder and start, which is then confirmed by matching sound around that start against every clip in that folder. Listening never assigns anything.
 
 - On its own: who is named or introduces themselves on a recording, from what is heard.
 - By hand: a person reads the transcript, plays any line and assigns the recording anywhere (see "One recording's detail shows who it could be and plays it against the cameras").
-
-### Recordings still unplaced can be transcribed in full for a fee
-
-Recordings still unmatched, ambiguous, estimated or placed by time only, and every camera clip with at least 20 seconds of sound not already covered by a placed recording (one starting within 5 seconds of a placed recording's span in the same folder is covered), can have their first 10 minutes transcribed by a paid outside service, with the language identified and speakers told apart. The person is first told "<n> recordings and <m> clips to transcribe (<h> h of audio, about $<cost>); already done: …" and nothing is spent unless they confirm. Already transcribed files are not done again, and the service's copies are deleted after each one. Without the service's key the person is told to set it first. A recording and a clip that share enough of their words (runs of 4 words, or 6 characters in Chinese and Japanese; at least 3 runs and 5 % of the shorter) give the recording's folder and start, which is then confirmed by matching sound around that start against every clip in that folder. Up to 20 errors are reported with the count. When paid credit runs out partway, every finished transcript is kept and the rest are finished with the product's own transcription, unattended, skipping what is done.
-
-- Who: an admin.
-- Pending: footage-sorter-and-camera-cards-2-Q10
 
 ### Each recording gets one verdict
 
@@ -753,7 +723,6 @@ It can be filtered by verdict, each with its count (matched, misplaced, time-onl
 
 - Who: anyone signed in sees it; approving needs an admin.
 - Name and search words: Audio worklist. Search words: sound, recordings, whose interview, field audio, recorder.
-- Pending: footage-sorter-and-camera-cards-2-Q9
 
 ### One recording's detail shows who it could be and plays it against the cameras
 
@@ -790,9 +759,8 @@ An approved recording is filed in the Audio folder inside its shoot's folder, or
 
 ### Field recordings not yet on the NAS are found on every computer and drive
 
-From the record of every copy, the Sorter lists the field recordings that exist on the studio's computers and drives but not yet on the NAS: how many, how many are unique, how many hours, and the 40 biggest groups by computer and folder. A field recording is an unbroken 32-bit WAV file of at least the shortest length that is not named like music. Each is listed with where it is, its size, time, format, recorder and the computer, Chinese names intact; files left out are listed with their reason (broken, music, too short, not field sound). Copies are recognised as the same recording by size plus the contents of their first and last megabyte.
+From the record of every copy, the Sorter lists the field recordings that exist on the studio's computers and drives but not yet on the NAS: how many, how many are unique, how many hours, and the 40 biggest groups by computer and folder. A field recording is an unbroken 32-bit WAV file at least 30 seconds long that is not named like music. Each is listed with where it is, its size, time, format, recorder and the computer, Chinese names intact; files left out are listed with their reason (broken, music, too short, not field sound). Copies are recognised as the same recording by size plus the contents of their first and last megabyte.
 
-- Setting: Shortest field recording. Does: recordings shorter than this are not counted as field sound. Default: 30 seconds. Who: an admin. Applies to: the site. Search words: field audio, shortest, WAV, recorder.
 
 ### Loose video is placed into shoots by the same matching
 
@@ -800,7 +768,6 @@ A video clip outside the destination tree, under a folder a person names, is pla
 
 - On its own: a loose video clip's proposed shoot folder, from its sound and time.
 - By hand: a person assigns it to any folder, as any clip.
-- Pending: footage-sorter-and-camera-cards-2-Q11
 
 #### Lessons
 

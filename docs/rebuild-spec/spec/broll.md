@@ -38,16 +38,12 @@ Comparing places follows each disk's own rule: editors' Windows and Mac disks ig
 
 ### The archive has two halves: the studio's own footage and Downloads
 
-Every clip is either the studio's own footage (its own shoots) or a download (anything else). A shoot added through the archive's own page counts as the studio's own footage, as does any collection the studio archives as its shoot's proxies. A site also lists, by name, which other collections of the archive hold its own shoots. When that list is blank, everything browses as Downloads.
+Every clip is either the studio's own footage (its own shoots) or a download (anything else). A shoot added through the archive's own page counts as the studio's own footage, as does any collection the studio archives as its shoot's proxies. A site also lists, by name, which other collections of the archive hold its own shoots. When that list is blank or has never been set, everything browses as Downloads.
 
-When a site has never set this list, the folder that holds the studio's own shoots is taken as the list.
-
-- Pending: broll-Q24
 - Who: an admin.
 - Setting: Name for the studio's own footage. Does: the label the folder tree and the search page give the studio's own footage. Default: "Our Footage". Who: an admin. Applies to: the site. Search words: own footage, our footage, label, shoots.
 - Setting: Collections that are the studio's own footage. Does: which collections of the archive browse and filter as the studio's own shoots rather than Downloads. Default: blank (everything else is Downloads). Who: an admin. Applies to: the site. Search words: own footage, collections, shoots, downloads.
 - Setting: Top folder for the studio's own shoots. Does: the folder of the archive under which shoots added through the archive's page are filed. Default: the archive's own-footage folder. Who: an admin. Applies to: the site. Search words: archive folder, shoots, own footage, filing.
-- Setting: Collection descriptions. Does: a one-line description of each collection, shown to editors for information. Default: none. Who: an admin. Applies to: the site. Search words: collections, descriptions, shares, archive.
 
 ### An editor browses the archive through a folder tree with two roots
 
@@ -59,8 +55,7 @@ The folder tree always shows Downloads first, then the studio's own footage, eac
 A folder's count is exactly the number of clips clicking it shows, and every clip it shows can be previewed or says why not. A folder shows an expand mark only when it has sub-folders, and its sub-folders show only when it or one inside it is selected. Each folder's tooltip is its short name. Clicking a folder selects it; clicking the selected folder moves up exactly one level; clicking a selected root with no folder clears the choice. "clear" ("Show everything") selects nothing. Choosing a folder clears any folder chosen from a clip's path, goes to page 1 and makes a step Back can undo.
 
 - Who: anyone signed in.
-- Ways in: the folder tree, the category list beside the search box, and the folders and category shown in an open clip.
-- Pending: broll-Q9
+- Ways in: the folder tree, and the folders and category shown in an open clip.
 
 ### Where a clip is filed in the archive, and what it is called
 
@@ -112,12 +107,8 @@ The studio's starting list has 33 subject categories in groups:
 
 Besides these: interviewee b-roll, reached only through the interview-folder rule; five fallbacks (news broadcast, interviews, archival, public life, places); and the default "Unsorted".
 
-The assistant can propose a category list from all the themes seen so far, written for a person to review; it is refused while nothing is described yet. The describing also suggests a category for each clip, which is shown with the clip but never decides its category.
-
 - On its own: each clip's category, from its themes and its folder.
 - By hand: an admin edits the category list and the words that point to each category; a clip's category, once given, is kept.
-- Pending: broll-Q3
-- When the assistant is off: no category proposal is offered.
 
 ### A clip found at a new place keeps everything known about it
 
@@ -129,7 +120,6 @@ A clip is recognised by its content, not its name or place, so a renamed or move
 
 A clip whose file is no longer in the archive is hidden from search and browsing, and comes back by itself when the file returns. Nothing known about it is forgotten. While the archive cannot be read at all (an unmounted share, an empty or missing folder), no clip is hidden on that account.
 
-- Pending: broll-Q20
 
 ### An admin can check the archive for damaged files
 
@@ -154,7 +144,7 @@ Every clip that enters the archive, by any way in, is described and becomes sear
 - Where the picture allows it, the setting and the camera's movement.
 - Two to six themes for the clip (or each stretch of it): free tags such as the subject matter. At most 160 characters.
 - Picture-quality flags (see "Each clip is flagged for poor exposure or focus").
-- The category it is filed under (see "Every clip is filed under one subject category"), with the describing's own suggestion beside it.
+- The category it is filed under (see "Every clip is filed under one subject category").
 - The words spoken in it, with their times (see "Speech in a clip is transcribed so the archive can be searched by what is said").
 - Which describing, at which quality, described it, and when.
 
@@ -186,7 +176,6 @@ Text that speech recognition invents from silence or music is thrown away: any p
 
 A collection can have transcription switched off, and a clip longer than its collection's longest clip, or with no readable duration, is never transcribed or described (see "An admin sets how each collection is described and transcribed"). Both always hold.
 
-- Pending: broll-Q18
 
 ### Describing needs a graphics card and offers two quality levels, Good and Best
 
@@ -207,7 +196,6 @@ The site's level is the default for every drop; the person dropping clips may ch
 
 - Setting: B-roll describing quality. Does: whether new clips are described at Good or Best unless a drop chooses otherwise; anything else is refused. Default: Good. Who: an admin. Applies to: the site. Search words: describing quality, good, best, model, b-roll indexing, VRAM.
 - Ways in: the site setting, and the choice on each drop.
-- Pending: broll-Q27
 
 ### What describing needs is downloaded once, checked, resumable and then works offline
 
@@ -221,7 +209,6 @@ The first time a computer describes clips at a level, it downloads what that lev
 
 Once present nothing is fetched again and describing works with no internet.
 
-- Pending: broll-Q4
 
 ### A computer says whether it can describe clips, and every reason why not
 
@@ -242,7 +229,6 @@ When the person dropping clips chooses "Only when idle", describing works only w
 
 While describing runs on a computer someone is working at, it stays under the site's share of that computer's capacity. At most one describing holds a graphics card at a time: one is stopped before another starts. Making proxies on that computer waits while describing runs, and says so ("indexing b-roll first"). While a computer is describing, or downloading what describing needs, it is kept from sleeping, and a shutdown is met with a warning (see The app on each editor's computer: Settings, records and background work).
 
-- Pending: broll-Q7
 - Setting: Share of a working computer that describing may use. Does: caps how much of a computer's capacity background describing takes while someone is working at it. Default: 60%. Who: an admin. Applies to: the site. Search words: capacity, background, usable, indexing load, share.
 
 ### The computer doing the work shows what describing is doing, and the person at it can pause, resume, start now or cancel
@@ -270,7 +256,6 @@ The progress window "INDEXING B-ROLL" ("Your clips are indexed on this computer 
 
 - Who: the person at the computer doing the work.
 - Ways in: the app on that computer, the drop on the b-roll page, and the dashboard (see "A person pauses, resumes, starts now or cancels their drop").
-- Pending: broll-Q25
 
 ### An admin sees describing on every computer
 
@@ -303,26 +288,17 @@ A clip with no picture is not a failure: it reads "audio-only (no video stream) 
 
 ### A problem every clip would share stops the work with one message and keeps the queue
 
-When describing fails for a reason every clip would share (the describing does not start or does not answer, or, when the assistant describes, out of credit, a missing or wrong key, a usage or rate limit, an overloaded service, or a setting every request would repeat), the work stops at once without marking the clip it was on, says "The queue is unchanged - fix the cause and re-run to resume" (for a limit: that it was reached after N clips and when it resets), and resumes where it stopped. Brief errors are tried again for a while first. A limit is recognised only from the service's own reply; any other failure is the clip's own and the queue moves on. Unattended, a limit is waited out until the reset time the service names plus a minute (if that is no more than 6 hours away), otherwise 15 minutes at a time; after 6 hours of waiting with not one clip done, the work stops for good and says so. When the server is busy for a moment, finished work is offered again, never thrown away.
+When describing fails for a reason every clip would share (the describing does not start or does not answer, or a setting every clip would repeat), the work stops at once without marking the clip it was on, says "The queue is unchanged - fix the cause and re-run to resume", and resumes where it stopped. Brief errors are tried again for a while first. Any other failure is the clip's own, names its cause, and the queue moves on. When the server is busy for a moment, finished work is offered again, never thrown away.
 
 ### Long describing work survives restarts and shows live progress
 
 Describing outlives the window or page that started it, survives the app quitting, a crash and a reboot, and resumes each clip at the step it reached, never redoing finished work. While it runs it shows how many clips are left, clips per minute, time to finish, and counts done, failed, skipped and not started, in local time, as sentences whose age shows ("updated 2 min ago"). When it makes no progress for several minutes it says so. It reports success only when every clip is done.
 
-### An admin can bound how much describing is done
+### An admin can set a time after which no new clip is described
 
-An admin can set at most how many clips are described in a day, and a clock time after which no new clip is started; clips already started finish and are saved, and the rest stay waiting. When the assistant describes, the allowance spent so far is shown.
+An admin can set a clock time after which no new clip is started; clips already started finish and are saved, and the rest stay waiting. There is no limit on how many clips are described in a day.
 
-- Setting: Most clips described in a day. Does: no new clip is started once this many have been described that day. Default: no limit. Who: an admin. Applies to: the site. Search words: limit, cap, clips a day, allowance, budget.
 - Setting: Stop starting new clips at. Does: a clock time after which no new clip is started until the next day; clips under way finish. Default: none. Who: an admin. Applies to: the site. Search words: stop time, overnight, cutoff, indexing hours.
-
-### The assistant can describe clips instead, for a fee
-
-Besides the studio's own graphics cards, clips can be described by the assistant over the internet, paid per clip. A new site describes on its own graphics cards, which costs nothing per clip. With the assistant, an admin chooses a faster, cheaper model or a slower, stronger one. Nothing is ever spent unless an admin has chosen this. The key is kept with the product's other secrets, never in an ordinary setting; each run states whose credit it is spending, or "NO API KEY" with the reason, and a missing, unreadable or empty key stops the work with the queue intact. Every description is recorded with its clip, its length, the model, how much was sent and returned, how long it took and an estimated cost from list prices (never the billed amount; the studio's own graphics cards count as zero). A cost report gives, per model, calls, clips, minutes of footage, minutes of describing time, estimated cost, cost per minute and per hour of footage, speed against real time, and a forecast of cost and time for an archive of a given number of hours. To bound cost on long clips, an admin can cap how much of a long clip is looked at; the look is then spread evenly over the whole length.
-
-- Pending: broll-Q2
-- Setting: Who describes b-roll. Does: the studio's own graphics cards, or the assistant for a fee. Default: the studio's own graphics cards. Who: an admin. Applies to: the site. Search words: describer, paid, assistant, local, graphics card, cost.
-- When the assistant is off: describing is always on the studio's own graphics cards and this choice is not shown.
 
 ### An admin sets how each collection is described and transcribed
 
@@ -386,21 +362,13 @@ A new folder or category replaces the old one, never adds to it. Every narrowing
 
 With the search box empty, every clip the narrowings allow is listed, newest added first, with no matching moments, and the total is the full count.
 
-### An editor chooses between three ways of searching: words, words plus related meaning, or meaning only
+### Search finds the words first, then a few clips related by meaning
 
-- Hybrid (the default) shows exactly the word-search results in their order, then up to 5 more clips found only by meaning, always after every word result, under a "Related" heading and with a dashed border. A meaning match on a clip the words already found never changes the order. If the search is mostly Chinese and the words found nothing, no related clips are added, so an empty result stays possible.
-- Keyword is words only.
-- Semantic is meaning only, with no limit of 5 and no Chinese rule.
-
-Meaning matches count only when close enough. A way of searching the server cannot run is shown unavailable with its reason as the tooltip, word for word: "Meaning-based search is not available on this server: <a part it needs> is missing.", "Meaning-based search is not available on this server: the query model is not installed.", "No clips have been prepared for meaning-based search yet, so it can only find nothing." Hybrid is never unavailable: when meaning search cannot run it carries "Keyword only right now: the meaning-based half of this search is not available." If the page is in a way that cannot run, it switches to Hybrid, searches again and warns "<reason> Switched to Hybrid." or "<reason> Switched to Hybrid, which is searching by keyword only for now."
-
-- Pending: broll-Q8
+Results are every clip the words find, in their order, then up to 5 more clips found only by meaning, always after every word result, under a "Related" heading and with a dashed border. A meaning match on a clip the words already found never changes the order. Meaning matches count only when close enough. If the search is mostly Chinese and the words found nothing, no related clips are added, so an empty result stays possible. When meaning search cannot run, the search still answers by words and carries "Keyword only right now: the meaning-based half of this search is not available.", with the reason as its tooltip, word for word: "Meaning-based search is not available on this server: <a part it needs> is missing.", "Meaning-based search is not available on this server: the query model is not installed." or "No clips have been prepared for meaning-based search yet, so it can only find nothing."
 
 ### Search forgives misspellings and partial words when the exact words find little
 
-A "fuzzy" tick, on by default, works with Hybrid and Keyword. When the exact words find fewer than 5 clips, the search also tries: the start of any word of 5 or more letters ("ambul" finds "ambulance"; shorter words are never expanded, so "mars" never finds "marriage"); the Chinese word split above; and spelling correction, replacing each word of 3 or more letters that the archive has never seen by the closest whole word of similar length the archive does contain, only when it is very close ("ambluance" becomes "ambulance", never "Blu"). Forgiving matches never replace the snippet shown for an exact match.
-
-- Pending: broll-Q8
+When the exact words find fewer than 5 clips, the search also tries: the start of any word of 5 or more letters ("ambul" finds "ambulance"; shorter words are never expanded, so "mars" never finds "marriage"); the Chinese word split above; and spelling correction, replacing each word of 3 or more letters that the archive has never seen by the closest whole word of similar length the archive does contain, only when it is very close ("ambluance" becomes "ambulance", never "Blu"). Forgiving matches never replace the snippet shown for an exact match.
 
 ### The search page says while it is searching and when a search fails
 
@@ -408,18 +376,8 @@ While a search runs the results are dimmed and "Searching..." shows above them, 
 
 ### The page's address holds the search and the open clip
 
-The address holds the search words, category, own footage or Downloads, folder, page, open clip and the second the clip was opened at. Reloading, or following such a link, restores the search and reopens the clip at that second; the highlighted matching moments on the clip's bar are not restored from a link. Back and Forward walk folder choices, pages and clip openings before leaving the page; typing in the search box does not add steps. Links to a collection that has since been renamed still open it.
+The address holds the search words, category, own footage or Downloads, folder, what to search, the hidden flags, page, open clip and the second the clip was opened at. Reloading, or following such a link, restores the search and reopens the clip at that second; the highlighted matching moments on the clip's bar are not restored from a link. Back and Forward walk folder choices, pages and clip openings before leaving the page; typing in the search box does not add steps. Links to a collection that has since been renamed still open it.
 
-The way of searching, what to search, the fuzzy tick and the hidden flags are not held in the address, and go back to their defaults on reload or when the address is shared.
-
-- Pending: broll-Q10
-
-### A category list beside the search box filters by subject
-
-"All categories" plus every category, indented by depth. Choosing one clears any folder chosen from a clip's path, goes to page 1, makes a step Back can undo and searches. It shows blank while browsing own footage, whose shoots are not categories.
-
-- Ways in: this list, the Downloads half of the folder tree, and a clip's category in the open clip.
-- Pending: broll-Q9
 
 ### A line above the results says what is being shown
 
@@ -431,7 +389,7 @@ The pager reads "← prev", "<from>-<to> of <total>", "next →". Each press is 
 
 ### An empty result says why and offers the likely way out
 
-Browsing: "There are no clips in <scope>." where the scope names the root, folder or path, or "the whole archive". Searching: `Nothing matched "<words>" in <scope>.`, then "N clips were searched." (or "1 clip was searched."), then "Try fewer words, or switch to Semantic search, which finds meaning rather than words." If meaning search is unavailable and the way chosen is not Keyword, its reason is added as a warning. Links are shown only for what is actually in force: "switch to Semantic search", "clear the folder filter", "stop hiding flagged clips", "turn fuzzy matching back on".
+Browsing: "There are no clips in <scope>." where the scope names the root, folder or path, or "the whole archive". Searching: `Nothing matched "<words>" in <scope>.`, then "N clips were searched." (or "1 clip was searched."), then "Try fewer words." If meaning search is unavailable, its reason is added as a warning. Links are shown only for what is actually in force: "clear the folder filter", "stop hiding flagged clips".
 
 #### Lessons
 
@@ -441,7 +399,7 @@ Browsing: "There are no clips in <scope>." where the scope names the root, folde
 
 ### Results are thumbnails that scrub on hover and show the moment that matched
 
-Results are thumbnails only, with no text under them; names and buttons appear only when a clip is opened. Each thumbnail is a still with the clip's length (m:ss) in a corner and a tooltip "<file name> - <category, or suggested category, or Unsorted>". Each clip's still belongs to that clip alone. Stills load as they come into view; a clip with no still shows a "no preview" placeholder. Moving the pointer across a thumbnail shows the frame at that point of the clip, keeping up with the pointer. In search results the thumbnail holds the frame of the best matching moment instead, and returns to it when the pointer leaves, for clips of any length. Each thumbnail has a "+" that adds the clip to a client folder without opening it. Clicking a thumbnail opens the clip at its best matching moment, or at its start when browsing, never at a moment belonging to a clip opened earlier.
+Results are thumbnails only, with no text under them; names and buttons appear only when a clip is opened. Each thumbnail is a still with the clip's length (m:ss) in a corner and a tooltip "<file name> - <category>". Each clip's still belongs to that clip alone. Stills load as they come into view; a clip with no still shows a "no preview" placeholder. Moving the pointer across a thumbnail shows the frame at that point of the clip, keeping up with the pointer. In search results the thumbnail holds the frame of the best matching moment instead, and returns to it when the pointer leaves, for clips of any length. Each thumbnail has a "+" that adds the clip to a client folder without opening it. Clicking a thumbnail opens the clip at its best matching moment, or at its start when browsing, never at a moment belonging to a clip opened earlier.
 
 - Phone and desk: the "+" shows on hover on a desk, and always on a touch screen or when the thumbnail has keyboard focus.
 
@@ -516,13 +474,6 @@ An original is light enough to edit with as it is when its video is H.264, HEVC 
 
 For a shoot archived as its own proxies, every camera file without a proxy beside it (in a Proxy folder, under the same name) gets one before the shoot enters the archive, made with the same settings as editors' own proxies, carrying the source timecode, written aside and only then put in place, and checked as a preview is. Folders that look like proxy folders, names starting with "@" or a dot, and the collection's left-out folders are skipped; a clip of 5 minutes or more is left out. Each clip's result (made, unreadable, no length, no picture, over 5 minutes, bad result, failed) is recorded and shown. Camera files are never moved, changed or deleted.
 
-### An admin can have previews that will not play remade
-
-An admin can have the archive's previews checked: a preview that is not H.264 or is 10-bit (and so will not play in a browser) is remade, but only inside a Proxy folder, never over an original ("these are originals, not previews"); a preview whose timecode differs from its original's is corrected without re-encoding and checked; a hover strip without a measured layout is rebuilt. It first shows what it would do and acts only when confirmed, and counts failures. Whatever it fixes stays fixed: no later step puts the old preview back.
-
-- Who: an admin.
-- Pending: broll-Q19
-
 #### Lessons
 
 - Met: BRO-075, BRO-076, BRO-077, BRO-078, BRO-079, BRO-080, BRO-081.
@@ -543,15 +494,12 @@ A red notice that stays until dismissed ("dismiss") holds refusals.
 
 - Who: anyone signed in, for a computer they are at.
 - Ways in: dropping anywhere on the b-roll page, the "+" button, and the file and folder choosers.
-- Pending: broll-Q1
-- Pending: broll-Q28
 - Windows and macOS: the chooser is the system's own on each; on both it closes by itself after 5 minutes.
 
 ### Only video files are taken, and camera raw is not
 
 A drop's every nested folder is read and only video files are taken: MP4, MOV, M4V, MXF, MTS and M2TS (AVCHD), AVI, MKV and WebM, in any letter case. Names starting with a dot, and files Windows marks hidden or system, are skipped. Camera raw (Blackmagic RAW, RED, Canon Cinema RAW Light) is not taken, because it cannot be decoded without Resolve; a shoot in raw enters the archive as its own proxies. "N of M files were not video and were left out."; nothing usable: "Nothing there this app can index: b-roll takes video files (...)". A single file of another kind is refused on its own line ("<kind> is not a video this machine can index") while the rest of the drop goes ahead. A file name may be up to 255 characters and a sub-folder path up to 1024.
 
-- Pending: broll-Q5
 
 ### A drop holds at most 2,000 clips and is taken only if it fits
 
@@ -565,8 +513,7 @@ A drop holds at most 2,000 clips: "Only the first N clips were taken: a batch ho
 
 The same one rule (the drop, plus the floor) is used whenever the computer is asked, so a computer never says it can take a drop and then refuses it. A disk whose free space cannot be measured never refuses.
 
-- Pending: broll-Q6
-- Setting: Keep this much space free. Does: the free space dropped b-roll and music are never allowed to eat into on this computer. Default: 20 GB. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: free space, floor, disk full, staging, reserve.
+- Setting: Keep this much space free. Does: the one floor of free space on this computer that nothing CC Sync writes there (dropped b-roll and music, proxies, downloads) ever eats into. Default: 20 GB. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: free space, floor, disk full, staging, reserve.
 
 ### A drop is filed under a shoot name, suggested and made safe for every computer
 
@@ -584,7 +531,7 @@ One dropped folder becomes the suggested shoot name and is not repeated as a sub
 
 ### Dropped files are copied in with progress, and an interrupted copy is tried again
 
-Shortly after a drop the files are copied onto the editor's computer, two at a time, each with its progress, so even a 4 GB file never looks like a hung page. A dropped file takes its real name only once every byte has arrived; a broken copy is deleted. A broken connection is retried on its own, 3 tries in all (after 2, 4 and 8 seconds), showing "upload interrupted, retrying (n of 3)..."; two minutes without progress counts as broken, and there is never a limit on total time. After that: "<message> Tried N times: press retry when the connection is back." with "retry" on the row and "retry all failed (N)". A file already fully copied counts as done ("that clip is already staged"), so a page that reconnects never sends a big file twice. When a copy is refused, the person sees the reason, never a network error:
+Shortly after a drop the files are copied onto the editor's computer, two at a time, each with its progress, so even a 4 GB file never looks like a hung page. A dropped file takes its real name only once every byte has arrived; a broken copy is deleted. A broken connection is retried on its own, 3 tries in all (after 2, 4 and 8 seconds), showing "upload interrupted, retrying (n of 3)..."; two minutes without progress counts as broken, and there is never a limit on total time. After that: "<message> Tried N times: press retry when the connection is back." with "try again" on the row and "try all failed again (N)". A file already fully copied counts as done ("that clip is already staged"), so a page that reconnects never sends a big file twice. When a copy is refused, the person sees the reason, never a network error:
 
 - "not enough space to stage this clip: it needs X GB and only Y GB is free (the floor is Z GB). Free some space and drop it again";
 - "this upload sent more than it declared - nothing was kept";
@@ -592,10 +539,8 @@ Shortly after a drop the files are copied onto the editor's computer, two at a t
 - "CC Sync could not write the clip to its staging folder: <reason>";
 - "no path was given for that clip", "that file is not on this computer", "that file could not be read", "that is not a video this machine can index".
 
-Each file shows waiting, ready or failed ("the file is not there", "this file could not be read (<error>)"). Failed files can be retried one, several or all at once; retrying re-checks chosen files and clears a broken copy; retrying something that did not fail does nothing harmful. Leaving the page while files are still being copied brings up the browser's leave warning.
+Each file shows waiting, ready or failed ("the file is not there", "this file could not be read (<error>)"). A failed clip is tried again with its row's "try again", or together with every other failed clip of the drop by "try all failed again (N)", whichever step it failed in; retrying re-checks chosen files and clears a broken copy; retrying something that did not fail does nothing harmful. Leaving the page while files are still being copied brings up the browser's leave warning.
 
-- Ways in: "retry" on a row, and "retry all failed (N)".
-- Pending: broll-Q12
 
 ### The editor chooses the description quality, when the work runs, and what is uploaded
 
@@ -603,11 +548,9 @@ Each file shows waiting, ready or failed ("the file is not there", "this file co
 - "When to run": "Only when idle" (the default) or "Foreground".
 - "Keep sub-folders" (on).
 - "Upload the originals too" (on). Off, the archive holds the clips' previews and editing copies only, and the clips owe no original.
-- "Transcribe speech", which follows the collection's own setting.
 
-The summary reads "<n> clips, <size> - will run now" or "... will run when you're away".
+Speech in the clips is transcribed as the collection's own setting says, with no choice on the drop. The summary reads "<n> clips, <size> - will run now" or "... will run when you're away".
 
-- Pending: broll-Q13
 
 ### Running a drop asks first when it is large or needs a download
 
@@ -623,18 +566,14 @@ A status line with "recheck" shows the state of the app on this computer:
 - "Your CC Sync app needs the update it offers before it can do this. Take the update, then reload this page.";
 - "not reachable: the CC Sync app is not running, or the browser blocked local connections (self-test: open <the app's local status address> in a tab; if that shows ok:true it is the browser, not the app)".
 
-A page that cannot reach the app never claims the app is not running: it names both possibilities and offers the one-click self-test. "The app did not answer", "the app needs updating" and a real refusal are told apart, each with its next step. Beside it, the collections are listed with their descriptions ("no shares configured" or "failed to load shares" otherwise).
-
-- Ways in: the "Add b-roll" panel, and the collections panel.
-- Pending: broll-Q11
+A page that cannot reach the app never claims the app is not running: it names both possibilities and offers the one-click self-test. "The app did not answer", "the app needs updating" and a real refusal are told apart, each with its next step. It is shown in the "Add b-roll" panel.
 
 ### While a drop runs, the person sees its progress and can act on it
 
-A running drop shows "<shoot> - <state>"; the counts "<done> of <n> indexed · <live> searchable · <failed> failed · <dup> already in the archive · <owed> still to send the original"; when the computer doing it last answered; what it is waiting for, in words (waiting for the indexing model, waiting until you step away from the keyboard, waiting for DaVinci Resolve to close, paused, waiting for the one-off download, waiting: the sync drive is not connected, waiting: this computer's sync config needs fixing, this GPU cannot run the chosen model, b-roll ingest is off on this computer, nothing to do, indexing); the download with its rate and minutes left; the current step and percent; whether uploads are queued or paused; and up to 200 clip lines. It refreshes every second or two for progress and every few seconds for the drop's record. Reopening the page shows the person's newest unfinished drop again.
+A running drop shows "<shoot> - <state>"; the counts "<indexed> of <n> indexed · <live> searchable · <failed> failed · <dup> already in the archive · <skipped> skipped · <owed> still to send the original", where "indexed" counts only clips that were indexed; when the computer doing it last answered; what it is waiting for, in words (waiting for the indexing model, waiting until you step away from the keyboard, waiting for DaVinci Resolve to close, paused, waiting for the one-off download, waiting: the sync drive is not connected, waiting: this computer's sync config needs fixing, this GPU cannot run the chosen model, b-roll ingest is off on this computer, nothing to do, indexing); the download with its rate and minutes left; the current step and percent; whether uploads are queued or paused; and up to 200 clip lines. It refreshes every second or two for progress and every few seconds for the drop's record. Reopening the page shows the person's newest unfinished drop again.
 
 Buttons: Pause or Resume, "Start now" (only while waiting for the person to step away or Resolve to close), "Pause uploads"/"Resume uploads", "cancel batch…". All are disabled once the drop has finished. While the computer doing the work does not answer, Pause, Resume and Start now are disabled with "the CC Sync app isn't answering right now - the batch keeps its place (...)".
 
-- Pending: broll-Q16
 
 ### A drop's state is shown in fixed words
 
@@ -642,7 +581,7 @@ Buttons: Pause or Resume, "Start now" (only while waiting for the person to step
 
 ### A person sees their own drops, and an admin sees every computer's
 
-"Batches" has "Mine" and, for an admin only, "All computers" (anyone else is refused: "only an admin can see every computer's batches"), newest first, up to 200. Another editor's drop is invisible to anyone but an admin, as if it did not exist. Each card shows the shoot, state, the editor (in the all view), the computer or "no computer yet", last answer, quality, "foreground" or "when idle", counts, "uploads paused", and any stored error (up to 500 characters). Actions: "clips"/"hide clips" (up to 200 lines); "take over on this computer" (a waiting drop of one's own); "try the N failed again" or "finish the N still uploading" (a finished drop of one's own); "cancel" (unfinished). The list can be opened at any time, without dropping anything, to see what is waiting and what failed, with reasons.
+"Batches" has "Mine" and, for an admin only, "All computers" (anyone else is refused: "only an admin can see every computer's batches"), newest first, up to 200. Another editor's drop is invisible to anyone but an admin, as if it did not exist. Each card shows the shoot, state, the editor (in the all view), the computer or "no computer yet", last answer, quality, "foreground" or "when idle", counts, "uploads paused", and any stored error (up to 500 characters). Actions: "clips"/"hide clips" (up to 200 lines); "take over on this computer" (a waiting drop of one's own); "try all failed again (N)" (a finished drop of one's own with failed clips or originals still owed); "cancel" (unfinished). The list can be opened at any time, without dropping anything, to see what is waiting and what failed, with reasons.
 
 - Who: anyone signed in for their own drops; an admin for everyone's. Cancel and retry are for the drop's owner or an admin.
 
@@ -656,7 +595,6 @@ Pause (which also ends "start now"), resume, start now (work at once, and unpaus
 
 - Who: the drop's owner, or an admin.
 - Ways in: the drop on the b-roll page, the app on the computer doing the work, and the dashboard.
-- Pending: broll-Q25
 
 ### A clip is searchable as soon as its preview is safely in the archive, before its original
 
@@ -668,17 +606,14 @@ If a clip is live on its previews and then its original fails to arrive, the cli
 
 ### Failed clips and owed originals of a finished drop can be tried again
 
-"try the N failed again" or "finish the N still uploading" puts every failed clip and every clip still owing its original back to waiting, keeping its archive name, so no duplicate is made; the drop waits for a computer again, and the editor is told how many. The work is redone from the files this computer holds; if it cannot tell which drop, it refuses with a reason. "running" is said only once a computer has taken it. Refused while a computer is still working the drop, naming it: "<computer> is still working on this batch. Stop it first, then try the failed clips again." A drop whose computer went away can still be tried again.
+"try again" on a failed clip, or "try all failed again (N)", puts every failed clip and every clip still owing its original back to waiting, keeping its archive name, so no duplicate is made; the drop waits for a computer again, and the editor is told how many. The work is redone from the files this computer holds; if it cannot tell which drop, it refuses with a reason. "running" is said only once a computer has taken it. Refused while a computer is still working the drop, naming it: "<computer> is still working on this batch. Stop it first, then try the failed clips again." A drop whose computer went away can still be tried again.
 
-- Ways in: on a finished drop in the list of drops.
-- Pending: broll-Q12
 
 ### Dropped files are cleaned away a week after they are no longer needed
 
 The files held on a computer for a drop are deleted 7 days after the drop ended, or, for files dropped but never run, once they and the newest of them are older than that. Never deleted: a drop not yet finished, and originals the archive does not have yet. "CLEAR FINISHED STAGING", in the app's settings on the computer, deletes every finished drop at once, never one running or held: "Cleared <N finished staging folders>, <X.X> GB."; when only drops never run are held: "The staging on this computer is <N drops> that were never indexed, so there is nothing FINISHED to clear. Those clear themselves once they are past the staging retention window, or as soon as the drop is run."; otherwise "There is no finished staging to clear on this computer.", and it says how many it kept back. A failure reads "CC Sync could not clear the staging folders. See the log." A folder that cannot be deleted yet (a file still open on Windows) is tried again shortly. The space held is shown on the computer (size, drops, the oldest), with a red line "Finished indexing staging is holding X.X GB on this computer" beside the button, and on the dashboard. An editor can also remove a drop they no longer want from the list of drops.
 
 - Who: the editor on that computer.
-- Setting: Keep dropped files for. Does: how long the files held for a finished b-roll or music drop stay on this computer; 0 deletes them as soon as the drop ends. Default: 7 days. Who: the editor on that computer. Applies to: a computer. Search words: staging, keep, clean up, dropped files, retention.
 - When the b-roll archive is off: the button and the line count music drops only.
 
 ### Copies of a clip already in the archive are found and set aside, never deleted
@@ -726,7 +661,7 @@ When the clip's file is not on this computer, exactly that one file is downloade
 
 A computer downloads at most two clips at once for an editor who is waiting. A third reads "not sent yet: this computer is already downloading as much as it will at once. This one starts as soon as a slot is free": the page shows "Waiting for this computer's other downloads to finish." with the button reading "WAITING…", never as an error and never as success, asks again at the pace the app suggests (at least every second), and starts the moment a slot frees; after 15 minutes it gives up with "This computer has been busy with other downloads for a while. Try again when they have finished." A failure reads "couldn't sync the clip from the NAS: <reason>", and the next send starts again from the beginning. Quitting the app stops every such download ("cancelled - CC Sync shut down").
 
-A clip is fetched this way only on a computer that syncs remotely (a computer wired to the server already sees the NAS itself), and only when the archive is at its usual place on this computer; an editor who points the archive at a folder of their own gets "file not found at <path> - is the share mounted?" instead. Other refusals, each on the page:
+A clip is fetched this way only on a computer that syncs remotely (a computer wired to the server already sees the NAS itself), and only when the archive is at its usual place on this computer; an editor who points the archive at a folder of their own is told "nothing was fetched: the archive on this computer is in a folder of your own, which CC Sync does not fill" with "file not found at <path> - is the share mounted?". Other refusals, each on the page:
 
 - this computer's sync settings are incomplete (no server named, no folder on the server, or no folder on this computer), each in its own sentence naming which is missing;
 - "can't fetch the clip from the NAS - <detail>";
@@ -735,8 +670,6 @@ A clip is fetched this way only on a computer that syncs remotely (a computer wi
 - "this computer could not start the download (<error>)".
 
 - Ways in: sending a b-roll clip; the same one-file fetch serves a music track sent to Resolve and a downloaded YouTube original brought to the editor's computer.
-- Pending: broll-Q26
-- Pending: broll-Q22
 
 ### A clip sent to Resolve gets its editing proxy, never the browser preview as its proxy
 
@@ -750,7 +683,6 @@ Both send buttons are disabled while a send is under way. Opening another clip m
 
 Unreachable: "Couldn't reach the CC Sync app. It may not be running, or your browser blocked the connection (look for a “local network” permission prompt, or allow it in site settings). Self-test: open <the app's local status address> - if that shows ok:true, it's the browser, not the CC Sync app." followed by where to get the app. Any other refusal: the app's own message, or "The CC Sync app returned HTTP <n>". When the app must be updated first: "Your CC Sync app needs the update it offers before it can do this. Take the update, then reload this page." Resolve's own refusals, and "the Resolve worker failed" when Resolve could not do it, are passed on as they are.
 
-- Pending: broll-Q15
 
 ### The dashboard shows whether each computer can take "Send to Resolve"
 
@@ -784,9 +716,8 @@ The editing copy for a stand-in is downloaded in the background, one at a time p
 
 ### The editor is told while any clip is cut on a stand-in
 
-While any clip on this computer is still a stand-in, the app on the editor's computer shows how many, says they are being cut on the preview and not the editing proxy, and says to send them again; stand-ins whose upgrade gave up are shown as a count with one reason. The b-roll page lists the stand-ins whose editing copy was given up. A stand-in holds the preview's picture under the original's name, so a render made on this computer while it is a stand-in renders the preview.
+While any clip on this computer is still a stand-in, the app on the editor's computer shows how many, says they are being cut on the preview and not the editing proxy, and says to send them again; stand-ins whose upgrade gave up are shown as a count with one reason. The b-roll page lists the stand-ins whose editing copy was given up. A stand-in holds the preview's picture under the original's name, so a render made on this computer while it is a stand-in renders the preview: the app says so beside its count and, when it can tell a render is starting on this computer, warns before it that the render would use the preview for those clips.
 
-- Pending: broll-Q21
 
 ### Each computer knows which of its files are stand-ins, and never forgets one by mistake
 
@@ -804,7 +735,6 @@ When an archive clip in Resolve was placed from a stand-in and the real original
 
 When the archive cannot be read (its proxies folder is missing: "the archive folder is there but its contents are not"; it cannot be listed; or it lists empty: "the folder is there but completely empty"), admins are told "the b-roll archive cannot be read", as a serious problem, checked afresh every few minutes and shown until it is readable again. The text explains that every clip an editor sends to Resolve is then the small preview instead of the editing proxy. During such an outage nothing lasting is recorded about a clip sent: "could not read the archive" is never taken to mean "this clip has no original". Not raised when the b-roll archive is switched off.
 
-- Pending: broll-Q23
 
 ### The archive remembers where each clip's true original lives
 
@@ -821,7 +751,6 @@ Every archive clip, downloaded or own shoot, carries the place and size of its o
 A client folder is a titled, ordered set of archive clips with one link a client opens with no sign-in, seeing previews only. Folders belong to the studio: every signed-in editor can see, change, revoke and delete every folder; who made it is recorded and shown but grants nothing. Each folder is "live" (its tooltip gives the expiry), "revoked" or "expired"; revoked wins over expired.
 
 - Who: anyone signed in.
-- Pending: broll-Q14
 - Name and search words: Client folders. Search words: client folders, share link, client preview, licensing, share footage.
 
 ### An editor makes a client folder from any folder of the archive in one step
@@ -854,7 +783,7 @@ The "+" on a thumbnail, or "+ client folder" in the open clip, shows "Add to cli
 
 ### An editor manages the folder list and makes new folders
 
-The list explains that clients see previews only and need no sign-in. It offers "+ New folder" and "refresh". Each row shows the title, its state, "<n> clips · by <person> · opened Nx" or "never opened"; clicking opens it. Newest first. Empty: "No client folders yet. Make one, then add clips from the + on any thumbnail." Failure: "Could not load client folders: <message>". "+ New folder" asks "Name for the new client folder (the client sees this):"; a blank name warns "A folder needs a title"; otherwise "Created "<title>"" and the folder opens; failure "Could not create the folder: <message>". Escape does not close the list.
+The list explains that clients see previews only and need no sign-in. The same list also holds the folder links the Footage Sorter makes (see The Footage Sorter and camera cards: Downloading originals and sharing folders) and the delivery links, each marked as what it is. It offers "+ New folder" and "refresh". Each row shows the title, its state, "<n> clips · by <person> · opened Nx" or "never opened"; clicking opens it. Newest first. Empty: "No client folders yet. Make one, then add clips from the + on any thumbnail." Failure: "Could not load client folders: <message>". "+ New folder" asks "Name for the new client folder (the client sees this):"; a blank name warns "A folder needs a title"; otherwise "Created "<title>"" and the folder opens; failure "Could not create the folder: <message>". Escape does not close the list.
 
 ### An editor captions, orders and removes the clips in a folder
 
@@ -892,7 +821,7 @@ Everything behind a client link answers on the link alone, read only, and is che
 
 ### A client sees the folder as a page of previews with the studio's contact for licensing
 
-Header: the product mark, "<ORGANISATION> // PREVIEW" ("Footage" until loaded) and "N clip(s)"; the browser tab reads "<title> - footage preview". Then the title, description and "To licence any of this footage, contact <contact>." (an e-mail address becomes a mail link with the subject "Licence enquiry: <title>"). Help: "Tap or click a clip to play the preview and see what is in it. On a computer, hover over a thumbnail to scrub through it. Previews are low resolution. Full-quality masters are supplied on licence." Then the clips in the folder's order: still, hover scrub, length, and "<name> - <caption>" (up to 3 lines). Empty: "This folder is empty." Footer: the organisation name, " · this preview is available until <local date>" when an expiry is set, and the contact line.
+The page is drawn in the product's one look and carries the studio's own name and mark. Header: the studio's mark, "<ORGANISATION> // PREVIEW" ("Footage" until loaded) and "N clip(s)"; the browser tab reads "<title> - footage preview". Then the title, description and "To licence any of this footage, contact <contact>." (an e-mail address becomes a mail link with the subject "Licence enquiry: <title>"). Help: "Tap or click a clip to play the preview and see what is in it. On a computer, hover over a thumbnail to scrub through it. Previews are low resolution. Full-quality masters are supplied on licence." Then the clips in the folder's order: still, hover scrub, length, and "<name> - <caption>" (up to 3 lines). Empty: "This folder is empty." Footer: the organisation name, " · this preview is available until <local date>" when an expiry is set, and the contact line.
 
 - Phone and desk: long names wrap on narrow screens; hover scrub is for a pointer, and a tap opens the clip.
 

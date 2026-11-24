@@ -404,7 +404,7 @@
 
 - Only one set-up runs at a time on a computer | APP-017 asks for it; no item shows it.
 - Set-up checks that it can finish before it changes anything | the checks before removing anything, the bare-drive refusal and the Resolve-installed check come from APP-014, APP-020 and APP-005.
-- The finish page says whether the computer is ready, and what happens next | the editor no longer copies a sync code and a key to send to the admin: the computer appears on the dashboard waiting for approval by itself; done is said only after the computer has reported in, its drive answers and Resolve can be reached (APP-013).
+- The finish page says whether the computer is ready, and what happens next | the editor no longer copies a sync code and a key to send to the admin: the computer appears on the dashboard waiting for approval by itself; done is said only after the computer has reported in and its drive answers (APP-013); Resolve missing is a note on the finish page (joins 2026-11-24, editor-app F21).
 - An editor gets the installer for a new computer, or to repair one | a file or a link an admin hands over that works without signing in or the private network (APP-021).
 - The studio's drive letter and tree name cannot change under installed computers | APP-043; the text chooses refusing over carrying the change.
 - On Windows the icon comes back by itself, and a computer without it keeps working | the editor is told when the icon never appears, and starting the app again opens its settings (APP-070).
@@ -416,6 +416,7 @@
 - The editor can restart the app | a failed restart is told (APP-084).
 - Uninstalling removes the app and every way into the studio's server, never the media | every credential removed (APP-151), one rule for the identity on both systems, and Resolve's mapping removed on a Mac (editor-app-Q11).
 - The app keeps its own work going when part of it stops | work that keeps progressing is never cut off by a fixed clock (APP-146).
+- The editor opens Timeline Cards in a window of its own from the app | added by the joins (2026-11-24, editor-app F9), from the owner's answer on page 28.1.
 
 ## Parts of items left out
 
@@ -480,10 +481,12 @@
 - Accounts, privacy and the legal paperwork / The licence a person accepts | Nothing syncs until the licence is accepted, and the app asks within a minute | the licence window.
 - Accounts, privacy and the legal paperwork / What the product records about a person | One set-up wizard takes a computer from nothing to signed in and working, and is safe to run again | the reporting choices page.
 - Accounts, privacy and the legal paperwork / How a computer proves who it belongs to | The editor signs in with the username and password their admin gave them | each computer's own sign-in.
-- Accounts, privacy and the legal paperwork / Suspending, disabling and removing a person | The editor signs in with the username and password their admin gave them | the refusal sentences for those people.
+- Accounts, privacy and the legal paperwork / Passwords, sessions and failed sign-ins | The editor signs in with the username and password their admin gave them | the refusal sentences, the same as the dashboard's sign-in.
+- Accounts, privacy and the legal paperwork / What the product records about a person | The editor sends the admin a full description of the computer with one button | what diagnostics hide when a kind is withheld.
+- Accounts, privacy and the legal paperwork / The licence a person accepts | Nothing syncs until the licence is accepted, and the app asks within a minute | a newer licence version asked for while syncing goes on.
 - Releases and updates / Offering an update to a computer | The menu holds about ten everyday lines | the offered version in the menu and settings.
 - Releases and updates / Rolling back and withdrawing a build | A version that cannot stay up is replaced by the version before | going back to the earlier version.
-- Releases and updates / Making and publishing a release | An editor gets the installer for a new computer, or to repair one | publishing an installer.
+- Releases and updates / Customer sites and the vendor's release feed | An editor gets the installer for a new computer, or to repair one | an admin taking the installer from the vendor.
 - Resolve on the editor's computer / Setting Resolve up: edition, scripting switch, preferences | On Windows a remote editor's copy of the projects appears at the studio's drive letter | Resolve's drive mapping on a Mac.
 - Resolve on the editor's computer / Grading from the server's originals | Windows warns when the drive letter does not lead to the synced folder, and repairs it in one click | the drive pointed at the server for grading.
 - Resolve on the editor's computer / Connecting to Resolve's scripting: launch, stalls and death | The editor can restart the app | the link to Resolve renewed on its own.
@@ -497,6 +500,59 @@
 - The b-roll archive / Bringing new footage in | Long background work has a progress window the editor can close and reopen | the browser page's progress.
 - The b-roll archive / Sending a clip to Resolve | The settings each computer holds | fetching missing clips switched off by a folder of one's own.
 - Music / Adding tracks to the library | Long background work has a progress window the editor can close and reopen | the browser page's progress.
-- The Footage Sorter and camera cards / Downloading originals and sharing folders | Field backup opens from the menu | the field backup page.
+- The Footage Sorter and camera cards / Copying a card | Field backup opens from the menu | the field backup page (part 1).
+- The Footage Sorter and camera cards / The sorter page | Field backup opens from the menu | the field backup page keeping itself up to date (part 3).
+- Timeline Cards: the editor / Opening episodes and keeping the editor running | The editor opens Timeline Cards in a window of its own from the app | the editor window itself.
+- The b-roll archive / Describing and indexing clips | The menu carries a line for each piece of work under way | what a drop waits for and what each button answers.
+- Music / Imports across computers | The menu carries a line for each piece of work under way | what each music button answers.
+- Sync / What is owed | The editor sees each ticked project with what it is doing and why | the safe-to-close line.
+- Resolve on the editor's computer / Setting Resolve up: edition, scripting switch, preferences | The finish page says whether the computer is ready, and what happens next | the note when Resolve is missing.
+- Proxies and file moves / Making proxies on editors' computers | A computer doing heavy work stays awake and warns before shutting down | proxy making kept awake.
 - The dashboard / Projects | When the project open in Resolve has no home on the server, the editor is asked once | the page for setting up a project.
 - The dashboard / Reports from computers | The editor sends the admin a full description of the computer with one button | diagnostics sent on error and on request.
+
+## Joins settled
+
+- accounts-privacy-legal F1 | changed: The editor signs in with the username and password their admin gave them | "disabled" dropped; suspended or removed now share the one refusal sentence.
+- accounts-privacy-legal F6 | changed: The editor signs in with the username and password their admin gave them | the 16-computer limit and signing out the least recently used one dropped; a new computer takes nothing from the others.
+- accounts-privacy-legal F7 | changed: The editor signs in with the username and password their admin gave them | refusals use accounts-privacy-legal's sentences (one sentence for unknown name and wrong password, wait in minutes, "login not configured on the server"), pointing there.
+- broll F3 | changed: The settings each computer holds | "where dropped files wait and how long finished drops are kept" dropped from the list.
+- dashboard-1 F7 | changed: The editor sends the admin a full description of the computer with one button | withheld kinds hidden as in accounts-privacy-legal "Diagnostics hide what a computer withholds", with a pointer.
+- editor-app F3 | changed: A failed transfer is explained in plain words | refused sign-in row uses the refused-sign-in warning with SIGN IN AGAIN…, not diagnostics.
+- editor-app F4 | changed: A value set on the computer always wins | the exception named: a site-only limit, above all a kind of reporting the studio switched off, is never overridden from the computer (settled by ACC-047).
+- editor-app F5 | no change here: accounts-privacy-legal changes; this piece already counts closing as unanswered.
+- editor-app F6 | changed: Nothing syncs until the licence is accepted, and the app asks within a minute ; At start the app says at once if this computer will not sync, and confirms a finished update | "nothing syncs" limited to a computer that never accepted a licence; a newer version is asked for while syncing goes on.
+- editor-app F7 | no change here: already agrees (home here; broll and music point to it).
+- editor-app F8 | changed: The menu carries a line for each piece of work under way | b-roll and music analysis lines (music failure line included) added to the menu, their buttons placed in the settings window, each absent while its part is off. The b-roll upload lines were not carried: they describe analysis done here and then uploaded, an arrangement.
+- editor-app F9 | changed: The editor opens Timeline Cards in a window of its own from the app (new) | a menu line while Timeline Cards is on; the window is part of the one app and its updates.
+- editor-app F10 | no change here: this piece already shows the shared-work time read-only and changed on the computer, and mentions no sync-drive reminder setting.
+- editor-app F11 | changed: The settings each computer holds | wired or remote is set only on the computer, taken out of the settings an admin changes from the dashboard.
+- editor-app F12 | changed: The app starts whenever the editor signs in to the computer, and set-up confirms it is running | installing or updating switches the start at sign-in back on after Task Manager turned it off (settled by SRT-008).
+- editor-app F13 | changed: Field backup opens from the menu | field backup off by default on every computer.
+- editor-app F14 | no change here: already agrees (this piece's sentences win; music points here).
+- editor-app F15 | changed: The product's pages reach Resolve on the editor's computer through the app, and only the studio's pages may | the app's local status address a browser can open.
+- editor-app F16 | changed: A computer doing heavy work stays awake and warns before shutting down | proxy making named, with the same 8-hour cap and its shutdown sentence quoted; pointer to proxies-and-file-moves.
+- editor-app F21 | changed: The finish page says whether the computer is ready, and what happens next ; Set-up checks that it can finish before it changes anything | "Resolve can be reached" dropped; Resolve missing is a finish-page note, absent with the help for the editing program off.
+- editor-app F22 | no change here: sync-1 changes its pointer.
+- editor-app F23 | changed: Set-up checks that it can finish before it changes anything | the bare-drive refusal limited to a remote editor's computer; a computer straight off the server uses the site's drive letter as its root; pointer to sync-2's folder checks.
+- editor-app F24 | changed: A computer that is not fully set up names what is missing ; At start the app says at once if this computer will not sync, and confirms a finished update | status sentence is sync-2's "Sync: not set up yet", the longer explanation kept in WHAT IS NOT SET UP.
+- editor-app F25 | no change here: sync-2 changes.
+- editor-app F26 | no change here: sync-2 changes.
+- editor-app F27 | no change here: already agrees (an admin, for the site).
+- fleet-jobs F14 | no change here: already agrees (this piece's menu line is the one sentence).
+- fleet-jobs F17 | no change here: accounts-privacy-legal and fleet-jobs change.
+- footage-sorter-and-camera-cards-3 F3 | changed: Field backup opens from the menu | pointer moved to part 1 "An editor can copy a card with no network at all" and part 3 "The field backup page on an editor's computer keeps itself up to date".
+- music F5 | no change here: already agrees (home here; music points to it).
+- releases-and-updates F8 | changed: A version that cannot stay up is replaced by the version before ; The settings window ranks its warnings, merges repeats and shows at most six | the rollback sentence now pointed to in releases-and-updates instead of quoted.
+- releases-and-updates F9 | changed: A version that cannot stay up is replaced by the version before | with nothing to go back to, relaunched at most three times an hour, then left down, admin told.
+- releases-and-updates F10 | no change here: releases-and-updates changes.
+- releases-and-updates F11 | no change here beyond F12: this piece keeps the installer sentences.
+- releases-and-updates F12 | changed: An editor gets the installer for a new computer, or to repair one | admins told to take the installer from the vendor, pointing to "An admin brings one version from the vendor onto the site by hand"; "re-publish it" dropped.
+- resolve-on-the-editors-computer F4 | no change here: this piece's sentence stands.
+- resolve-on-the-editors-computer F5 | changed: The editor can restart the app | "never has to restart" limited to the ordinary case, pointing to "What the editor is told when Resolve cannot be reached".
+- sync-1 F8 | changed: The editor sees each ticked project with what it is doing and why | one closed list of states; "the others show waiting or paused" dropped.
+- sync-1 F9 | changed: Notifications are the operating system's own, headed with the studio's name and mark | reminders also when what is owed cannot be told, and for a drive that stays not answering.
+- sync-2 F4 | no change here: sync-2 changes its pointer to the menu's resume line.
+- sync-2 F5 | changed: The app keeps its own work going when part of it stops | the setting to switch automatic recovery off and its status sentence dropped.
+- sync-2 F6 | changed: The editor is told when the dashboard is not hearing from the computer, and when the clock is wrong | sync-2's sentence and threshold (more than 60 seconds, "Turn on setting the time automatically.").
+- sync-2 F9 | changed: The editor sees each ticked project with what it is doing and why | the safe-to-close line placed in the app's window.

@@ -10,9 +10,11 @@ The server checks the whole studio on its own, about every 10 minutes, and an ad
 
 The alert settings open with: "Off by default. Nothing here ever leaves this NAS unless you set a channel. One save checks every field below together, and refuses the whole form on one bad field." Choosing nobody reads "Nothing leaves this NAS. Problems still show on the dashboard." With nobody chosen, problems are still found, still shown on the dashboard and still counted among the open problems; they are written down and nobody is told.
 
-For e-mail the admin gives the outgoing mail server, its port (usually 587 with an upgraded secure connection, or 465), the sign-in name and password of the mail account, the sender address, and one or more recipient addresses separated by commas or semicolons. A port must be between 1 and 65535 ("must be a port number between 1 and 65535") and may be left blank. The connection is encrypted unless the admin turns that off, and the mail server's certificate and name are checked unless the admin turns that off, which is an explicit choice for a studio's own internal mail server with its own certificate. A certificate that fails the check is a refusal, never a quiet fallback to sending unchecked; the admin is told "the certificate <host> presented could not be verified (...). If this is your own mail server with its own certificate, turn off 'Verify the mail server's certificate' in the alert settings."
+For e-mail the admin gives the outgoing mail server, its port (usually 587 with an upgraded secure connection, or 465), the sign-in name and password of the mail account, the sender address, and one or more recipient addresses separated by commas or semicolons. A port must be between 1 and 65535 ("must be a port number between 1 and 65535") and may be left blank. The connection is encrypted unless the admin turns that off; turning it off while a mail sign-in is set is refused, both when the settings are saved and again when a message is sent, and the admin is told that the mail password would cross unencrypted. The mail server's certificate and name are checked unless the admin turns that off, which is an explicit choice for a studio's own internal mail server with its own certificate. A certificate that fails the check is a refusal, never a quiet fallback to sending unchecked; the admin is told "the certificate <host> presented could not be verified (...). If this is your own mail server with its own certificate, turn off 'Verify the mail server's certificate' in the alert settings."
 
 A web address for alerts must start with https://, or the save is refused: "the webhook URL must start with https:// (an alert body names your editors and computers)". It is checked again each time a message is sent. Because the rest of such an address works as a password, it is shown masked after its site part ("https://host/..."); saving the form back with the mask unchanged keeps the stored address. Only the site part is ever written into the list of what was sent. The server never follows a redirect from that address.
+
+Every mail the product sends goes this one way: to the alert recipients, from the sender address, through these settings. That includes the daily footage-not-at-home mail (see The Footage Sorter and camera cards: Backed up and safe to format, "A report and a daily mail say what footage is not at home").
 
 Saving answers "saved." or, when a destination was just switched on, "Saved. The next check will send everything that is currently open." Each save is recorded in the history of changes, naming the kind of destination only, never the address. None of these settings is ever handed to editors' computers or their installers.
 
@@ -45,7 +47,7 @@ An admin may also choose, on purpose, to tell nobody. That choice is recorded, e
 
 ### The dashboard says whether alerts are really reaching anyone
 
-Alert delivery is shown as working only when a destination is set, something was delivered through it to someone in the last 30 days, and the most recent failure is older than the last success. Green reads "the e-mail channel delivered something N hour(s) ago", naming the channel by what it is: e-mail or the other service. Otherwise it is shown as not working, with one of:
+Alert delivery is shown as working only when a destination is set, something was delivered through it to someone in the last 30 days, and the most recent failure is older than the last success. This is the one rule for whether somebody is told, wherever the product says it. Green reads "the e-mail channel delivered something N hour(s) ago", naming the channel by what it is: e-mail or the other service. Otherwise it is shown as not working, with one of:
 
 - "no mail server and no webhook is set, so nothing this server finds is ever sent to anybody";
 - "the e-mail channel is set up and has never managed to send anything: ...";
@@ -53,9 +55,11 @@ Alert delivery is shown as working only when a destination is set, something was
 - "the last message this server tried to send did not go out: ...";
 - "nothing has been delivered through the e-mail channel since YYYY-MM-DD".
 
+When the record of what was delivered cannot be read, the status line reads "cannot verify", never green.
+
 After each check the server's status also says how many alerts were sent, that some could not be delivered, that the channel is slow ("S of T alert(s) sent this check; the alert channel is slow"), or, with no destination, "N alert(s) were written down here and nobody was told: no alert channel is set up".
 
-While no destination is set (and the admin has not chosen to tell nobody), a warning stands among the open problems: "Nobody is being told when this server finds a problem..." with the fix: set an address or a web address in the alert settings, then press "Send a test".
+While no destination is set, or nothing has been delivered through it in the last 30 days, a warning stands among the open problems: "Nobody is being told when this server finds a problem..." with the fix: set an address or a web address in the alert settings, then press "Send a test". An admin's recorded choice to tell nobody ends that warning, but the home page and the protection list still read that nobody is told, by the admin's own choice, and never show it as green.
 
 - Who: an admin.
 - Ways in: the alert channel's own status line beside the alert settings, and the standing problem among the open problems.
@@ -69,18 +73,15 @@ While no destination is set (and the admin has not chosen to tell nobody), a war
 
 ### An admin sees every problem open now and every kind of check
 
-Opening the alerts view runs every check afresh and shows:
+The problems open now, their severities (error, warning or information), their counts, the all-clear line and every check with whether it ran are the one list on the Overview (see The dashboard: Problems the server finds, "Everything the server knows is wrong is in one list" and "What the server checks, and whether each check ran"). What belongs to alerts by mail is shown with the alert settings:
 
-- "checked against N things every M minutes" (every 10 minutes unless set otherwise);
-- every problem open now, with a count: severity, title, what it concerns, the diagnosis, the detail and the fix (with the site's support contact added); or "Nothing is wrong that this server can see. All N checks ran and found nothing.";
-- every kind of check, with its severity ("problem" or "to look at"), its title, what it means and whether it sends a message;
+- every kind of check, with its title, what it means and whether it sends a message;
 - the alert settings, with a password shown only as set or not set and a mask;
 - "Preview this week's report", which opens the subject and body of this week's report as plain text in a new tab, put together from what is open now; nothing is sent.
 
-The open problems include an editor's computer whose installation failed. The count of open problems is shown to admins wherever the dashboard shows its problems.
+Inside a message, an error is headed "problem" and a warning "to look at".
 
 - Who: an admin.
-- Name and search words: Problems the server found. Search words: problems, health, checks, open alerts, what is wrong.
 
 ### An admin chooses which kinds of problem send a message
 
@@ -104,11 +105,11 @@ By e-mail, everything one check finds goes out as one combined message; another 
 - only repeats: "CC Sync: still not fixed after D day(s): <first two headlines> and K more";
 - only clearances: "CC Sync: cleared - <headline>" or "CC Sync: N problem(s) cleared".
 
-The body lists serious problems before warnings. New problems appear in full under "PROBLEM:" (serious) or "TO LOOK AT:" (a warning). Repeats are one line each under "STILL NOT FIXED" with "(open for D day(s))", then "The full description of each of these went out when it was first found. Nothing about them has changed." Clearances appear under "CLEARED:". Then "Still open from before: N (see the dashboard)" when warnings or say-once problems are still open. Days open count from the first alert after the problem last cleared, and are at least 1.
+The body lists serious problems before warnings. New problems appear in full under "PROBLEM:" (an error) or "TO LOOK AT:" (a warning). Repeats are one line each under "STILL NOT FIXED" with "(open for D day(s))", then "The full description of each of these went out when it was first found. Nothing about them has changed." Clearances appear under "CLEARED:". Then "Still open from before: N (see the dashboard)" when warnings or say-once problems are still open. Days open count from the first alert after the problem last cleared, and are at least 1.
 
 ### A serious problem is repeated once a day while it lasts
 
-Each kind of problem is either serious (a problem) or something to look at (a warning). A serious problem is sent when first found and then once a day for as long as it stays true. A warning is sent once and not again until it has cleared and come back. Some kinds are said once only while they stay true, and say so on their own description. A time that cannot be read counts as never sent.
+In messages, a problem of error severity counts as a serious problem and a warning as something to look at. A serious problem is sent when first found and then once a day for as long as it stays true. A warning is sent once and not again until it has cleared and come back. Some kinds are said once only while they stay true, and say so on their own description. A time that cannot be read counts as never sent.
 
 ### People are told when a problem clears
 
@@ -122,7 +123,7 @@ Problems found while no destination was set are not lost. When an admin first se
 
 No failure to send ever stops or slows the server's checking. A message that cannot go out in time waits and goes later, whole: a combined message is sent whole or not at all. While messages are waiting a warning stands among the open problems: "Sending this server's alerts took longer than a check is allowed, so N of them were left for the next check. ..." with the fix to press "Send a test" in the alert settings and time it. It clears on the first check that sends everything.
 
-Every message whose send fails (an alert, a clearance, the weekly report, the daily "still here", the server check's report) is tried again after about 10 minutes, then an hour, then 6 hours, and keeps being tried until it goes; it is shown as not delivered until it does, and is never dropped.
+Every message whose send fails (an alert, a clearance, the weekly report, the daily "still here", the daily footage-not-at-home mail, the server check's report) is tried again after about 10 minutes, then an hour, then 6 hours, and keeps being tried until it goes; it is shown as not delivered until it does, and is never dropped.
 
 ### A failure to deliver is named in plain words
 
@@ -135,7 +136,7 @@ With no destination, each message is recorded as not delivered because none is s
 
 ### An admin sees every message that was sent
 
-The list of what was sent shows the most recent 200 messages, newest first, grouped by the message each problem went out in ("<ago>: one message, N findings"), with whether all of them were delivered. Each shows when, what kind (an alert, a clearance, the daily "still here", the weekly report, a test, the server check), the subject, where it went, and "sent" or why it failed. A failed send is kept. Empty, it reads "Nothing has been sent yet." Entries are forgotten after 120 days.
+The list of what was sent shows the most recent 200 messages, newest first, grouped by the message each problem went out in ("<ago>: one message, N findings"), with whether all of them were delivered. Each shows when, what kind (an alert, a clearance, the daily "still here", the weekly report, a test, the server check, the daily footage-not-at-home mail), the subject, where it went, and "sent" or why it failed. A failed send is kept. Empty, it reads "Nothing has been sent yet." Entries are forgotten after 120 days.
 
 - Who: an admin.
 - Name and search words: Alerts sent. Search words: sent alerts, mail history, messages, delivered.
@@ -254,9 +255,9 @@ Each action does exactly what the matching control on the dashboard does, is che
 
 | Action | Refused when |
 |---|---|
-| Push the newest app build to a computer ("asked <who> to update to X on its next report") | no such computer, no newest build for its platform, or it already runs it |
-| Withdraw a pushed update for a computer | no such computer, or no update waiting |
-| Resume proxy download on a computer | no such computer, or its last report does not show that download stopped itself |
+| Push the current version for that computer's operating system to a computer ("asked <who> to update to X on its next report"), exactly as the dashboard's push does (see Releases and updates: Pushing updates and seeing who has what, "An admin pushes a version to one computer"); a computer already running it is not refused | no such computer, no current version of the app is published for that computer's operating system, or that computer kept crashing on that version and went back from it |
+| Withdraw a pushed update for a computer (it succeeds even when nothing was waiting) | no such computer |
+| Resume downloads on a computer | no such computer, or its last report does not show its downloads stopped themselves |
 | Start syncing again everywhere (end the studio-wide stop) | no studio-wide stop in force |
 | Keep syncing stopped everywhere, for 24 hours from the reply, keeping its reason and start | no studio-wide stop in force |
 | Cancel a piece of shared work by number (it stops the next time its computer reports, or when the server next looks at it) | no such work, or already finished |
@@ -277,30 +278,27 @@ Letting a computer waiting to join the studio in is deliberately not possible by
 
 Each setting below is one thing an admin can change for the whole site. Each has a plain name, what it does for people, its default, and words to find it by. A switch whose value cannot be read counts as off.
 
+These are the core's site settings. Each part's own site settings are given, with their names and search words, in that part's own description; among them the YouTube downloads switch (see YouTube downloads: Keeping the downloader working, "A site switches YouTube downloads on and off while the server runs") and YouTube's extra measures against being blocked (see YouTube downloads: Signing in to YouTube, "A site decides whether signed-in YouTube sessions may be used on editors' computers"). A few core settings are described in full with the behaviour they belong to, and are only pointed to here: the studio's time zone, which the weekly report, the daily "still here" message and the server check keep to (see The server: installing it and keeping it running: NAS speed, load and clock, "Schedules run on the studio's own clock"); the shared libraries every editor's computer gets (see The server: installing it and keeping it running: Settings and secrets, "The kind of NAS, the project layout and the shared libraries"); and updating editors' computers by themselves (see Releases and updates: Offering an update to a computer, "A studio can let its computers take newer versions without anyone clicking").
+
 - Setting: Studio name. Does: names the studio in the dashboard's title and wherever the product shows its brand. Default: blank. Who: an admin. Applies to: the site. Search words: studio name, brand, company, title, organisation.
 - Setting: Studio short name. Does: a short form of the studio's name for tight spots, such as the hover text of the app's icon on editors' computers. Default: blank. Who: an admin. Applies to: the site. Search words: short name, abbreviation, brand, tray, tooltip.
 - Setting: Product name. Does: the name the product goes by on every page, in every message, in the installed app and on editors' computers. Default: CC Sync. Who: an admin. Applies to: the site. Search words: product name, brand, app name, rename.
 - Setting: Mark on editors' computers. Does: the picture editors see as the product's icon on their computers: the product's own mark, another mark shipped with the app, or a picture on the editor's computer. Default: the product's own mark. Who: an admin. Applies to: the site. Search words: logo, icon, mark, brand, picture.
 - Setting: Support contact. Does: where the studio's people are sent for help; added as "Support: <address>" wherever the product tells someone to send something to support. Default: blank, which uses the vendor's support address. Who: an admin. Applies to: the site. Search words: support, help contact, email, who to ask.
-- Setting: Time zone. Does: the time zone the weekly report, the daily "still here" message and the server check keep to. Default: blank, which is universal time. Who: an admin. Applies to: the site. Search words: time zone, clock, schedule, hours, local time.
 - Setting: Where editors see the studio's tree. Does: the drive letter (or, on a Mac-style tree, the absolute folder) at which every editor's computer finds the studio's shared tree. Default: P:\. Who: an admin, and only before any computer has joined. Applies to: the site. Search words: drive letter, P drive, tree, mount, path.
 - Setting: Tree name. Does: the name of the studio's shared tree as editors see it. Default: the name given when the server was set up. Who: an admin, and only before any computer has joined. Applies to: the site. Search words: tree name, share, root folder, library name.
 - Setting: Where the tree lives on the server. Does: the folder on the NAS that holds the studio's tree. Default: the folder given when the server was set up. Who: an admin, and only before any computer has joined. Applies to: the site. Search words: server folder, NAS path, share, storage, tree location.
 - Setting: Folders in every new project. Does: the list of folders laid down in each new project. Default: the product's standard project folders. Who: an admin. Applies to: the site. Search words: project template, folders, new project, structure, layout.
-- Setting: Shared libraries. Does: the folders every computer gets whatever it has ticked, for example colour look-up tables. Default: the product's standard shared libraries. Who: an admin. Applies to: the site. Search words: shared library, LUTs, assets, common folders, everyone gets.
 - Setting: Dashboard address. Does: the address editors' computers and browsers use to reach the dashboard, and that every "open the dashboard" link follows. Default: learned by the server itself where it can. Who: an admin. Applies to: the site. Search words: dashboard address, URL, link, web address, domain.
-- Setting: YouTube downloads. Does: shows or hides YouTube downloads for everyone and starts or stops all their work. Default: off. Who: an admin. Applies to: the site. Search words: YouTube, downloads, videos, part, switch.
-- Setting: YouTube's extra measures against being blocked. Does: lets downloads take extra steps to get past YouTube refusing them; only matters while YouTube downloads are on. Default: off. Who: an admin. Applies to: the site. Search words: YouTube blocked, unblock, refused, download fails.
-- Setting: Updates with nobody clicking. Does: every editor's computer installs any newer build offered to it without anyone pressing anything (never an older one). Default: off. Who: an admin. Applies to: the site. Search words: automatic updates, auto update, unattended, upgrade, install updates.
 - Setting: Which assistant to use. Does: pins one of the connected assistants for every feature that uses one; left unpinned, each feature uses the first available in the owner's order of preference. Default: unpinned. Who: an admin. Applies to: the site. Search words: assistant, AI, provider, model, pin.
 - Setting: Who is told about problems. Does: where the server sends what it finds: nobody, by e-mail, or posted to another service's web address. Default: nobody. Who: an admin. Applies to: the site. Search words: alerts, notify, destination, channel, who is told.
-- Setting: Alert recipients. Does: the e-mail addresses that receive alerts, reports and the server check, separated by commas or semicolons. Default: blank. Who: an admin. Applies to: the site. Search words: recipients, alert email, to address, who gets mail.
+- Setting: Alert recipients. Does: the e-mail addresses that receive alerts, reports, the daily footage-not-at-home mail and the server check, separated by commas or semicolons. Default: blank. Who: an admin. Applies to: the site. Search words: recipients, alert email, to address, who gets mail.
 - Setting: Sender address. Does: the address alert mail comes from. Default: blank. Who: an admin. Applies to: the site. Search words: sender, from address, mail from, alert email.
 - Setting: Outgoing mail server. Does: the mail server alerts are sent through. Default: blank. Who: an admin. Applies to: the site. Search words: mail server, outgoing mail, email server, send mail.
 - Setting: Mail server port. Does: the port of the outgoing mail server. Default: 587. Who: an admin. Applies to: the site. Search words: port, 587, 465, mail port.
 - Setting: Mail sign-in name. Does: the account name used to sign in to the mail server. Default: blank. Who: an admin. Applies to: the site. Search words: mail user, username, mail login, account.
 - Setting: Mail password. Does: the password of the mail account, kept apart and never shown back. Default: not set. Who: an admin. Applies to: the site. Search words: mail password, app password, email password, sign in.
-- Setting: Secure mail connection. Does: encrypts the connection to the mail server; off sends unencrypted. Default: on. Who: an admin. Applies to: the site. Search words: encryption, secure, TLS, mail security.
+- Setting: Secure mail connection. Does: encrypts the connection to the mail server; it cannot be turned off while a mail sign-in is set, so a password never crosses unencrypted. Default: on. Who: an admin. Applies to: the site. Search words: encryption, secure, TLS, mail security.
 - Setting: Verify the mail server's certificate. Does: refuses to send when the mail server's certificate does not match it; off only for a studio's own internal mail server with its own certificate. Default: on. Who: an admin. Applies to: the site. Search words: certificate, verify, mail security, self-signed.
 - Setting: Alert web address. Does: the https address of another service that each alert is posted to. Default: blank. Who: an admin. Applies to: the site. Search words: webhook, web address, post alerts, chat, integration.
 - Setting: Kinds of problem that send a message. Does: one tick per kind of check; an unticked kind is still checked and shown but sends no message. Default: every kind ticked. Who: an admin. Applies to: the site. Search words: alert kinds, mute, silence, which alerts, notifications.
@@ -314,7 +312,7 @@ Each setting below is one thing an admin can change for the whole site. Each has
 
 ### Saving settings checks every field first and one bad field changes nothing
 
-Only an admin may read or change the site's settings ("log in first", "admins only"). A save sends the whole form. Each save says "saving...", then "saved at HH:MM:SS" by the person's own clock, or "could not save: <reason>"; a refusal that names a setting opens the place holding it and keeps what the admin typed.
+Only an admin may read or change the site's settings ("log in first", "admins only"). A save sends the whole form. Each save says "saving...", then "saved at HH:MM:SS" by the person's own clock, or "could not save: <reason>"; a refusal that names a setting opens the place holding it and keeps what the admin typed. A save that would switch a kind of reporting from computers off first asks the admin, with "Stop reporting", and nothing is saved until they confirm (see Accounts, privacy and the legal paperwork: What the product records about a person, "An admin switches a kind of reporting off for the whole studio").
 
 Every value is trimmed. Text holding control characters is refused ("must not contain control characters"), as is any alert value over 400 characters. Whole numbers may be blank but not negative ("must not be negative", "'x' is not a whole number"). Yes-or-no settings take on, off or blank (blank is off). A setting the product does not know is refused ("not a recognised site setting"). The whole form is checked before anything is written, so one bad field changes nothing, and the reason is shown. Each setting records when and by whom it was last changed, and can be cleared back to its default.
 
@@ -328,11 +326,11 @@ Where the server can learn a value for itself (the dashboard's own address among
 
 ### Where the tree sits is fixed once any computer has joined
 
-The place every editor's computer finds the studio's tree must look like "P:" or "P:\" (the backslash is added) or be an absolute folder with no "..", and may not be blank ("must be a Windows drive letter like 'P:\' or an absolute folder like '/mnt/tree'"). Once any computer has joined or reported, changing where editors see the tree, the tree's name or where the tree lives on the server is refused, because every computer finds its footage there; the message says to plan every computer's move first, and that only the person installing the server can unlock the change on purpose. Saving the value a setting already has is not a change.
+Where editors see the studio's tree, the tree's name and where the tree lives on the server are fixed, and shown read-only, once any computer has joined, because every computer finds its footage there; there is no way to change them after that. The shape the drive letter must have, the lock and what a refused change says are described in full elsewhere (see The server: installing it and keeping it running: Settings and secrets, "The tree, the drive letter and the dashboard's address are set once and then locked").
 
 ### Project folders and shared libraries stay inside the studio's tree
 
-Each folder in the list made in every new project, and each shared library, must be a folder under the tree: never an absolute folder, never with a drive letter, never with ".." ("must stay under the tree root: '..' is not allowed"). A shared library's name needs at least one letter A to Z or digit 0 to 9, and two names that could be taken for the same library are refused ("rename one of them").
+Each folder in the list made in every new project, and each shared library, must be a folder under the tree; the checks and what the admin is told are described with those settings (see The server: installing it and keeping it running: Settings and secrets, "The kind of NAS, the project layout and the shared libraries").
 
 ### The support contact is added wherever the product says to ask for help
 
@@ -342,13 +340,13 @@ Help text that tells someone to send something to "us" or to "support" has "Supp
 
 Every save, import, undo and setup-checklist save that changes a setting is recorded with when, who made it, how (save, import or undo) and which settings it touched; a saved alert destination is recorded by its kind only, never its address, and no password or other secret is ever recorded. The history lists the most recent changes, each as "<what was done> by <person>", how long ago (the exact time on hover) and how many settings, with the total recorded ("No site setting changes recorded yet." when there are none).
 
-"Undo the last change" asks "Put back the <n> setting(s) changed by <person> <ago> (<exact time>)?" and puts back exactly the earlier values that change replaced, through every check a save goes through. It undoes exactly that change, never a newer one made meanwhile: if someone saved since, it is refused with "the newest change is no longer the one you confirmed (someone saved since): reload the page". With nothing recorded it is refused ("no site setting change is recorded to undo"). It is disabled until the history has loaded. Before undoing, the admin is told which kinds of reporting from computers the undo would switch off. The undo is itself recorded, so it can be undone.
+"Undo the last change" asks "Put back the <n> setting(s) changed by <person> <ago> (<exact time>)?" and puts back exactly the earlier values that change replaced, through every check a save goes through. It undoes exactly that change, never a newer one made meanwhile: if someone saved since, it is refused with "the newest change is no longer the one you confirmed (someone saved since): reload the page". With nothing recorded it is refused ("no site setting change is recorded to undo"). It is disabled until the history has loaded. An undo that would switch a kind of reporting from computers off first asks the same question as a save, with "Stop reporting" (see Accounts, privacy and the legal paperwork: What the product records about a person, "An admin switches a kind of reporting off for the whole studio"). The undo is itself recorded, so it can be undone.
 
 - Who: an admin.
 
 ### An admin exports the settings as text and imports them by pasting
 
-An admin can export the site's settings as a plain-text settings file, and import one by pasting it, up to 65,536 characters. Pasting nothing is refused ("could not import", asking for the settings file first). Before anything is written the product works out the differences: "Nothing in that text differs from the current settings. Nothing was changed." or "This will change <n> setting(s), including <setting> from <old or (blank)> to <new or (blank)>, ... [, and <k> more]. Apply it?" (the first three named), together with which kinds of reporting from computers it would switch off. Applying goes through every check a save does, reloads the page, keeps the replaced values, and appears in the history so it can be undone like a save; a failure says "could not import: <reason>". Lines the dashboard does not hold are ignored; text with nothing it recognises is refused; text that cannot be read is refused with the reason. The studio's projects folder is always named "Projects", and an import naming it otherwise is refused.
+An admin can export the site's settings as a plain-text settings file, and import one by pasting it, up to 65,536 characters. Pasting nothing is refused ("could not import", asking for the settings file first). Before anything is written the product works out the differences: "Nothing in that text differs from the current settings. Nothing was changed." or "This will change <n> setting(s), including <setting> from <old or (blank)> to <new or (blank)>, ... [, and <k> more]. Apply it?" (the first three named). An import that would switch a kind of reporting from computers off also asks the same question as a save, with "Stop reporting" (see Accounts, privacy and the legal paperwork: What the product records about a person, "An admin switches a kind of reporting off for the whole studio"). Applying goes through every check a save does, reloads the page, keeps the replaced values, and appears in the history so it can be undone like a save; a failure says "could not import: <reason>". Lines the dashboard does not hold are ignored; text with nothing it recognises is refused; text that cannot be read is refused with the reason. The studio's projects folder is always named "Projects", and an import naming it otherwise is refused.
 
 - Who: an admin.
 
@@ -399,7 +397,7 @@ Every signed-in page shows "updated <time ago>": when the server last answered i
 
 When the server cannot read how syncing of project folders stands, every page adds the warning "the data on this page may be stale" with a "What to do" link to the help on putting it right. On a phone only the warning is shown, never the time. When the server cannot tell, no warning is shown.
 
-When a page's exchanges with the server start failing, a warning held at the bottom of the page reads "THIS PAGE HAS STOPPED UPDATING (last update <N seconds / minutes / hours ago>). Nothing below is current." followed by the reason:
+When a page's own refreshes start failing, a warning held at the bottom of the page reads "THIS PAGE HAS STOPPED UPDATING (last update <N seconds / minutes / hours ago>). Nothing below is current." followed by the reason:
 
 - the session ended: "Your session has ended. Reload the page and sign in again.";
 - refused to this account: "The server refused this to your account (403)[: <server's reason>]. Reload the page; if you were signed out, sign in again.";
@@ -408,6 +406,8 @@ When a page's exchanges with the server start failing, a warning held at the bot
 - no answer in time: "The server did not answer in time. Reload the page to try again."
 
 The warning never covers anything on the page, and it goes by itself the moment any exchange with the server succeeds. Text from the server is always shown as plain text.
+
+Only the page's own refreshes failing bring this warning. A change a person asked for with a button, form or switch that the server refuses never marks the page as out of date: it gets a short note directly above the control that was used (see The whole product: Could not check, refusals and nothing silent, "A refused change is shown beside the control that asked for it").
 
 - Phone and desk: on a phone only the stale warning shows, never the "updated" time.
 
@@ -427,7 +427,7 @@ Without anyone pressing anything, what the dashboard shows about the studio is k
 | How far each computer is through each project, and which files it still lacks | about a minute |
 | The projects and computers the NAS knows of | about two minutes |
 | A folder newly marked as a project on the NAS | set up within about five minutes |
-| How many video files a changed project holds on the NAS | about 15 minutes (a brand-new project is counted within seconds of being found) |
+| A file that reached the server showing as on the server | within five minutes (a newly found project is counted first, within a minute or two; see The dashboard: Projects, "The server counts what each project holds on the NAS") |
 | What is protected | about 15 minutes |
 | The server's own checks for problems | about 10 minutes |
 
@@ -447,7 +447,7 @@ A person can fold sections of a page away, and the choice is kept. A folded sect
 
 ### Returning to a page puts the person back where they were
 
-Returning to a page restores where it was scrolled and which sections were open, even when parts of it arrive a moment late; a remembered position is forgotten after 8 hours. A link that names a place on a page scrolls there instead, once that place has arrived, every time the link is pressed, without fighting a person who has already started scrolling.
+Returning to a page puts the person back where they were on it, and a link that names a place on a page leads there instead (see The dashboard: Overview, menus and finding things, "Every page remembers where the person was on it" and "A link can lead to any place on a page").
 
 ### A page drawn before an update reloads instead of acting
 
@@ -481,7 +481,7 @@ The home page loads within a second for a studio of 20 computers, and stays fast
 
 ### One slow action never holds up anyone else
 
-While one change is being written, every other page and every computer's report is still answered within a second. When the server truly cannot take something at that moment it says it is busy at once rather than making the person wait. No admin action, upload, search or other long piece of work delays other people's pages or the computers' reports by more than a second: long work runs alongside and shows its progress.
+While one change is being written, every other page is still answered within a second, and every computer's report finishes in about a tenth of a second. When the server truly cannot take something at that moment it says it is busy at once rather than making the person wait. No admin action, upload, search or other long piece of work delays other people's pages by more than a second, or the computers' reports beyond that tenth of a second: long work runs alongside and shows its progress.
 
 ### Admins are told when the server was too busy to answer
 
@@ -552,7 +552,7 @@ Only the pages named as open are reachable without signing in: the sign-in page 
 
 ### A change that did not come from the dashboard's own page is refused
 
-A change sent to the dashboard from another web site, or from a page whose sign-in has changed since it was drawn, is refused with "this action did not come from this dashboard's own page: reload the page and try again", and in Timeline Cards with "this request came from another site". The cure is to reload the page. On anything that changes data or drives the editing program, a request whose browser hides where it came from is refused unless it can be shown to come from the dashboard itself; only a request that states no origin at all, as programs do, may pass on its sign-in alone.
+A change sent to the dashboard from another web site, or from a page whose sign-in has changed since it was drawn, is refused with "this action did not come from this dashboard's own page: reload the page and try again". Timeline Cards shows its own sentence for the same refusal (see Timeline Cards: the editor: Speed and smoothness, "An edit is refused only for a real reason, and never in silence"). The cure is to reload the page. On anything that changes data or drives the editing program, a request whose browser hides where it came from is refused unless it can be shown to come from the dashboard itself; only a request that states no origin at all, as programs do, may pass on its sign-in alone.
 
 ### Sign-in travels only over secure connections when the address is secure
 
@@ -560,7 +560,7 @@ When the dashboard's address starts with https, a person's sign-in is only ever 
 
 ### The dashboard warns when a computer reaches it unencrypted over the public internet
 
-For each computer the dashboard records whether it connects unencrypted over the public internet, unencrypted over the studio's own or private network, or encrypted, and records a change when one happens. It raises a warning only for an unencrypted connection over the public internet.
+For each computer the dashboard records whether it connects unencrypted over the public internet, unencrypted over the studio's own or private network, or encrypted, and records a change when one happens. Only an unencrypted connection over the public internet is raised to admins; that problem, how serious it is, how often it repeats and its fix are described with the rule it guards (see Accounts, privacy and the legal paperwork: How secrets and keys are kept, "A credential never crosses the internet unencrypted").
 
 ### Oversized requests are refused before they are read
 
@@ -582,20 +582,20 @@ A page that fails shows only the kind of error and that the detail is kept for t
 
 ### An admin stops syncing on every computer at once, with a reason
 
-"Stops uploads, proxy downloads and shared project files on every editor's computer. Nothing is deleted; it is fully reversible. A computer that is off right now takes the stop the moment it reports again."
+The stop control explains the whole effect before anything is stopped: every transfer stops on every editor's computer (uploads, downloads, project files, the shared libraries and the first set-up of any new folder); shared work running anywhere goes back to waiting and no computer takes any; no computer starts taking part in Timeline Cards; nothing is deleted and it is fully reversible; and a computer that is off right now takes the stop the moment it reports again.
 
-To stop, the admin gives a reason ("why (shown in every editor's tray)"), at least 3 and at most 500 characters; without one they are told "say why: the reason is shown in every editor's tray (at least 3 characters)". Then "stop all syncing" asks "Stop syncing on EVERY computer in the fleet? Uploads, proxy downloads and shared project files stop everywhere until you start them again here. Nothing is deleted. Work done while it is stopped will not reach anyone until you start them again." The stop lasts 24 hours unless the admin chooses another length, from any time above zero up to 720 hours (30 days), and then ends by itself.
+To stop, the admin gives a reason, which is shown in every editor's app, and chooses how long the stop lasts. Then "stop all syncing" asks the admin to confirm, naming the same whole effect, that nothing is deleted, and that work done while it is stopped reaches no one until syncing starts again. The reason's limits, the refusal without one, the length (24 hours unless the admin chooses another), the stop ending by itself and what each computer and editor sees are described in full with the stop itself (see Sync: Studio-wide stops and the editor's pause, "An admin stops syncing on every computer with a reason").
 
-Each computer picks the stop up the next time it reports (within a minute) and shows the reason in its tray, including a computer that was off when it was set. The stop survives a dashboard restart. Editors cannot start syncing again from their own computers; only an admin can.
+The stop survives a dashboard restart. Editors cannot start syncing again from their own computers; only an admin can.
 
 - Who: an admin starts it. Anyone signed in, and any recognised computer, can see whether it is on.
 
 ### An admin keeps the stop on for longer or starts syncing again
 
-While stopped, the stop control shows "Syncing is stopped on every computer", the reason, "set by <who> <ago> (N hours so far, N computers in the fleet)", and "releases itself <in ...> unless you keep it stopped (kept on N times)", with "Each app picks this up on its next report (within a minute) and shows the reason in its tray. Editors cannot start syncing again themselves; only this button can."
+While stopped, the stop control shows "Syncing is stopped on every computer", the reason, "set by <who> <ago> (N hours so far, N computers in the fleet)", and "releases itself <in ...> unless you keep it stopped (kept on N times)", with a line saying that each app picks the stop up on its next report and shows the reason, and that editors cannot start syncing again themselves; only this button can.
 
 - "start syncing again" ends the stop everywhere.
-- "keep it stopped" asks "Keep every computer in the fleet stopped for another day? ..." and moves only the end, to one day from now, keeping the reason, who set it and when it began. Asked after the stop has already ended, it is refused with "Syncing already started again at <time>. To stop it again, give a reason." or "Nothing is stopped, so there is nothing to keep stopped. Stop syncing with a reason."
+- "keep it stopped" asks the admin to confirm and moves only the end, by the chosen length from now, keeping the reason, who set it and when it began. Asked after the stop has already ended, it is refused (see Sync: Studio-wide stops and the editor's pause, "An admin keeps a studio-wide stop going or starts syncing again").
 
 - Who: an admin.
 

@@ -413,7 +413,7 @@
 
 - ACC-001 | 17-037, 20-010 | the items let anyone the sign-in service vouches for in while the studio knows no editors, or cannot read who it knows, and make a name known when a computer reports under it; the lesson has the admin decide every account. Wrote: never assumed, and a report never adds a name.
 - ACC-002 | 17-036, 17-037 | the items match a single sign-on person by the name the service gives; the lesson requires an identifier the person cannot change. Wrote the identifier.
-- ACC-004 | 11-020, 11-046, 17-041, 21-011, 19-027 | the items give names of 1 to 32, 1 to 31 and 1 to 64 characters, and some parts silently refuse names others accept; the lesson wants one shape that works everywhere. Wrote 1 to 31 (what the NAS accepts) and one shape.
+- ACC-004 | 11-020, 11-046, 17-041, 21-011, 19-027 | the items give names of 1 to 32, 1 to 31 and 1 to 64 characters, and some parts silently refuse names others accept; the lesson wants one shape that works everywhere. Wrote 1 to 32 (a lower-case letter and up to 31 more, as the product takes today; settled by the joins 2026-11-24) and one shape.
 - ACC-007 | 11-052, 11-053, 12-012, 13-065, 13-070, 20-014, 22-014, 22-027 | the items make an admin approve each computer and each computer's key after the person exists; the ruling grants access with one button and no other step. Wrote one step, and signing in on the computer as all it takes.
 - ACC-018 | 11-049, 13-068, 17-026 | the items say suspending signs nobody out of the browser; the lesson says suspending ends sessions. Wrote the lesson.
 - ACC-018 | 11-050, 13-069 | the items let a removal partly succeed with warnings; the lesson wants all or nothing. Wrote all or nothing.
@@ -502,10 +502,12 @@
 - 13-061 | "the app has to be restarted (tray, then Restart CCSync)": simplified
 - 10-037 | the failure being only logged: told instead
 - ACC-045 | the half saying the server holds no NAS-admin credential by default and verifies the NAS it talks to: belongs with installing the server
+- 21-012 | the site's transfer-only setting, the report converting existing editors and its refusal: settled by the joins (2026-11-24, accounts-privacy-legal F12); editors are always transfer-only
+- 21c-017 | the admin list being given at install: settled by the joins (2026-11-24, server-install-and-running-1 F1); it is kept in the browser set-up
 
 ## Joins with other capabilities
 
-- The app on each editor's computer / Signing in, the computer's identity and the licence | A computer becomes a person's when they sign in on it | the app's sign-in window, its refusal sentences, at most 16 computers per person
+- The app on each editor's computer / Signing in, the computer's identity and the licence | A computer becomes a person's when they sign in on it | the app's sign-in window, its refusal sentences, and its one warning for a refused sign-in
 - The app on each editor's computer / Settings, records and background work | An editor chooses what their computer reports | the privacy rows in the app's settings window
 - The app on each editor's computer / Installing and setting up | A computer accepts the licence before it first syncs | the licence page and the reporting page of set-up
 - Work shared out across the computers / When a computer counts as free and able | Four kinds of reporting can be switched off, by a computer or for the whole studio | idle time withheld means the computer is never counted idle
@@ -527,9 +529,53 @@
 - Releases and updates / Signing and trust | A credential never crosses the internet unencrypted | downloads checked against a signature
 - Releases and updates / Customer sites and the vendor's release feed | What a customer receives, and what never | the site's credential for downloading the product
 - The whole product / The assistant | How long the product keeps each kind of record | the assistant switch and its records
+- The dashboard / Each computer's state | A person or an admin asks one of the person's computers to change its settings | every request to one computer waits for it and expires after 14 days
+- The app on each editor's computer / Signing in, the computer's identity and the licence | A refused computer is told why, and the admin sees it | the one warning for a refused sign-in, offering to sign in again
+- The Footage Sorter and camera cards / The record of every copy | What a computer tells the server ; Four kinds of reporting can be switched off, by a computer or for the whole studio | drive reporting and its per-computer switch
+- The server: installing it and keeping it running / Installing on a NAS | The admins are named at install, and are never the NAS's own administrator ; The server's set-up asks the admin to accept the licence | the admin list kept in the set-up's admin account task, and the licence task pointing here
+- The server: installing it and keeping it running / Settings and secrets | Secrets the server is given are kept by the server | secrets an admin enters, never shown back
 
 ## Settled by the owner 2026-11-24
 
 - accounts-privacy-legal-U1 | records of conversations with the assistant are kept 30 days by default, a site setting an admin can change
 - accounts-privacy-legal-U2 | the Footage Sorter exists once, inside the dashboard, behind its sign-in
 - accounts-privacy-legal-U3 | Timeline Cards exists once, inside the dashboard, behind its sign-in
+
+## Joins settled
+
+- accounts-privacy-legal F1 | no change here: the text already speaks only of suspending and removing; the `##` heading "Suspending, disabling and removing a person" is left for the lead to rename by hand
+- accounts-privacy-legal F3 | changed: An admin manages the studio's people from one list | the page is dashboard-1's "People and computers"; this behaviour points there and to each action's own behaviour here
+- accounts-privacy-legal F4 | no change here: dashboard-1 and server-install-and-running-1 drop the site's choice; this text already has per-project access only
+- accounts-privacy-legal F5 | changed: Each project is reachable only by its members | the person who creates a new project is a member at once; creating one that exists grants nothing
+- accounts-privacy-legal F6 | no change here: editor-app drops the 16-computer limit (the join line here no longer names it)
+- accounts-privacy-legal F7 | no change here: editor-app takes this piece's sentences
+- accounts-privacy-legal F10 | changed: The server's set-up asks the admin to accept the licence | home of the task; adds that it is first on the set-up's list (server-install-and-running-1 points here)
+- accounts-privacy-legal F12 | changed: A studio can keep editors to file transfers only on the NAS | the setting, the conversion report and its refusal go; editors are always transfer-only (the `###` heading is kept as it stands)
+- accounts-privacy-legal F13 | no change here: the server-install pieces change; this text already keeps the NAS login's password in step
+- accounts-privacy-legal F14 | no change here: server-install-and-running-2 changes; this text already deletes the NAS login on removal
+- accounts-privacy-legal F15 | changed: Secrets the server is given are kept by the server (new) | points to server-install-and-running-1's "Secrets an admin enters are checked and never shown back"
+- accounts-privacy-legal F16 | changed: What a computer tells the server ; Four kinds of reporting can be switched off, by a computer or for the whole studio | drive reporting while the Footage Sorter is on, and its per-computer switch beside the four kinds
+- accounts-privacy-legal F17 | changed: Four kinds of reporting can be switched off, by a computer or for the whole studio | the drive switch is the editor's at that computer; footage-sorter-and-camera-cards-2 changes its Who
+- accounts-privacy-legal F18 | no change here: sync-2 drops its exception; this text already agrees
+- accounts-privacy-legal F19 | no change here: whole-product changes to count every reporting kind as withheld when its copy cannot be read
+- cards-editor-5 F1 | no change here: cards-editor-5 changes; this text is the home of signing out
+- dashboard-1 F1 | no change here: dashboard-1 changes; this text already holds the rule
+- dashboard-1 F7 | changed: Diagnostics hide what a computer withholds | a withheld idle time is left out of diagnostics and named in the note (editor-app points here)
+- dashboard-2 F1 | no change here: dashboard-2 points to this text's question
+- dashboard-2 F2 | no change here: this text is the home of the problem and already says serious and repeated daily
+- dashboard-2 F3 | no change here: dashboard-2 changes
+- editor-app F3 | changed: A refused computer is told why, and the admin sees it | points to editor-app's refused sign-in warning instead of quoting a sentence of its own
+- editor-app F4 | no change here: editor-app changes
+- editor-app F5 | changed: A computer accepts the licence before it first syncs ; The licence window | closing counts as unanswered and the offer returns; only DECLINE stops the automatic offer
+- editor-app F6 | no change here: editor-app changes; the ruling leaves this text as it is
+- editor-app F10 | changed: A person or an admin asks one of the person's computers to change its settings | the sync-drive reminder goes; how long a computer lends itself is shown read-only, changed on the computer
+- editor-app F11 | no change here: editor-app changes; this text already says wired or remote is never asked for
+- fleet-jobs F16 | changed: Stopping a person takes effect everywhere at once | a piece of shared work already finished can still be handed in
+- fleet-jobs F17 | changed: A person or an admin asks one of the person's computers to change its settings | home of the ask: takes fleet-jobs' refusals, one ask at a time, its states and its notice to the editor; waiting and the 14-day expiry point to dashboard-1's rule
+- footage-sorter-and-camera-cards-1 F13 | no change here: footage-sorter-and-camera-cards-3 changes
+- releases-and-updates F1 | no change here: releases-and-updates changes
+- server-install-and-running-1 F1 | changed: The admins are named at install, and are never the NAS's own administrator ; An admin's emergency password door under single sign-on | the admin list is kept in the browser set-up's admin account task and refused there; the heading is kept as it stands (it still says "at install", left for the pointer pass)
+- server-install-and-running-1 F2 | no change here: server-install-and-running-1 changes
+- server-install-and-running-1 F4 | changed: A sign-in name has one shape, and a name accepted anywhere works everywhere ; What a refused sign-in says | 1 to 32 characters, "(at most 32 characters)"
+- server-install-and-running-1 F5 | no change here: server-install-and-running-1 changes and points here
+- whole-product F1 | no change here: whole-product changes; this text already deletes on time while the assistant is off

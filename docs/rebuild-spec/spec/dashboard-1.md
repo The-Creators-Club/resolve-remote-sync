@@ -18,7 +18,7 @@ An editor sees their own computers in full and summary counts for the rest of th
 
 An admin can look at the Overview as another person: they choose the person, then optionally one of that person's computers. A computer chosen that is not that person's is ignored. An editor sees only themself. Projects are ticked on the Projects page, not here.
 
-Admins also get a "Stop the fleet" shortcut, explained as "it pauses syncing on every computer at once until you start it again. Nothing is deleted, and the pause ends by itself after 24 hours." It leads to the one studio-wide stop (see the second part of the dashboard's specification, "Stopping and resuming the fleet"). While the studio is stopped, every page says so.
+Admins also get a "Stop the fleet" shortcut, explained as "it pauses syncing on every computer at once until you start it again. Nothing is deleted, and the pause ends by itself after 24 hours unless you choose another length." It leads to the one studio-wide stop (see Sync: Studio-wide stops and the editor's pause, "An admin stops syncing on every computer with a reason"). While the studio is stopped, every page says so.
 
 - Who: anyone signed in; acting for another person and the stop are for admins only.
 - Name and search words: Overview. Search words: home, overview, start page, summary, dashboard.
@@ -77,7 +77,7 @@ A search box in the menu bar takes a name and jumps straight to what it finds: a
 
 ### The settings search finds settings only
 
-Inside Settings, a second search finds any setting by its plain name or its search words and opens it in view. It returns settings only, never pages, projects, computers or people. Settings are listed in groups by what they do; the groups are in the second part of the dashboard's specification.
+Inside Settings, a second search finds any setting by its plain name or its search words and opens it in view. It returns settings only, never pages, projects, computers or people. Settings are listed in groups by what they do; the groups are the ones the builder proposes from the list of every setting and the owner approves.
 
 - Who: an admin.
 - Name and search words: Settings search. Search words: settings, find a setting, options, preferences, configure.
@@ -94,7 +94,7 @@ On returning, sections are opened again and the page scrolls back once its panel
 
 ### A link can lead to any place on a page
 
-Following a link to a particular part of a page opens whatever holds it (a tab, a folded section, a fold-out) and scrolls to it, when the page loads and whenever the link changes; following the same link again does it again. A link naming a fold-out section of the Overview opens it once; if the person folds it again, later refreshes respect that. Every control can be reached and worked from the keyboard. The only single-key shortcut on dashboard pages is "/", which puts the cursor in the page's find box.
+Following a link to a particular part of a page opens whatever holds it (a tab, a folded section, a fold-out) and scrolls to it, once that place has arrived, when the page loads and whenever the link changes, without fighting a person who has already started scrolling; following the same link again does it again. A link naming a fold-out section of the Overview opens it once; if the person folds it again, later refreshes respect that. Every control can be reached and worked from the keyboard. The only single-key shortcut on dashboard pages is "/", which puts the cursor in the page's find box.
 
 ### The account menu
 
@@ -121,7 +121,7 @@ Clicking the installer link downloads, at once, the installer for the operating 
 
 ### Builds on offer are listed in a fixed order
 
-Wherever builds of the app or the server are listed, the ones being served to the studio's computers come first, then what the vendor offers, then any other versions the server holds, folded away. Within each, builds are grouped by kind, then by platform. Publishing and offering builds are in Releases and updates: Offering an update to a computer.
+Wherever builds of the app or the server are listed, the ones being served to the studio's computers come first, then the other versions the server holds, then what the vendor offers. Within each, builds are grouped by kind, then by platform. Each group of held versions shows its current and its newest version; only older held versions are folded away, and they are offered when choosing a version to go back to. The page is in Releases and updates: Pushing updates and seeing who has what, "The versions page shows every version the site holds"; publishing and offering builds are in Releases and updates: Offering an update to a computer.
 
 ### Help and the glossary are open to everyone signed in
 
@@ -179,17 +179,17 @@ A page or a row about one computer shows only that computer's facts, and which c
 
 Each computer shows exactly one headline. The first of these that is true wins:
 
-1. A named fault, red: the computer's own sentence saying why it is not syncing (see Sync: Saying truthfully what the sync is doing), including "nobody signed in" when no person is signed in on it, and "cannot sign in" with the reason when it is running but cannot prove who it belongs to.
+1. A named fault, red: the computer's own sentence saying why it is not syncing, for a reason that is a fault (see Sync: Saying truthfully what the sync is doing, "Each computer says in one sentence why it is not syncing, and since when"), including "Not syncing: nobody is signed in to CC Sync on this computer" when no person is signed in on it, and "Not syncing: this computer cannot sign in to the server: <reason>" when it is running but the server turns it away (its sign-in refused or revoked, its person suspended or removed). A pause the editor made and an admin's studio-wide stop are not faults: they take the information line below.
 2. Not heard from. With nothing ticked, muted: "Nothing ticked for this computer. Last report <date time> UTC". Otherwise "Not heard from since <date time> UTC" (or "Not heard from this computer for 15 minutes or more" when the time is not known), amber from 15 minutes, red from 6 hours.
 3. The app out of date, amber: "Out of date: running X, current is Y".
 4. A kind of movement that has stopped, red: "<Kind> has stopped: <reason>".
-5. An information sentence, muted.
+5. An information sentence, muted: the computer's information reasons ("Nothing ticked for this computer", "Nothing to download: this project is upload-only on this computer"), "Not syncing: syncing is paused on this computer" for a pause the editor made, and "Not syncing: syncing is stopped by your admin for the whole studio" for an admin's studio-wide stop.
 6. "Syncing", muted.
 7. Idle, muted: "Idle between checks, N file(s) still to move", "Idle, nothing owed" (only once the number of files owed has been checked and is zero), or "Idle".
 
 A computer that has gone quiet reads as asleep or not reporting, never as a sync fault, unless it was known to be in the middle of moving files when it went quiet. A computer with nothing ticked is always fine: it leads with the neutral line above and is never an error, a warning, an alert, a blocked state, an open issue or a computer expected to sync, however long it is quiet. A computer wired to the server syncs nothing by design and never shows a sync fault, chip, headline or alert about syncing.
 
-Beside the folded details, a count says how many further notes there are, so a headline is never calmer than what is folded under it. Each of these counts as a note: crashes of the app; the drive filling up; clips outside the shared tree; projects not open in Resolve with clips only on this computer; stray project folders; a project folder that has moved; conflicting copies of project files; an update that keeps failing; this computer being turned away; files it will not upload; a lot of footage in its own recoverable-files bin (over 5 GB); footage waiting in its drop folder; clips that need proxies; the Timeline Cards link to Resolve on this computer not running; YouTube clips waiting for Resolve, or the YouTube import having given up; clips with neither the original nor a proxy on this computer; Resolve having stopped answering.
+Beside the folded details, a count says how many further notes there are, so a headline is never calmer than what is folded under it. Each of these counts as a note: crashes of the app; the drive filling up; clips outside the shared tree; projects not open in Resolve with clips only on this computer; stray project folders; a project folder that has moved; conflicting copies of project files; an update that keeps failing; this computer being turned away; files it will not upload; a lot of footage in its own recoverable-files bin (over 5 GB); footage waiting in its drop folder; clips that need proxies; the Timeline Cards link to Resolve on this computer not running; YouTube clips waiting for Resolve, or the YouTube import having given up; clips with neither the original nor a proxy on this computer; Resolve having stopped answering. A note, issue or problem that depends on a kind of information the computer or the site withholds (clips outside the tree, clips only on this computer, stray project folders, a moved project folder) is not raised for that computer, and one already open closes without a message (see "A computer withholds kinds of information by choice").
 
 Nothing in the headline, the notes or the issues is ever said about a state chosen on purpose (nothing ticked, a part the site switched off, a plan with nothing to change, a build already replaced by a newer one).
 
@@ -213,7 +213,7 @@ A project is the worst of its computers, and the whole studio is the worst of it
 
 Each computer's row lists what is wrong with it, errors first and then warnings, or "nothing wrong" when there is nothing. Each issue carries its explanation:
 
-- "proxy download stopped itself": "<reason>, stopped <ago>. Uploads and project files are still moving; nothing was deleted." The reason is only ever the one the computer gave, at its own threshold.
+- "downloads stopped themselves": "<reason>, stopped <ago>. Uploads are still moving; nothing was deleted." The reason is only ever the one the computer gave, at its own threshold (see Sync: Safety stops, "Downloads stop themselves when the server suddenly looks wrong").
 - "stopped by your admin" or "syncing paused on this computer", with the reason.
 - "project files not syncing <ago>" (never on a computer wired to the server): they have not been kept in step since <time>, whether anything is still trying, and the last error.
 - "clock <amount> ahead" or "clock <amount> behind": "this computer's clock is <amount> ahead of/behind the server's. A clock this far out can make files fail to come down while reporting no error. Fix the clock on that computer (turn on automatic time)." Shown once the two clocks are a minute or more apart; the alert mailed to admins waits until they are five minutes apart.
@@ -226,13 +226,14 @@ Each computer's row lists what is wrong with it, errors first and then warnings,
 - "reverted from <version>": it installed <version>, could not start it, and put itself back on <running>; "That build should not be made current for the fleet."
 - "suspended": "an admin suspended this person. Their computers are being turned away and their projects are not being sent to them. Their sync plan is kept: Resume puts it all back."
 - "conflicts: N": "Two people saved one project file; nothing was lost, but somebody's edit is sitting in a renamed copy."
-- "N clips outside the tree in <project>": the project open in Resolve uses N clips from outside the synced tree[, N of them under the wrong drive letter]; they will never upload, so the timeline opens with missing media on every other computer. Scanned <ago>. A Resolve project tied to no synced project raises nothing. When the open project cannot be known it reads "could not check", never fine.
-- "N project(s) with clips only here": N clips exist only on this computer, outside the tree, in Resolve projects it does not have open ('<first three names>'[ and N more]); they never upload until the editor opens each project and gathers its media (see Resolve on the editor's computer: Fixing media: copying in, rehearsals and undo).
+- "N clips outside the tree in <project>", with "N on the wrong drive" beside it when some are under the wrong drive letter: the project open in Resolve uses N clips from outside the synced tree; they will never upload, so the timeline opens with missing media on every other computer. Scanned <ago>. A Resolve project tied to no synced project raises nothing. When the open project cannot be known it reads "could not check", never fine; when the computer or the site withholds the open project, it shows the "not reported" tag instead (see "A computer withholds kinds of information by choice").
+- "N other projects with clips only here": N clips exist only on this computer, outside the tree, in Resolve projects it does not have open ('<first three names>'[ and N more]); they never upload until the editor opens each project and gathers its media (see Resolve on the editor's computer: Fixing media: copying in, rehearsals and undo).
 - "N stray project folders": N project folders on this disk are not in the synced tree, holding <size>; nothing in them is on the server or visible to anybody else.
-- "project folder moved": N project folders are not where the tree expects; syncing for them looks busy and moves nothing; move it back, or move it through the product so every computer follows (see Proxies and file moves: Moving footage through the product).
+- "project folder moved": N project folders are not where the tree expects; syncing for them looks busy and moves nothing; move it back (the app's put-back button), or, to rename or move the project for everyone, rename or move its folder on the server, which every computer follows (see Proxies and file moves: Moves made by hand on the NAS, "A project folder moved or renamed by hand on the NAS is followed").
 - "won't upload: N": N files exist on the NAS under the same name at a different size (counted under <subfolder> when known); an upload never overwrites a file already on the server, so this computer's newer versions will never go up.
 - "crashes: N": the app on this computer crashed N times in the background and wrote a report each time; its icon stays up and syncing looks normal, so ask this computer why (see "An admin asks a computer why, from its details").
 - "youtube clips waiting for resolve: N" (they are on the disk, nothing is lost) or "youtube import gave up" (they stay on the disk under the YouTube folder and are tried again when the app restarts).
+- the computer's YouTube state: its state and reason, how many clips are waiting and since when, and whether it can download; and, for any clip this computer should have downloaded and did not, its reason. The states and reasons are YouTube downloads' own (see YouTube downloads: Where a download runs, and saying so, "The page always says where each job ran and why", and Keeping the downloader working, "Admins are warned when downloading on the server or a computer is not working").
 - "N need proxies": N clips on this computer have no proxy yet, so nobody else can see that footage; with the state of proxy making and how many are waiting.
 - "N clips with neither original nor proxy here".
 - "trash: <size>" (only above 5 GB): N recoverable files in this computer's own recoverable-files bin, removed by themselves after 14 days.
@@ -249,9 +250,9 @@ Each computer's row lists what is wrong with it, errors first and then warnings,
 
 After the issues, a computer's row shows what it is working on:
 
-- each piece of shared work it is doing, "<kind of work>: N%", leading to the list of shared work, with the work's number, kind, state, file and last sign of life on pointing; marked as a warning when the work reported one (see Work shared out across the computers: Progress);
-- "lending until <time>": somebody at that computer chose to take shared work now, so it is offered work while they use it until <time> or until they turn it off; nothing else is bypassed (a studio-wide stop, an update or a stopped proxy download still hold it);
-- when this computer is the one whose Resolve Timeline Cards works with: "cards[: <timeline>][ v<version>]" while that link is running (with the timeline and when it last talked to Resolve), or "cards not running" with the reason in plain words (stopped until the app is restarted, refused to start, signed out, or cannot reach the dashboard, so what the page shows from it is not current).
+- each piece of shared work it is doing, "<kind of work>: N%", leading to the list of shared work, with the work's number, kind, state, file and last sign of life on pointing (see Work shared out across the computers: Progress);
+- "lending until <time>": somebody at that computer chose to take shared work now, so it is offered work while they use it until <time> or until they turn it off; nothing else is bypassed (a studio-wide stop, an update or downloads that stopped themselves still hold it);
+- when this computer is the one whose Resolve Timeline Cards works with: "cards[: <timeline>][ v<version>]" while that link is "running" (with the timeline and when it last talked to Resolve), or "cards not running" with the link's state word, "refused", "stopped", "credential refused" or "unreachable", and its sentence, so what the page shows from it is not current. Only "running" is green. Anything shown stopped is restarted within about a minute; only after 5 failed starts in a row does it stop trying until the app is restarted. The states are Timeline Cards' own (see Timeline Cards: the hand-over to Resolve, and exports: Which computer is driving Resolve, "Each computer shows whether its Resolve is taking part and if not why").
 
 A computer stops showing work the moment its first report after the work ended arrives.
 
@@ -275,7 +276,7 @@ Each computer's row folds out into its details. They stay open across refreshes,
 
 Each computer's sync drive free and total space and its system drive's free space are shown with the time they were measured. A value that could not be measured is shown as unknown, never as zero.
 
-The verdict on the sync drive: amber under 10% free or under 50 GB free; red under 5% free or under 20 GB free; otherwise green. A computer that never said, or whose figure is more than 48 hours old, gets no verdict. A low-space colour is a warning and never a stop: why a computer stopped bringing files down is told only from the reason the computer itself gave.
+Beside them is shown the computer's own floor: the free space at which its downloads pause (20 GB unless the computer reports another figure). The verdict on the sync drive: amber under 10% free or under 50 GB free; red under 5% free or under the computer's own floor; otherwise green. A computer that never said, or whose figure is more than 48 hours old, gets no verdict. A low-space colour is a warning and never a stop: why a computer stopped bringing files down is told only from the reason the computer itself gave.
 
 ### What each computer holds of each project is shown
 
@@ -292,19 +293,19 @@ Every figure names the project or folder it covers, and a figure for one project
 
 ### An admin asks one computer to do something and is told when it will happen
 
-Requests an admin aims at one computer (update now, resume proxy download, ask this computer why, change one of its settings) wait for that computer and reach it when it is next heard from. Each request waits until it has been carried out or for 14 days, whichever comes first, follows the computer if it is renamed, and is never delivered to a different computer claiming the same identity. Each answer to the admin names the editor and the computer and says when it will apply:
+Requests an admin aims at one computer (update now, resume downloads, ask this computer why, change one of its settings) wait for that computer and reach it when it is next heard from. Each request waits until it has been carried out or for 14 days, whichever comes first, follows the computer if it is renamed, and is never delivered to a different computer claiming the same identity. Each answer to the admin names the editor and the computer and says when it will apply:
 
 - nothing on record of the computer being heard from: "when that computer next reports. Nothing on record says when it last did";
 - last heard from 24 hours ago or more: "when that computer next reports. It was last heard from <age>, so this may sit for a while";
 - otherwise: "on that computer's next report, usually within 30 s. It was last heard from <age>".
 
-For a build that is not yet the studio's current one, it adds ", as an offer of a build being tried on this computer first". Ages read "N s ago" under 90 seconds, "N minutes ago" under 90 minutes, "N hours ago" under 48 hours, and otherwise "N days ago". A computer heard from 24 hours ago or more, or never, is marked as silent. A silent computer is warned about and never a reason to refuse. The admin is also told when the same request was already waiting from an earlier click.
+For a version held back and not yet the studio's current one, it adds ", as an offer of a held-back version to this computer alone". These are the sentences for every request aimed at one computer, an update pushed to it included (see Releases and updates: Pushing updates and seeing who has what, "An admin pushes a version to one computer"). Ages read "N s ago" under 90 seconds, "N minutes ago" under 90 minutes, "N hours ago" under 48 hours, and otherwise "N days ago". A computer heard from 24 hours ago or more, or never, is marked as silent. A silent computer is warned about and never a reason to refuse. The admin is also told when the same request was already waiting from an earlier click.
 
 - Who: an admin.
 
-### An admin resumes a computer's stopped proxy download
+### An admin resumes a computer's stopped downloads
 
-In a computer's details, "Resume" is offered when its proxy download stopped itself to protect footage and no resume is already waiting. It asks the computer to start again when it is next heard from, and then shows "resume asked" ("waiting for <machine> to report in and pick this up"). If the computer has left the studio: "That computer has left the fleet, so nothing was resumed. Reload the page." Why proxy downloads stop themselves is in Sync: Safety stops.
+In a computer's details, "Resume" is offered when its downloads stopped themselves to protect footage and no resume is already waiting. It asks the computer to start again when it is next heard from, and then shows "resume asked" ("waiting for <machine> to report in and pick this up"). If the computer has left the studio: "That computer has left the fleet, so nothing was resumed. Reload the page." Why downloads stop themselves is in Sync: Safety stops.
 
 - Who: an admin; the editor can also resume from the app on their computer.
 
@@ -319,17 +320,17 @@ In a computer's details, "Ask this computer why" asks it to send its diagnostics
 
 Above the list of computers, banners say when syncing is stopped somewhere:
 
-- the studio-wide stop: "stopped", "Syncing is stopped on every computer: an admin stopped the whole fleet." with the reason and "set by <who> <ago>" (the stop itself is in the second part of the dashboard's specification, "Stopping and resuming the fleet");
-- proxy downloads that stopped themselves: "stopped", "Proxy download stopped on N computer(s): <person/computer list>. Check the server, then press "Resume" on that computer's row (or have each editor resume proxy download in the app on their computer)." with each computer's reason;
+- the studio-wide stop: "stopped", "Syncing is stopped on every computer: an admin stopped the whole fleet." with the reason and "set by <who> <ago>" (the stop itself is in Sync: Studio-wide stops and the editor's pause, "An admin stops syncing on every computer with a reason");
+- downloads that stopped themselves: "stopped", "Downloads stopped on N computer(s): <person/computer list>. Check the server, then press "Resume" on that computer's row (or have each editor resume downloads in the app on their computer)." with each computer's reason;
 - paused at the computer: "paused", "Syncing is paused on N computer(s), by whoever is sitting at it/them: <list>.";
 - computers being turned away (admins only): "refused", "N computer(s) is/are being refused: <list>. They are reporting and the dashboard is turning them away (<reason>). Have each editor sign in again in the app on that computer.";
 - projects the server would not take off its lists all at once (see "Projects never vanish all at once because the NAS looked empty").
 
-For admins the same place also lists the lost computers (see "A computer silent for a week is listed as lost") and, when the vendor's release feed cannot be read, when it was last checked, how many days ago, the last error, "stale" when it has been read before and the last check is older than the stale limit (a feed never yet checked is not called stale), and whether every build on offer needs the server to be updated first (see Releases and updates: Customer sites and the vendor's release feed).
+For admins the same place also lists the lost computers (see "A computer silent for a week is listed as lost"). When the server has never checked the vendor's release feed, or has had no successful check of it for more than 7 days, the one banner about it is the Overview's (see Releases and updates: Customer sites and the vendor's release feed, "The server checks the vendor's list every day, and an admin can check now").
 
 ### What computers can be asked to change is shown before asking
 
-For each computer, the dashboard shows which of its settings can be changed from the dashboard (nothing listed means it cannot take a request) and their values: how long it lends itself to shared work (0 to 100000 minutes), its sync-drive reminder (0 to 100000 minutes), whether YouTube downloads, YouTube sign-in and the YouTube terms are on, off or unknown, its YouTube sign-in state, and which settings are waiting for the app to restart. When the computer did not say what is waiting for a restart, that shows as "cannot tell", never "nothing waiting". The settings themselves are in The app on each editor's computer: Settings, records and background work.
+For each computer, the dashboard shows which of its settings can be asked for from the dashboard (nothing listed means it cannot take a request): whether it takes shared work and which kinds. Asking is in Accounts, privacy and the legal paperwork: What each person may see and reach, "A person or an admin asks one of the person's computers to change its settings". Beside them the dashboard shows, read-only, how long it lends itself to shared work (changed on the computer), whether YouTube downloads, YouTube sign-in and the YouTube terms are on, off or unknown, its YouTube sign-in state, and which settings are waiting for the app to restart. When the computer did not say what is waiting for a restart, that shows as "cannot tell", never "nothing waiting". The settings themselves are in The app on each editor's computer: Settings, records and background work.
 
 - When YouTube downloads are off: the YouTube values are not shown.
 
@@ -362,15 +363,9 @@ Ticking a project for a computer means that computer takes the project: its orig
 
 A tick is either full sync (the default) or upload only (see "Full sync or upload only, and switching between them"). Ticking a project that is already ticked the other way switches it.
 
-A tick changes only the computer chosen. When no single computer is chosen, the tick covers every computer the person has; before it is saved the person is asked, with every computer named. A person with no computer yet gets the tick held for their first computer, which takes it when it is first heard from.
+A tick changes only the computer chosen. When no single computer is chosen, the tick covers every computer the person has that is not wired to the server; before it is saved the person is asked, with every computer named. A person with no computer yet gets the tick held for their first computer, which takes it when it is first heard from.
 
-Refusals, each saying why:
-
-- "you can only change your own projects (admins excepted)";
-- "unknown or inactive project '<name>'";
-- "this account is wired to the server: it works directly off the NAS and syncs nothing, so projects cannot be ticked for it", when every computer of the person is wired to the server;
-- "'<editor>' has no computer named '<computer>'";
-- "'<computer>' is wired to the server: it works directly off the NAS and syncs nothing, so projects cannot be ticked for it".
+A tick is refused, saying why, when it is someone else's plan and the person is not an admin, when the project is unknown or archived, when the computer named is not the person's, and when the computer, or every computer of the person, is wired to the server. The rules and their sentences are in Sync: A plan belongs to a computer, "The rules every tick and untick follow, wherever it is made".
 
 A tick is recorded in the history with where the project was ticked before and after (nothing is recorded when nothing changed), and reaches the computer within about a minute.
 
@@ -394,6 +389,7 @@ Wherever ticks are shown, the page says whose plan and which computer a tick cha
 
 - An admin who has other editors can pick "<me> (me)" or any other known editor; picking one clears the computer choice.
 - When the chosen person has more than one computer, a computer choice offers "every computer" or each computer ("A sync plan belongs to a computer, not a person. Every computer ticks or unticks all of them at once."). With exactly one computer it simply says "computer: <name>".
+- A tick for a whole person ("every computer") leaves out their computers wired to the server on its own; a person whose every computer is wired gets nothing ticked.
 - When acting for someone else, a warning reads "acting as <name>: a tick here starts a real sync on their computer".
 
 The choice works in every browser, with or without scripts.
@@ -416,11 +412,13 @@ Every action and question works for any project name a person can type, shows th
 
 ### Ticking warns when the proxies may not fit but never refuses
 
-When the project's proxy size on the server and the computer's free space are both known, ticking asks first unless the proxies plus 20 GB fit and the proxies are under half the free space: "<project> is <size> of proxies. <computer> has <free> free." plus "That is more than will fit." when they are larger than the free space, then "Sync it there anyway?". The tick is never refused. A project whose proxies were never measured shows "not measured", meaning a tick cannot warn about space. The same question is asked when switching an upload-only tick to full sync.
+When the project's proxy size on the server and the computer's free space are both known, ticking asks first unless the proxies plus 20 GB fit and the proxies are under half the free space: "<project> is <size> of proxies. <computer> has <free> free." plus "That is more than will fit." when they are larger than the free space, then "Sync it there anyway?". Cancel unticks it again. The tick is never refused. A project whose proxies were never measured shows "not measured", meaning a tick cannot warn about space; nothing is said when either figure is unknown, and a computer that never reported its disk is unknown, never empty. The same question is asked when switching an upload-only tick to full sync.
+
+Ticking for a whole person checks each of their computers and shows up to three such sentences. Ticking a whole column of the plan grid gives one warning for the column's total ("<n> projects (<k> of them measured) are <size> of proxies..."). The same rule is used everywhere a tick is made.
 
 ### Full sync or upload only, and switching between them
 
-A tick is full sync (originals go up, proxies and project files come down) or upload only ("For footage you already have on this computer: send the video originals to the server and download nothing (no proxies, no shared project files)."). What upload only does is in Sync: Upload only.
+A tick is full sync (originals go up, proxies and project files come down) or upload only ("For footage you already have on this computer: send every file to the server and download nothing but the project's empty folders (no proxies, no shared project files, no originals)."). An upload-only tick sends every file of the project up (system clutter and temporary files excepted), and the only thing that comes down is the project's folder structure, empty, so the editor sees where originals go. What upload only does is in Sync: Upload only, "An upload-only tick sends every file up and brings down only the empty folders".
 
 - "Upload only for me/<name>" ticks a project upload only.
 - "Switch to upload only" on a ticked project asks: "This sets <project> to upload only on every one of <list>: nothing more comes down on any of them, and a computer that has a full sync of it now stops downloading. Their copies stay on disk. Switch to upload only?"
@@ -445,9 +443,12 @@ For the viewer (or the person an admin is acting for, with "acting as <name>: th
 
 For one person, or one of their computers, the sync queue shows each ticked project in the order it is worked through: its name, position, full or upload only, whether the project has gone from the server, whether the computer is working on it right now, how complete it is, the files and bytes still needed, the speed and time left, a status (green when nothing is known), and the borrowed folders it brings in. It also names every computer of the person (listed in the question when unticking for the whole person), the Resolve project open now, the project it was matched to, and whether that pairing was made by the editor, an admin, or worked out by the product.
 
-With a computer chosen, that computer's facts are used; otherwise those of the person's most recently heard-from computer. The queue shows order and progress only; projects are ticked and unticked on the Projects page.
+With a computer chosen, that computer's facts are used; otherwise those of the person's most recently heard-from computer. Projects are ticked and unticked on the Projects page.
 
-- Who: the person themself, or an admin for anyone.
+With one computer chosen, any project in its queue can be moved to the front, or the whole order set by hand; the new order is that computer's alone, reaches it within about a minute, and does not redo projects already handled this round (see Sync: What syncs where, "Projects ticked on a computer sync one at a time, in the order set for that computer"). The same is offered for each computer on the per-computer view.
+
+- Who: the person themself, or an admin for anyone; the order is changed by the editor for their own computers, or by an admin for anyone's.
+- Ways in: the per-computer view, and a person's own page.
 - Name and search words: Sync queue. Search words: queue, my projects, order, waiting projects, progress.
 - When the help for the editing program is off: the open Resolve project and its pairing are not shown.
 
@@ -461,7 +462,7 @@ The plan grid shows projects against one person's computers.
 - One column per computer: its name with whether the person is present, the person, "<size> free" on its sync drive, and either "wired: set on that computer" or the column actions "all", "none" and "copy from..." (see "An admin ticks or unticks a whole column at once").
 - One row per active project: its name and its proxies' size on the server ("not measured" meaning a tick cannot warn about space). Each cell has a tick ("sync "<project>" to <computer>") and an "up" box.
 - A filter box hides projects whose name does not contain the typed text ("Filtering unticks nothing").
-- Legend: ticked "synced: the project comes down and goes up"; up "upload only: originals go up, nothing comes down"; empty "not on this computer".
+- Legend: ticked "synced: the project comes down and goes up"; up "upload only: every file goes up, only the empty folders come down"; empty "not on this computer".
 - On a wired computer an unticked cell cannot be ticked, and a ticked one can only be unticked ("syncs nothing: untick to clear this stale sync.").
 - A cell for a person whose computer has never been heard from applies to the person as a whole (every computer, or the plan held for their first computer).
 - The "up" box ticks the project upload only (ticking it if needed); turning it off returns it to a full tick; it never unticks.
@@ -579,7 +580,7 @@ For each active project the server knows every video file: its path in the proje
 
 - A file that reached the server shows as on the server within five minutes, however many projects the studio has.
 - A newly found project is counted first, within a minute or two. A project never counted shows "not counted yet", never "0 originals", and its proxy size is unknown, never zero, when warning about a tick.
-- A count that fails is recorded with its time, and the project is counted again next time, so a passing fault does not stick. When the server is refused while listing a project's files, admins see a serious problem, one per project: "The figures on that project's page are the last good ones", with a fix that mentions moving the project through the product if it was renamed (see Proxies and file moves: Moving footage through the product). This is only checked while the projects folder itself is healthy.
+- A count that fails is recorded with its time, and the project is counted again next time, so a passing fault does not stick. When the server is refused while listing a project's files, admins see a serious problem, one per project: "The figures on that project's page are the last good ones", with a fix that, if the project folder was moved or renamed, says to move it back (the app's put-back button), or, to rename or move the project for everyone, rename or move its folder on the server, which every computer follows (see Proxies and file moves: Moves made by hand on the NAS, "A project folder moved or renamed by hand on the NAS is followed"). This is only checked while the projects folder itself is healthy.
 - A count that would drop more than 90% of a project's files at once is not taken: the last good figures stay, and admins see "A project's file count collapsed, so the last good one is kept" until a count comes in that agrees.
 - Files the sync deliberately never sends are never counted as owed, waiting or behind.
 
@@ -605,7 +606,7 @@ Refusals, each saying why:
 - "could not create the folders on the NAS. Ask an admin to check the server" (the details, which name places on the server, are kept from the person);
 - a Resolve project none of the person's computers has reported (checked before anything is made).
 
-On sites that control access per project, the new folder is open only to that project's group, and the creator is given access (see Accounts, privacy and the legal paperwork: What each person may see and reach).
+The new folder is open only to that project's members, and the creator is given access at once (see Accounts, privacy and the legal paperwork: What each person may see and reach, "Each project is reachable only by its members").
 
 - Who: anyone signed in.
 - Ways in: the Projects page, and the page an editor reaches from Resolve (see "A new Resolve project with no folder leads the editor to pick or create one").
@@ -630,10 +631,10 @@ When the app on an editor's computer notices a new Resolve project with no proje
 - Done: "ok", "Projects/<folder> is set up on the server[ and "<name>" now files into it].", "Syncing for it is set up automatically within about 5 minutes. You can close this page."
 - Not done: the error, and when the typed name already exists, "Use Projects/<folder>" to link that folder instead; "pick a folder to link"; a Resolve project already paired can only be pointed elsewhere by an admin ("this Resolve project is already mapped: ask an admin to change it").
 
-A Resolve project is paired with a project on its own only when its name matches exactly one project's name exactly; any partial match is put to a person, and no guess is ever kept unconfirmed.
+A Resolve project is paired with a project on its own only when its name matches exactly one project, by the rule in Resolve on the editor's computer: Knowing which project is open, "A Resolve project is tied to a project in the tree"; any partial match is put to a person, and no guess is ever kept unconfirmed.
 
 - Who: anyone signed in; changing a pairing once set is for an admin.
-- On its own: pairs a Resolve project with a project when the names match exactly and only one project matches.
+- On its own: pairs a Resolve project with a project when its name matches exactly one project by that rule.
 - By hand: the editor picks or creates the folder on this page; an admin changes a pairing on the project's page, and an automatic pass never changes a pairing that has been set.
 - When the help for the editing program is off: this page does not exist; projects are made from the Projects page.
 - Name and search words: Set up a Resolve project. Search words: new Resolve project, link folder, pick folder, project folder, set up project.
@@ -650,7 +651,7 @@ Archiving takes a project off every list, the plan grid and every queue, and com
 
 The archived projects are listed, newest archived first ("Off every tick list and the queue. Nothing was deleted: the folders and the files are still on the server."): project, "archived <ago> by <who>, still ticked for N editor(s)", and "unarchive" ("The ticks it had are still there, so it starts syncing again on the next cycle."). Unarchiving makes the project active at once. An archive survives every later look at the NAS: the project stays archived however often its folder is seen. Creating or using a folder under an archived project's name is refused until it is unarchived.
 
-On sites that control access per project, the project's group loses access while it is archived and gets it back when unarchived. Both acts are recorded in the history with who ticks the project. Refusals: "no project called '<name>'"; "'<name>' is already archived"; "'<name>' is not archived". If the list cannot be read: "The archived list could not be read right now, so it is not shown. Nothing was archived or restored by this, and the projects above are unaffected."
+The project's members lose access to its folder while it is archived and get it back when it is unarchived. Both acts are recorded in the history with who ticks the project. Refusals: "no project called '<name>'"; "'<name>' is already archived"; "'<name>' is not archived". If the list cannot be read: "The archived list could not be read right now, so it is not shown. Nothing was archived or restored by this, and the projects above are unaffected."
 
 - Who: an admin.
 - Ways in: the project's page, the plan grid.
@@ -698,7 +699,7 @@ The head reads "N file(s) · <size> waiting", or "not counted yet". The lead rea
 
 There is one fold-out per person, computer, project and kind of movement:
 
-- "getting ready" ("the project was just ticked, and the computer and server are setting it up. Nothing needs doing."), with "Just ticked as upload only. Waiting for this computer's first list of files, then its video originals start uploading (nothing is downloaded)." or "Just ticked. Syncing starts within a minute or two.";
+- "getting ready" ("the project was just ticked, and the computer and server are setting it up. Nothing needs doing."), with "Just ticked as upload only. Waiting for this computer's first list of files, then its files start uploading (only the empty folders come down)." or "Just ticked. Syncing starts within a minute or two.";
 - "cannot tell" ("The dashboard cannot tell whether this computer still owes uploads."), with the reason and "Leave it running and check the app on it.";
 - otherwise: the direction, "N file(s) · <size>", and whether it is an upload, a proxy download or project files, each explained;
 - "on hold" with the computer's own reason and "(since <ago>)" (see "Files waiting are on hold only for the computer's own reason");
@@ -715,7 +716,8 @@ A file waiting in the queue is shown on hold, with the reason and since when, on
 | Reason the computer gave | What it holds |
 |---|---|
 | not signed in, licence not accepted, sync drive missing or not answering or not the right drive, studio-wide stop, stopped on this computer, paused, offline | every kind of transfer |
-| a wrong clock, a full drive, the proxy download safety stop | proxy downloads only |
+| a wrong clock, a full drive | proxy downloads only |
+| downloads that stopped themselves as a safety measure | every download; uploads keep going |
 | project files not syncing | project files only |
 
 A stuck transfer never marks a hold. A backlog its computer says it cannot move never looks as if it were draining.
@@ -738,15 +740,16 @@ The Transfers page lists them under "Recently completed files: what the apps rep
 
 The people and computers page shows an admin:
 
-- how people sign in on this site, and every account (see Accounts, privacy and the legal paperwork: Who may sign in);
+- how people sign in on this site (see Accounts, privacy and the legal paperwork: Who may sign in);
+- every person: "N accounts", or "No editor accounts yet.". Each shows the sign-in name, "shown as" (their display name), role, status (active or suspended), their computers, and the actions: set a password, suspend or resume, end their sign-ins, download their data, erase their history, and remove. Where the studio's NAS holds people's logins, it also shows whether the person's account may open the shared folders, and whether the NAS has it locked. When the account list cannot be read: "The account list is unavailable: <error>", with whatever did answer. The list refreshes by itself every 30 seconds, and every action answers with a notice or an error line. What each action does is in Accounts, privacy and the legal paperwork: Who may sign in, "An admin manages the studio's people from one list";
 - every known computer with its owner, name, operating system, app version, when last heard from, wired or syncing, its identity (on pointing) and how many projects are ticked on it, with "remove" ("Every computer that has reported in. Remove forgets it: its sync plan, its status and its membership of the studio."); empty: "No computer has reported in yet.";
 - suspended people, with each suspension's details;
 - computers waiting to be approved, each with a suggested owner and name when that computer has already said who it is (see "A new computer is approved under its owner");
-- people the studio's computers know of who have no account.
+- people the studio knows by a computer, a plan or a report who have no account ("Known to the fleet (a device, a plan or a report), but no account here."), with remove, download data and erase history.
 
 Only real people appear in any list of people; the product's own accounts never do. When one part of this page cannot be read right now, it says so for that part only and shows the rest.
 
-- Who: an admin.
+- Who: an admin. Anyone else is told "admins only".
 - Name and search words: People and computers. Search words: people, users, editors, computers, accounts, approve.
 
 ### A new computer is approved under its owner
@@ -789,8 +792,8 @@ An admin can open any person's page and sees the same, for that person.
 A person's page lists each computer's settings as that computer last told them: name, value (or "not reported") and where it is changed. A table lists every setting that concerns the person, in four kinds:
 
 - kept by the dashboard: display name; what each computer syncs ("N projects, N upload only"); password; signed-in browsers;
-- each computer's own, changed from the dashboard: lending to shared work, and which kinds of work it takes;
-- each computer's own, changed at that computer: remote or wired; lend it now; the drive reminder; the YouTube terms and sign-in (only when YouTube downloads are on for the site); updating the app; signing the computer in or out;
+- each computer's own, changed from the dashboard: whether it takes shared work, and which kinds of work it takes;
+- each computer's own, changed at that computer: remote or wired; how long it lends itself to shared work; lend it now; the YouTube terms and sign-in (only when YouTube downloads are on for the site); updating the app; signing the computer in or out;
 - set for everyone: the drive letter; automatic updates; YouTube downloads; the studio-wide stop.
 
 Admins get links to each; editors read "your admin".
@@ -833,7 +836,7 @@ An editor account at least 30 days old (or of unknown age) that no computer has 
 
 Every change to plans, people, computers, builds and settings is kept in a history of who did what and when, for 180 days. Nothing edits or removes a line, except removing lines past 180 days; deleting a person changes how their lines name them but does not remove the lines (see Accounts, privacy and the legal paperwork: What the product records about a person).
 
-Recorded acts include: ticks, unticks, undos and plan copies; creating, using a folder as, archiving and unarchiving a project; the studio-wide stop and start; a proxy download resumed; asking a computer for diagnostics; a person deleted; a computer approved or forgotten; a build published, made current or withdrawn; an update pushed to a computer and its withdrawal or expiry; a file moved and sent again; a Resolve undo asked for; site settings saved; asking a computer to change its settings and that being withdrawn, applied, refused or expiring; dismissing a problem, and a problem closing itself; changes to how many removals are allowed, and approving removals that were held back.
+Recorded acts include: ticks, unticks, undos and plan copies; creating, using a folder as, archiving and unarchiving a project; the studio-wide stop and start; downloads resumed; asking a computer for diagnostics; a person deleted; a computer approved or forgotten; a build published, made current or withdrawn; an update pushed to a computer and its withdrawal or expiry; a file moved and sent again; a Resolve undo asked for; site settings saved; asking a computer to change its settings and that being withdrawn, applied, refused or expiring; dismissing a problem, and a problem closing itself; changes to how many removals are allowed, and approving removals that were held back.
 
 The page shows the newest 200 lines: when (exact time on pointing), who (display name, sign-in name on pointing; "?" when unknown, never blank), the act, its subject and its details as recorded (damaged details shown as plain text). A filter ("filter by project, editor, computer, version or action") with "filter" and "clear" searches across subject, who and act. It does not refresh by itself. Empty: "Nothing in the history matches "<q>"." or "Nothing has been recorded yet. Every tick, stop, deletion and publish from here on lands in this list."
 
@@ -886,11 +889,11 @@ What a computer says about itself is never refused whole. A part that is wrong, 
 
 ### A computer that cannot sign in is still shown, and admins are told
 
-A computer that is running but cannot prove who it belongs to, or whose account is suspended, removed or disabled, is still shown, as "cannot sign in" or "being turned away", with the reason. Admins see a serious problem, "a computer is being turned away": "<who> IS running and IS trying to report, and this server is turning it away (<age>). ..." The fix: "Ask that editor to sign in again in the CC Sync app on that computer." A computer's own sign-in never expires on its own (see Accounts, privacy and the legal paperwork: How a computer proves who it belongs to).
+A computer that is running but cannot prove who it belongs to, or whose person is suspended or removed, is still shown, as "Not syncing: this computer cannot sign in to the server: <reason>" or "being turned away", with the reason. Admins see a serious problem, "a computer is being turned away": "<who> IS running and IS trying to report, and this server is turning it away (<age>). ..." The fix: "Ask that editor to sign in again in the CC Sync app on that computer." A computer's own sign-in never expires on its own (see Accounts, privacy and the legal paperwork: How a computer proves who it belongs to).
 
 ### A computer withholds kinds of information by choice
 
-A computer, or the whole site, can choose not to send some kinds of information about itself (for example the Resolve project open, what is on its disk, or how long the computer has been idle). Those kinds are never shown, never kept, and never present in the computer's diagnostics either. Wherever the dashboard would show them, a quiet tag reads "not reported by this computer: <label>", explained as a privacy choice, never a fault. The switches themselves are in Accounts, privacy and the legal paperwork: What the product records about a person.
+A computer, or the whole site, can choose not to send some kinds of information about itself (for example the Resolve project open, what is on its disk, or how long the computer has been idle). Those kinds are never shown, never kept, and never present in the computer's diagnostics either. Wherever the dashboard would show them, a quiet tag reads "not reported by this computer: <label>", explained as a privacy choice, never a fault; a withheld open Resolve project shows this tag, never "could not check". A withheld kind never changes any colour, headline, note or alert. Issues, notes and problems that depend on a withheld kind (clips outside the tree, clips only on this computer, stray project folders, a moved project folder) are not raised for that computer, and one already open is closed without a message (see Accounts, privacy and the legal paperwork: What the product records about a person, "Withheld information reads as not reported, never as a fault"). The switches themselves are in Accounts, privacy and the legal paperwork: What the product records about a person.
 
 ### Diagnostics reach an admin on their own and when asked
 
@@ -931,9 +934,9 @@ The server looks at itself and the studio and keeps one list of everything it fi
 - a link to the place to act (its words depend on the problem, "Take me there" otherwise): a problem about a project goes to that project, one about a computer to that computer, otherwise to the place named for its kind;
 - "dismiss".
 
-The list is ranked: errors, then warnings, then information, then checks that could not be made. It gathers what the server's checks found, the alerts, the always-true facts that are broken, and the protection lines that are not all right (see The server: installing it and keeping it running: Health checks and alerts, and Snapshots, restoring and the server's disk). When one of these cannot be read, it becomes one row of its own, "Could not read <source>", the error, "This page could not ask this source, so nothing it would report is shown here. That is not checked, not OK.", so the list can never read all clear while a source is not answering.
+The list is ranked: errors, then warnings, then information, then checks that could not be made. It gathers what the server's checks found, the alerts, the always-true facts that are broken, and the protection lines that are not all right (see The server: installing it and keeping it running: Health checks and alerts, and Snapshots, restoring and the server's disk). When one of these cannot be read, it becomes one row of its own, "Could not read <source>", the error, "This page could not ask this source, so nothing it would report is shown here. That is not checked, not OK.", so the list can never read all clear while a source is not answering. The open problems include an editor's computer whose installation failed.
 
-The list is refreshed every minute while in view. The head reads "N open" with counts "N needs attention", "N worth a look", "N not checked", and "Support: <contact>". "Not checked is not OK. It means this server cannot answer that one, and the reason is beside it." With nothing open: "All clear. N of M checks ran and found nothing wrong.", plus a warning "N never ran" when some checks have never run.
+Opening the list runs every check afresh. The list is refreshed every minute while in view. The head reads "checked against N things every M minutes" (every 10 minutes unless set otherwise) and "N open" with counts "N needs attention", "N worth a look", "N not checked", and "Support: <contact>". "Not checked is not OK. It means this server cannot answer that one, and the reason is beside it." With nothing open: "All clear. N of M checks ran and found nothing wrong.", plus a warning "N never ran" when some checks have never run.
 
 Dismissing asks "Dismiss this? It is only hidden. If the server finds the same problem again it comes straight back, so dismissing it is not a fix." If the problem had already gone: "that notice is already gone. Reload the page." After a dismiss, every count and list that includes it updates. A problem found again keeps its first-seen time and opens again, even if it was dismissed or had closed. Looking never changes anything: the checks only read, and they never repair.
 
@@ -966,7 +969,7 @@ The product's own safety rules are shown the same way, each as fine, broken, not
 Every problem has a rule that closes it, and the reason it closed is recorded in the history as automatic:
 
 - a problem about a state stays while the state is true, and closes the first time a complete check finds it gone;
-- a one-off error (a page that failed, a busy server, a slow write, a restart of the server's own work) closes after 24 hours without being seen again;
+- a one-off error (a page that failed, a busy server, a slow write, a restart of the server's own work, more moves by hand at once than could be followed) closes after 24 hours without being seen again;
 - a reply to the server-check mail that failed a check closes when a later reply from the same sender was acted on, otherwise after 7 days;
 - a file moved by hand on the server closes once it is at least 24 hours old and every computer has followed the move (or none held a copy), otherwise after 7 days without happening again;
 - slow work closes the next time the same work finishes in time, also after a restart of the server.
@@ -986,6 +989,8 @@ Each kind lists at most 40 problems. Beyond that one more entry, "and more of th
 
 Neither is raised for a computer with nothing ticked or a computer wired to the server.
 
+When most computers go quiet at the same time, one serious problem, "most computers went quiet at the same time", points the admin at the server and its network. It stands beside each silent computer's own problem and does not replace it (see The server: installing it and keeping it running: Connections and credentials, "Admins are warned when most computers go quiet at once").
+
 ### Project folders the server cannot set up are named with the repair
 
 Each of these opens a problem that closes itself once the cause is gone; every other project carries on.
@@ -997,7 +1002,7 @@ Each of these opens a problem that closes itself once the cause is gone; every o
 
 ### Files moved by hand on the NAS are reported as they are followed
 
-For each move made by hand on the NAS that the server recognises, an information problem opens: "N file(s) were moved on the server, by hand, from <old place>. K computer(s) are following: each moves its own copy and relinks Resolve, so nothing re-uploads the old path." Its fix: "Nothing to do; the computers follow on their own. If this was not a move, open the project page's list of moves." At most 500 moves are taken at once; beyond that the first 500 (by project and path) are followed and a serious problem opens, "more file moves were made on the server in one go than could be followed". It says how many were found and how many could be followed, that the rest count as deletions for every editor's computer (their copies go back up to the old places, and downloading stops itself on the computers that held them), and what to do: find what changed on the server (a restore, a remount or a big reorganisation), then move the rest through the product so every computer follows. When not every project could be read, the check for moves made by hand is not marked as checked. How a move is followed is in Proxies and file moves: Moves made by hand on the NAS.
+For each move made by hand on the NAS that the server recognises, an information problem opens: "N file(s) were moved on the server, by hand, from <old place>. K computer(s) are following: each moves its own copy and relinks Resolve, so nothing re-uploads the old path." Its fix: "Nothing to do; the computers follow on their own. If this was not a move, open the project page's list of moves." If one look ever finds more moves by hand than can be followed, a serious problem opens, "more file moves were made on the server in one go than could be followed", naming how many were found and how many were not followed; it closes as a one-off error (see "Problems close themselves when they are over"). When not every project could be read, the check for moves made by hand is not marked as checked. How a move is followed is in Proxies and file moves: Moves made by hand on the NAS.
 
 
 ### Slow work on the server is shown as a problem until it is fast again
@@ -1052,7 +1057,30 @@ Each protection line that is missing (each project or computer, where a line has
 | A protection the server relies on is missing, or cannot be verified | error or warning | the protection lines |
 | A switchable part (b-roll, music, YouTube downloads, Timeline Cards, the Footage Sorter) is on but did not start | warning | that part's state |
 | The b-roll archive cannot be read, so every clip sent to Resolve is the small preview | error | the b-roll archive |
-| The vendor's release feed cannot be reached, a build from it was refused, or a build from it needs the server to be updated first | warning, error, warning | the list of builds |
+| "an update will not install" | error | the computer |
+| "a computer is refusing every update" | error | the computer |
+| "a new version is not being taken" | warning | the computer |
+| "a computer is several versions behind" | warning | the computer |
+| "a computer cannot be updated from here" | error | the computer |
+| "a trial version is failing" | warning | the list of builds |
+| "a computer went back from an update" | warning | the computer |
+| "a recalled version is still running" | error | the computer |
+| "one platform's version is behind another's" | warning | the list of builds |
+| "a held version can strand computers" | error | the list of builds |
+| "the server is not running the update applied to it" | error | the list of builds |
+| "computers send things this server is too old to read" | warning | the list of builds |
+| "this server cannot check for updates" | warning | the list of builds |
+| "updates cannot install on this NAS" | warning | the list of builds |
+| "work is waiting and nobody is taking it" | warning | the work page |
+| "the fleet gave up on some work" | warning | the work page |
+| "the server has stopped making work it took over" | error | the work page |
+| "footage is outside the tree in '<project>'" | warning | the computer |
+| "footage on one computer only in '<first>' and N other projects" | warning | the computer |
+| "this server's private network connection is down" | error | the health of the server's own work |
+| "this server's private network key is about to expire" | error | the health of the server's own work |
+| "the dashboard is not published on the private network" | error | the health of the server's own work |
+| "most computers went quiet at the same time" | error | the health of the server's own work |
+| "a computer reaches this dashboard unencrypted over the internet" | error | the computer |
 | A configured secret has quotes or spaces around it | error | no button |
 | The server is running with its security checks relaxed | error | no button |
 | Alert mail is slow to go out, or no way to send alerts is set up | warning | the alert settings |
@@ -1060,6 +1088,8 @@ Each protection line that is missing (each project or computer, where a line has
 | The assistant is not working (its own update failed, or it is stuck) | warning or error | the assistant's settings |
 
 Comparing who should receive each project with who does is done both ways in every check, and each mismatch is named with what it means and how to fix it; the server never repairs it by itself. A problem about a page or request that failed on the server names the full address that failed, carries its own error type, message and the innermost few places it happened, bounded in size and with every key or token masked, never the secret part of a link handed to a client. Deliberate restarts are never counted as crashes, and running a newer release than the vendor offers is never flagged.
+
+Each problem's own rule (when it opens, its words and its fix) is kept with the capability it belongs to: the version problems in Releases and updates: Pushing updates and seeing who has what, "The server tells an admin when versions are not reaching computers"; the shared-work problems in Work shared out across the computers: Failures, retries and the queue ("Admins are warned when work waits and nobody can take it", "Admins are warned when work was given up"); the two footage problems in Resolve on the editor's computer: Clip paths and media outside the shared tree, "Admins are told when footage used in Resolve is outside the shared tree"; the private-network problems and the quiet computers in The server: installing it and keeping it running: Connections and credentials; and the unencrypted connection in Accounts, privacy and the legal paperwork: How secrets and keys are kept, "A credential never crosses the internet unencrypted", where it is repeated daily while that computer still reports. The two footage problems are raised only while the help for the editing program is on, and neither is raised for a computer that withholds the kind of information it depends on.
 
 - When a part is off: no problem about that part is raised or shown.
 - When the assistant is off: no problem about the assistant is raised or shown.

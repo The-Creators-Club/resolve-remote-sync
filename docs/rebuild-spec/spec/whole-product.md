@@ -34,7 +34,7 @@ When something goes wrong that the product did not expect, the person sees "inte
 
 ### A part that is missing or broken never stops anything else
 
-The b-roll archive, music, YouTube downloads, Timeline Cards and the Footage Sorter each come up on their own. If one is not set up, is incomplete, or fails to start, the dashboard, syncing and every other part still start and work. A part that started but cannot work (for example, it cannot write where it keeps its records) is taken out of the menu rather than shown broken, and an admin sees why on the list of problems and beside its switch in settings.
+The b-roll archive, music, YouTube downloads, Timeline Cards and the Footage Sorter each come up on their own. If one is not set up, is incomplete, or fails to start, the dashboard, syncing and every other part still start and work. A part that is switched on but cannot work (for example, it cannot write where it keeps its records) keeps its place in the menu, and opening it shows a page saying in plain words that it is not working right now, why, and that admins have been told. An admin sees why on the list of problems, in the overview's state of the parts and beside its switch in settings.
 
 ### Every feature shows somewhere whether it works
 
@@ -107,7 +107,7 @@ Every studio runs the same product, with every part in it. A part a studio does 
 
 On a new site, the help for the editing program is on and the other five switchable parts are off until an admin switches them on. A studio that only wants syncing sees nothing else until an admin switches a part on. Switching a part off hides it from everyone but an admin and stops its work everywhere, on the server and on every editor's computer, within a minute; nothing it holds is deleted, and switching it on again brings it back as it was. Switching a part on makes it appear for everyone within a minute, with no restart of the server or of any computer.
 
-Some features inside a part are also switched on for the whole site rather than per person, and are described where they belong: getting round YouTube's blocking (see YouTube downloads: How YouTube throttles and refuses) and computers taking new versions without anyone clicking (see Releases and updates: Pushing updates and seeing who has what). Each is off on a new site.
+Some features inside a part are also switched on for the whole site rather than per person, and are described where they belong: YouTube's extra measures against being blocked (see YouTube downloads: Signing in to YouTube, "A site decides whether signed-in YouTube sessions may be used on editors' computers") and computers taking new versions without anyone clicking (see Releases and updates: Pushing updates and seeing who has what). Each is off on a new site.
 
 - Who: an admin.
 - Setting: Switchable parts. Does: switches each of the six parts (the b-roll archive, music, YouTube downloads, Timeline Cards, the Footage Sorter with camera cards, the help for the editing program) on or off for everyone. Default: the help for the editing program on, the other five off. Who: an admin. Applies to: the site. Search words: parts, modules, switch on, enable, disable, features.
@@ -117,7 +117,7 @@ Some features inside a part are also switched on for the whole site rather than 
 
 Every computer of the studio works from the site's settings: the studio's name and brand, the name its drive is given in sentences, which parts are switched on, and the switches on what computers report. A change an admin makes reaches every running computer within about 15 minutes, and a part switched on or off within a minute, with no restart. A computer that is off takes the change as soon as it next reaches the server.
 
-Each computer keeps the last copy of the site's settings it was given (from its installation onwards) and works from that copy whenever the server cannot be reached, so it starts and syncs offline. When the copy cannot be read, every optional feature counts as off and every switch on what a computer reports counts as on, the safe side in each case, until a good copy arrives (see Accounts, privacy and the legal paperwork: What the product records about a person).
+Each computer keeps the last copy of the site's settings it was given (from its installation onwards) and works from that copy whenever the server cannot be reached, so it starts and syncs offline. When the copy cannot be read, every optional feature counts as off and every kind of reporting that can be switched off counts as withheld, the safe side in each case, until a good copy arrives; syncing and the checks behind those kinds of reporting keep running meanwhile. This holds for the app on each computer and for the Timeline Cards editor in a browser alike (see Accounts, privacy and the legal paperwork: What the product records about a person).
 
 - On its own: each computer picks up the site's settings without anyone asking, and keeps working from its last copy when the server cannot be reached.
 
@@ -287,9 +287,9 @@ Pages of the dashboard ask the app on the editor's own computer to do things the
 
 Every refusal reads "this request was refused by the CC Sync app on this computer", followed by the advice to open the app's log, or to copy the app's diagnostics and send them to the admin; the reason itself is in the log.
 
-If the dashboard address known to the computer is not the address editors actually browse to, every send to the editing program is refused this way. An admin or the editor puts it right by correcting the address, or by adding the other address the dashboard is reached by (see The app on each editor's computer: Settings, records and background work). When the server announces a new address, every app follows it within about 30 seconds, without a restart.
+If the dashboard address known to the computer is not the address editors actually browse to, every send to the editing program is refused this way. An admin or the editor at that computer puts it right by correcting the dashboard address of that computer, or an admin adds, for the whole site, the other address the dashboard is reached by (see The app on each editor's computer: Settings, records and background work). When the server announces a new address, every app follows it within about 30 seconds, without a restart.
 
-- Who: refusals reach whoever pressed the button; the address is set by an admin or the editor at that computer.
+- Who: refusals reach whoever pressed the button; the dashboard address of a computer is corrected by an admin or the editor at that computer; another address allowed to send is added by an admin, for the site.
 
 ### A page can name only files inside the studio's libraries
 
@@ -398,7 +398,7 @@ A page served from the server shows a file's place relative to the studio's tree
 
 ### Dates are the studio's dates
 
-Every date and time a person enters or reads is understood in the studio's own time zone, so the date a person sees is the studio's date at any hour (see The server: installing it and keeping it running: Settings and secrets). A file or folder with a date that cannot be true (for example far in the future) shows a plain placeholder date and never hides or breaks any other row. Nothing is told apart by its time alone, and where a limit counts recent events (for example how many restarts in an hour), a time in the future counts as recent.
+Every date and time a person enters or reads is understood in the studio's own time zone, so the date a person sees is the studio's date at any hour (see The server: installing it and keeping it running: NAS speed, load and clock, "Schedules run on the studio's own clock"). A file or folder with a date that cannot be true (for example far in the future) shows a plain placeholder date and never hides or breaks any other row. Nothing is told apart by its time alone, and where a limit counts recent events (for example how many restarts in an hour), a time in the future counts as recent.
 
 #### Lessons
 
@@ -424,7 +424,7 @@ No password, key, sign-in code or token is ever shown in full after it has been 
 
 ### Nothing runs on a computer that its person or the vendor did not put there
 
-The product only ever runs what the vendor ships in it, and programs a person chose to add, by pressing a button that names what will be fetched and from where. Every program the product fetches from outside is pinned to a version and to its publisher's own checksum, and is checked before it is unpacked or run. When the publisher gives no checksum, the program is refused and nothing is installed. The same program, byte for byte, may come from a second place. A failed or refused fetch leaves whatever was there before still working.
+The product only ever runs what the vendor ships in it, and programs a person chose to add, by pressing a button that names what will be fetched and from where. Every program the product fetches from outside is pinned to a version and to its publisher's own checksum, and is checked before it is unpacked or run. Two kinds of program keep themselves current instead of staying on a pinned version: YouTube's downloader, and a subscription assistant's program the server installed and an admin has set to keep up to date (see "A site may instead connect an assistant through a subscription signed in on the server"). Each takes the newest build its publisher offers, checked against the publisher's own checksum before it is used, never going to an older one, with no button to press. When the publisher gives no checksum, the program is refused and nothing is installed. The same program, byte for byte, may come from a second place. A failed or refused fetch leaves whatever was there before still working.
 
 ### A request the server cannot accept gets a plain refusal, never a crash
 
@@ -442,7 +442,7 @@ Each kind of regular contact from an editor's computer keeps its own least inter
 
 ### One switch turns the assistant off for the whole site
 
-An admin can switch the assistant off for the whole site. With it off, nothing in the product calls an assistant, and no assistant control is left on any screen: no button, panel, picker, setting, chip or message about it, on the dashboard, in any part, or on an editor's computer. Everything else keeps working. Each part says what it does instead where the assistant would have helped (see the parts' own pieces). Switching it off deletes nothing: connected assistants, keys, conversations and the house style are kept, and switching it on again brings everything back as it was. The change reaches every screen within a minute.
+An admin can switch the assistant off for the whole site. With it off, nothing in the product calls an assistant, and no assistant control is left on any screen: no button, panel, picker, setting, chip or message about it, on the dashboard, in any part, or on an editor's computer. Everything else keeps working. Each part says what it does instead where the assistant would have helped (see the parts' own pieces). Switching it off deletes nothing: connected assistants, keys, conversations and the house style are kept, and switching it on again brings everything back as it was. The keeping period for records of conversations with the assistant still runs while it is off, so a conversation older than that period is deleted on time as usual (see Accounts, privacy and the legal paperwork: What the product records about a person, "How long the product keeps each kind of record"). The change reaches every screen within a minute.
 
 - Who: an admin.
 - Setting: The assistant. Does: switches every use of the assistant on or off for the whole site; off removes every assistant control from every screen. Default: on (nothing is answered until an assistant is connected). Who: an admin. Applies to: the site. Search words: assistant, AI, switch off, disable assistant, AI off.
@@ -480,11 +480,11 @@ The assistant settings show:
 
 - at the top, "pinned to <name>", "pinned, not available" or "auto: first available";
 - the connected assistants, "<n> of <total> set up · in order", each with its place in the order, its name, its state, its last test, its key masked and whether it was set when the server was installed or entered here, and what it is used for, standing by for, or not used for and why;
-- for each feature that uses the assistant (YouTube search and relevance, Timeline Cards' search by meaning, summaries and edit chat, the server's own check-up), who answers it and why, or that nothing does and why;
+- for each feature that uses the assistant (YouTube search and relevance, Timeline Cards' search by meaning, summaries and edit chat, footage-in's translation, line-up and first sort, the board's assistant, the Footage Sorter's Ask, the server's own check-up), who answers it and why, or that nothing does and why;
 - "+ add new", listing the kinds not yet connected ("<n> more you can set up: <names>", or "All are set up."), each with what it is and what it needs;
 - per assistant: Test, Pin as preferred or Unpin, Replace key, Remove.
 
-With none connected: "No assistant is connected.", saying that the YouTube downloader cannot search, Timeline Cards' assistant features do not work, the server's check-up mails a plain summary, and that adding a key takes a minute. A failure to read the settings says "could not read the assistant settings: <reason>". Some kinds of assistant can answer only some features (for example only YouTube search); the help says which.
+With none connected: "No assistant is connected.", saying that the YouTube downloader cannot search, Timeline Cards' assistant features (footage-in's translation, line-up and first sort and the board's assistant among them) do not work, the Footage Sorter's Ask does not answer, the server's check-up mails a plain summary, and that adding a key takes a minute. A failure to read the settings says "could not read the assistant settings: <reason>". Some kinds of assistant can answer only some features (for example only YouTube search); the help says which.
 
 - Who: an admin.
 - Ways in: the assistant settings (see The dashboard: Settings and setup).
@@ -531,9 +531,9 @@ When the assistant the site relies on can no longer be used (a key refused, a pr
 
 ### What the assistant costs is shown before it runs, and a site can cap it
 
-Every assistant task a person starts shows what it is expected to cost before it runs. Routine work over a whole project or archive (describing clips, lining up a whole episode) stays within a cost the site sets, and says so when it would go over.
+Every assistant task a person starts shows what it is expected to cost before it runs. Routine work over a whole project or archive (describing clips, lining up a whole episode) counts against the site's one daily budget below, like every other use of the assistant; no feature has an allowance of its own.
 
-A site can also cap what the assistant spends in a day, in money. Once the day's budget is spent, new runs are refused and anyone waiting is told at once: "today's assistant budget of $X is spent; try again tomorrow, or ask an admin to raise it". Raising the budget lets waiting work carry on at once. The assistant settings show what has been spent so far that day against the budget. The day is the studio's own day.
+A site can cap what the assistant spends in a day, in money. Once the day's budget is spent, a run a person starts is refused and anyone waiting is told at once: "today's assistant budget of $X is spent; try again tomorrow, or ask an admin to raise it". Work running on its own (such as footage-in) may spend the whole day's budget, then waits, and carries on by itself when the next day's budget opens. Raising the budget lets waiting work carry on at once. The assistant settings show what has been spent so far that day against the budget. The day is the studio's own day.
 
 - Setting: Assistant budget per day. Does: the most the site's assistant may spend in a day before new runs are refused. Default: no limit. Who: an admin. Applies to: the site. Search words: budget, spend limit, assistant cost, daily cap, AI cost.
 - When the assistant is off: not shown.
@@ -557,7 +557,7 @@ Work for the assistant is done most urgent first: what a person is waiting for, 
 Whether the assistant can be used is worked out once, without a call that costs anything, and shown on the page; checking never stops the page from updating. Every button that needs the assistant is then dimmed, with a one-sentence reason on hover, focus or tap:
 
 - no assistant connected: "no assistant has a working key", with where an admin connects one;
-- the connected assistant cannot do this feature: Timeline Cards' search by meaning, section summaries, montage conversations and edit chat work only with the kind of assistant they were made for, so with another kind they say "The Assistant connected here cannot do Timeline Cards' search by meaning and summaries: an admin can connect one that can, or pin it, in the Assistant settings"; the YouTube downloader works with any kind;
+- the connected assistant cannot do this feature: Timeline Cards' search by meaning, section summaries, montage conversations, edit chat, footage-in's translation, line-up and first sort, and the board's assistant work only with the kind of assistant they were made for, so with another kind they say "The Assistant connected here cannot do Timeline Cards' search by meaning and summaries: an admin can connect one that can, or pin it, in the Assistant settings"; the YouTube downloader and the Footage Sorter's Ask work with any kind;
 - not yet checked on this server: the admin should test it in the assistant settings;
 - slow to start: "the server is busy starting the assistant: try again in a minute";
 - signed out: "an admin must sign it in again".
@@ -568,7 +568,7 @@ When a request fails, the person is told in words, never with a crash: the assis
 
 ### A person picks how strong an assistant answers, where offered
 
-Where Timeline Cards lets a person choose (the transcript search panel and the edit chat), three strengths are offered: "fastest", "stronger" and "most capable", each named by what it does and each with a short note carrying its price to the site. Each panel says which is its default: transcript search defaults to the fastest, the edit chat to the most capable. Summaries, the montage builder and search inside one transcript always use the fastest.
+Where Timeline Cards lets a person choose (the transcript search panel and the edit chat), three strengths are offered: "fastest", "stronger" and "most capable", each named by what it does and each with a short note carrying its price to the site. Each panel says which is its default: transcript search defaults to the fastest, the edit chat to the most capable. Summaries, the montage builder and shortening use the strength chosen in the edit chat. A search of one person's transcripts is a scope of the transcript search panel and uses the strength chosen there.
 
 When the maker offers a newer version of one of the three strengths, the choice moves to it by itself, never to anything older than the version the product came with; its label stays the name of what it does, and its note carries the new version's price, or "price not known yet" until the price is known. Looking for newer versions never makes a person wait; until an answer comes, or when it fails, the last known versions stay. A request naming a strength the product does not recognise gets that feature's default; nothing is ever refused for a bad choice.
 
@@ -576,13 +576,13 @@ When the maker offers a newer version of one of the three strengths, the choice 
 
 ### A conversation with the assistant is kept per cut list
 
-A feature that talks with the assistant (the edit chat, transcript search) keeps one conversation per cut list, so later questions build on earlier ones without the assistant reading everything again. It is saved after every finished turn and survives the page reloading and the server restarting; a cut list brought back from its history keeps its conversation. A conversation with no cut list open lasts until the server restarts.
+The edit chat keeps one conversation per cut list, so later questions build on earlier ones without the assistant reading everything again. It is saved after every finished turn and survives the page reloading and the server restarting; a cut list brought back from its history keeps its conversation, for at most the site's keeping period for records of conversations with the assistant. Transcript search keeps its conversations its own way, per episode, scope, strength and kind, going cold after an hour (see Timeline Cards: the editor: Search and the transcript panel, "The search sheet has pickers for which transcripts, how many results, which strength of assistant, and a fresh start").
 
-A new conversation starts when the transcripts it was given change, when the person presses "new conversation" or "start over", and when they switch strength: each strength holds its own conversation, and switching opens that strength's, which first reads the material again, slowly and at that strength's price. When a strength moves to a newer version, the open conversation carries on.
+A new conversation starts when the transcripts it was given change, when the person presses "new conversation" or "start over", and, in the edit chat, when the house style changed since the last message or the conversation had gone cold after more than an hour (see Timeline Cards: the editor: Shortening, the edit chat and the assistant, "The chat knows the whole episode's transcripts, the whole cut list and what the editor is pointing at"), and when they switch strength: each strength holds its own conversation, and switching opens that strength's, which first reads the material again, slowly and at that strength's price. When a strength moves to a newer version, the open conversation carries on.
 
 When the assistant no longer knows a conversation (for example on a server set up afresh), the feature opens a new one once, reading the material again, and says so on its status line; it never retries silently. A remembered conversation that is missing or damaged simply starts a new one at the next turn.
 
-- When the assistant is off: no conversation is offered and none is lost.
+- When the assistant is off: no conversation is offered, and switching it off deletes none; the keeping period still runs.
 
 ### The studio's website can ask the assistant to name a piece of gear from a photo
 

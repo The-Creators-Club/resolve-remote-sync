@@ -2,7 +2,7 @@
 
 ## Coverage
 
-- 01-065 | A computer's own heavy work comes first
+- 01-065 | Work on one computer takes turns
 - 04-019 | The person at a computer can lend it to shared work for a while
 - 09-027 | A computer takes shared work only while nobody is using it ; The person at a computer can lend it to shared work for a while ; An editor decides whether their computer takes shared work and which kinds ; A computer fetches the tools a kind of work needs by itself
 - 09-051 | A computer says in one sentence whether it is taking shared work and why not
@@ -263,7 +263,7 @@
 - The kinds of shared work and what each needs | analysing b-roll clips and analysing music are kinds of shared work, because the owner's requirements and the brief put all heavy work in this capability; no item lists them
 - A computer takes shared work only while nobody is using it | the b-roll and music analysis kinds wait for the computer's quiet time
 - A computer fetches the tools a kind of work needs by itself | the transcription set-up is fetched by the computer, not set up by hand (fleet-jobs-Q12); the warning after two failed fetches comes from JOB-011
-- A computer's own heavy work comes first | all work on one graphics card takes turns, and own work never puts a computer in rest (JOB-005)
+- Work on one computer takes turns | all work on one graphics card takes turns, and waiting its turn never puts a computer in rest (JOB-005); describing b-roll goes before proxy making (BRO-033, the joins 2026-11-24)
 - The server makes no media while a card is being copied to the NAS | written from JOB-002
 - An admin can start waiting work now, on a chosen computer | a "start now" control on the work page, on any able computer or a picked one (JOB-012); today it can only be set when work is queued by hand
 - Choosing a computer is a pick from the studio's known computers | the pick, with a typed name only when none is known (JOB-013)
@@ -312,24 +312,35 @@
 - 27-026 | submitting work by hand, and the whole command line (list, why, watch, cancel, retry): cut by the owner (2026-11-24, fleet-jobs-Q5 to fleet-jobs-Q8)
 - 12-067 | 200 by default, "no executor is configured": insides
 - 20-093 | the labels on screen (the speech-to-text tool's name, PROXY 480p, AUDIO, PEAKS and the others): replaced by the plain kind names
-- 01-065 | b-roll and music indexing as the computer's own work: in this text they are shared kinds; the order between them and own proxy making belongs to their pieces
+- 01-065 | proxy making and b-roll and music indexing as the computer's own work: in this text they are all shared kinds (the joins 2026-11-24, proxies-and-file-moves F5), and "busy with your own work" is gone with them
+- 09-064 | whether the Footage Sorter's card and drive work is on: card and drive work is not shared work (the joins 2026-11-24, footage-sorter-and-camera-cards-1 F1)
+- 09-062 | stereo sound in the clip's small picture copy: it is picture-only (the joins 2026-11-24, cards-footage-in F13)
 - 04-019 | the lightning symbol in the menu wording: dropped
 - 11-013 | the end time in universal time: now the viewer's local time
 
 ## Joins with other capabilities
 
-- Proxies and file moves / Making proxies on editors' computers | A computer's own heavy work comes first | the computer's own proxy making comes before shared work and says it is busy
+- Proxies and file moves / Making proxies on editors' computers | Work on one computer takes turns | proxy making is shared work, waits while describing runs and says "indexing b-roll first"
+- Proxies and file moves / Making proxies on editors' computers | The kinds of shared work and what each needs | what making a proxy needs, and its "Make proxies on this computer" switch as the kind's tick
+- YouTube downloads / Every clip lands as a single MP4 file with H.264 picture and AAC sound at a constant frame rate | The kinds of shared work and what each needs | converting a download is shared work
+- The Footage Sorter and camera cards / Every sound recording is listened to for names and introductions | The kinds of shared work and what each needs | listening to recordings, and transcription asked for on the Sorter's own folders
+- Timeline Cards: footage in, ready to cut / Speech-to-text: facts and situations | Progress is shown as it goes, never as a made-up zero ; Choosing a computer is a pick from the studio's known computers | what a person watching a transcription sees, and who picks the computer for it
+- Timeline Cards: footage in, ready to cut / Footage files and files made from them | A small preview copy of a clip is made for Timeline Cards | the interview's preview, a different file from a clip's small picture
+- The b-roll archive / Describing and indexing clips | A computer takes shared work only while nobody is using it | the wording of a drop's start now, pause, resume and cancel
+- Music / Adding tracks to the library | A computer takes shared work only while nobody is using it | the wording of a drop's start now, pause, resume and cancel
+- The app on each editor's computer / The tray or menu-bar icon and its menu | A computer says in one sentence whether it is taking shared work and why not | the menu line while work an admin started now runs
+- Accounts, privacy and the legal paperwork / What each person may see and reach | An admin or the computer's owner can ask a computer from the dashboard to change its shared-work settings | the ask, its refusals, states and expiry
+- The dashboard / Each computer's state | Each computer's shared-work state on the dashboard | the work running and "lending until <time>"
 - Proxies and file moves / Making proxies on editors' computers | Choosing a computer is a pick from the studio's known computers | the editor picks which computer makes a clip's proxy from its preview
 - The b-roll archive / Describing and indexing clips | The kinds of shared work and what each needs | what b-roll analysis needs and shows
 - Music / Adding tracks to the library | The kinds of shared work and what each needs | what music analysis needs and shows
-- The Footage Sorter and camera cards / Copying a card | The kinds of shared work and what each needs | what card and drive copies do
-- The Footage Sorter and camera cards / Drives, speed and interruptions | The server makes no media while a card is being copied to the NAS | when a card copy to the NAS is under way
+- The Footage Sorter and camera cards / Copying a card | The kinds of shared work and what each needs | card copies, drive copies and drive reads are not shared work and start at once
 - Timeline Cards: footage in, ready to cut / The transcript and its English | A computer transcribes an episode's folder | what a transcript holds
 - Timeline Cards: the editor / Media the browser gets | Media for Timeline Cards is made by the studio's computers first, and by the server when none can | the editor shows "making" and uses the files
 - Timeline Cards: the hand-over to Resolve, and exports / Which computer is driving Resolve | Work tied to one computer's Resolve is never shared | Resolve work stays on its own computer
-- Sync / Safety stops | The reasons a computer is passed over for a piece of work | a proxy download that stopped itself
+- Sync / Safety stops | The reasons a computer is passed over for a piece of work | downloads that stopped themselves
 - Sync / Wired or remote | The best-placed able computer is asked first | the wired setting of a computer, preferred for sound and waveforms
-- The dashboard / Stopping and resuming the fleet | A studio-wide stop or the app closing puts running work back to waiting | the fleet-wide stop
+- Sync / Studio-wide stops and the editor's pause | A studio-wide stop or the app closing puts running work back to waiting | the fleet-wide stop
 - The dashboard / Problems the server finds | Admins are warned when work waits and nobody can take it | where warnings are shown
 - The dashboard / Alerts by mail | Admins are warned when work was given up | warnings by mail
 - Accounts, privacy and the legal paperwork / Suspending, disabling and removing a person | A computer whose access is refused says so and takes no work | when access is withdrawn
@@ -338,3 +349,38 @@
 ## Settled from the present product
 
 - fleet-jobs-U1 | quiet time five minutes, two tries; no studio-wide limit of their own exists
+
+## Joins settled
+
+- accounts-privacy-legal F1 | changed: A computer whose access is refused says so and takes no work | "disabled" dropped (suspended or removed only); the pointer keeps the other piece's `##` heading as it stands and names its "Stopping a person takes effect everywhere at once"
+- broll F4 | changed: Work already running is finished when the person comes back | for describing b-roll and analysing music the piece is one clip or one track, finished and saved before the computer waits
+- cards-editor-2 F12 | changed: Media for Timeline Cards is made by the studio's computers first, and by the server when none can | "given up" kept for the piece of work; what the clip shows and when the editor asks again now point to cards-editor-2; a later request is a new piece
+- cards-footage-in F12 | changed: A computer transcribes an episode's folder | "can ask for speakers to be told apart" dropped: every transcription tells speakers apart
+- cards-footage-in F13 | changed: A small preview copy of a clip is made for Timeline Cards | "stereo sound" dropped, the clip's small picture is picture-only, "no video track" applies to it only, and the interview's preview is pointed to in footage-in
+- dashboard-1 F8 | no change here: dashboard-1 gains the three rows; this piece stays the home of each warning's rule
+- dashboard-2 F4 | no change here: dashboard-2 states the whole effect of the studio-wide stop
+- fleet-jobs F1 | changed: A computer takes shared work only while nobody is using it | the dropper's start now, pause, resume and cancel of a b-roll or music drop named as a further way past the wait, music's "now" is this start now, and the site's share of a working computer (60%) added as a setting
+- fleet-jobs F2 | changed: Work already running is finished when the person comes back | the piece is one clip or one track for describing and music analysis
+- fleet-jobs F4 | changed: The best-placed able computer is asked first | describing b-roll prefers the computer the clips were dropped from; every other kind has no preference of its own
+- fleet-jobs F5 | changed: Work names its files inside the studio's shared folders ; Work can be meant for one named computer ; Media for Timeline Cards is made by the studio's computers first, and by the server when none can ; Work that fails is tried again on another computer, a set number of times | a folder the editor chose on their own computer may be named, for b-roll indexed in place, and such work is meant for that computer; "shared out only for files in the shared folders" narrowed to Timeline Cards media
+- fleet-jobs F7 | changed: A computer takes shared work only while nobody is using it | the computer's quiet time and Resolve hold-back are said to be the only ones, used by proxy making, describing and music analysis too; proxies-and-file-moves drops its own two settings
+- fleet-jobs F8 | changed: The kinds of shared work and what each needs ; A computer offers only work it has checked it can do right now ; Choosing a computer is a pick from the studio's known computers ; Media for Timeline Cards is made by the studio's computers first, and by the server when none can | transcription runs on a processor only when no computer has a usable graphics card or a person picks one, with the person told it will be much slower; whoever asked for the transcription, or an admin, picks; "never taken over by the server" kept without its reason
+- fleet-jobs F9 | changed: Progress is shown as it goes, never as a made-up zero | 30 seconds kept as the floor for other kinds; transcription progress points to cards-footage-in
+- fleet-jobs F10 | changed: The kinds of shared work and what each needs ; A computer takes shared work only while nobody is using it ; Work that fails is tried again on another computer, a set number of times | three kinds added (lining clips up, listening to the Sorter's recordings, converting YouTube downloads), with who asks, needs, tick name, quiet time, tries; their at-once limit is "every other kind" (4)
+- fleet-jobs F11 | changed: The kinds of shared work and what each needs ; A computer transcribes an episode's folder | the Footage Sorter asks for transcription on its own folders, and transcription exists while either part is on
+- fleet-jobs F12 | changed: Waiting work is taken in a fair order | playing a clip whose media is not ready moves that clip's waiting media to the front
+- fleet-jobs F13 | changed: Each computer's shared-work state on the dashboard ; The person at a computer can lend it to shared work for a while | "lending until <time>", and the work running and the lending row point to dashboard-1
+- fleet-jobs F14 | changed: A computer says in one sentence whether it is taking shared work and why not | state 4 uses the app's menu line while admin-started work runs; a lent computer gets "This computer is running a fleet job."
+- fleet-jobs F15 | changed: The kinds of shared work and what each needs ; An admin can start waiting work now, on a chosen computer ; A computer offers only work it has checked it can do right now | card copies, drive copies and drive reads start as soon as whoever may start them asks and skip every rule here; the start-now routing for them is gone
+- fleet-jobs F16 | no change here: already says a finished piece can still be handed in; accounts-privacy-legal makes the exception
+- fleet-jobs F17 | changed: An admin or the computer's owner can ask a computer from the dashboard to change its shared-work settings | the refusals, the one-ask rule, the states, the expiry and the editor's notice replaced by a pointer to accounts-privacy-legal; the two settings and the dashboard controls kept
+- footage-sorter-and-camera-cards-1 F1 | changed: The kinds of shared work and what each needs ; A computer takes shared work only while nobody is using it ; A computer does one piece of shared work at a time ; Only so many of each kind of work run across the studio at once ; The best-placed able computer is asked first ; An admin can start waiting work now, on a chosen computer ; Progress is shown as it goes, never as a made-up zero ; The work page shows what is waiting and running, and why any of it is not moving ; Work that fails is tried again on another computer, a set number of times ; What an admin can learn about what a computer is able to do | card copies, drive copies and drive reads are no longer shared work: out of the opening, the quiet table, the kinds table and its "off" line, the ranking, the one-at-a-time exception, the at-once limits, the start-now sentence, progress, the work page's opening, the tries table and the admin's facts; pointer to "There is one card copy, and it starts at once on the computer the card is in"
+- footage-sorter-and-camera-cards-1 F4 | changed: The server makes no media while a card is being copied to the NAS | its pointer to Drives, speed and interruptions dropped; this piece is the one description
+- music F7 | changed: Work that fails is tried again on another computer, a set number of times ; A computer takes shared work only while nobody is using it | "tried twice in all" for music replaced: a track that cannot be read or analysed fails at once, only a computer failure sends it elsewhere; b-roll keeps two tries
+- music F8 | no change here: music points to this piece's quiet time and Resolve hold-back
+- proxies-and-file-moves F5 | changed: The kinds of shared work and what each needs ; A computer takes shared work only while nobody is using it ; Work on one computer takes turns ; A computer says in one sentence whether it is taking shared work and why not ; The reasons a computer is passed over for a piece of work ; Every piece of work has one answer to "why is this not running" ; An editor decides whether their computer takes shared work and which kinds | editing proxies added as a kind (its tick is "Make proxies on this computer"); "A computer's own heavy work comes first" renamed "Work on one computer takes turns" and no longer a separate class; reason 13 and sentence 6 dropped; JOB-005's turn-taking kept
+- proxies-and-file-moves F6 | changed: Work on one computer takes turns ; Waiting work is taken in a fair order | describing b-roll goes first; proxy making waits and says "indexing b-roll first"
+- proxies-and-file-moves F7 | no change here: proxies-and-file-moves describes where the pick is offered; this piece keeps the pick and its pointer
+- sync-1 F6 | changed: The reasons a computer is passed over for a piece of work ; An admin can start waiting work now, on a chosen computer | "proxy download" becomes "downloads" for the safety stop
+- coordinator follow-up (PRX-030, PRX-031) | changed: Work already running is finished when the person comes back ; A computer does one piece of shared work at a time ; A studio-wide stop or the app closing puts running work back to waiting | proxy making stops within seconds and discards its part-made file; several proxies at once count as one piece; Resolve rules for proxies are the general ones; the studio-wide stop now points to sync-1
+- sync-1 F10 | changed: The reasons a computer is passed over for a piece of work ; An admin can start waiting work now, on a chosen computer | reason 6 "syncing is stopped on this computer" and the start-now hold "or on that computer" dropped; later reasons renumbered

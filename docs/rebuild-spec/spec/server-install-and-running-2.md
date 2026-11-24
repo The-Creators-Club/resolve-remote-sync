@@ -6,9 +6,9 @@ This part covers how the studio's computers and people reach the server, the cre
 
 ### The dashboard is reached only through the studio's private network
 
-The studio's private network is the one way in to the dashboard, for this studio and for every customer: from inside the studio and from away alike, an editor's computer, an admin's browser and a phone all reach the dashboard through it. A private network of this kind joins the studio's own computers and phones wherever they are, so no editor needs a VPN of their own and nothing about the dashboard is open to the internet. The one exception is the link an editor hands to a client for a client folder (see The b-roll archive: Client folders and links).
+The studio's private network is the one way in to the dashboard, for this studio and for every customer: from inside the studio and from away alike, an editor's computer, an admin's browser and a phone all reach the dashboard through it. A private network of this kind joins the studio's own computers and phones wherever they are, so no editor needs a VPN of their own and nothing about the dashboard is open to the internet. The exceptions are the links handed to people outside the studio: the b-roll archive's client folder links and the Footage Sorter's folder links, which an admin sees together in one list (see The Footage Sorter and camera cards: Downloading originals and sharing folders, "An admin sees every folder link and can switch one off at once").
 
-On the NAS the dashboard answers only on the NAS itself and on its publication on the private network, never on every address the NAS has. There is no address for the person installing to choose or type for this: the server's place on the private network comes from signing it in (see "The server joins the private network and publishes the dashboard there with https").
+On the NAS the dashboard answers only on the NAS itself and on its publication on the private network, never on every address the NAS has. There is no address for the person installing to choose or type for this: the NAS is joined to the studio's private network before the server is installed (see The server: installing it and keeping it running: Installing on a NAS, "What a NAS must have before the server goes on it"), and the server's place on it follows from that (see "The server joins the private network and publishes the dashboard there with https").
 
 Facts about the NAS that make this the simplest arrangement:
 
@@ -22,22 +22,20 @@ This is about reaching the dashboard. Which way footage itself travels between t
 
 ### The server joins the private network and publishes the dashboard there with https
 
-The set-up wizard carries an optional task, "Connect to your private network", with the button "SIGN IN OR PUBLISH" and a CHECK. It signs the server in to the studio's private network and publishes the dashboard there over https.
+The set-up wizard carries an optional task, "Connect to your private network", with a button that publishes the dashboard and a CHECK. The NAS is already on the studio's private network before the server is installed (see The server: installing it and keeping it running: Installing on a NAS, "What a NAS must have before the server goes on it"); this task publishes the dashboard there over https and checks that it really answers.
 
 What the task shows:
 
 | State | Shown as |
 |---|---|
-| The server is not signed in to the private network | to do: the server is not signed in yet, with the link to open to add it to the network, or, when there is no link yet, a note to press the button |
-| Signed in and published with https | ok: "signed in as <name>, published at <address>" |
-| The dashboard's address is already an address on the private network | ok |
-| Signed in, but the server's key on the network expires within 14 days | warning: "... its key expires in N day(s). When it does every editor loses the server at once.", with the steps in the network's own admin console to turn key expiry off for this server. A later expiry date is shown as a note. |
-| Signed in but not published | to do, saying which of these holds, each with the step to fix it: https certificates are off for the network; the publishing settings could not be read; nothing publishes the dashboard on the network, so no editor can reach it (it answers on the NAS itself only) |
+| The NAS is not on the private network | to do, saying that the NAS must be joined to the studio's private network first |
+| Published with https, and the dashboard answers at its secure address on the private network as seen from outside the server | ok: "signed in as <name>, published at <address>" |
+| On the network, but the server's key on the network expires within 14 days | warning: "... its key expires in N day(s). When it does every editor loses the server at once.", with the steps in the network's own admin console to turn key expiry off for this server. A later expiry date is shown as a note. |
+| On the network, but not published, or published but not answering from outside the server | to do, saying which of these holds, each with the step to fix it: https certificates are off for the network; the publishing settings could not be read; nothing publishes the dashboard on the network, so no editor can reach it (it answers on the NAS itself only); the dashboard answers only to the server itself, not at its secure address on the private network |
 
-What the button does:
+The task turns ok only when the dashboard really answers over the private network at a valid secure address, as seen from outside the server; answering only to the server itself is never enough.
 
-- When the server is signed in, it publishes the dashboard with https on the private network. If the dashboard had no address yet, the published address becomes the dashboard's address.
-- When the server is not signed in, it fetches a sign-in link, waiting up to about 5 seconds, and says "open <link> and sign in, then press CHECK on this task". It never reports success by itself: only CHECK does.
+What the button does: it publishes the dashboard with https on the private network. If the dashboard had no address yet, the published address becomes the dashboard's address. It never reports success by itself: only CHECK does.
 
 Refusals, each in plain words with the next step:
 
@@ -45,15 +43,15 @@ Refusals, each in plain words with the next step:
 - https certificates are off for the network: where in the network's admin console to turn them on, then press this again, "so no editor could connect";
 - the publishing settings could not be read;
 - publishing is not turned on for the network: follow the link in the message once;
-- the server has no name on the network yet.
+- the server has no name on the network yet, because the NAS has not been joined to it.
 
 - Who: an admin.
 - Ways in: the set-up wizard.
-- Name and search words: connect to your private network. Search words: private network, publish, https, sign in server, remote.
+- Name and search words: connect to your private network. Search words: private network, publish, https, publish dashboard, remote.
 
 ### The dashboard is put back on the private network on its own if it goes missing
 
-- On its own: about once a minute, a server signed in to the private network checks that the dashboard is still published there, and publishes it again if it is not. A publication that exists, including one an admin made by hand, is never overwritten.
+- On its own: about once a minute, a server on the private network checks that the dashboard is still published there, and publishes it again if it is not. A publication that exists, including one an admin made by hand, is never overwritten.
 - By hand: the last repair (when, whether it worked, and why not) is shown on the private-network task in the set-up wizard and in the alert below, and the admin can publish by hand from the same task.
 
 ### Admins are warned when the server's private-network link is down, about to expire or not publishing the dashboard
@@ -145,7 +143,7 @@ On TrueNAS the server never holds the NAS administrator's password. It holds an 
 - The person setting up creates that dedicated account and its rights themselves in TrueNAS; the product does not. The product then makes the key for it.
 - Before the key is made, the person is always told the risk that remains: even the dedicated account can reset any account's password and keys and change permissions anywhere. The key's worth is that the administrator password is not on the server, that it can be revoked by its name, and that its account can be watched. They are shown exactly which actions the key allows.
 - Making the key act as the administrator itself is refused unless the person deliberately asks for it, and then they are warned that the key has administrator-equivalent rights.
-- The key is shown once ("TrueNAS stores it hashed and will not show it again"), with where to enter it and a reminder of where to revoke it. The product writes it down nowhere but the server's secret store.
+- The key is shown once ("TrueNAS stores it hashed and will not show it again"), with where to enter it and a reminder of where to revoke it. The product writes it down nowhere but among the secrets the server keeps for the admin, never shown back (see The server: installing it and keeping it running: Settings and secrets, "Secrets an admin enters are checked and never shown back").
 - The key is labelled by name in TrueNAS. Each new key gets a new name, so the old one can be deleted by name.
 - If TrueNAS refuses every way of making the key, the person is told not to guess and to read TrueNAS's own documentation. If a key was made but its value did not come back, they are told to delete it in TrueNAS and try again.
 - Asking for such a key on a Synology is refused, explaining that DSM has no access keys.
@@ -164,7 +162,7 @@ DSM has no access keys of its own, so on a Synology the server holds the passwor
 
 ### The product makes sure it is talking to the studio's own NAS
 
-Every connection the product makes to the NAS that carries a password, a key or an account change first checks that the NAS is the studio's NAS. A NAS ships with a certificate it made itself, which no certificate authority vouches for, so the product recognises the NAS by its own identity:
+Every connection the product makes to the NAS that carries a password, a key or an account change first checks that the NAS is the studio's NAS. A NAS ships with a certificate it made itself, which no certificate authority vouches for, so the product recognises the NAS by its own identity. Every identity the NAS presents on such a connection, its certificate and its remote-shell identity alike, is recorded and checked the same way:
 
 - On its own: the first time the server reaches the NAS during set-up, the NAS's identity is recorded and the person is shown its fingerprint, told that later connections are checked against it and that a change will be refused, and given the fingerprint to compare with the one the NAS shows on its own screen. If the NAS cannot be reached to record it, the server meanwhile accepts only a certificate the usual authorities vouch for (so a NAS's own certificate fails) and tries again after a minute.
 - On its own: an identity that has CHANGED from the recorded or pinned one is refused, showing the expected and offered fingerprints, where the expected one came from, how to update it, and "Nothing was sent". It is never trusted again on its own. A NAS that presents no identity, or a record that cannot be read, is refused the same way.
@@ -173,7 +171,7 @@ Every connection the product makes to the NAS that carries a password, a key or 
 The identity the server trusts is also what editors' computers check the NAS by. The record of trusted identities can be read only by admins.
 
 - Who: an admin.
-- Setting: the NAS's identity. Does: decides which NAS the product will send passwords, keys and account changes to. Default: the identity seen at first connection, recorded. Who: an admin. Applies to: the site. Search words: NAS certificate, fingerprint, NAS identity, trust NAS.
+- Setting: the NAS's identity. Does: decides which NAS the product will send passwords, keys and account changes to: the identity recorded at first connection, a fingerprint the admin pins, the usual certificate authorities, or the studio's own certificate authority; never no check. Default: the identity seen at first connection, recorded. Who: an admin. Applies to: the site. Search words: NAS certificate, fingerprint, NAS identity, trust NAS.
 
 ### What the product says when a TrueNAS refuses or a connection drops
 
@@ -193,8 +191,8 @@ Synology's answers are shown in plain words:
 
 - the session has no privilege: almost always a session from an older sign-in;
 - the session expired: the product signs in again once, and a second expiry is reported;
-- invalid account or password; the account may not sign in to DSM;
-- a two-factor code is needed;
+- invalid account or password; the account is disabled; the account may not sign in to DSM;
+- a two-factor code is needed: "give the dashboard an account with two-step sign-in off"; the two-factor code was wrong;
 - the Snapshot Replication package is not installed;
 - no such user; the user already exists; the password fails this DSM's password policy;
 - no such group; the group already exists; bad or missing values;
@@ -215,7 +213,7 @@ The server writes the studio's tree as one account of its own on the NAS, which 
 
 ### Each editor gets their own account on the NAS
 
-Each editor has an account of their own on the NAS, in the editors' group, with a home folder and a random password the editor never needs to know. It is what lets the editor's computers move footage to and from the NAS, and it is what an admin sees for that editor in the NAS's own list of users: beside each editor, the dashboard says which account on the NAS is theirs and that it exists only so their computers can move files. Files an editor writes can be changed by the other editors. The account appears within about 30 seconds of the editor being added. Accounts are never deleted by this.
+Each editor has an account of their own on the NAS, in the editors' group, with a home folder and, where the studio uses the shared folders, the person's own account password, changed whenever their password is, so they never have a second password to remember (see Accounts, privacy and the legal paperwork: Who may sign in, "Every person has one account, and a studio may put its single sign-on in front"). It is what lets the editor's computers move footage to and from the NAS, and it is what an admin sees for that editor in the NAS's own list of users: beside each editor, the dashboard says which account on the NAS is theirs and that it exists only so their computers can move files. Files an editor writes can be changed by the other editors. The account appears within about 30 seconds of the editor being added. Keeping accounts up never deletes one; an account goes only when its person is removed (see "When an editor leaves their computers lose the NAS").
 
 - Signing in on one more computer never disturbs a person's other computers: each keeps its access to the NAS, and nobody has to do anything on the NAS for it (see Accounts, privacy and the legal paperwork: How a computer proves who it belongs to).
 - Every step that changes the NAS stops at the first failure and reads its result back before reporting success. A change that did not hold is shown to the admin with the reason.
@@ -224,7 +222,7 @@ Each editor has an account of their own on the NAS, in the editors' group, with 
 - On Synology:
   - Refused before anything is created or changed: Synology's built-in account names (admin, guest, anonymous, root, system, http, in any letter case); names starting "sc-", which look like Synology package accounts; an existing account numbered outside 1024 to 169999; and an existing account not in the editors' group, which the product will not take over (the person is told to add it to the group on the NAS first or pick another name).
   - If Synology says the name exists but does not list it as an ordinary account, the person is told it is probably a package account and to pick another name.
-  - The random password meets Synology's rule of mixed case and a digit. It never expires, no e-mail is sent, and the editor may change it.
+  - The account never expires and no e-mail is sent. Synology's password rule asks for mixed case and a digit; a person's password that fails this DSM's password policy is reported to the admin in Synology's own answer (see "A Synology must run DSM 7 with every service the product needs").
   - The home folder must exist: if Synology's "User Home" service is off, the step is refused and the person is told to turn it on (Control Panel, User & Group, Advanced) and run it again.
 
 Facts about Synology accounts: every account's main group is the NAS's "users" group, so the editors' group is an extra one; account names match regardless of letter case; an account counts as locked when it has expired; and asking Synology for an existing account by name can answer that it is missing, so the product finds accounts by listing them. A failure to look an account up stops the step with the NAS's reason.
@@ -257,7 +255,7 @@ A fact about Synology: with its file-transfer service off, an editor's computer 
 
 ### When an editor leaves their computers lose the NAS
 
-When an editor is removed or suspended, or one of their computers is forgotten, that computer can no longer reach the NAS, and the editor's other computers are not disturbed. When the admin asks for the account to be locked as well, TrueNAS locks the account and Synology expires it at once. On Synology, if the computer's access was removed but the account could not be expired, the admin is told exactly that.
+When one of an editor's computers is forgotten, that computer can no longer reach the NAS, and the editor's other computers are not disturbed. When an editor is suspended, none of their computers can reach the NAS and their login on the NAS is locked (TrueNAS locks the account and Synology expires it at once); resuming them unlocks it. When an editor is removed, their login on the NAS is deleted with their account, so it never outlives them (see Accounts, privacy and the legal paperwork: Suspending, disabling and removing a person, "An admin removes a person from the whole product"). Nothing in the project tree is deleted; what happens to the person's home folder on each kind of NAS is in The server: installing it and keeping it running: Installing on a NAS, "Editor accounts on the NAS are made and managed by the dashboard". On Synology, if the computer's access was removed but the account could not be expired, the admin is told exactly that.
 
 - Who: an admin.
 
@@ -306,10 +304,10 @@ A NAS whose storage is nearly full slows every read and every folder listing. Th
 
 ### Schedules run on the studio's own clock
 
-A NAS can declare one time zone while its clock and schedules run on another. Every scheduled scan, snapshot and upload fires at the studio's wall-clock time. The dashboard shows the admin the studio's time zone and the time the NAS's clock actually reads, checked against true time rather than the zone the NAS declares. When the NAS's clock is a minute or more from true time (the amount at which a computer's clock is shown as wrong), the admin is told, as a problem the server found, with the NAS's time, the true time and the step to correct it on the NAS.
+The studio has one named time zone, and everything follows it: every schedule, every report and daily message, and every time that carries no zone of its own. It is asked in set-up's "your studio" task, offered as the NAS's own zone where that is known (see The server: installing it and keeping it running: Installing on a NAS, "Set-up task: your studio"). A NAS can declare one time zone while its clock and schedules run on another. Every scheduled scan, snapshot and upload fires at the studio's wall-clock time. The dashboard shows the admin the studio's time zone and the time the NAS's clock actually reads, checked against true time rather than the zone the NAS declares. When the NAS's clock is a minute or more from true time (the amount at which a computer's clock is shown as wrong), the admin is told, as a problem the server found, with the NAS's time, the true time and the step to correct it on the NAS.
 
 - Who: an admin.
-- Setting: the studio's time zone. Does: the wall-clock time every scheduled scan, snapshot, upload and report is set in and shown in. Default: asked at set-up. Who: an admin. Applies to: the site. Search words: time zone, clock, schedule, studio time.
+- Setting: the studio's time zone. Does: the wall-clock time every scheduled scan, snapshot, upload, report and daily message is set in and shown in, and the zone of every time that carries none of its own. Default: asked at set-up, offered as the NAS's own zone where that is known. Who: an admin. Applies to: the site. Search words: time zone, clock, schedule, studio time.
 
 ### Pages stay quick while big downloads and checks run
 

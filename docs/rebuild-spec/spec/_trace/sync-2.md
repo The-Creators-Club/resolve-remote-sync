@@ -41,7 +41,7 @@
 - 03-009 | left out: cut by the owner (2026-11-24, sync-2-Q1)
 - 09-008 | A remote editor's downloads take the studio's fastest path, and an admin can choose it
 - 12-038 | The app and the dashboard say which way a computer's transfers go, and how fast ; An interrupted upload never leaves a broken file where a good one is expected
-- 16-057 | Footage travels only over the studio's own private network
+- 16-057 | The way footage travels is chosen by measuring real transfers
 - 27-033 | left out: for the builders only (what it states for a person, a relayed route being shown, is written into "The app and the dashboard say which way a computer's transfers go, and how fast")
 - 02-002 | A file is sent only once it has stopped changing
 - 02-006 | A new proxy on the server is brought down only once it has stopped changing
@@ -71,7 +71,7 @@
 - 12-045 | The dashboard shows and warns about project folders out of place and footage not yet filed
 - 15-067 | The dashboard shows and warns about project folders out of place and footage not yet filed
 - 15-098 | Every project folder on the server is checked to still be recognised as its project
-- 20-049 | A computer or a person can have a chosen project that new footage lands in
+- 20-049 | left out: settled by the joins (2026-11-24, footage-sorter-and-camera-cards-2 F10)
 - 22-016 | The editor picks the folder for the project tree when setting up
 - 22-017 | The editor picks the folder for the project tree when setting up
 - 16-060 | Downloads from a Synology NAS always arrive whole
@@ -97,7 +97,8 @@
 - Options: A: always so, no setting. B: a setting an admin can turn on. C: drop the idea.
 - Recommend: A, because footage of clients should never pass through someone else's service, and one fixed rule is fewer parts than a switch; it matches your earlier decision that the studio's private network is the only way in.
 - Changes for a person: with A nothing to set; a remote editor whose computer cannot reach the studio's private network directly is shown the slow-route warning instead of silently going through a relay.
-- Text assumes: A
+- Text assumes: no fixed rule (see the note below)
+- Settled by the joins 2026-11-24 (sync-2 F8): the text no longer states a fixed rule about routes; the way footage travels is chosen by measuring real transfers (owner's requirements, section 1). This question is held by the lead until the measurements exist (decisions page 5, 5.2), and the text carries no Pending mark for it.
 - Items: 16-057
 - Covers: 16-Q3
 
@@ -215,19 +216,19 @@
 ## Joins with other capabilities
 
 
-- sync / What syncs where | A newer local file that will never upload because the server has its name is reported | the first version of a name to reach the server is the one kept
+- sync / Names | A newer local file that will never upload because the server has its name is reported | the first version of a camera original's name to reach the server is the one kept
 - sync / Files that must never sync | Files that are never sent are never counted as owed | which files uploads leave behind
 - sync / Files that must never sync | Each computer says in one sentence why it is not syncing, and since when | a project held back until it is protected
 - sync / Disk space | An editor sees the originals they asked for arrive | the disk-space sentences
 - sync / Safety stops | How a sync that did not simply succeed is shown | the limit on removals and the safety stop
 - sync / Stuck, slow and fair transfers | How a sync that did not simply succeed is shown | a project's time running out
-- sync / The sync drive | When the sync drive is pulled with work owed, the editor is told what is owed and reminded until it is back | the drive phrases and what stops when the drive goes
+- sync / The sync drive | When the sync drive is pulled with work owed, the editor is told what is owed and reminded until it is back | the drive phrases, what stops when the drive goes, and the pulled-drive warning, its reminders and its two buttons
 - sync / Wired or remote | The app's window shows what is going up, what is coming down and the originals asked for | a computer that works straight off the server
 - sync / Upload only | The dashboard lists what each computer still owes, and never claims "nothing" when it cannot tell | an upload-only tick
 - sync / Studio-wide stops and the editor's pause | The app's menu says in one phrase what syncing is doing now | stops and the pause
 - accounts-privacy-legal / What the product records about a person | The dashboard lists what each computer still owes, and never claims "nothing" when it cannot tell | a computer withholding its file list
 - accounts-privacy-legal / Who may sign in | A computer belongs to a person only once it is tied to a known editor | what a known editor and a sign-in name are
-- resolve-on-the-editors-computer / Missing clips, relinking and refreshing | When an admin renames or moves a project on the server, every editor's copy follows by itself | relinking Resolve after the folder moved
+- proxies-and-file-moves / Relinking Resolve after a move | When an admin renames or moves a project on the server, every editor's copy follows by itself | relinking Resolve after the folder moved
 - resolve-on-the-editors-computer / Clip paths and media outside the shared tree | Each computer says in one sentence why it is not syncing, and since when | clips outside the tree that will never upload
 - proxies-and-file-moves / Moves that reach every computer | When an admin renames or moves a project on the server, every editor's copy follows by itself | the server side of a project moved
 - dashboard / Each computer's state | Each computer says in one sentence why it is not syncing, and since when | the per-computer view
@@ -238,8 +239,9 @@
 - editor-app / Installing and setting up | The editor picks the folder for the project tree when setting up | the set-up screens
 - editor-app / The tray or menu-bar icon and its menu | The app's menu says in one phrase what syncing is doing now | the menu itself
 - editor-app / Starting, staying running and crashing | Syncing comes back by itself when it stops running | crash reports and restarts of the app
-- editor-app / Signing in, the computer's identity and the licence | An editor is told once when their computer may not be recognised after a rename, and syncing carries on | the computer's identity
-- footage-sorter-and-camera-cards / Sorting into shoots, people and cameras | A computer or a person can have a chosen project that new footage lands in | footage dropped in and filed
+- editor-app / Signing in, the computer's identity and the licence | An editor is told once when their computer may not be recognised after a rename, and syncing carries on | the computer's identity, the sentence the editor is shown and the button that gives a new identity
+- editor-app / The tray or menu-bar icon and its menu | The app's menu says in one phrase what syncing is doing now | the menu's "Resume downloads" line
+- editor-app / Starting, staying running and crashing | Syncing comes back by itself when it stops running | recoveries counted and shown, no crash report for a recovered failure
 - broll / Sending a clip to Resolve | A remote editor's downloads take the studio's fastest path, and an admin can choose it | b-roll fetched when needed
 - server-install-and-running / Installing on a NAS | Downloads from a Synology NAS always arrive whole | kinds of NAS
 - server-install-and-running / NAS speed, load and clock | A change starts syncing within about a minute, and an idle studio barely touches the NAS | the NAS's load
@@ -247,3 +249,40 @@
 ## Settled from the present product
 
 - sync-2-U1 | yes: syncing does not start until the computer's settings are complete and the licence is accepted
+
+## Joins settled
+
+- accounts-privacy-legal F18 | changed: A computer belongs to a person only once it is tied to a known editor | dropped the brand-new-dashboard exception; a computer belongs to a person only once tied to an editor the admin has let in
+- dashboard-1 F23 | no change here: dashboard-1 changes (the lead's ruling); this piece already says a deliberate stop or pause is never a fault, and its table now marks the admin's stop and the editor's pause as deliberate
+- editor-app F22 | no change here: sync-1 changes its pointer to this piece's Windows checks
+- editor-app F23 | no change here: editor-app changes
+- editor-app F24 | no change here: editor-app changes to this piece's sentence
+- editor-app F25 | changed: Syncing comes back by itself when it stops running | no crash report; a failed attempt is counted among the app's recoveries, with a pointer to editor-app
+- editor-app F26 | changed: An editor is told once when their computer may not be recognised after a rename, and syncing carries on | own wording with "repair" replaced by a pointer to editor-app's sentence and button
+- footage-sorter-and-camera-cards-2 F10 | changed: A computer or a person can have a chosen project that new footage lands in (removed) ; A renamed computer keeps its plan and everything waiting for it | the chosen project and its setting removed (the lead's ruling); the rename no longer carries a chosen project
+- proxies-and-file-moves F3 | no change here: dashboard-1 changes (the lead's ruling)
+- proxies-and-file-moves F14 | no change here: this piece is the home and already carries the sentence
+- proxies-and-file-moves F15 | changed: When an admin renames or moves a project on the server, every editor's copy follows by itself | a folder at the new place holding only proxies or anything the product made is never a synced copy; refused with the "folder with its new name" sentence; nothing created meanwhile
+- resolve-on-the-editors-computer F2 | changed: Each computer says in one sentence why it is not syncing, and since when | the clips line uses "N clips outside the tree"
+- resolve-on-the-editors-computer F7 | changed: When an admin renames or moves a project on the server, every editor's copy follows by itself | relink pointer goes to Proxies and file moves: Relinking Resolve after a move
+- server-install-and-running-1 F19 | changed: Downloads from a Synology NAS always arrive whole | dropped the vendor-appliance parenthesis
+- sync-1 F2 | changed: The dashboard lists what each computer still owes, and never claims "nothing" when it cannot tell | owed up counts every file not on the NAS for an upload-only tick
+- sync-1 F9 | changed: When the sync drive is pulled with work owed, the editor is told what is owed and reminded until it is back | the warning covers uploads owed or owed that cannot be told
+- sync-1 F10 | changed: Each computer says in one sentence why it is not syncing, and since when ; The app's menu says in one phrase what syncing is doing now ; An editor sees the originals they asked for arrive ; A computer's warnings clear as soon as it reports they are over, and silence means "cannot tell" | every per-computer "stopped on this computer" cause, sentence, menu phrase and two-things warning removed
+- sync-1 F14 | no change here: this piece already says every file waits 2 minutes of still size and time
+- sync-1 F17 | changed: A newer local file that will never upload because the server has its name is reported | limited to camera originals; pointer to Sync: Names
+- sync-1 F18 | changed: Files that are never sent are never counted as owed | uses sync-1's words for what a YouTube download leaves behind
+- sync-1 F19 | changed: The app's menu says in one phrase what syncing is doing now ; Each computer says in one sentence why it is not syncing, and since when | the table is the one list; the menu follows its order; sync-1's three sentences added ("This computer is not set up for syncing yet.", the wired computer's sentence and its "sync off" status line)
+- sync-1 F20 | changed: Each computer says in one sentence why it is not syncing, and since when ; An editor sees the originals they asked for arrive | sync-1's three drive phrases used
+- sync-1 F21 | changed: When the sync drive is pulled with work owed, the editor is told what is owed and reminded until it is back | the Drive reminders setting deleted
+- sync-1 F22 | changed: When the sync drive is pulled with work owed, the editor is told what is owed and reminded until it is back | keeps what counts as owed and the summary; the notices, reminders and buttons point to sync-1
+- sync-2 F1 | no change here: dashboard-1 changes
+- sync-2 F2 | changed: Each computer says in one sentence why it is not syncing, and since when | row added after "nobody is signed in" for a computer the server turns away
+- sync-2 F4 | changed: The app's menu says in one phrase what syncing is doing now | "(see Settings)" dropped; the menu's "► Resume downloads…" line is named as the one place downloads start again, as editor-app has it
+- sync-2 F5 | no change here: editor-app drops its setting (the lead's ruling); this piece stands
+- sync-2 F6 | no change here: editor-app changes to this piece's sentence
+- sync-2 F7 | changed: A ticked project's folder layout is made on the editor's computer, empty folders included | made for upload-only projects too, nothing else comes down
+- sync-2 F8 | changed: The way footage travels is chosen by measuring real transfers (renamed from "Footage travels only over the studio's own private network") | the fixed route rule replaced by choice by measurement; Pending mark removed
+- sync-2 F9 | changed: Every editor is told whether it is safe to shut down or unplug their computer | the app added as a way in
+- sync-2 F10 | no change here: sync-1 changes its future-dated wording
+- sync-2 F11 | changed: A file changed in two places at once keeps both versions | count and up to 20 files with their paths, marked as cut with how many more

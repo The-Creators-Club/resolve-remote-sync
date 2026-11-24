@@ -20,12 +20,12 @@ Every computer reproduces each project at the same path inside its own copy of t
 When a project is ticked on a computer for full sync:
 
 - **Camera originals go up.** Every camera video file in the project's folder on that computer, at any depth, is copied up to the same place on the server. The kinds carried are the common camera and video files: Blackmagic RAW, QuickTime, MP4, MXF, AVI, AVCHD, Matroska, RED, Canon Cinema RAW Light, MPEG, Windows Media, WebM and Insta360 360 video, recognised whatever the letter case of the name. An upload never deletes anything on the server and never replaces a file already there.
-- **Proxies come down.** Everything inside any folder named Proxy (at any depth, any letter case) comes down from the server, smallest first, so a computer can show everyone's footage. For a clip downloaded from YouTube only its proxy comes down; the downloaded original goes up to the server from the computer that downloaded it and never comes down to anyone else's (a person who wants it downloads it themselves).
+- **Proxies come down.** Everything inside any folder named Proxy (at any depth, any letter case) comes down from the server, smallest first, so a computer can show everyone's footage. For a clip downloaded from YouTube the downloaded original goes up to the server from the computer that downloaded it, and comes down by itself only to the computer of the editor who asked for it, when that computer syncs the project; every other computer gets only its proxy, and anyone else who wants the original fetches it by hand.
 - **The project's other files are kept in step.** Edit projects, sound, graphics, documents and every other file that is neither video nor a proxy are kept the same on the NAS and on every computer with a full tick, both ways, and a change is noticed as it happens.
 - **The folder layout comes down.** Within one pass of the tick, every folder of the project on the server exists on the computer, empty folders included, so a team's prepared folders appear before anything is in them. A folder whose name starts with a dot is never created.
 - **Originals picked for this computer come down**, and no other originals do (see "An editor picks camera originals to come down to one computer").
 
-Nothing comes down that was made on this computer and nothing goes up that came down: originals brought down are never sent back, and proxies are never sent up.
+Nothing comes down that was made on this computer and nothing goes up that came down: originals brought down are never sent back, and proxies that came down are never sent up. A proxy made on this computer goes up to the server's Proxy folder at the same place, never replacing one already there.
 
 
 ### New footage starts going up about two minutes after it stops changing
@@ -65,7 +65,7 @@ Proxies come down on their own; camera originals come down only when picked. A p
 
 The project's page lists every pick for the project, for everyone, under "Camera originals brought down to one computer, beside its proxies. A folder also brings what is uploaded into it later. Stopping keeps the files already down." Each pick shows the person, the computer, the folder or file and its path (who chose it, from Resolve or the dashboard, and when, on pointing), its size on the server, and how much of it is on that computer: "cannot tell" (the computer withholds its file list or has not reported), "nothing on the server yet", or "[at least ]N of M in". "Stop" is offered only on picks the viewer may change, asking "Stop bringing <path> to <computer>? The files already there stay." With none: "No originals chosen for this project. Proxies come down as usual."
 
-To bring more, the person chooses one of their computers that has this project ticked for full sync. With none: "None of your computers has this project ticked for full sync, so there is nowhere to bring originals to." "Browse originals" shows "Originals of <project>[/<folder>] on the server, for <computer>.", "Up a folder", folders (opened on click, with file count and size, and "Bring this folder", asking "Bring the N originals in <folder> (<size>) to <computer>, and anything uploaded into it later?") and files (with size and "Bring this file"), marked "chosen" where already picked. At most 400 files are listed per folder, then "and N more files here. Bring the folder to get them all." Before the server has counted the project: "The server is still counting this project's files. They appear here within a minute or two: press Browse originals again." With nothing there: "The server has no originals here yet." When the Footage Sorter is on, each file shows a small picture from its proxy that opens the proxy playing in a new tab, or "no proxy yet".
+To bring more, the person chooses one of their computers that has this project ticked for full sync. With none: "None of your computers has this project ticked for full sync, so there is nowhere to bring originals to." "Browse originals" shows "Originals of <project>[/<folder>] on the server, for <computer>.", "Up a folder", folders (opened on click, with file count and size, and "Bring this folder", asking "Bring the N originals in <folder> (<size>) to <computer>, and anything uploaded into it later?") and files (with size and "Bring this file"), marked "chosen" where already picked. At most 400 files are listed per folder, then "and N more files here. Bring the folder to get them all." Before the server has counted the project: "The server is still counting this project's files. They appear here within a minute or two: press Browse originals again." With nothing there: "The server has no originals here yet." Each file shows a small picture from its proxy that opens the proxy playing in a new tab, or "no proxy yet".
 
 Before anything comes down the person sees the plan: the total size now picked for that computer and project, counting each file once however many picks cover it, and a file not yet seen counting as nothing. The answers are "<path> comes down to <computer> on its next pass. Everything chosen there for this project is <size>." and "<path> no longer comes down to <computer>. Files already there stay." Up to 5000 additions and 5000 removals are taken in one change, removals first, and the person is told how many were added and removed.
 
@@ -95,26 +95,11 @@ A computer that must be updated before it can bring originals down is listed but
 
 ### An editor asks for originals from inside Resolve
 
-On a computer connected to the studio, the app puts a CC Sync entry in Resolve's Scripts menu every time it starts (even with Resolve open), keeps it current, removes entries it no longer offers and never touches anything the editor put there. Resolve shows new script entries only after it restarts. The entries are:
-
-1. "Bring originals - selected media pool clips"
-2. "Bring originals - timeline clips between In and Out" (with no In and Out marks, the clip under the playhead)
-3. "Bring originals - whole timeline"
-4. "Stop originals - selected media pool clips"
-5. "Stop originals - timeline clips between In and Out" (or the clip under the playhead)
-6. "Stop originals - whole timeline"
-
-Each counts every media pool clip once, skipping titles and generators; between In and Out means every clip on every video and audio track that overlaps that range. Each clip is turned into its file, and each file into the ticked project that holds it; files in no ticked project, and files that are not camera originals, are counted and reported, not asked for. The request is picked up within about 2 seconds, recorded as made from Resolve, and starts the download at once; it is answered even while syncing is paused. If the server cannot be reached the request is kept and sent again, and no part of it is sent twice.
-
-Answers appear in Resolve's console, each beginning "CC Sync: ": "asked for the originals of N clip(s). CC Sync will confirm."; "asked to stop bringing the originals of N clip(s). CC Sync will confirm."; "this script runs from inside DaVinci Resolve (Workspace > Scripts)."; "no project is open."; "no clips are selected in the media pool. Select some and run this again."; "no timeline is open."; "no clips from the media pool sit between the In and Out marks."; "no In and Out marks are set and there is no clip under the playhead."; "this timeline has no clips from the media pool."; "could not find your home folder, so the request was not sent."; "could not write to <folder>, so the request was not sent."; "something went wrong, nothing was sent (<error>)." The app then confirms in a notice titled with the originals asked for.
-
-If Resolve does not seem to be installed for this user, the app says "DaVinci Resolve does not seem to be installed for this user (<path> is missing)." and starts anyway.
+An editor can also pick originals to come down to the computer they are at, or stop them, from inside Resolve; the menu entries, what the editor is told and how a request is handled are described in one place (see Resolve on the editor's computer: Grading from the server's originals, "An editor asks for originals from inside Resolve"). A pick made there is the same pick as one made on the project's page: it is recorded as made from Resolve, under the editor's name, starts the download at once, is answered even while syncing is paused, and is refused by the same rules in the same words.
 
 - Who: an editor, for the computer they are at.
 - When the help for the editing program is off: no entries are put in Resolve, and originals are picked from the project's page only.
-- Windows and macOS: offered on both. Asking never flashes a window on Windows.
 - Pending: sync-1-U2
-- See Resolve on the editor's computer: Bins, clip sorting and imports, for how clips are matched to their files.
 
 ### A project can include a folder of another project
 
@@ -171,10 +156,11 @@ A library that fails is tried again after 1 minute, then less often, doubling up
 - "<name> could not be set up on this computer[: <reason>]. It keeps trying."
 
 - On its own: every computer the studio has accepted receives both libraries.
+- See The server: installing it and keeping it running: Settings and secrets, "The kind of NAS, the project layout and the shared libraries", for the site's Shared libraries setting, whose default is these two.
 
 ### The app lists this computer's ticked projects and how each is doing
 
-The app's settings window lists the projects ticked for this computer. With none: "No projects are ticked for this computer yet: tick them on the dashboard" (never a warning). For each project: "<project> - <full sync | upload only (no proxy download)>: <state>", then a quieter line with the state of its uploads and downloads, then any detail. The states are "up to date", "syncing now", "waiting its turn", "paused", "there is a problem", "not synced to this computer", or "not known".
+The app lists the projects ticked for this computer, each with its mode and its state, from one closed list of states, and never shows an empty plan as a warning (see The app on each editor's computer: Windows, dialogs and notifications, "The editor sees each ticked project with what it is doing and why").
 
 - Who: the editor at the computer.
 
@@ -251,10 +237,10 @@ A tick made for the person rather than one computer is a tick on each of their c
 
 ### The rules every tick and untick follow, wherever it is made
 
-- Only the editor themself or an admin may change an editor's plan ("not allowed" otherwise).
+- Only the editor themself or an admin may change an editor's plan ("you can only change your own projects (admins excepted)" otherwise).
 - A named computer must be one of that editor's ("<editor> has no computer named '<m>'"); with no computer named, the change is for the person: every computer they use that is not wired.
 - A change can tick, untick, tick without touching an existing tick's mode, or set the mode (full or upload only), ticking if needed. A stale button never does the opposite of what it showed.
-- Ticking a project the server does not have, or one that is archived, is refused: "unknown project '<slug>'".
+- Ticking a project the server does not have, or one that is archived, is refused: "unknown or inactive project '<name>'", with the project's name as people see it.
 - A wired computer cannot be ticked: "<m> is wired to the server: it works directly off the NAS and syncs nothing, so projects cannot be ticked for it", and when every computer of the person is wired: "every computer on this account is wired to the server: they work directly off the NAS and sync nothing, so projects cannot be ticked for them". A tick for the person skips wired computers on its own, and a person whose every computer is wired gets nothing.
 - Ticking a project for one computer adds it at the end of that computer's order and changes no other computer. Ticking one already ticked in the other mode switches the mode and keeps its place.
 - Unticking for one computer removes the project from that computer only; the person's other computers keep syncing it. Unticking for the person removes it from every computer of theirs. An untick on a computer that never had the project changes nothing, and the person is told nothing changed rather than anything being widened.
@@ -264,15 +250,11 @@ A tick made for the person rather than one computer is a tick on each of their c
 - Who: the editor for their own computers, or an admin.
 - See The dashboard: Ticking and unticking, for the controls.
 
-### Unticking can be undone within a minute at no cost
-
-For 60 seconds after an untick, nothing about it is put into effect, so unticking and pressing Undo within that minute changes nothing on any computer. Adding is never delayed.
-
 ### A plan can be copied from one computer to another of the same person
 
 For any computer, another computer of the same person can be chosen to copy from. The target's ticks are replaced by the source's: the same projects, in the same order, in the same modes, recorded as made by the person copying. The person is first asked "Replace <target>'s <n> project(s) with <source>'s <m>?" followed by either "<target> stops syncing <k> of them: <names>..." or "Nothing is removed from <target>." Afterwards they are told how many projects the target now holds and which were added and removed, and the change takes effect within about a minute. The target's picks of originals in projects the source does not have are dropped; the source's picks are not copied.
 
-Every project added or removed is recorded as its own tick or untick, marked as a copy from the source, so the computer's plan history shows it and each one can be undone, and a project removed this way gets the same minute's grace as a hand untick.
+Every project added or removed is recorded as its own tick or untick, marked as a copy from the source, so the computer's plan history shows it and each one can be undone (see The dashboard: Ticking and unticking, "Recent tick changes can be undone within an hour").
 
 Refusals:
 
@@ -342,7 +324,7 @@ Afterwards: "This computer is now set to <ROLE>. Takes effect the next time CC S
 
 A wired computer downloads nothing, keeps no local copy of any project, never appears in any sync queue and puts no steady load on the NAS for syncing. It shows as healthy, still reports what its Resolve sees, and still warns about media used from outside the shared tree. Nothing of any project is ever sent to it.
 
-It cannot be given a new tick: its box on the dashboard is locked with "<computer> is wired to the NAS: it works directly off the tree, so a new sync cannot be ticked here", and a person's own account page offers no project to add for it. Ticks left on a computer from before it became wired never raise an error, a notice or an alert; an admin can still see them and clear them.
+It cannot be given a new tick: its box on the dashboard is locked, with the sentence given there (see The dashboard: Ticking and unticking, "A tick box always does what it showed"), and a person's own account page offers no project to add for it. Ticks left on a computer from before it became wired never raise an error, a notice or an alert; an admin can still see them and clear them.
 
 - See The dashboard: Ticking and unticking.
 
@@ -365,7 +347,7 @@ A wired computer's finish page is headed "DONE: CONNECTED TO THE NAS" and says t
 
 ### An upload-only tick sends every file up and brings down only the empty folders
 
-For a project ticked upload only on a computer, every file in its folder goes up to the server, not just video. The only thing that comes down is the project's folder structure, empty: the editor sees the project's folders in their own copy of the tree, in the place their own originals go, so they can see where to put them. A folder made on the server later also arrives, empty. A file other than a camera original that is changed after it went up goes up again, replacing the server's copy, whose earlier version is kept on the NAS for a year; a camera original is never replaced. Nothing else comes down: no proxies, no project files, no originals (a pick of originals for it is refused), and it includes no folders of other projects. Left out of the upload: anything inside a Proxy folder, operating-system litter and hidden files, unfinished, temporary, lock and partial files, files half-way through a move, YouTube downloads still in progress, the product's own recovery folder, and the hidden bookkeeping other sync tools keep in a folder.
+For a project ticked upload only on a computer, every file in its folder goes up to the server, not just video. The only thing that comes down is the project's folder structure, empty: the editor sees the project's folders in their own copy of the tree, in the place their own originals go, so they can see where to put them. A folder made on the server later also arrives, empty. A file other than a camera original that is changed after it went up goes up again, replacing the server's copy, whose earlier version is kept on the NAS for a year; a camera original is never replaced. Nothing else comes down: no proxies, no project files, no originals (a pick of originals for it is refused), and it includes no folders of other projects. Left out of the upload: anything inside a Proxy folder, operating-system litter and hidden files, unfinished, temporary, lock and partial files, files half-way through a move, YouTube downloads still in progress and whatever a YouTube download leaves behind, the product's own recovery folder, and the hidden bookkeeping other sync tools keep in a folder.
 
 Its status adds "Uploads only. Proxies do not come down for this project." while it is syncing or waiting, and it never reads as out of sync because no files came down. Whether a file belongs to an upload-only project is decided ignoring letter case, slash direction and the two ways Windows and macOS spell accented letters; when the product cannot tell, it uploads camera video only.
 
@@ -406,14 +388,14 @@ A few times a day the oldest contents of the recovery folder are cleared, and ev
 - then, if what is left is over 50 GB, the oldest batches until it is under, never the newest batch;
 - and when the sync drive is short of free space, the oldest batches until there is enough room again, never the newest (see "Downloads pause when the sync drive is nearly full, uploads never").
 
-Earlier versions of a project file changed by syncing are kept in the same recovery folder, under the same rules. Nothing is cleared while downloads are halted by a safety stop.
+Earlier versions of a project file changed by syncing are kept in the same recovery folder, under the same rules. Nothing is cleared while downloads are halted by a safety stop, and no clearing ever removes a file the NAS does not hold.
 
 - Setting: Keep removed files on editors' computers. Does: how many days the recovery folder keeps what was moved aside. Default: 14 days. Who: an admin. Applies to: the site. Search words: recovery folder, removed files, keep, days, trash.
 - Setting: Recovery folder size. Does: the most the recovery folder keeps before the oldest batches go. Default: 50 GB. Who: the editor in the app's settings for their own computer, or an admin for any computer from the dashboard. Applies to: a computer. Search words: recovery folder, size, trash, space.
 
 ### The editor can open the recovery folder and see what it holds
 
-The app shows where the recovery folder is, how many files and batches it holds, its total size, its oldest batch, and how long copies are kept, in the same words everywhere and with the site's actual keep period. From 1 GB up, its status says "Recoverable files in <path>: <size> (N files). Copies older than D days are removed automatically". "Open the recovery folder" opens it; with no sync folder known: "CC Sync does not know where your sync folder is yet, so there is no recovery folder to open. Open Settings, THIS COMPUTER." The dashboard is told the folder's size (file count and bytes), where it is and how long files are kept there.
+The app shows where the recovery folder is, how many files and batches it holds, its total size, its oldest batch, and how long copies are kept, in the same words everywhere and with the site's actual keep period. From 1 GB up, its status says "Recoverable files in <path>: <size> (N files). Copies are removed automatically after D days, or sooner when the recovery folder passes <size> or the drive runs short of space" (the second size being the computer's recovery folder size). "Open the recovery folder" opens it; with no sync folder known: "CC Sync does not know where your sync folder is yet, so there is no recovery folder to open. Open Settings, THIS COMPUTER." The dashboard is told the folder's size (file count and bytes), where it is and how long files are kept there.
 
 - Who: the editor at the computer.
 
@@ -430,7 +412,7 @@ One action unticks the project on the dashboard, stops syncing it here, then del
 1. First: "Checking whether this project's files have reached the server…" (see "Removal is refused while anything here is missing from the server").
 2. Ready: "Remove '<project>' from THIS computer? This unticks the project on the dashboard, stops syncing it here, and deletes the local copy to free disk space." then what was checked: for an upload-only project, "CC Sync has checked every file in this project's folder, apart from its Proxy folders (the server makes those again): each one is on the server at the same size and content, and none was left that CC Sync does not upload."; for a full tick, "CC Sync has checked this project's files: all of them have reached the server. Proxy folders are not counted, because the server makes those again." then "Tick the project again any time to sync it back." The button reads "REMOVE FROM THIS COMPUTER".
 3. The check is made again at the moment of deletion.
-4. The project is unticked for this computer (for every computer of the person when the dashboard does not know this computer, or when the tick is the person's own). Failures, each leaving everything in place: "sign in first"; "could not untick on the dashboard (<message>): nothing was deleted"; "the dashboard still lists it in this computer's sync plan after the untick. Untick it on the dashboard"; "the dashboard has no tick for it under this computer's name (<computer>), but it is still ticked for another of your computers. If this computer was renamed, wait until the dashboard shows the new name, or untick it on the dashboard"; "the dashboard has no tick for it under this computer's name (<computer>), and could not be asked whether another of your computers holds it. Try again in a minute".
+4. The project is unticked for this computer (for every computer of the person when the dashboard does not know this computer, or when the tick is the person's own). Failures, each leaving everything in place: "sign in first"; "could not untick on the dashboard (<message>): nothing was deleted"; "the dashboard still lists it in this computer's sync plan after the untick. Untick it on the dashboard"; "There is no tick for <project> under this computer's name (<computer>), but it is still ticked for another of your computers. Nothing was removed. If this computer was renamed, wait until the dashboard shows the new name, or untick it on the dashboard."; "the dashboard has no tick for it under this computer's name (<computer>), and could not be asked whether another of your computers holds it. Try again in a minute".
 5. Syncing stops here: "the project was unticked, but it could not be stopped syncing on this computer: nothing was deleted. Try again in a minute."
 6. The folder is deleted. "'<project>' removed from this computer. The server copy is untouched." If the folder was already gone: "'<project>' is no longer synced here (its folder was already gone)". If some files could not be deleted: "'<project>' was unticked and stopped, but some files could not be deleted (<error>). Delete the folder by hand: it is safe now."
 
@@ -447,7 +429,7 @@ A project's local copy is deleted only when the product can show nothing would b
 - camera originals changed after they were uploaded: "<N files> changed after they were uploaded (e.g. ...). Rename them first, so they upload as new files", or that it could not check;
 - files sharing a name with a different file on the server: "<N files> share a name with a different file already on the server, so they will never upload (e.g. ...). Rename them first", or that it could not check;
 - files nothing carries up: "<N files> in this folder are not carried by any sync, so the server will never have them (e.g. ...)", or "CC Sync could not read this project's folder to check what is in it";
-- files dated in the future: "<N files> are dated in the future (a camera clock set wrong), which CC Sync will not upload (e.g. ...). One a few hours ahead uploads by itself once that time passes; otherwise its modified date has to be reset to now (ask whoever looks after your computers) before it can upload";
+- files dated in the future (a camera clock set wrong) that have not reached the server yet: the editor is told how many, with examples, that such files upload like any other once they have stopped changing, and that their dates are wrong and are best reset to now by whoever looks after their computers;
 - files coming down not all here yet (full tick): "<N files> have not arrived on this computer yet", or that it could not ask.
 
 The editor sees "► project not ready to remove", "'<project>' is NOT ready to be removed." and each reason as a bullet, then "Deleting it now would destroy work that exists nowhere else. Leave CC Sync running until this finishes, then try again. If you have to free the space anyway (a dead server, a full disk), type the project's folder name exactly to confirm:" and the name, with a text box, CANCEL and "REMOVE ALL ELSE". A wrong entry shows "type exactly: <name>". Confirming removes everything that is safely on the server and keeps every file the server lacks, in place, listing them. The override (project, time, how much was owed, up to 4 reasons) is reported to the admin.
@@ -574,16 +556,7 @@ When a project's folder loses its project mark, the product puts it back on its 
 
 ### Syncing waits for a short list of reasons, each in its own words
 
-Syncing does not start, and the status says why, in this order:
-
-1. paused by the editor: "Syncing is paused.";
-2. stopped for the whole studio by an admin (see below);
-3. nobody signed in, or the computer not set up yet: its sentence, else "This computer is not set up for syncing yet.";
-4. the licence not accepted;
-5. the sync drive absent: "PAUSED: <drive> is disconnected: plug it back in and syncing resumes on its own", the drive named from the studio's settings;
-6. a wired computer: "This computer works straight off the server, so there is nothing to sync.", status "sync off: this computer works directly off the server".
-
-The same reasons, in the same order and the same words, are given everywhere: in the app, on the dashboard and in alerts. Sync never starts with nobody signed in.
+When syncing does not start, the status says why. The reasons, their order and their words are one list, given the same everywhere: in the app, on the dashboard and in alerts (see Sync, part 2: Saying truthfully what the sync is doing, "Each computer says in one sentence why it is not syncing, and since when"). Sync never starts with nobody signed in.
 
 
 ### The editor pauses and resumes syncing
@@ -594,7 +567,7 @@ The same reasons, in the same order and the same words, are given everywhere: in
 
 ### Sync now runs every transfer this computer has switched on at once
 
-"Sync now" cuts the wait short and checks every project at once, running only the transfers this computer has switched on, the same set its automatic start uses. The notice afterwards is "Sync requested: <what will sync>" or "Sync requested. Checking the server for changes now." when accepted, and "Not now: <reason>" or "Not now: nothing on this computer needs syncing." when refused. If the app gives no answer, nothing is shown.
+"Sync now" cuts the wait short and checks every project at once, running only the transfers this computer has switched on, the same set its automatic start uses. The notice afterwards is "Sync requested: <what will sync>" or "Sync requested. Checking the server for changes now." when accepted, and "Not now: <reason>" or "Not now: nothing on this computer needs syncing." when refused. If the app gives no answer, nothing is shown. When the round trip it started ends, the editor is told what it did: how many files were sent up and how many brought down.
 
 - Who: the editor at the computer.
 
@@ -634,13 +607,13 @@ While a studio-wide stop is in force, every page of the dashboard shows a banner
 
 ### Each kind of file travels only in its own direction
 
-Within a ticked project, camera originals only go up (and come down only when picked), proxies only come down, and every other file is kept in step both ways. A video original is never carried as an ordinary project file, and neither is anything in a Proxy folder. The video kinds, matched in any letter case, are BRAW, MOV, MP4, MXF, AVI, MTS, M2TS, MKV, R3D, CRM, MPG, MPEG, WMV, WEBM, INSV and 360; these same kinds are what the product counts as video originals everywhere on an editor's computer. In the shared libraries no video travels at all.
+Within a ticked project, camera originals only go up (and come down only when picked), proxies come down (only a proxy made on this computer goes up, never replacing one on the server), and every other file is kept in step both ways. A video original is never carried as an ordinary project file, and neither is anything in a Proxy folder. The video kinds, matched in any letter case, are BRAW, MOV, MP4, MXF, AVI, MTS, M2TS, MKV, R3D, CRM, MPG, MPEG, WMV, WEBM, INSV and 360; these same kinds are what the product counts as video originals everywhere on an editor's computer. In the shared libraries no video travels at all.
 
 ### Some files never travel at all
 
 These never travel in either direction, by any upload or download, and are never counted as owed or missing:
 
-- unfinished, temporary, lock and partial files of every tool, files still being uploaded or downloaded, the product's own half-copied files, and YouTube downloads still in progress or left by one that failed;
+- unfinished, temporary, lock and partial files of every tool, files still being uploaded or downloaded, the product's own half-copied files, YouTube downloads still in progress or left by one that failed, and whatever a YouTube download leaves behind: the download kept aside under an "original" name while its name was held, and every half-made file of a conversion;
 - files half-way through a move the product is making;
 - empty (zero-byte) camera files;
 - the hidden companion files macOS writes beside each file on drives it did not format ("._" files), and the folder settings files of macOS and Windows (Finder's and Explorer's hidden folder files, thumbnail files), and other operating-system clutter;
@@ -649,19 +622,21 @@ These never travel in either direction, by any upload or download, and are never
 
 The same set is left out everywhere. Any macOS companion files already on the NAS are found and cleared, and the leftovers of an interrupted transfer are cleaned up; neither is ever footage.
 
+A file whose size or time is still changing does not travel yet, whatever its kind: it travels once it has been still for a set time (see Sync, part 2: Clocks and file age, "A file is sent only once it has stopped changing").
+
 ### A project never syncs until these rules are in place for it
 
 A project, a shared library or an included folder whose never-travel rules cannot be confirmed on a computer (they could not be read or written) is held offline there rather than synced without them, shows as blocked, and starts by itself once the rules are confirmed, across retries, restarts and the release of any stop. A newly ticked project therefore never carries a camera original the wrong way, even for a moment. If the rules are found changed, the correct ones are put back on their own within a few minutes.
 
 ### Files edited on two computers at once are both kept
 
-When the same project file is changed on two computers before either change has travelled, both copies are kept, of any kind of file. Nothing is merged or deleted on its own. The editor is told (see "The editor is told about waiting projects, broken included folders, renamed projects and files edited twice") and the admin sees each such file with its path on the computer's row, and how many the computer holds.
+When the same project file is changed on two computers before either change has travelled, both copies are kept, of any kind of file. Nothing is merged or deleted on its own. The editor is told (see "The editor is told about waiting projects, broken included folders, renamed projects and files edited twice") and the admin sees on the computer's row how many the computer holds and up to 20 of the files with their paths, marked as cut, with how many more, when there are more.
 
-- See Sync, part 2: Saying truthfully what the sync is doing.
+- See Sync, part 2: Saying truthfully what the sync is doing, "A file changed in two places at once keeps both versions".
 
 ### The editor is shown files that will never upload and included folders that do not work
 
-The app shows: files dated in the future (a camera clock set wrong), which do not upload until that time; up to 5 files whose name already exists on the server at a different size, so this computer's version will never upload, with both sizes; up to 10 sentences about shared libraries or included folders that are not working on this computer; and up to 10 projects renamed on the server whose folder this computer moved to match (old name, new, when, and whether Resolve was relinked). Only projects ticked here count, and warnings about projects no longer ticked are dropped; when the app cannot tell what is ticked, it drops nothing. When the sync drive stops answering and the app can no longer notice new files at once, or when it can again, the editor is told.
+The app shows: files dated in the future (a camera clock set wrong), which upload like any other file and are listed until their dates are put right; up to 5 files whose name already exists on the server at a different size, so this computer's version will never upload, with both sizes; up to 10 sentences about shared libraries or included folders that are not working on this computer; and up to 10 projects renamed on the server whose folder this computer moved to match (old name, new, when, and whether Resolve was relinked). Only projects ticked here count, and warnings about projects no longer ticked are dropped; when the app cannot tell what is ticked, it drops nothing. When the sync drive stops answering and the app can no longer notice new files at once, or when it can again, the editor is told.
 
 - When the help for the editing program is off: renamed projects say nothing about relinking.
 
@@ -686,7 +661,7 @@ Updating the app never makes a computer bring down again files it already holds 
 ### The editor is told about files that will never upload because of a name clash or a wrong clock
 
 - "⚠ N files on the server have the same name but a different size, so your newer version will NOT upload (e.g. <name>: yours <size>, the server's <size>). Rename yours, or ask your admin to remove the server's copy". Each such file is listed with both sizes, up to 20, and the folder holding one can be opened.
-- "⚠ N files are dated in the future, so they will NOT upload (first: <name>, dated YYYY-MM-DD). A camera clock is set wrong. One a few hours ahead uploads by itself once that time passes. One dated further ahead needs its modified date reset to now (a copy or re-import keeps the date); ask whoever looks after your computers. Fixing the camera clock only helps future recordings".
+- Files dated in the future: the editor is told how many there are, the first one's name and date, that a camera clock is set wrong, that the files upload like any other and only their dates are wrong, that a date further ahead is best reset to now by whoever looks after their computers (a copy or re-import keeps the date), and that fixing the camera clock only helps future recordings.
 
 The first version of a camera original's name to reach the server is the only one that ever will; a newer local version with the same name stays behind and is reported like this, never sent.
 
@@ -741,7 +716,7 @@ When the only problem at start is that the sync folder is not there and it lives
 
 ### A drive pulled out with work owed is named and reminded about
 
-When the sync drive goes away with uploads owed, or when what is owed cannot be told, the warning names what is owed instead of a calm note:
+When the sync drive goes away with uploads owed, or when what is owed cannot be told, the warning names what is owed instead of a calm note (what counts as owed, and how it is summed up in <owed>, see Sync, part 2: What is owed, "When the sync drive is pulled with work owed, the editor is told what is owed and reminded until it is back"):
 
 - "<Drive> was disconnected with <owed> still to go: plug it back in to finish syncing"
 - "<Drive> is mounted at the wrong place with <owed> still to go: eject it, delete the leftover empty folder, then plug it back in"
@@ -759,7 +734,7 @@ As the editor types the folder on a Mac it is checked, and refused in red with s
 
 When the folder is on an external drive, set-up stops and says to plug it in (and unlock it if encrypted) and run again if the drive is not there. If the Mac mounted the drive under a numbered second name (for example "SSD 1"), set-up records the drive by what it is rather than by its name, and says the app will follow it whatever it is called. If the drive's usual name is only a plain leftover folder and the drive itself cannot be found, set-up stops with a boxed warning that the path IS NOT A MOUNTED VOLUME, explaining that syncing into the leftover folder would fill the Mac's internal disk instead of the drive, then the fix: eject, remove the leftover folder, unplug and plug in again, run again. If the Mac cannot identify the volume, set-up refuses to guess. Two drives of the same name both mounted get a warning to rename one. A drive not formatted in the Mac's own format gets a warning that other formats lose macOS file details and some cannot keep names differing only in letter case. Set-up records which drive it is, so the app can later tell "drive unplugged" from "drive plugged in but empty".
 
-- Windows and macOS: these checks are made on a Mac. See The app on each editor's computer: Installing and setting up, for Windows.
+- Windows and macOS: these checks are made on a Mac. See Sync, part 2: Project folders on an editor's computer, "The editor picks the folder for the project tree when setting up", for Windows.
 
 #### Lessons
 
@@ -781,15 +756,13 @@ Originals picked for a computer come down only while the whole batch would fit a
 
 ### Ticking warns when the proxies may not fit
 
-When both the project's proxy size on the server and the computer's last reported free space are known, and the project would leave less than 20 GB free or take half or more of the free space, ticking it asks "<project> is <size> of proxies. <computer> has <free> free.[ That is more than will fit.] Sync it there anyway?". Cancel unticks it again; nothing is refused. The same warning is given when switching an upload-only tick to full. Ticking for a person checks each of their computers and shows up to three such sentences; ticking a whole column gives one warning for the column's total ("<n> projects (<k> of them measured) are <size> of proxies..."). Nothing is said when either figure is unknown; a computer that never reported its disk is unknown, never empty. The same rule is used everywhere a tick is made.
+Wherever a tick is made, ticking a project whose proxies may not fit on the computer warns, naming both figures, and asks before saving; it never refuses (see The dashboard: Ticking and unticking, "Ticking warns when the proxies may not fit but never refuses").
 
 - Who: the editor for their own computers, or an admin.
-- See The dashboard: Ticking and unticking.
 
 ### The dashboard shows each computer's free space and colours it
 
-For each computer the dashboard shows the free and total space where it syncs, the free space on its system disk, and when they were measured; a check-in without a measurement leaves the last one shown. The whole studio's free and total space can be seen beside the ticks. The drive is red under 5 percent free or under the computer's own floor (20 GB, or the figure the computer reports); amber under 10 percent or under 50 GB; otherwise green. A computer that reports nothing about its drive gets no colour, never a reassuring green. A computer below its own floor is shown as having probably stopped downloading, labelled as a guess; no figure never counts as stopped, and no verdict is given when its floor is off.
-
+For each computer the dashboard shows the free and total space where it syncs, the free space on its system disk, and when they were measured; a check-in without a measurement leaves the last one shown. The whole studio's free and total space can be seen beside the ticks. The drive is red under 5 percent free or under the computer's own floor (20 GB, or the figure the computer reports); amber under 10 percent or under 50 GB; otherwise green. A computer that reports nothing about its drive gets no colour, never a reassuring green. Why a computer stopped downloading is told only from the reason the computer itself reported; a low-space colour is a warning, never a stop, and a computer with no figure never counts as stopped.
 The computer's row shows "disk N%" when the drive is not healthy, with the sync drive's free and total space, the system drive's free space and when they were measured, and explains: downloads fill a drive file by file; below its floor downloads stop and the recovery folder is emptied oldest first until the drive has twice the floor free, which starts downloads again; downloads halted by a safety stop wait for a person to resume them, from that computer or by an admin on its row.
 
 - See The dashboard: Each computer's state.

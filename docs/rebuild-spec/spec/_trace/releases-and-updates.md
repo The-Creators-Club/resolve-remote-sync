@@ -339,7 +339,9 @@
 - Each computer is offered the version it should run, or told why not | a computer that does not say its operating system is shown as unknown and offered nothing, instead of being taken for Windows
 - The vendor's signing key is kept offline and protected | a written plan for a stolen key, and a reminder at each release while a backup is missing (ruling)
 - An admin sees which server updates are on offer | "An admin sees which server updates are on offer" covers what before were two views (the update view and the "how everything stands" view), written once
-- A new version that keeps crashing puts the previous one back by itself | the app's own log line is joined by telling the server when it cannot go back, so a person can step in
+- A new version that keeps crashing puts the previous one back by itself | with nothing to go back to, the crashing version is relaunched at most three times an hour and then left down, and the admin is told a person must step in (joins, page 8.11)
+- Every site takes the vendor's versions from one signed list | every version taken from the vendor is downloaded with a credential issued to the site, which follows no redirect (ACC-065, ruling; joins F1); how it is issued and what the admin is told when it is missing or refused are new
+- Anyone signed in can download the app and the installer | an installer link an admin hands a new editor, working without signing in (joins F10, page 8.12)
 
 - The vendor sees before publishing whether a release makes syncing slower | from the owner's requirements (2026-11-24): the measurements of how fast footage travels are run again before each release and shown to the vendor
 - The Timeline Cards app on an Android phone updates itself from the server | the Android app's refusal of an update with no checksum, with the message taken from the Windows app; on a computer Timeline Cards updates with the one app (releases-and-updates-Q3)
@@ -393,7 +395,35 @@
 - The dashboard / Each computer's state | An admin pushes a version to one computer | the per-computer view carries "update now"
 - The server: installing it and keeping it running / Snapshots, restoring and the server's disk | An admin moves the server back to an earlier version | the backups taken before an update and restoring one
 - The server: installing it and keeping it running / Installing on a NAS | Some server updates need the installation renewed on the NAS | installing the server, where the vendor's key and list are put in place
-- YouTube downloads / Jobs on the page: queue, retry, cancel | An admin updates the server with one button | a server update interrupts YouTube downloads in progress
+- YouTube downloads / Jobs on the page: queue, retry, cancel | An admin updates the server with one button | what a server restart does to a job ("A server restart never loses a job"); the update waits for running download jobs
+- The server: installing it and keeping it running / Updates, restarts and rollbacks | An admin updates the server with one button ; An admin moves the server back to an earlier version | an update or going back keeps the dashboard answering with no gap
+- The dashboard / Each computer's state | An admin pushes a version to one computer | the sentences telling the admin when a request aimed at one computer applies
+- Accounts, privacy and the legal paperwork / Third-party licences and what customers receive | Every site takes the vendor's versions from one signed list | downloading the product needs a credential issued to the site
 - Music / Adding tracks to the library | Every site takes the vendor's versions from one signed list | the large file music search needs comes through the vendor's list
 - Timeline Cards: the editor / Working offline, connections and several devices | The Timeline Cards app on an Android phone updates itself from the server | the app's offline data kept across an update
 - Sync / Stuck, slow and fair transfers | An update waits until it will harm no work in progress | uploads and downloads resuming where they stopped after a restart
+
+## Joins settled
+
+- accounts-privacy-legal F1 | changed: Anyone signed in can download the app and the installer | "disabled" dropped: a computer of a removed or suspended account is refused
+- cards-editor-4 F1 | no change here: cards-editor-4 changes; this piece already says Timeline Cards on a computer opens from the one app and updates with it
+- cards-editor-4 F5 | no change here: cards-editor-4 changes its names
+- dashboard-1 F12 | no change here: dashboard-1 adds the fourteen rows; this piece stays the home of each rule
+- dashboard-1 F13 | changed: An admin pushes a version to one computer | the when-it-applies sentences now point to dashboard-1's "An admin asks one computer to do something and is told when it will happen", keeping ", as an offer of a held-back version to this computer alone"
+- releases-and-updates F1 | changed: Every site takes the vendor's versions from one signed list ; The server believes only a release list the vendor signed, and refuses an earlier one played back ; An admin brings one version from the vendor onto the site by hand | every version taken from the vendor is downloaded with the site's credential, how the site gets it, what the admin is told when missing or refused, and that such a download follows no redirect
+- releases-and-updates F2 | changed: The versions page shows every version the site holds | the order stated (served, other held, the vendor's offer; by kind then operating system) and only older held versions folded
+- releases-and-updates F3 | no change here: dashboard-1 changes; this piece already counts a never-checked list as stale at 7 days
+- releases-and-updates F4 | changed: The server checks the vendor's list every day, and an admin can check now ; The server tells an admin when versions are not reaching computers | the overview banner named as the one place, and the problem row's condition aligned with it
+- releases-and-updates F5 | no change here: dashboard-2 changes; this piece already says a version already running is not installed again
+- releases-and-updates F6 | no change here: dashboard-2 changes; withdrawing here already always succeeds
+- releases-and-updates F7 | no change here: dashboard-2 points to this piece's setting "Update editors' computers by themselves"
+- releases-and-updates F8 | changed: A new version that keeps crashing puts the previous one back by itself | the editor's sentence is now editor-app's, naming the crashing version and saying the admin was told
+- releases-and-updates F9 | changed: A new version that keeps crashing puts the previous one back by itself | with nothing to go back to, relaunched at most three times an hour, then left down, admin told a person must step in
+- releases-and-updates F10 | changed: Anyone signed in can download the app and the installer | an admin-made installer link that works without signing in: who makes it, what it reaches, what happens when used
+- releases-and-updates F11 | changed: Anyone signed in can download the app and the installer | the generic sentences kept for the app's own downloads; the installer's sentences point to editor-app
+- releases-and-updates F12 | no change here: editor-app changes; this piece already tells the customer to take the installer from the vendor
+- server-install-and-running-1 F14 | changed: An admin sees which server updates are on offer ; An admin updates the server with one button ; The admin watches each step of a server update ; A site that follows the vendor updates its server by itself ; An admin moves the server back to an earlier version | every "offline for about ten seconds" dropped (covers releases-and-updates F13); updating and going back keep the dashboard answering, pointing to server-install-and-running-1
+- server-install-and-running-1 F15 | changed: An admin updates the server with one button ; A site that follows the vendor updates its server by itself | the YouTube refusal and the force dropped; the update waits for running download jobs and goes ahead by itself (covers releases-and-updates F14)
+- server-install-and-running-1 F16 | changed: An admin moves the server back to an earlier version | every backup kept is listed (at most 8), pointing to server-install-and-running-1 for the keeping rule
+- server-install-and-running-1 F17 | no change here: this piece is the home and "Some server updates need the installation renewed on the NAS" already holds it; server-install-and-running-1 points here
+- youtube F4 | changed: An admin updates the server with one button | the refusal counting YouTube downloads dropped; what a restart does to a job points to youtube's "A server restart never loses a job"

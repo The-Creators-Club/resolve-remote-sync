@@ -76,14 +76,17 @@ If an update is interrupted at any point (the computer loses power, the app is k
 
 A person signed in to the dashboard, or a computer with the studio's credentials, may download any version the studio holds, or ask for "current" (in any letter case) to get the current version of that kind for that operating system. This is how a new editor gets the installer.
 
-- Neither signed in nor a computer with credentials: told to sign in.
-- A computer whose person's account is removed, suspended or disabled: refused with the account's sentence (see Accounts, privacy and the legal paperwork: How a computer proves who it belongs to).
+A new editor cannot sign in yet, so an admin can also hand them a download link for the installer that works from anywhere without signing in. Only an admin makes such a link. It reaches the studio's current installer and nothing else the server holds. Following it downloads the installer exactly as the installer page does, and a person following it when nothing is published, or when the installer's file has gone, reads the installer page's sentences (see The app on each editor's computer: Installing and setting up, "An editor gets the installer for a new computer, or to repair one").
+
+- Neither signed in, nor a computer with credentials, nor following an admin's installer link: told to sign in.
+- A computer whose person's account is removed or suspended: refused with the account's sentence (see Accounts, privacy and the legal paperwork: How a computer proves who it belongs to).
+- The sentences below are for the app's own downloads of its versions. A person downloading the installer reads the installer page's sentences instead (see the same heading of The app on each editor's computer).
 - Nothing current: "no current <platform> <kind> is published".
 - An unknown version: refused as unknown.
 - The file is missing on the server: "the file for that version is missing on the server".
 - The download carries its checksum, version and signature details, so a first install that cannot check a signature itself can still check the file is whole and refuse a source that is not signed.
 - The file name the person downloads is made from the kind, operating system and version.
-- Who: anyone signed in, and every computer of the studio.
+- Who: anyone signed in, every computer of the studio, and anyone an admin hands an installer link to.
 
 ### The Timeline Cards app on an Android phone updates itself from the server
 
@@ -231,7 +234,7 @@ A server update is downloaded only over a secure connection, is at most 256 MiB,
 ### The server believes only a release list the vendor signed, and refuses an earlier one played back
 
 - The vendor's list of versions, and every version in it, must carry a valid vendor signature.
-- The list is fetched only over secure connections at every hop (a redirect to an insecure address is refused), sends no credential of any kind, and is limited in size.
+- The list is fetched only over secure connections at every hop (a redirect to an insecure address is refused), sends no credential of any kind, and is limited in size. The versions it names are downloaded with the site's credential (see "Every site takes the vendor's versions from one signed list").
 - A list older than the newest one the server has ever accepted is refused as "a possible replay of an earlier list", and nothing changes. A list's date never goes backwards: when the vendor publishes, a wrong clock on the vendor's computer is caught and named.
 - Versions without a valid signature, versions that claim a minimum above their own, and versions the vendor has recalled are dropped.
 - Versions the list describes in a form this server cannot use are reported: the check still succeeds, but it reads "N record(s) in the list are not offered here: ... The vendor has to publish them again." (up to five named).
@@ -436,7 +439,7 @@ An admin asks one computer to install a version, naming it (up to 32 characters)
   - the named version is not held for that operating system: "<version> is not held on this server for <platform>";
   - the version this computer kept crashing on and went back from: "<computer> kept crashing on <version> and went back, so it will not install that version again, not even from UPDATE NOW. Publish a fixed version and it is offered as usual." (A version with an unfinished-work mark counts as the same version.)
 - Before a second click, the admin sees what is already waiting for that computer: an update and when it was asked for, and any other request waiting for it.
-- The admin is told whether a request was already waiting, whether the version is held back (", as an offer of a held-back version to this computer alone"), and when it will apply: "on that computer's next check-in, usually within 30 s. It was last heard from <N s | N minutes | N hours | N days> ago". When it was last heard from 24 hours or more ago: "when that computer next checks in. It was last heard from ..., so this may sit for a while". With nothing on record: "when that computer next checks in. Nothing on record says when it last did". A long-silent computer gets this warning, never a refusal.
+- The admin is told whether a request was already waiting, whether the version is held back, and when it will apply, in the sentences every request aimed at one computer uses, with ", as an offer of a held-back version to this computer alone" added for a held-back version (see The dashboard: Each computer's state, "An admin asks one computer to do something and is told when it will happen"). A long-silent computer gets a warning, never a refusal.
 - The computer installs it on its next check-in, only if the signed offer it holds is exactly that version, the version is not below its floor, and replacing the app would not interrupt work in progress. The editor is told "Your administrator is updating CC Sync to v<X>." The same waits and refusals apply as for the editor's own click, retried quietly. A new request for the same version is tried at once. A version already running is not installed again.
 - If the computer cannot be offered the pushed version, it is not sent. The computer is given the reason ("the update you were sent cannot be installed on this computer"), and the admin sees "cannot be sent": "This computer is not being offered that version: <why>. It still takes shared work. Withdraw the push or publish a version it can take." The push stays waiting and is sent as soon as the version can be offered.
 - While a push waits for that answer, the computer is given no new shared heavy work, because it is about to change version (see Work shared out across the computers: Choosing who runs what).
@@ -450,10 +453,10 @@ An admin asks one computer to install a version, naming it (up to 32 characters)
 
 ### The versions page shows every version the site holds
 
-The versions page is the one place an admin sees and changes which versions the site holds and offers. It reads afresh every 30 seconds, and every action redraws the whole list.
+The versions page is the one place an admin sees and changes which versions the site holds and offers. It reads afresh every 30 seconds, and every action redraws the whole list. It lists, in this order: the versions being served to the studio's computers, then the other versions the server holds, then what the vendor offers; within each, grouped by kind, then by operating system.
 
 - At the top, what the server hands out right now: "app: what every computer updates itself to. installer: what a new editor downloads." One version per kind and operating system, with "N computer(s) on it".
-- Versions are grouped by kind (the app on the editor's computer, the server, the installer, the Timeline Cards app) and operating system (Windows, macOS, then others). Empty groups are left out. Each group shows its current version and its newest version first. Older held-back versions are folded away ("Kept so you can put the computers back on one of them. A version taken from the vendor waits here, held back and on trial, until somebody makes it current."), and offered in the choice of a version to go back to. Empty: "Nothing held: every version here is the current one for its platform."
+- Versions are grouped by kind (the app on the editor's computer, the server, the installer, the Timeline Cards app) and operating system (Windows, macOS, then others). Empty groups are left out. Each group shows its current version and its newest version first. Only older held-back versions are folded away ("Kept so you can put the computers back on one of them. A version taken from the vendor waits here, held back and on trial, until somebody makes it current."), and offered in the choice of a version to go back to. Empty: "Nothing held: every version here is the current one for its platform."
 - For each version: its version, when and by whom it arrived, its size and a short fingerprint (the whole one on pointing), and these labels where they apply:
   - "current", or "held back" (kept here, not handed out) and since when;
   - the processor it is for;
@@ -521,7 +524,7 @@ Each of these is shown as a problem the server found and mailed as an alert (see
 | a held version can strand computers | serious | a current version needs a floor above its own ("a computer that accepts it can never install anything again"), or a floor below the highest already held for its kind, or a version on the shelf (not recalled) needs a newer server ("it needs server X and this server is Y, so it can never be handed to the computers from here"), or an operating system's current version is not the vendor's newest (not held here, held but not current, or older). Not checked with no vendor list or before the vendor's offer was read | update the server, or make the vendor's newest current |
 | the server is not running the update applied to it | serious | the server started on its installation's version while its record says a newer update was applied | see the server's update history |
 | computers send things this server is too old to read | warning | computers send details this server cannot store. Shown with the list of details | update this server ("Update now") |
-| this server cannot check for updates | warning | the vendor's list was last read 7 days or more ago, never, or the last read failed. Cleared when no vendor list is set up | "Check now" |
+| this server cannot check for updates | warning | no successful read of the vendor's list for more than 7 days, or never. Shown as the overview banner of "The server checks the vendor's list every day, and an admin can check now". Cleared when no vendor list is set up | "Check now" |
 | updates cannot install on this NAS | warning | every version the vendor offers needs a newer server installation than this one | renew the installation on the NAS (see "Some server updates need the installation renewed on the NAS") |
 
 - Who: an admin sees these.
@@ -536,8 +539,8 @@ Each of these is shown as a problem the server found and mailed as an alert (see
 
 One failed start of a new version is allowed (antivirus holding the files, for example). When a new version fails to start, or crashes, a second time within 10 minutes of its first start, the app puts the previous version back and starts it, before anything else starts, and syncing resumes with nobody touching the computer. A start that lost to a copy already running, or that was the hand-over during an update, does not count. A start that finishes and stays up resets the count.
 
-- It cannot go back when no previous copy is kept, when the previous version is unknown, or when the previous version is below the computer's floor. Then the app carries on, says why in the start-up log, and the server is told, so a person can step in. None of this can stop the app from starting when it would otherwise start.
-- About three seconds after the start on the previous version, the editor is told: "The last update kept crashing, so CC Sync went back to v<version>."
+- It cannot go back when no previous copy is kept, when the previous version is unknown, or when the previous version is below the computer's floor. Then the crashing version is relaunched no more than three times an hour and then left down, and the admin is told that a person must step in.
+- About three seconds after the start on the previous version, the editor is told: "The v<X> update kept crashing, so CC Sync went back to the previous version. Your admin has been told", where v<X> is the version that kept crashing. The admin is told at the same time (see "The server tells an admin when versions are not reaching computers").
 - The crashing version is marked on this computer: neither an unattended update nor an admin's push installs it again, and a newer version is tried as usual. The mark clears only when the computer runs that version, because the editor chose it deliberately. The server is told which version the computer went back from until a check-in is accepted.
 - On its own: going back, decided from the new version's failed starts and crashes in its first 10 minutes.
 - By hand: the editor sees what happened and can choose the version again from the menu. The admin sees "went back from <v>".
@@ -602,15 +605,15 @@ After a new server version starts, the server waits about 45 seconds and then ch
 
 ### An admin moves the server back to an earlier version
 
-An admin can take the server back to the previous version, or to an earlier one the server still holds, and the server restarts. "go back to…" offers them ("Offline about ten seconds. Its data is backed up and stays as it is. Asks first.").
+An admin can take the server back to the previous version, or to an earlier one the server still holds. Going back keeps the same promise as an update: the dashboard and every open editor's page keep answering throughout, with no gap a person or an editor's app can notice (see The server: installing it and keeping it running: Updates, restarts and rollbacks, "Updating the server never takes the dashboard away"). "go back to…" offers them, saying that the data is backed up and stays as it is, and that it asks first.
 
-- It asks "Move this server back to <version>? It will be offline for about ten seconds while it restarts. The data is backed up first and stays as it is: it is not taken back to an earlier copy." The button stays disabled until a version is chosen.
+- It asks "Move this server back to <version>? The data is backed up first and stays as it is: it is not taken back to an earlier copy." The button stays disabled until a version is chosen.
 - The admin may tick "also restore the data from <backup>" ("no backup on record" when there is none). The question then says that everything recorded since that backup is discarded, the computers' check-ins since then included.
 - When the studio's data is newer than the earlier version understands, the move is refused unless the admin restores the backup named in the message alongside it, or explicitly accepts the risk. The question says to tick the restore box "or this will be refused". When it cannot be known whether the earlier version understands the data, the move is allowed, the data stays, and the answer says it is unknown.
 - A backup can only be restored together with going back. A backup that does not exist or holds nothing in use is refused.
 - Refused while an update is running, when the server holds no earlier version ("this server is already running the version it was installed with"), and when the named version is not held.
 - A version gone back from is marked "gone back from by <admin>" and is never taken again by itself, until an admin updates to it by hand.
-- The 10 newest backups are listed: when, name, from which version, what they hold, size.
+- Every backup kept is listed (at most 8): when, name, from which version, what they hold, size. How many are kept is in The server: installing it and keeping it running: Snapshots, restoring and the server's disk, "Before every update the studio's data is backed up".
 - Who: an admin.
 
 #### Lessons
@@ -623,7 +626,7 @@ An admin can take the server back to the previous version, or to an earlier one 
 
 The server's update view shows the version running and what it came from, and lists, newest first, with size, publish date and notes:
 
-- updates the server can take with one button ("update now": "It is offline for about ten seconds. Its data is backed up first. Asks first.");
+- updates the server can take with one button ("update now", saying that the data is backed up first and that it asks first);
 - updates that need the server's installation renewed in the NAS's own app manager, with the exact steps (see "Some server updates need the installation renewed on the NAS");
 - earlier versions the server can go back to.
 
@@ -634,7 +637,7 @@ A version equal to the one running is not listed. With nothing newer: "No update
 
 ### An admin updates the server with one button
 
-Every server update the vendor offers is applied from the dashboard with one button. The NAS's own app manager is needed only when the installation itself must be renewed. The admin is asked "Update this server to <version>? It will be offline for about ten seconds while it restarts. The data is backed up first." The update starts at once and the server restarts by itself for about ten seconds when it lands.
+Every server update the vendor offers is applied from the dashboard with one button. The NAS's own app manager is needed only when the installation itself must be renewed. The admin is asked "Update this server to <version>? The data is backed up first." The update starts at once, and the dashboard and every open editor's page keep answering throughout, with no gap a person or an editor's app can notice (see The server: installing it and keeping it running: Updates, restarts and rollbacks, "Updating the server never takes the dashboard away"). An update waits until running YouTube download jobs have finished, trying again by itself, and is never forced past a running job. What a restart of the server does to any job is in YouTube downloads: Jobs on the page: queue, retry, cancel, "A server restart never loses a job".
 
 Refused, with the reason in words, when:
 
@@ -643,18 +646,18 @@ Refused, with the reason in words, when:
 - that version is already running;
 - the version is older than the one running ("To go back, use go back to… instead");
 - the update needs the installation renewed in the NAS's app manager instead;
-- YouTube downloads are in progress: "N YouTube download(s) are running: an update restarts the server for about ten seconds and interrupts them. Wait, or apply again with force." Downloads waiting for review do not count. The admin can override with force;
 - the data disk is short of space: it needs at least four times the update's size plus twice the size of the studio's live data, plus 256 MiB. A disk whose free space cannot be measured is not refused;
 - the server cannot write where updates go.
 
 An admin's own update to a version also lifts any "never take by itself" mark on that version.
 
 - Who: an admin.
-- When YouTube downloads is off: no download can be interrupted, so that refusal never appears.
+- On its own: holds the update back while a YouTube download job is running, from the jobs running now.
+- When YouTube downloads is off: there is no download to wait for, so an update goes ahead at once.
 
 ### The admin watches each step of a server update
 
-Progress is refreshed every second and shows, in order: queued ("starting the update"), downloading, checking, trying the new version against copies of the studio's data, backing up, switching over, restarting ("restarting: the server is offline for about ten seconds"), then done; or failed with the reason. A refusal shows "Not applied: <reason>". Opening the page while an update runs picks up its progress.
+Progress is refreshed every second and shows, in order: queued ("starting the update"), downloading, checking, trying the new version against copies of the studio's data, backing up, switching over, then done; or failed with the reason. A refusal shows "Not applied: <reason>". Opening the page while an update runs picks up its progress.
 
 - The page reloads by itself once the new version answers. After 3 minutes without an answer it says "the server has not come back yet. It may still be restarting: reload this page in a minute, or check the server's logs." and keeps watching, reloading by itself if it answers later.
 - An update cut off by the server or the NAS restarting is shown afterwards as failed, "interrupted by a restart at step S", and updating and going back work again from the page at once.
@@ -671,7 +674,7 @@ When the server is installed, the person is told whether later updates will appl
 
 ### A site that follows the vendor updates its server by itself
 
-When the site takes the vendor's versions as current (see "An admin chooses how much of the vendor's offer the site takes by itself"), the server takes the server version the vendor offers after each check, in the same way as the admin's button but never interrupting YouTube downloads. When it starts: "taking server <version> now: this server restarts for about ten seconds when it lands." When it does not, its health view shows one sentence why ("server <version> was not applied: <reason>"):
+When the site takes the vendor's versions as current (see "An admin chooses how much of the vendor's offer the site takes by itself"), the server takes the server version the vendor offers after each check, in the same way as the admin's button, waiting likewise for running YouTube download jobs. When it starts, its health view says it is taking that server version now. When it does not, its health view shows one sentence why ("server <version> was not applied: <reason>"):
 
 - an update is already running;
 - the newer version is not the one the vendor offers ("Update now" takes it by hand);
@@ -709,6 +712,7 @@ The vendor publishes one signed list that every site reads: the server's version
 - Every site, the vendor's own studio included, takes its versions this way, so every customer receives the app, the installer for each operating system and the server's updates through the same list. With no installer held, the page new editors download from tells the customer to take one from the vendor.
 - A site trusts the vendor's key and reads the vendor's list out of the box. The list's address is one the vendor owns and can move elsewhere without touching any installed site.
 - Every download a site makes, large files included, comes from the site's own source of versions, and never follows a redirect from a secure address to an insecure one. A large file a part needs carries a checksum the app compares with the one it already holds.
+- Every version a site takes from the vendor, server updates and large files included, is downloaded with the credential the vendor issued to that site (see Accounts, privacy and the legal paperwork: Third-party licences and what customers receive, "What a customer receives, and what never"). The vendor issues it with the package the customer installs from, and the server holds it from installation, so nothing is asked of the admin. An admin can replace it in the site's settings, and it is never shown. A download carrying the site's credential follows no redirect. When the credential is missing, or the vendor refuses it, nothing is taken, and the admin is told in words, wherever the version was asked for ("Check now", the vendor's list, the server's update view), that the site's download credential is missing or was refused and to ask the vendor for it. The vendor's list itself needs no credential, so the admin still sees what the vendor offers.
 - Setting: Where the site takes the vendor's versions from. Does: the address of the vendor's list. Empty means the site is never offered any version. Default: the vendor's own address. Who: an admin. Applies to: the site. Search words: release feed, vendor, update source, updates address.
 
 ### An admin chooses how much of the vendor's offer the site takes by itself
@@ -734,7 +738,7 @@ The first check runs about ten seconds after the server starts, then once a day.
 
 - The view shows whether a list is set up and where, the choice in force, "last checked <ago>" (or "never"), how often it checks, "next in about <time>" or, after a failure, "next retry in about <time>", and "last check failed" with the error on pointing.
 - Kept: when the list was last checked (success or failure), the last error, when the list itself was made, how many verified versions it carried, and what it offers per operating system. An empty offer means unknown, never "nothing offered".
-- Stale means never checked, or no successful check for more than 7 days. Then the overview shows a banner: "No successful update check for N days. Last checked <ago>: <error>. This site is not receiving fixes, which looks the same as no fixes having been published." With no list set up it says so and is never called stale.
+- Stale means never checked, or no successful check for more than 7 days. Then the overview shows a banner: "No successful update check for N days. Last checked <ago>: <error>. This site is not receiving fixes, which looks the same as no fixes having been published." This banner is the one place the state of the vendor's list is shown as a problem: it is the problem "this server cannot check for updates" (see "The server tells an admin when versions are not reaching computers"), shown once on the overview and mailed once. With no list set up it says so and is never called stale.
 - With no list set up there are no checks and nothing reaches out to the internet. "Check now" and taking a version from the vendor answer that no vendor list is set up.
 - Setting: How often the server checks the vendor. Does: the time between checks of the vendor's list. Never under a minute. Default: once a day. Who: an admin. Applies to: the site. Search words: update check, check interval, vendor check, how often.
 
@@ -750,7 +754,7 @@ The vendor's list shows each version it offers, with its notes and when it was p
 
 "<list> are offered by the vendor. Press "Check now" to take them." or "Nothing new: this server already holds everything the vendor offers." A newer server version shows that it is available, what is running, and how to apply it.
 
-Taking a version is refused when no list is set up, when it is a server update ("server updates are applied, not taken"), when it is already held (or the same version from different bytes: "The vendor has to publish this version under a new version number."), when the download is not secure, does not match, fails, or is over 200 MiB or ten minutes, or when the disk is short of space (see "A version reaches a site whole or not at all"). The record names the admin as the one who brought it.
+Taking a version is refused when no list is set up, when the site's download credential is missing or refused, when it is a server update ("server updates are applied, not taken"), when it is already held (or the same version from different bytes: "The vendor has to publish this version under a new version number."), when the download is not secure, does not match, fails, or is over 200 MiB or ten minutes, or when the disk is short of space (see "A version reaches a site whole or not at all"). The record names the admin as the one who brought it.
 
 The set-up shows "Software for editors": "Take the current version of the app for Windows and macOS." It reads "windows <version> current, macos <version> current"; a warning when only one operating system has a current version ("<platform>: none held"); to do when neither does, pointing to taking one from the vendor; failed when the server cannot read its versions. Its "CHECK NOW" checks the vendor now under the site's choice and adds "taken from the vendor: <versions>", "the vendor has nothing this server does not already hold", or a warning that the check failed.
 

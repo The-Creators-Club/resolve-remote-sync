@@ -200,7 +200,8 @@
 
 - sync / Speed and routes | The dashboard is reached only through the studio's private network | which way footage travels to a far-off computer, chosen by measurement
 
-- broll / Client folders and links | The dashboard is reached only through the studio's private network | the one link reachable from outside the private network
+- footage-sorter-and-camera-cards / Downloading originals and sharing folders | The dashboard is reached only through the studio's private network | the one list of links reachable from outside the private network (client folder links and the Sorter's folder links)
+- server-install-and-running / Installing on a NAS | The server joins the private network and publishes the dashboard there with https | the NAS joined to the private network before installing
 - dashboard / Problems the server finds | Admins are warned when the server's private-network link is down, about to expire or not publishing the dashboard | where serious problems are shown and alerted
 - dashboard / Problems the server finds | Admins are warned when most computers go quiet at once | the same; the silent-computer ladder is with dashboard-1
 - editor-app / Signing in, the computer's identity and the licence | The admin sees how safely each computer reaches the dashboard | the app refuses plain http to a public address
@@ -222,3 +223,24 @@
 - "An editor's key sign-in needs their home folder kept to themselves" renamed "The NAS refuses an editor whose home folder is open to others", stated as NAS facts without keys.
 - "When an editor leaves their computers lose the NAS" no longer speaks of removing a key.
 - Routes: "The dashboard is reached only through the studio's private network" gained a sentence that the way footage travels is chosen by measurement; the Synology file-transfer passage is pending on new Q7; the DSM transfer limit is worded for any transfer through DSM's own file-transfer server.
+
+## Joins settled
+
+- accounts-privacy-legal F13 | changed: Each editor gets their own account on the NAS | the NAS login carries the person's own account password where the studio uses the shared folders, changed with it; the random password and "the editor may change it" go; "never deleted by this" now says an account goes only when its person is removed
+- accounts-privacy-legal F14 | changed: When an editor leaves their computers lose the NAS | removal deletes the NAS login with the account, suspension locks it and resuming unlocks it, nothing in the project tree is deleted, home folder pointed to piece 1; the "when the admin asks to lock" choice goes
+- accounts-privacy-legal F15 | changed: The server holds a limited key for a TrueNAS and never its administrator password | "the server's secret store" replaced by a pointer to piece 1's "Secrets an admin enters are checked and never shown back"
+- broll F7 | changed: The dashboard is reached only through the studio's private network | the exceptions are the b-roll client folder links and the Footage Sorter's folder links, pointing to the one list in the Footage Sorter's "An admin sees every folder link and can switch one off at once"
+- dashboard-1 F16 | no change here: dashboard-1's table gains the three problems; this piece stays the home of each rule
+- dashboard-1 F17 | no change here: dashboard-1's table gains the problem; this piece stays the home of the rule
+- dashboard-2 F8 | changed: Schedules run on the studio's own clock | the one named studio time zone that everything follows, zone-less times included; default asked at set-up, offered as the NAS's own zone where known
+- server-install-and-running-1 F10 | changed: Schedules run on the studio's own clock | points to piece 1's "Set-up task: your studio", which asks the time zone; the rest changes in the other pieces
+- server-install-and-running-2 F1 | changed: The server joins the private network and publishes the dashboard there with https ; The dashboard is reached only through the studio's private network ; The dashboard is put back on the private network on its own if it goes missing | the NAS is joined before installing (pointer to piece 1's prerequisite); the "not signed in yet, with the link" state and the sign-in half of the button go
+- server-install-and-running-2 F2 | no change here: this piece is the home and already names the task "Connect to your private network"; piece 1 points here
+- server-install-and-running-2 F3 | changed: The server joins the private network and publishes the dashboard there with https | ok only when the dashboard answers at its secure private-network address as seen from outside the server; the "already an address on the private network" row removed
+- server-install-and-running-2 F4 | no change here: piece 1 changes to this piece's wording
+- server-install-and-running-2 F5 | no change here: piece 1 drops the administrator password; this piece already holds the limited key only
+- server-install-and-running-2 F6 | no change here: this piece is the home and already names the task "Connect to your NAS"
+- server-install-and-running-2 F7 | changed: The product makes sure it is talking to the studio's own NAS | the setting "the NAS's identity" now lists its full choices, never no check
+- server-install-and-running-2 F8 | changed: The product makes sure it is talking to the studio's own NAS | every identity the NAS presents, its certificate and its remote-shell identity alike, is recorded and checked the same way
+- server-install-and-running-2 F9 | changed: A Synology must run DSM 7 with every service the product needs | the list becomes the union: account disabled, wrong two-factor code, and the advice "give the dashboard an account with two-step sign-in off"
+- sync-2 F8 | no change here: sync-2 changes; this piece already says the way footage travels is chosen by measurement

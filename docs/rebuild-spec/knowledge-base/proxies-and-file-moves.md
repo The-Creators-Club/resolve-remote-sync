@@ -11,7 +11,7 @@
 
 ### PRX-031: Proxy making uses the whole computer while idle, but backs off for Resolve.
 - Why: The owner: idle proxy making "can absolutely max out compute", "unless yeah the computer is doing a render or something else".
-- Must: An idle computer encodes several proxies in parallel; while Resolve is open or rendering it starts none, even on a forced run, unless the computer's Resolve hold-back is off.
+- Must: An idle computer encodes several proxies in parallel; it starts none while Resolve is rendering, and none while Resolve is open unless that computer's Resolve hold-back is off.
 - Kind: ruling
 
 ### PRX-033: A person can see which proxies were made, live progress and time left.

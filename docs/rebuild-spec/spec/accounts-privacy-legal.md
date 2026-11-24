@@ -20,7 +20,7 @@ The product keeps a list of the studio's people. A name joins it when an admin c
 
 ### A sign-in name has one shape, and a name accepted anywhere works everywhere
 
-A sign-in name starts with a lower-case letter, holds only lower-case letters, digits, ".", "_" and "-", and is 1 to 31 characters long. Typed names are trimmed and turned to lower case, and the person is told when capitals were turned to lower case. A name that does not fit is refused where it is first given (creating an account, the first sign-in through single sign-on) with the shape required: "username must start with a letter and contain only lowercase letters, digits, '.', '_', '-' (at most 31 characters)". A name the sign-in accepted works the same in every part of the product, on the NAS and on every computer; no part refuses a name the sign-in accepted, and no part treats such a person as not signed in.
+A sign-in name starts with a lower-case letter, holds only lower-case letters, digits, ".", "_" and "-", and is 1 to 32 characters long. Typed names are trimmed and turned to lower case, and the person is told when capitals were turned to lower case. A name that does not fit is refused where it is first given (creating an account, the first sign-in through single sign-on) with the shape required: "username must start with a letter and contain only lowercase letters, digits, '.', '_', '-' (at most 32 characters)". A name the sign-in accepted works the same in every part of the product, on the NAS and on every computer; no part refuses a name the sign-in accepted, and no part treats such a person as not signed in.
 
 A person who wants to be shown in another script or with spaces and capitals sets a display name (see "A person chooses the name others see").
 
@@ -57,16 +57,16 @@ When single sign-on is chosen but not fully set up, both steps answer with the f
 
 ### An admin's emergency password door under single sign-on
 
-So that a broken sign-in service cannot lock the studio out, the sign-in page also carries "Single sign-on is configured for this dashboard. Admin sign-in if the identity provider is down." "Admin sign-in" shows the password form under an "admin sign-in" divider. Only the admins named at install may sign in there; their password is their own account's password. Anyone else is refused with the ordinary refusal, and it counts as a failed sign-in. When the service cannot be reached, its refusal adds "An admin can sign in at" with a link to this door. The account page tells an admin about this door.
+So that a broken sign-in service cannot lock the studio out, the sign-in page also carries "Single sign-on is configured for this dashboard. Admin sign-in if the identity provider is down." "Admin sign-in" shows the password form under an "admin sign-in" divider. Only the admins named in the admin list of the server's set-up may sign in there (see "The admins are named at install, and are never the NAS's own administrator"); their password is their own account's password. Anyone else is refused with the ordinary refusal, and it counts as a failed sign-in. When the service cannot be reached, its refusal adds "An admin can sign in at" with a link to this door. The account page tells an admin about this door.
 
-- Who: the admins named at install only.
+- Who: the admins named in the set-up's admin list only.
 
 ### The admins are named at install, and are never the NAS's own administrator
 
-An admin is anyone named in the admin list given at install (or in the server's set-up), and any account with the admin role. Installing is refused when no admin is named ("name an editor account, not the NAS administrator") and when the list names the NAS's own administrator account, ignoring capitals ("use a separate account"). Names are comma-separated; spaces and blanks are dropped. A person's account page shows where their admin power comes from: the admin list, or their account's role.
+An admin is anyone named in the admin list, and any account with the admin role. The admin list is not chosen when the server is installed: it is kept in the server's set-up in the browser, in its admin account task, and the first admin's name starts it (see The server: installing it and keeping it running: Installing on a NAS, "Set-up task: your admin account"). The set-up refuses a list that names no admin ("name an editor account, not the NAS administrator") and one that names the NAS's own administrator account, ignoring capitals ("use a separate account"). Names are comma-separated; spaces and blanks are dropped. A person's account page shows where their admin power comes from: the admin list, or their account's role.
 
-- Who: the person installing the server.
-- Setting: Admins. Does: the people who are always admins, whatever their account's role. Default: none; at least one is required. Who: the person installing the server, and the server's set-up. Applies to: the site. Search words: admins, administrators, admin list, who is admin.
+- Who: whoever completes the server's set-up: anyone before the first account exists, then an admin.
+- Setting: Admins. Does: the people who are always admins, whatever their account's role. Default: the first admin's name; at least one is required. Who: an admin, in the server's set-up. Applies to: the site. Search words: admins, administrators, admin list, who is admin.
 
 ### A fresh install creates its first admin in a browser
 
@@ -87,18 +87,13 @@ A login made on the NAS is set up there with everything the person needs to sync
 
 ### An admin manages the studio's people from one list
 
-One list shows every person: "N accounts" or "No editor accounts yet." Each person shows the sign-in name; "shown as" (their display name); role; status (active or suspended); their computers; and the actions: set a password, suspend or resume, end their sign-ins (see "An admin ends every sign-in a person holds, at once"), download their data, erase their history, and remove. A person the studio knows by a computer, a plan or a report but who has no account is listed too ("Known to the fleet (a device, a plan or a report), but no account here."), with remove, download data and erase history. When the account list cannot be read: "The account list is unavailable: <error>", with whatever did answer. The list refreshes by itself every 30 seconds, and every action answers with a notice or an error line.
-
-Where the studio's NAS holds people's logins, the list also shows whether the person's account may open the shared folders, and whether the NAS has it locked.
+The admin's list of every person, with each person's computers and actions, is the People and computers page (see The dashboard: People and computers, "An admin sees every person and computer in one place"). Each action on a person's row is described here: set a password (see "An admin sets a person's password"), suspend or resume (see "An admin suspends a person and resumes them with nothing lost"), end their sign-ins (see "An admin ends every sign-in a person holds, at once"), download their data (see "A person downloads everything the product holds about them"), erase their history (see "An admin erases a person's past history"), and remove (see "An admin removes a person from the whole product").
 
 - Who: an admin. Anyone else is told "admins only".
-- Name and search words: People. Search words: people, users, accounts, editors, team.
 
 ### A studio can keep editors to file transfers only on the NAS
 
-A studio can choose that editors' NAS logins may only transfer files and never log in to the NAS itself. New accounts then get no login, and the NAS is set so that editors may only transfer files, with no password login; the admin is told whether that was set, was already right, or must be added by hand. Existing editors can be converted: first a report listing every editor and marking who would change, then, once confirmed, each account is converted and reported, ending "All editors are transfer-only." Converting is refused until the studio has chosen transfer-only ("set that first").
-
-- Setting: Editors transfer files only. Does: editors' NAS logins may move files for syncing but never log in to the NAS. Default: off. Who: the person installing the server. Applies to: the site. Search words: transfer only, no login, NAS login, file transfer.
+Editors' logins on the NAS may only transfer files, always: they never log in to the NAS itself, and reach only the project tree. This is not a choice a studio makes. Every editor's account is made that way, and the NAS is set so that editors may only transfer files; the admin is told whether that was set, was already right, or must be added by hand.
 
 ### A person chooses the name others see
 
@@ -155,7 +150,7 @@ Each refusal tells the computer, and through it the editor, why:
 | the person was removed | "this account was removed from the dashboard. Ask your admin to add it again if that was a mistake" |
 | the person is suspended | "this account is suspended on the dashboard. Ask your admin to press RESUME: your sync plan is untouched and comes straight back" |
 
-On the editor's computer a withdrawn sign-in reads "this computer's sign-in was revoked: sign in again from the CC Sync tray".
+On the editor's computer a refused sign-in is shown as one warning that offers signing in again first (see The app on each editor's computer: Signing in, the computer's identity and the licence, "A sign-in never expires on its own, and a refused one is said plainly").
 
 Each refusal marks the computer on the dashboard with "report refused at <time>" and a plain reason of at most 200 characters, such as "no computer sign-in was sent", "its computer sign-in was revoked by an admin", "its computer sign-in belongs to a different editor", "this account is suspended" or "this account was removed". Only computers the studio already knows are marked. Nothing else from a refused report is kept. The mark clears on the next accepted report.
 
@@ -189,7 +184,7 @@ When the server's own signing secret is changed, every existing computer sign-in
 
 ### Stopping a person takes effect everywhere at once
 
-Suspending and removing a person each take effect at the very next request, everywhere, all or nothing: every browser sign-in of theirs ends, every computer of theirs is refused wherever it reaches the server (reporting, signing in, reading its plan, moving files, shared work, and the b-roll archive, music, YouTube downloads, the Footage Sorter and Timeline Cards), and the server stops sharing projects with their computers within a minute. Every part asks the same one question, "may this person act?", so no door is left open. A request from such a person's computer to a switchable part (sending a clip from the b-roll archive, downloading a YouTube video on the editor's own computer) is answered as if no sign-in was given. The confirmation an admin answers states all of this before anything happens.
+Suspending and removing a person each take effect at the very next request, everywhere, all or nothing: every browser sign-in of theirs ends, every computer of theirs is refused wherever it reaches the server (reporting, signing in, reading its plan, moving files, shared work, and the b-roll archive, music, YouTube downloads, the Footage Sorter and Timeline Cards), except that a piece of shared work it had already finished can still be handed in, and the server stops sharing projects with their computers within a minute. Every part asks the same one question, "may this person act?", so no door is left open. A request from such a person's computer to a switchable part (sending a clip from the b-roll archive, downloading a YouTube video on the editor's own computer) is answered as if no sign-in was given. The confirmation an admin answers states all of this before anything happens.
 
 The product never takes an answer it could not read as "this person is fine". While it cannot tell whether a person is suspended or removed, it changes nothing: it shares nothing new with that person, unshares nothing that was already shared, and lets no suspended or removed person through; their computer is told "cannot confirm your account right now: try again shortly".
 
@@ -264,7 +259,7 @@ A sign-in is checked in this order, and the first that applies is what the perso
 4. Too many sign-ins being checked at once: "the server is busy checking sign-ins. Try again in a moment." This does not count as a failure.
 5. A wrong password, an unknown name, a suspended person, or a person who was removed (even if their NAS password still works): one sentence for all, "sign-in refused - check your username and password, then try again". It never says which half was wrong. Every such failure counts.
 
-Oversized or malformed sign-in requests are refused. A sign-in name is at most 31 characters (above) and a password at most 1024.
+Oversized or malformed sign-in requests are refused. A sign-in name is at most 32 characters (above) and a password at most 1024.
 
 A successful sign-in clears that name's failures, ends whatever sign-in that browser had before, starts a new one the server can end later, and says who is signed in and whether they are an admin. Anyone can ask who is signed in and whether they are an admin.
 
@@ -394,7 +389,7 @@ Asking for something one may not see answers exactly as if it did not exist: an 
 
 ### Each project is reachable only by its members
 
-Each project's folder on the NAS can be opened, changed or deleted only by its members, and folders above a project are protected so that nobody can remove or rename what is not theirs. A person is a member of a project when they have ticked it on any of their computers (full or upload only) and it is not archived, or when an admin has given them access. Giving access is the way in for a person whose computers only work straight off the server and so tick nothing. Membership follows ticks and grants within a minute. A membership added by hand on the NAS is never removed by the product. Creating a project that already exists grants nothing to anyone. An editor can delete only a project they are a member of.
+Each project's folder on the NAS can be opened, changed or deleted only by its members, and folders above a project are protected so that nobody can remove or rename what is not theirs. A person is a member of a project when they have ticked it on any of their computers (full or upload only) and it is not archived, or when an admin has given them access, or when they created it: the person who creates a new project is a member of it at once, before ticking it. Giving access is the way in for a person whose computers only work straight off the server and so tick nothing. Membership follows ticks and grants within a minute. A membership added by hand on the NAS is never removed by the product. Creating a project that already exists grants nothing to anyone, the person who asked included. An editor can delete only a project they are a member of.
 
 On each project's page an admin sees "given access by an admin" (each person, marked "(also ticks it)" where they tick it too, with "Remove", which asks "Remove <name>'s access to this project? Nothing on disk is deleted."; empty: "Nobody yet. People who tick this project get in by the tick.") and "in by their tick" (everyone who ticks it). A person choice and "Give access" ("choose a person first" when none). Results: "access given", "<name> can now open this project. The server applies it within a minute." and "access removed", "<name> no longer has access through this list. Someone who ticks the project still gets in by the tick." Giving access to a name the studio does not know is refused ("unknown editor '<name>'"). Every change is recorded in the history.
 
@@ -436,9 +431,33 @@ A script signed in as the person can fetch the same information.
 
 ### A person or an admin asks one of the person's computers to change its settings
 
-From the account page, a person (or an admin, for anyone) can ask one of the person's computers to change whether it takes shared heavy work and which kinds (see Work shared out across the computers). Whether a computer is wired or remote can never be asked for from the dashboard; it is set only on the computer. The page offers only settings that computer can take. The request waits until the computer next checks in, and is shown as waiting until the computer answers "applied" or "refused"; a request not answered within 14 days expires, and says so. Each computer shows how long it volunteers, how often it reminds about an unplugged sync drive, its YouTube status (downloads on, sign-in enabled, terms accepted, signed in), and its answer to the last request. A change applied on the computer takes effect at once, without restarting the app.
+From the account page, a person (or an admin, for anyone) can ask one of the person's computers to change whether it takes shared heavy work and which kinds (see Work shared out across the computers). Whether a computer is wired or remote can never be asked for from the dashboard; it is set only on the computer. The page offers only settings that computer can take. How long a computer lends itself to shared work is shown, read-only, and changed only on the computer.
+
+Refusals:
+
+- not the computer's owner or an admin: "Only the person this computer belongs to, or an admin, can change it."
+- an unknown computer: "<person> has no computer called <computer>."
+- anything other than the two settings: "Only these can be changed from here: whether the fleet may use the computer, and which kinds of work it takes."
+- unticking the last kind, refused before anything is sent: "That is the last kind of work this computer takes. Untick Let the fleet use this computer instead."
+- a kind of work that does not exist.
+- a computer never heard from: "<computer> has not been heard from yet." (the controls are replaced by this sentence)
+- a computer that must update first: "<computer> must update CC Sync before this can be changed from here. Update it, or change it in its own settings window." (the controls are replaced by this sentence)
+- nothing would change: "Nothing to ask: it already works that way."
+
+One ask per computer waits at a time. A new change while one waits is folded into it, the newer value winning for each setting. A waiting ask can be withdrawn ("Withdrawn. Nothing is asked of it now." or "There was nothing waiting to withdraw."). An ask is applied once, however often it reaches the computer, and an answer to an older ask changes nothing. The ask waits for the computer, and expires after 14 days, as every request to one computer does (see The dashboard: Each computer's state, "An admin asks one computer to do something and is told when it will happen"). The state shown under the computer:
+
+- "Asked <ago>. <computer> gets it the next time it is in touch."
+- "Sent to <computer> <ago>. Waiting for its answer."
+- "<computer> could not save it yet and will try again: <detail>" (it tries again after 5 minutes)
+- "In effect." (for 10 minutes after the answer, then nothing)
+- "<computer> refused: <detail>"
+- "<computer> was not in touch for 14 days, so the request was dropped."
+- nothing, when withdrawn or when there is none.
+
+Each computer shows how long it volunteers, its YouTube status (downloads on, sign-in enabled, terms accepted, signed in), and its answer to the last request. A change applied on the computer takes effect at once, without restarting the app. When the ask is applied, the editor at that computer is told once: "<Who> asked this computer to stop taking fleet work / take fleet work again / take every kind of fleet work / take only these kinds of fleet work: <kinds>." ("Your administrator" when no name is given, and a name is cut to 64 characters.) Every step is recorded in the history of who did what.
 
 - Who: the person for their own computers, an admin for anyone's.
+- Ways in: the person's own account page, the computer's own page on the dashboard, the per-computer view.
 
 ### Help shows each person only what their role may see
 
@@ -462,6 +481,8 @@ Every computer tells the server, whatever its switches:
 - the licence it accepted (version, when, and a fingerprint of the exact text);
 - which kinds of reporting it withholds.
 
+Only while the Footage Sorter is on, and unless the computer's drive reporting is off (below), it also tells the server every card reader and drive plugged into it: its identity, label, file system, size, free space, whether it is removable or fixed, whether it is the system drive, and its drive letter, with the tracked files on it (see The Footage Sorter and camera cards: The record of every copy, "Drives are known by their own identity and noticed when plugged in").
+
 Unless withheld (below), it also tells the server the open Resolve project, which media files are on its disk per project, the Resolve bin structure, the undo records it holds, and how long since its keyboard or mouse was last used. What the dashboard shows of a computer's media and bins is never more than about 10 minutes behind while the computer is on. Sync status is always sent in full, however much else a computer holds.
 
 ### Four kinds of reporting can be switched off, by a computer or for the whole studio
@@ -478,6 +499,8 @@ Four kinds of information about a person's work can be switched off, each on one
 Switching a kind off withholds the report, never the work: syncing, relinking, checks and everything else still run, and the editor's own undo from the app works whatever is withheld. Undo records are still listed, with project names shown as "<project>" or "(detail withheld: this computer does not report project names)", so an admin can still ask for an undo.
 
 Never withheld, because syncing or the person's own action needs them: names of files being and recently transferred, the result of a file move the dashboard ordered, a project name the editor types or sends when setting up a project, and, only if the Timeline Cards hand-over is on for this computer, the project and timeline it is driving.
+
+Beside the four kinds, while the Footage Sorter is on, a computer's report of its drives can be switched off on that computer by the editor at it, like every other reporting switch (the setting is "Tell the studio about this computer's drives": see The Footage Sorter and camera cards: The record of every copy, "Drives are known by their own identity and noticed when plugged in"). For the whole studio, drive reporting stops when the Footage Sorter is switched off.
 
 The server can never switch a computer's own choices, and a computer can never switch back on what the studio switched off.
 
@@ -518,7 +541,7 @@ Everywhere, a withheld kind reads as "not reported", never as zero, none or empt
 
 ### Diagnostics hide what a computer withholds
 
-When the computer or the studio withholds the Resolve project, the file list or the bins, the diagnostics a computer produces replace every known project name with "<project>" and every path in the studio's folders with "<root>/<file>", and end with a note naming what was withheld. If hiding fails, the whole description is replaced by a one-line notice that it was withheld.
+When the computer or the studio withholds the Resolve project, the file list or the bins, the diagnostics a computer produces replace every known project name with "<project>" and every path in the studio's folders with "<root>/<file>", and end with a note naming what was withheld. When the computer or the studio withholds idle time, the diagnostics leave it out, and the note names it too. If hiding fails, the whole description is replaced by a one-line notice that it was withheld.
 
 ### A person downloads everything the product holds about them
 
@@ -596,7 +619,7 @@ Where the product reads the studio's planning sheet for an episode, it copies on
 
 The licence an editor accepts travels inside the app, with its version. Before a computer syncs for the first time, someone at it must accept the current licence. Set-up shows it before anything is installed, and that is usually where it is accepted: the text read-only and scrollable, its version at the foot, and an introduction saying that accepting records the agreement on this computer and continues, and that declining closes set-up with nothing changed. The page is skipped when the computer has already accepted this version or a newer one (versions compared number by number), and is never skipped when the licence or its version cannot be found in the installer; then the page says so and tells the editor to ask the admin for a copy before continuing.
 
-If set-up did not record an acceptance, the app offers the licence by itself about 3 seconds after it starts, and again every minute until the window has actually been shown once (waiting while another of the app's windows is open, or while the desktop is not ready). Until it is accepted nothing syncs; everything else in the app still runs. The menu carries "► Accept the licence agreement to start syncing…" and the app's settings window shows a red line "⚠ <the reason>. Nothing syncs until it is accepted." with "READ AND ACCEPT THE LICENCE". The reason is one of "The CC Sync licence agreement has not been accepted on this computer." or "The licence acceptance record on this computer is unreadable.", each followed by where to read and accept it. Declining or closing the window stops the automatic offer and says "NOT SYNCING: the licence agreement was not accepted. Tray > Accept the licence agreement."; the menu and the settings window open it again any number of times while there is something to accept.
+If set-up did not record an acceptance, the app offers the licence by itself about 3 seconds after it starts, and again every minute until it has been answered (waiting while another of the app's windows is open, or while the desktop is not ready). Until it is accepted nothing syncs; everything else in the app still runs. The menu carries "► Accept the licence agreement to start syncing…" and the app's settings window shows a red line "⚠ <the reason>. Nothing syncs until it is accepted." with "READ AND ACCEPT THE LICENCE". The reason is one of "The CC Sync licence agreement has not been accepted on this computer." or "The licence acceptance record on this computer is unreadable.", each followed by where to read and accept it. Closing the window counts as unanswered, and the offer comes back. Only DECLINE stops the automatic offer; it says "NOT SYNCING: the licence agreement was not accepted. Tray > Accept the licence agreement."; the menu and the settings window open it again any number of times while there is something to accept.
 
 Accepting records on the computer which version was accepted, when, by whom, and a fingerprint of the exact text, and starts syncing at once (subject to everything else): "Licence accepted, syncing is starting." If the acceptance cannot be saved: "Couldn't save your acceptance. Check disk space and try again." A build missing its licence text says "NOT SYNCING: this build is missing its licence document." with how to get help, and does not keep asking. If checking the licence fails with an error, the licence counts as accepted.
 
@@ -605,7 +628,7 @@ Accepting records on the computer which version was accepted, when, by whom, and
 
 ### The licence window
 
-The window is headed "► licence agreement" and reads "This computer is NOT SYNCING until someone here accepts the CC Sync licence agreement (version <V>). Read it below. Accepting records your agreement on this computer only, and syncing starts straight away." Below it is the whole licence in a scrolling, read-only box, properly laid out as text a person reads: headings stand out, no authoring notes or markup, links shown as "text (address)", and no long dashes. The text recorded as accepted is the licence exactly as issued. The buttons are DECLINE and ACCEPT. The licence is accepted only by a deliberate click on ACCEPT: ACCEPT is not focused, no key press accepts it, Enter does nothing, closing the window declines, and if the window cannot be shown the answer is decline.
+The window is headed "► licence agreement" and reads "This computer is NOT SYNCING until someone here accepts the CC Sync licence agreement (version <V>). Read it below. Accepting records your agreement on this computer only, and syncing starts straight away." Below it is the whole licence in a scrolling, read-only box, properly laid out as text a person reads: headings stand out, no authoring notes or markup, links shown as "text (address)", and no long dashes. The text recorded as accepted is the licence exactly as issued. The buttons are DECLINE and ACCEPT. The licence is accepted only by a deliberate click on ACCEPT: ACCEPT is not focused, no key press accepts it, Enter does nothing, closing the window accepts nothing and leaves the licence unanswered, and if the window cannot be shown nothing is accepted and it is offered again.
 
 ### A new licence version asks everyone again without stopping their sync
 
@@ -621,7 +644,7 @@ An acceptance recorded for a computer by someone not sitting at it (an admin acc
 
 ### The server's set-up asks the admin to accept the licence
 
-The server's set-up carries a required task "Welcome, EULA": "Read and accept the license agreement." It shows the licence text and a box to tick. Its states: "accepted v<version>" (done); "awaiting acceptance of v<version>" (to do), so a new version needs a new acceptance; "no licence agreement is included in this build, so nothing has been accepted" (a warning, which records nothing and counts as satisfied only while the build truly has no licence, re-checked every time the task is looked at); "could not read EULA: ..." (failed). Once a licence is in the build, the task is to do until an admin accepts it, found without restarting the server.
+The server's set-up carries, first on its list of tasks, a required task "Welcome, EULA": "Read and accept the license agreement." It shows the licence text and a box to tick. Its states: "accepted v<version>" (done); "awaiting acceptance of v<version>" (to do), so a new version needs a new acceptance; "no licence agreement is included in this build, so nothing has been accepted" (a warning, which records nothing and counts as satisfied only while the build truly has no licence, re-checked every time the task is looked at); "could not read EULA: ..." (failed). Once a licence is in the build, the task is to do until an admin accepts it, found without restarting the server.
 
 - Who: an admin.
 
@@ -656,6 +679,10 @@ A customer installs from a package they are given. Nothing in the customer's pat
 - Met: ACC-060, ACC-061, ACC-062, ACC-063, ACC-064, ACC-065.
 
 ## How secrets and keys are kept
+
+### Secrets the server is given are kept by the server
+
+A secret an admin gives the server (a key for the NAS, a mail password, an assistant's key) is kept by the server and is never shown back; it can only be replaced (see The server: installing it and keeping it running: Settings and secrets, "Secrets an admin enters are checked and never shown back").
 
 ### Credentials on an editor's computer are private to that person
 

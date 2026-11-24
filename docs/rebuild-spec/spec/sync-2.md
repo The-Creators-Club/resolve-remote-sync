@@ -13,15 +13,17 @@ The reasons, highest first:
 | Cause | Sentence |
 |---|---|
 | nobody is signed in on the computer | "Not syncing: nobody is signed in to CC Sync on this computer" |
+| the computer is running but the server turns it away (its sign-in refused or revoked, its person suspended or removed) | "Not syncing: this computer cannot sign in to the server: <reason>" |
+| the computer is not set up for syncing yet (its settings are incomplete) | "This computer is not set up for syncing yet." |
 | the licence has not been accepted on it | "Not syncing: the licence agreement has not been accepted on this computer yet" |
-| the sync drive is missing | "Not syncing: the sync drive is not there on this computer" |
-| the sync drive is there but not answering | "Not syncing: the sync drive is mapped but not answering, so nothing can be read or written" |
-| the sync drive is mounted in the wrong place | "Not syncing: the sync drive is pointing at the wrong place" |
+| the sync drive is missing | "Not syncing: the sync drive is disconnected" |
+| the sync drive is there but not answering | "Not syncing: the sync drive is not answering: reconnect it or restart the computer" |
+| the sync drive is mounted in the wrong place | "Not syncing: the sync drive is mounted at the wrong place: eject it, delete the leftover empty folder, then plug it back in" |
 | downloading stopped itself because the drive is nearly full | "Not downloading: downloading stopped itself because the sync drive has only <free> free" |
-| an admin stopped syncing for every computer | "Not syncing: syncing is stopped by your admin for the whole studio" |
-| syncing is stopped on this computer | "Not syncing: syncing is stopped on this computer" |
-| the editor paused it | "Not syncing: syncing is paused on this computer" |
+| an admin stopped syncing for every computer (deliberate, never a fault) | "Not syncing: syncing is stopped by your admin for the whole studio" |
+| the editor paused it (deliberate, never a fault) | "Not syncing: syncing is paused on this computer" |
 | downloading stopped itself as a safety measure | "Not downloading: downloading stopped itself as a safety measure and needs a person to check the server: <reason>" |
+| the computer works straight off the server (information, never a fault) | "This computer works straight off the server, so there is nothing to sync.", and the app's own status line reads "sync off: this computer works directly off the server" |
 | nothing is ticked (information, never a fault) | "Nothing ticked for this computer" |
 | a ticked project's folder is not where it should be | "Your project folder for <name> is not where CC Sync expects it. Did you rename or move it?" with " (<N> project folders are missing)" when there are several |
 | one or more projects are held back while the others sync | "Not syncing <N> project(s): <up to 3 names> (<why>)", for example while a newly ticked project is not yet protected against the files that must never sync |
@@ -32,7 +34,7 @@ The reasons, highest first:
 
 Every other cause that is also true and can be fixed separately is added after the first as ". Also: <sentence>", so the computer names every reason it is not syncing, most actionable first. The computer's own detail is added in brackets unless it only repeats the sentence, is over 120 characters, or the reason is that nothing is ticked. A stuck upload or download that the server can see has started moving again is no longer shown. On a computer that works straight off the server, nothing is ever said about nothing being ticked, about being stuck, or about syncing having stopped running.
 
-Two further lines are added as information, never as a fault: "N clip(s) in the open project are outside the tree and will never upload", and "N clip(s) only on this computer in '<project>' [and M other project(s)], which it does not have open; they will never upload".
+Two further lines are added as information, never as a fault: "N clips outside the tree" (clips in the open project that will never upload), and "N clip(s) only on this computer in '<project>' [and M other project(s)], which it does not have open; they will never upload".
 
 A wrong clock on the computer is never a reason for not syncing; it is shown on its own (see "Each computer's clock is measured against the server's and a gap is shown").
 
@@ -40,19 +42,20 @@ A wrong clock on the computer is never a reason for not syncing; it is shown on 
 
 ### The app's menu says in one phrase what syncing is doing now
 
-The menu of the app on the editor's computer always carries one line starting "Sync:". The first that applies:
+The menu of the app on the editor's computer always carries one line saying what syncing is doing, starting "Sync:" (on a computer that works straight off the server it is the status line given in the table above). The first that applies:
 
-1. A stop is in force: "Sync: stopped by your admin" (an admin's stop for every computer) or "Sync: stopped on this computer", with " (and paused)" when the editor has also paused.
-2. Downloading stopped itself as a safety measure: "Sync: downloading stopped (see Settings)".
-3. The computer is not set up, or the licence is not accepted: "Sync: not set up yet".
-4. The sync drive is away: "Sync: paused (<drive phrase>)" or "Sync: paused (<drive phrase>, <owed> still to go)".
-5. Paused by the editor: "Sync: paused".
-6. Another reason syncing is held: "Sync: <the sentence>".
-7. Files are moving: "Sync: up U · down D files · 4.2 MB/s", "Sync: uploading N files · <rate>" or "Sync: downloading N files · <rate>". The rate is in megabytes per second (decimal), with one decimal.
-8. Files are waiting: "Sync: waiting, not connected to the server (N files owed)" when everything waiting needs a server that is not connected, otherwise "Sync: N files waiting", with " (not connected to the server)" when part of it is waiting for a connection.
-9. "Sync: up to date".
+1. Something holds syncing: the first reason of the table above that applies, in the table's order, in these words:
+   - the computer is not set up, or the licence is not accepted: "Sync: not set up yet";
+   - the sync drive is away: "Sync: paused (<drive phrase>)" or "Sync: paused (<drive phrase>, <owed> still to go)";
+   - an admin's stop for every computer: "Sync: stopped by your admin", with " (and paused)" when the editor has also paused;
+   - paused by the editor: "Sync: paused";
+   - downloading stopped itself as a safety measure: "Sync: downloading stopped", and the menu then offers "► Resume downloads…", the one place in the app where downloads are started again (see The app on each editor's computer: The tray or menu-bar icon and its menu, "The menu holds about ten everyday lines");
+   - any other reason: "Sync: <the sentence>".
+2. Files are moving: "Sync: up U · down D files · 4.2 MB/s", "Sync: uploading N files · <rate>" or "Sync: downloading N files · <rate>". The rate is in megabytes per second (decimal), with one decimal.
+3. Files are waiting: "Sync: waiting, not connected to the server (N files owed)" when everything waiting needs a server that is not connected, otherwise "Sync: N files waiting", with " (not connected to the server)" when part of it is waiting for a connection.
+4. "Sync: up to date".
 
-When both a stop and a pause are set, a second line warns: "⚠ Two things are stopping sync on this computer: your admin's stop and a pause." or "⚠ Two things are stopping sync on this computer: a stop and a pause. Clear both to sync again."
+When both the admin's stop and a pause are set, a second line warns: "⚠ Two things are stopping sync on this computer: your admin's stop and a pause."
 
 The same sentences, word for word, are used wherever the app says why syncing is held or that it is waiting for a connection.
 
@@ -86,7 +89,7 @@ While originals the editor asked for are coming down, the app shows "Bringing or
 - all present: "all {N} asked-for originals are here";
 - nothing to fetch because the files are missing on the server: "{N} asked-for originals are not on the server";
 - finished: "brought {done} of {total} originals down";
-- held, checked continually so that a download in progress stops within about a second: "NOT DOWNLOADING ORIGINALS: syncing is stopped on this computer" (an admin's stop or the computer's own), "NOT DOWNLOADING ORIGINALS: syncing is paused" (the editor's pause), "NOT DOWNLOADING ORIGINALS: the sync drive is not connected", "NOT DOWNLOADING ORIGINALS: {reason}" when the place they would land is refused by the same rules that guard every download into the tree, and the sentences about disk space (see Sync: Disk space);
+- held, checked continually so that a download in progress stops within about a second: "NOT DOWNLOADING ORIGINALS: syncing is stopped by your admin for the whole studio" (an admin's stop), "NOT DOWNLOADING ORIGINALS: syncing is paused" (the editor's pause), "NOT DOWNLOADING ORIGINALS: the sync drive is disconnected" (or the drive's other phrase, "the sync drive is mounted at the wrong place: ..." or "the sync drive is not answering: ..."), "NOT DOWNLOADING ORIGINALS: {reason}" when the place they would land is refused by the same rules that guard every download into the tree, and the sentences about disk space (see Sync: Disk space);
 - failed: that the server could not be listed to find the originals, that some originals did not arrive (with how many), or the transfer's own failure in a sentence.
 
 ### The app and the dashboard show the same live picture of what is moving
@@ -123,7 +126,7 @@ A clean ending shows how many files were transferred. A failure shows the most u
 
 ### Syncing comes back by itself when it stops running
 
-Syncing on a computer that dies, for whatever reason and at whatever time, is brought back within a minute or two, without waiting for anyone to sign in to the computer again. While it is not running it is shown as failing, with its cause, never as healthy. Restarts back off when they keep failing, and the editor is told after repeated failures. A failed attempt is logged, kept as a local crash report and counted ("N failed attempt(s) since the app started"), and the next one follows after the usual wait. If syncing stops altogether, the reason is recorded and it shows as stopped.
+Syncing on a computer that dies, for whatever reason and at whatever time, is brought back within a minute or two, without waiting for anyone to sign in to the computer again. While it is not running it is shown as failing, with its cause, never as healthy. Restarts back off when they keep failing, and the editor is told after repeated failures. A failed attempt is logged and counted among the app's recoveries ("N failed attempt(s) since the app started"), which the editor and the admin see (see The app on each editor's computer: Starting, staying running and crashing, "The app keeps its own work going when part of it stops"); it writes no crash report, and the next one follows after the usual wait. If syncing stops altogether, the reason is recorded and it shows as stopped.
 
 Every part of the sync resumes after a pause, after signing out and in again, and after the drive returns: nothing that is not running ever shows a healthy status. A deliberate pause is never overridden by a restart and never reported as an outage. A transfer stopped because a person or the app asked it to stop shows as stopped, never as an error, and a safety limit doing its job shows as paused.
 
@@ -140,7 +143,7 @@ Two serious alerts:
 
 ### A file changed in two places at once keeps both versions
 
-When a project file was changed on two computers at once, both versions are kept: the second is kept beside the first as a conflict copy. The product counts the conflict copies, shows the count and up to 20 examples on the dashboard, and logs a warning while any exist. It never deletes or merges them.
+When a project file was changed on two computers at once, both versions are kept: the second is kept beside the first as a conflict copy. The product counts the conflict copies, shows on the dashboard the count and up to 20 of the files with their paths, marked as cut, with how many more, when there are more, and logs a warning while any exist. It never deletes or merges them.
 
 ### Each project's progress on each computer is shown, with the project's own state on the NAS
 
@@ -169,7 +172,7 @@ A project ticked for a computer starts to take effect within about 5 seconds, an
 
 ### A computer's warnings clear as soon as it reports they are over, and silence means "cannot tell"
 
-These conditions a computer reports are rewritten, back to nothing included, by every report that carries them, and left as they were by a report that does not: downloading stopped by itself (with reason and time), a stop for every computer or for this one (with scope and reason), syncing not running (since when, how many restarts were tried, last error), how many times the app has crashed and its newest crash report, shared folders not yet protected against the files that must never sync (count and names), the number of conflict copies, and transfers the app ended because they stalled (which direction, how long, when). A computer whose last report did not carry them answers "cannot tell" to questions such as "has its downloading stopped itself", never "no".
+These conditions a computer reports are rewritten, back to nothing included, by every report that carries them, and left as they were by a report that does not: downloading stopped by itself (with reason and time), a stop for every computer (with its reason), syncing not running (since when, how many restarts were tried, last error), how many times the app has crashed and its newest crash report, shared folders not yet protected against the files that must never sync (count and names), the number of conflict copies, and transfers the app ended because they stalled (which direction, how long, when). A computer whose last report did not carry them answers "cannot tell" to questions such as "has its downloading stopped itself", never "no".
 
 A warning about one project stays until that project itself is found clean; a clean look at another project never clears it.
 
@@ -181,23 +184,16 @@ A warning about one project stays until that project itself is found clean; a cl
 
 ### When the sync drive is pulled with work owed, the editor is told what is owed and reminded until it is back
 
-Only work that is really moving counts as owed: a direction that says it is syncing but moves nothing does not. The summary names what is owed, for example "2 uploads and 14 other files (2.3 GB left)", using uploads, downloads, originals coming down, other files going up, other files coming down and other files. The drive is named as the site names it ("Your ... drive").
-
-- First notice: "<Your ... drive> was disconnected before syncing finished: <summary> still to go. Plug it back in to finish syncing."
-- Reminder: "<Your ... drive> is still disconnected and syncing is unfinished: <summary> still to go. Plug it back in to finish syncing."
-- A drive plugged in but not answering: "<Your ... drive> is still not answering, so nothing is syncing. Reconnect it or restart this computer."
-
-With nothing owed, the editor gets only one calm "Sync paused" notice. Reminders come every 30 minutes, and only while something owed is going up; when everything owed is coming down, only the first notice is given. A drive that is not answering is always reminded. The editor can snooze ("remind me later": one reminder after the chosen minutes, then the usual pace) or stop the reminders for this time; neither removes the standing warning line, and neither is remembered after a restart. The drive coming back ends it all. The episode is remembered across restarts: if the app restarts while the drive is still out with work owed, reminders carry on with one at once and no new first notice.
+Only work that is really moving counts as owed: a direction that says it is syncing but moves nothing does not. The summary names what is owed, for example "2 uploads and 14 other files (2.3 GB left)", using uploads, downloads, originals coming down, other files going up, other files coming down and other files. When the sync drive goes away with uploads owed, or when what is owed cannot be told, the editor is warned with this summary and reminded every 30 minutes until the drive is back, across restarts; with nothing owed they get only the one calm "Sync paused" notice. The warning, its reminders and the editor's buttons to silence them are in Sync: The sync drive, "A drive pulled out with work owed is named and reminded about".
 
 - Who: the editor, on their own computer.
-- Setting: Drive reminders. Does: how many minutes pass between reminders that the sync drive is away with work owed; 0 means the first notice only. Default: 30 minutes. Who: the editor for their own computer, or an admin. Applies to: a computer. Search words: drive, reminder, unplugged, disconnected, owed.
 
 ### The dashboard lists what each computer still owes, and never claims "nothing" when it cannot tell
 
 For each person, computer and ticked project, the dashboard lists what is waiting to go up and to come down, worked out from what the server holds against what the computer says it holds:
 
 - Owed down: files on the NAS the computer does not hold, never for an upload-only tick. When the computer's own list was cut short, the number shown is the smaller of the difference and "files on the NAS minus files held", sizes likewise, with no names.
-- Owed up: originals the computer holds that are not on the NAS (see "Files that are never sent are never counted as owed").
+- Owed up: originals the computer holds that are not on the NAS, and for an upload-only tick every file it holds in that project that is not on the NAS (see "Files that are never sent are never counted as owed").
 
 Each row gives direction, kind, file count, size, up to 50 file names (an admin can ask for more), and whether the names, the list or the count are uncertain. For a computer behind on a project, the full list of files it still lacks can be opened, with sizes where known, up to 500 names; a list cut there says it is cut and how many more there are. The list is cleared when the computer is complete on that project, and forgotten when it has not been refreshed for 7 days.
 
@@ -217,7 +213,7 @@ Totals give the files queued (preparing rows not counted) and the bytes queued. 
 
 ### Files that are never sent are never counted as owed
 
-Whatever uploads deliberately leave behind is never counted as owed going up, judged by the same rule on the editor's computer and on the server (see Sync: Files that must never sync). Among them: Mac resource-fork files whose names start with "._", copies the product made itself to make a file ready to edit, files marked as an original kept aside or as temporary, unfinished pieces of downloads, files that failed, and files of a move in progress, all compared ignoring capitals. Leftovers of a download that died are never owed for ever.
+Whatever uploads deliberately leave behind is never counted as owed going up, judged by the same rule on the editor's computer and on the server (see Sync: Files that must never sync). Among them: Mac resource-fork files whose names start with "._", temporary files, unfinished pieces of downloads, files that failed, whatever a YouTube download leaves behind (the download kept aside under an "original" name while its name was held, and every half-made file of a conversion), and files of a move in progress, all compared ignoring capitals. Leftovers of a download that died are never owed for ever.
 
 ### Every editor is told whether it is safe to shut down or unplug their computer
 
@@ -230,7 +226,7 @@ Worked out for the signed-in person only, naming their computers (the dashboard 
 - The short form beside what is moving: "Safe: nothing of yours is going up, so you can shut down or unplug." or "Not yet: closing or unplugging now would leave footage on one disk. Leave it running until this says safe."
 
 - Who: anyone signed in, for themselves.
-- Ways in: on the overview, beside what is moving now, and at the head of the sync list on the overview and on a person's own view of their computers.
+- Ways in: on the overview, beside what is moving now, and at the head of the sync list on the overview and on a person's own view of their computers; and in the app on the editor's computer, the same sentence for the signed-in person, naming each computer that still owes uploads.
 
 ### The dashboard knows what each computer holds, project by project
 
@@ -244,7 +240,7 @@ An upload cut off part way (the computer shut, the network dropped) never leaves
 
 ### A newer local file that will never upload because the server has its name is reported
 
-Each project is checked for files that exist both on the editor's computer and on the server with the same name but a different size. The first version of a name to reach the server is the one kept there (see Sync: What syncs where), so the local one will never upload. It is reported with an example and the two ways out: rename the local file, or have an admin remove the server's copy. The app can list up to 20 such files with this computer's size. Projects no longer ticked, or whose folder is gone, drop out of the report.
+Each project is checked for camera originals that exist both on the editor's computer and on the server with the same name but a different size. The first version of a camera original's name to reach the server is the one kept there (see Sync: Names, "The editor is told about files that will never upload because of a name clash or a wrong clock"), so the local one will never upload; every other file replaces the server's copy and is never reported here. It is reported with an example and the two ways out: rename the local file, or have an admin remove the server's copy. The app can list up to 20 such files with this computer's size. Projects no longer ticked, or whose folder is gone, drop out of the report.
 
 #### Lessons
 
@@ -297,11 +293,9 @@ A remote editor's downloads take the fastest of the studio's connections that re
 - Who: an admin.
 - Setting: Download connection. Does: which of the studio's connections this computer's downloads use. Default: the studio's normal connection. Who: an admin. Applies to: a computer. Search words: download, faster, remote editor, connection, speed.
 
-### Footage travels only over the studio's own private network
+### The way footage travels is chosen by measuring real transfers
 
-Footage and project files move only over the studio's own private and local network, never through outside relay services, and the NAS never announces itself publicly. A newly approved computer finds the NAS on the studio's private network by itself.
-
-- Pending: sync-2-Q2
+The way footage and project files travel between the NAS and an editor's computer, near or far, is chosen by measuring real transfers, as the owner's requirements describe ("How footage travels is chosen by measurement"); no route is ruled in or out before those measurements. A newly approved computer finds the NAS by itself.
 
 #### Lessons
 
@@ -356,13 +350,13 @@ A warning is raised for each computer that has waited 24 hours or more to be app
 
 ### A computer belongs to a person only once it is tied to a known editor
 
-A computer is linked to a person only when it has been tied to an editor the dashboard knows (on a brand-new dashboard that knows no editors yet, any computer named like a sign-in name counts). A computer that belongs to nobody is listed as belonging to nobody, and the product never adds or removes anything it receives on its own. For every computer that has ever connected, the dashboard knows its name, whose it is (or nobody's), whether it is the server itself, when it was first and last seen, whether it is connected now, its last address and when it last connected; whether it is connected is refreshed about every minute. Whose a computer is is worked out afresh each time, never remembered from before.
+A computer is linked to a person only when it has been tied to an editor the admin has let in; while the studio has no editors yet, no computer belongs to anyone. A computer that belongs to nobody is listed as belonging to nobody, and the product never adds or removes anything it receives on its own. For every computer that has ever connected, the dashboard knows its name, whose it is (or nobody's), whether it is the server itself, when it was first and last seen, whether it is connected now, its last address and when it last connected; whether it is connected is refreshed about every minute. Whose a computer is is worked out afresh each time, never remembered from before.
 
 ### A renamed computer keeps its plan and everything waiting for it
 
-Each computer is recognised as itself after a change of its name. When a computer reports under a new name and is recognised as an older entry of the same person that has been quiet for 5 minutes or more, the new name takes over: its ticks, its chosen project for new footage, the originals it asked for, and every request still waiting for it (file moves, Resolve undo, a settings change and the rest) move to the new name, and the old entry is removed. What it last said it holds on disk, and its transfers, rebuild under the new name, and the old ones are forgotten in time.
+Each computer is recognised as itself after a change of its name. When a computer reports under a new name and is recognised as an older entry of the same person that has been quiet for 5 minutes or more, the new name takes over: its ticks, the originals it asked for, and every request still waiting for it (file moves, Resolve undo, a settings change and the rest) move to the new name, and the old entry is removed. What it last said it holds on disk, and its transfers, rebuild under the new name, and the old ones are forgotten in time.
 
-The rename is refused, with nothing changed, when the new name is already a computer of that person with a plan of its own, so a clash of names can never destroy a plan. When the computer is already known to be the same one (recognised as itself, old name quiet), it may take over a new-name entry that has no ticks and no chosen project of its own. A settings request already finished at the new name gives way to one still waiting at the old name; one still waiting at the new name is kept.
+The rename is refused, with nothing changed, when the new name is already a computer of that person with a plan of its own, so a clash of names can never destroy a plan. When the computer is already known to be the same one (recognised as itself, old name quiet), it may take over a new-name entry that has no ticks of its own. A settings request already finished at the new name gives way to one still waiting at the old name; one still waiting at the new name is kept.
 
 ### A disk copied onto a second computer is caught and explained
 
@@ -372,9 +366,9 @@ When an editor's disk has been copied onto a second computer and both are runnin
 
 ### An editor is told once when their computer may not be recognised after a rename, and syncing carries on
 
-When the app cannot be sure it will recognise this computer again after a rename, it says so once each time it starts: "Syncing is not affected, but this computer cannot be recognised again if it is renamed. The Settings window can repair this, and your admin may want to look first." Syncing carries on as normal.
+When the app cannot be sure it will recognise this computer again after a rename, it says so once each time it starts, and syncing carries on as normal; the sentence and the button that gives the computer a new identity are in The app on each editor's computer: Signing in, the computer's identity and the licence, "When the identity cannot be read, the editor can give the computer a new one".
 
-- By hand: the editor repairs it from the app's Settings window.
+- By hand: the editor gives the computer a new identity from the app, with that button.
 
 ### A new server over a NAS editors already sync from keeps what each computer syncs
 
@@ -403,7 +397,7 @@ The folder is checked as the editor types. A problem shows in red with a cross a
 
 ### A ticked project's folder layout is made on the editor's computer, empty folders included
 
-For a fully ticked project, every folder of the project on the server is made on the editor's computer, empty ones included, so the editor sees the project laid out as on the server. A folder made on the server appears on editors' computers within about 5 minutes without anyone asking, and at once after the project is moved on the server. It never happens for an upload-only project, and never while the sync drive is missing, so no stray tree is ever built on the start-up disk.
+For a ticked project, fully or upload only, every folder of the project on the server is made on the editor's computer, empty ones included, so the editor sees the project laid out as on the server and where their originals go. For an upload-only project nothing else comes down. A folder made on the server appears on editors' computers within about 5 minutes without anyone asking, and at once after the project is moved on the server. It never happens while the sync drive is missing, so no stray tree is ever built on the start-up disk.
 
 ### When an admin renames or moves a project on the server, every editor's copy follows by itself
 
@@ -413,7 +407,7 @@ Before anything else syncs, the app compares where each ticked project lives on 
 - Neither present: nothing happens.
 - The new place already holds a synced copy of the project: the old folder is left where it is for a person to deal with, and syncing continues from the new one.
 - The new place holds only empty folders: they are cleared and the move goes ahead.
-- The new place holds files but is not a synced copy: the move is refused.
+- The new place holds files but is not a synced copy: the move is refused ("a folder with its new name is already on this computer"). A folder there holding only proxies, or anything else the product made there itself, is never a synced copy of the project, so the move is refused there too, and nothing is created at the new place meanwhile.
 - Moving to another drive: the folder is copied, put in place only when complete, and the old one removed only then; if it cannot all be removed it is left with a warning. A half-finished copy from a failed attempt is cleared at the next attempt. Empty parent folders left behind are not tidied.
 - The move fails (on Windows usually because Resolve, Explorer or antivirus holds a file open): the project stops syncing and stays visibly blocked until the move can be made, because syncing from the wrong place would spread the whole project as deleted to the server and every editor. It tries again by itself at every look. The product never adopts a folder it made itself in place of the real copy, and never stops uploading the real copy.
 - The target must lie inside the editor's synced tree, or nothing is moved.
@@ -426,7 +420,7 @@ The editor sees one of these ({name} is the project's path):
 - "{name} is not syncing because CC Sync could not move its folder. Your files are safe where they are. Close it in Resolve and in Explorer, then it retries by itself."
 - "{name} is not syncing because a folder with its new name is already on this computer. Your files are safe where they are. Move that other folder somewhere else, then it retries by itself."
 
-Once the folder is where it belongs, the "could not move" sentence clears and the project syncs again. The last 20 such events are kept for each computer, one per project, old place and outcome, so a project that fails every time does not crowd out real renames. Relinking Resolve continues in Resolve on the editor's computer: Missing clips, relinking and refreshing.
+Once the folder is where it belongs, the "could not move" sentence clears and the project syncs again. The last 20 such events are kept for each computer, one per project, old place and outcome, so a project that fails every time does not crowd out real renames. Relinking Resolve continues in Proxies and file moves: Relinking Resolve after a move, "Resolve's clips follow a moved file now or when the project next opens".
 
 - When the help for the editing program is off: the sentences end at "CC Sync moved your copy to match ({name})." and the two failure sentences say "Close any program using it" in place of naming Resolve.
 
@@ -463,12 +457,6 @@ A standing check confirms that every active project folder the server can see is
 
 - Who: admins.
 
-### A computer or a person can have a chosen project that new footage lands in
-
-Each computer, or a person as a whole, can have a chosen project that new footage dropped in on it lands in. A computer's own choice records who set it and when. A computer without its own choice uses its person's; for a person with neither, any of their computers' choices is used.
-
-- Setting: Project for new footage. Does: names the project that new footage dropped on this computer lands in. Default: none. Who: the editor, or an admin. Applies to: a computer, or a person. Search words: new footage, drop, landing project, default project.
-
 #### Lessons
 
 - Met: SYN-128, SYN-129, SYN-130, SYN-131.
@@ -477,7 +465,7 @@ Each computer, or a person as a whole, can have a chosen project that new footag
 
 ### Downloads from a Synology NAS always arrive whole
 
-A fact about Synology: its built-in secure file transfer service silently cuts short any download larger than 514 MiB when the file is asked for in pieces larger than 64 KiB, and it should not be given more than 16 transfers at once. On TrueNAS there is no such limit. Downloads from a Synology NAS therefore always stay within those limits (an appliance the vendor supplies does not have the fault), and always complete; no admin ever has to tune anything for it.
+A fact about Synology: its built-in secure file transfer service silently cuts short any download larger than 514 MiB when the file is asked for in pieces larger than 64 KiB, and it should not be given more than 16 transfers at once. On TrueNAS there is no such limit. Downloads from a Synology NAS therefore always stay within those limits, and always complete; no admin ever has to tune anything for it.
 
 On every NAS, a downloaded file shorter than its source is never marked done.
 

@@ -6,7 +6,7 @@ This is the help the product gives with DaVinci Resolve on an editor's computer,
 
 ### What Resolve does with multicams, timelines and frame rates
 
-These are facts about DaVinci Resolve. Every part of the product that builds or places anything in Resolve (sending a b-roll clip, a music track or a YouTube download, the hand-over of a cut from Timeline Cards, a repair made here) keeps the promise that goes with each.
+These are facts about DaVinci Resolve. Every part of the product that builds or places anything in Resolve (sending a b-roll clip, a music track or a YouTube download, the hand-over of a cut from Timeline Cards, a repair made here) keeps the promise that goes with each, except where a row limits its promise to some of these.
 
 | Fact about Resolve | What the product promises |
 |---|---|
@@ -18,7 +18,7 @@ These are facts about DaVinci Resolve. Every part of the product that builds or 
 | Rebuilding a damaged multicam timeline by exporting and importing it fails both ways. | A damaged multicam timeline is repaired inside Resolve (the timeline is duplicated and each pair relinked), never by an export and import round trip, and no stray angle timelines are left behind. |
 | Resolve places a clip added by script a frame early now and then, and reports odd source times. | Every clip the product places in Resolve is read back and laid again once if it is a frame out. |
 | Resolve's append can report success while placing nothing. | After adding a clip to a timeline, the product confirms it is there at the expected start, without tying it to one media type and so losing its sound. |
-| A new Resolve project starts at 24 fps, or at the rate of the first raw clip imported. | Before anything is imported or built, the project's rate is checked against the footage (29.97 fps drop-frame for this studio's footage), and the person is stopped, with the reason, if it cannot be set. |
+| A new Resolve project starts at 24 fps, or at the rate of the first raw clip imported. | Before the product creates a project or builds a timeline in it (a multicam, the hand-over of a cut), the project's rate is checked against the footage (29.97 fps drop-frame for this studio's footage), and the person is stopped, with the reason, if it cannot be set. A b-roll clip, a music track or a YouTube download sent into the timeline already open is placed as it is, with no rate check: a project's rate can change only while it holds no timelines, so there is no rate left to set. |
 | Resolve counts an audio-only clip's frames in that clip's own rate. | Placing audio-only clips converts frames using the clip's own rate, and the timeline's length is checked afterwards. |
 | Several things in Resolve cannot be done by script at all. | Each such step is handed to the person as a named instruction with its exact value, and the product never reports success for a setting Resolve refused. |
 | Resolve's count of linked clips changes between sessions on identical timelines. | Resolve's link count is never taken as proof that picture and sound are paired. |
@@ -26,7 +26,7 @@ These are facts about DaVinci Resolve. Every part of the product that builds or 
 
 ### The editor is warned when the open timeline uses VP9 originals
 
-DaVinci Resolve cannot decode VP9 originals (typical of YouTube downloads) at full resolution, although editing with proxies looks fine; the render then fails with "Error decoding full resolution media". So the app checks each original used on a video track of the open timeline whenever the timeline's video clips change. If any is VP9, a window titled "CC Sync: VP9 media in this timeline" says:
+DaVinci Resolve cannot decode VP9 originals (typical of YouTube downloads) at full resolution, although editing with proxies looks fine; the render then fails with "Error decoding full resolution media". The same holds for some AV1 originals: they are looked for at the same moments and named in the same window, the same way as VP9 files, and offered the same repair. So the app checks each original used on a video track of the open timeline whenever the timeline's video clips change. If any is VP9, a window titled "CC Sync: VP9 media in this timeline" says:
 
 - "N source media file(s) is/are VP9 in project “<project>”, and DaVinci Resolve cannot render VP9 originals at full resolution. This timeline WILL FAIL to render with “Error decoding full resolution media”."
 - "It plays fine now only because Resolve is using the H.264 proxies.", shown only when the affected clips are in fact playing from proxies, and left out otherwise.
@@ -34,12 +34,12 @@ DaVinci Resolve cannot decode VP9 originals (typical of YouTube downloads) at fu
 - "How to fix it: convert each original to H.264, then relink the clip to the converted file or remake its proxy."
 - "STOP WARNING FOR THIS TIMELINE keeps this quiet until a new VP9 clip is added to this timeline."
 
-Buttons: "STOP WARNING FOR THIS TIMELINE" and "CLOSE". The window also offers to repair the clips before a render: each VP9 original is swapped for an edit-ready copy with the same frame count, which takes seconds per clip when such a copy exists (as it does for a YouTube download made ready to edit); only a clip with no matching copy is re-encoded. The swap is a relink, recorded so it can be undone like any other.
+Buttons: "STOP WARNING FOR THIS TIMELINE" and "CLOSE". The window also offers to repair the clips before a render: each VP9 original is swapped for the clip's proxy when that proxy has exactly the same frame count, which takes seconds per clip; only a clip with no such proxy is re-encoded. The swap is a relink, recorded so it can be undone like any other.
 
 While the app runs, the same VP9 files on the same timeline are not shown again after either button. "STOP WARNING FOR THIS TIMELINE" remembers those files for that project and timeline across restarts, for up to 500 timelines, forgetting the oldest first. A VP9 file newly added to the timeline warns again. A remembered file later found not to be VP9 (converted in place) is forgotten, so a new VP9 file at that path warns again. A file that cannot be found (for example on a computer holding only proxies) or cannot be read is never warned about. If the window cannot be shown because another of the app's windows is open, the warning is shown at the next chance.
 
 - Who: the editor at that computer.
-- On its own: the app decides which originals are VP9 by reading the files on this computer.
+- On its own: the app decides which originals are VP9, or AV1 that Resolve cannot render, by reading the files on this computer.
 - By hand: the editor silences the warning for one timeline, or switches it off for the computer.
 - Setting: VP9 warning. Does: warns when the open timeline uses VP9 originals that Resolve cannot render. Default: on. Who: the editor at that computer. Applies to: a computer. Search words: VP9, render fails, decoding error, YouTube originals.
 
@@ -172,7 +172,7 @@ What the product does with them:
 - It drives Resolve only on the computer Resolve runs on, with "External scripting using" set to Local. It never turns on Network and never relies on it.
 - It finds whether Resolve is installed wherever it is installed, its version, and whether it has ever been run on this computer (its preferences exist). When it cannot find Resolve, it says so in plain words and names where it looked.
 - On Windows it recognises the Studio edition from its licence when one is found; when it cannot tell, the edition is reported as "unknown", never as "free". On macOS the edition is never recognised and is reported as unknown.
-- Setup counts as done only after the app has really connected to Resolve once.
+- Resolve's own setup counts as done only after the app has really connected to Resolve once; the computer is ready to sync whether or not it has.
 - Syncing never depends on Resolve or its scripting: with Resolve Free, scripting off, an older Resolve or a Windows in another language, setup completes or names exactly what the editor must change, and everything else in the product keeps working.
 
 - Windows and macOS: only Windows and macOS are supported. On any other system everything about Resolve is reported as unknown and nothing is changed.
@@ -190,7 +190,7 @@ Facts about Resolve: it keeps its preferences in two files that must agree with 
 
 ### Installing the app sets Resolve up for the studio
 
-After the app is in place, the install sets Resolve up, following the rules above:
+After the app is in place, the install sets Resolve up, following the rules above. Resolve missing, or never opened, is a note on the finish page, never a failed step: the computer is still ready and syncs. With the help for the editing program switched off, the install sets nothing up in Resolve and shows none of these notes.
 
 1. "External scripting using" is set to Local when it is None or not set, and never changed when it is Local or Network. This is done by writing Resolve's preference, never by talking to Resolve. Outcomes, each a note on the install's finish page: done or already set (nothing shown, and the note says so when a Studio licence was found); Resolve not found and never opened ("Could not find DaVinci Resolve on this computer ... Install Studio, open it once, quit it, then run this installer again"); Resolve open (quit it, then set Preferences, System, General, External scripting using, Local); never opened (after its first launch, set it); preferences incomplete (set it and click Save). Every computer gets this step, whether wired or remote.
 2. Resolve's LUT list is pointed at the studio's shared LUT library (see "Every Resolve lists the studio's shared LUTs").
@@ -293,7 +293,7 @@ The product proposes where each clip of the open project belongs, and the editor
 These are facts about DaVinci Resolve that hold whatever is built:
 
 - Every outside program that talks to Resolve goes through a helper program that Resolve starts late in its own launch (it can be minutes after Resolve opens), listening on TCP port 1144 on the computer. Resolve then connects to that helper and registers as its host. The helper exits when its last connection closes.
-- A program that connects in the short gap between the helper starting and Resolve registering gets no Resolve, drops, and takes the helper down. Resolve retries a few times (the editor sees Resolve hang for 10 to 20 seconds while it launches) and then gives up scripting for the whole session, for every program on that computer. It never retries that session. The only cure is to quit Resolve and every program that talks to it, start Resolve, then start the programs.
+- A program that connects in the short gap between the helper starting and Resolve registering gets no Resolve, drops, and takes the helper down. Resolve retries a few times (the editor sees Resolve hang for 10 to 20 seconds while it launches) and then gives up scripting for the whole session, for every program on that computer. It never retries that session. The only cure is to quit every program that talks to Resolve, quit Resolve, start the programs, then start Resolve; starting the product's app before Resolve is safe because it never connects during Resolve's launch.
 - Asking Resolve for a connection when no helper is present does not fail at once: it keeps retrying for about 4 seconds, so a program that "just checks whether Resolve is up" is in the middle of an attempt when the helper appears.
 - Waiting a fixed time after Resolve opens does not work: the dangerous gap starts when the helper starts, not when Resolve does.
 - A program still connected to a Resolve that has closed breaks scripting in later Resolve sessions.
@@ -308,8 +308,8 @@ These are facts about DaVinci Resolve that hold whatever is built:
 
 ### The product never harms a Resolve session
 
-- The product connects to Resolve only when Resolve's scripting helper is listening AND Resolve itself has registered with it. It learns this by looking at what is listening and connected on the computer, never by attempting a connection and never by waiting a time after Resolve starts. With no helper (Resolve closed) it stays quiet; with a helper but no Resolve registered yet, it holds off every request until Resolve has registered. Only when it cannot tell at all (the computer's list of connections cannot be read, or something other than Resolve's helper holds port 1144) does it go ahead and connect. This holds for everything the product does with Resolve, scheduled work included, and nothing on an editor's computer contacts Resolve before its launch completes.
-- The app is the one part of the product that talks to Resolve on a computer. It holds Resolve only during a request, never while working something out. Another program found driving Resolve on the same computer is named to the editor and left alone, never stopped, and is looked for again on its own so the editor need not restart anything; when it cannot be told whether one is running, it counts as running.
+- The product connects to Resolve only when Resolve's scripting helper is listening AND Resolve itself has registered with it. It learns this by looking at what is listening and connected on the computer, never by attempting a connection and never by waiting a time after Resolve starts. With no helper (Resolve closed) it stays quiet; with a helper but no Resolve registered yet, it holds off every request until Resolve has registered, looking again about every 3 seconds. Holding off is a waiting state, never a failure, and never counts towards giving up. Only when it cannot tell at all (the computer's list of connections cannot be read, or something other than Resolve's helper holds port 1144) does it go ahead and connect. This holds for everything the product does with Resolve, scheduled work included, and nothing on an editor's computer contacts Resolve before its launch completes.
+- The app is the one part of the product that talks to Resolve on a computer. It holds Resolve only during a request, never while working something out, and a link to Resolve with nothing asked of it for a minute is let go; a lost link is dropped, and the rule above is checked again before connecting anew. Another program found driving Resolve on the same computer is named to the editor and left alone, never stopped, and is looked for again on its own so the editor need not restart anything; when it cannot be told whether one is running, it counts as running.
 - When Resolve quits, the app lets go of it entirely, so the next Resolve starts clean.
 - The product never force-closes Resolve without first saving or closing the open project, and after any restart of Resolve it checks that Resolve is usable.
 - Learning whether Resolve is running costs nothing noticeable on an idle computer, and one answer serves every part of the product. A Resolve started as Blackmagic Proxy Generator does not count as Resolve.
@@ -356,7 +356,7 @@ The app's menu has a Resolve line, absent until the app has first tried to reach
 - "Resolve: not connected right now (<reason>)" if this computer has connected before;
 - "Resolve: NOT CONNECTED this session (<reason>)" if it never has; when the reason is that scripting is switched off in Resolve, the advice about Resolve's scripting preference is shown instead.
 
-The counts use the same words, and mean the same, in the menu, the settings window and on the dashboard.
+The counts use the same words, and mean the same, in the menu, the settings window (which adds a few words of explanation after each) and on the dashboard (which may add " in <project>").
 
 - Who: the editor at that computer.
 
@@ -463,7 +463,7 @@ The app follows which project is open in Resolve, and in which library, and tell
 
 Each Resolve project name (trimmed, capitals ignored, up to 256 characters) is tied to at most one project in the tree, so the product knows where its media belongs. A tie records the Resolve project's name, the project, its folder, whether it was made automatically, by an editor or by an admin, who and when.
 
-- The product ties a name on its own only when it exactly matches one project: the Resolve name equals, ignoring capitals, accent spelling, and treating hyphens and underscores as spaces, either a project's whole name or the last folder of its path, for exactly one project. Two projects with that name (for example "2025/Shinto" and "2026/Shinto") mean no tie. A folder in the projects tree that is not a registered project but has that name also leaves the choice to a person. When the tree cannot be read, nothing is tied.
+- The product ties a name on its own only when it exactly matches one project: the Resolve name equals, ignoring only capitals and accent spelling, either a project's whole name or the last folder of its path, for exactly one project. Two projects with that name (for example "2025/Shinto" and "2026/Shinto") mean no tie. A folder in the projects tree that is not a registered project but has that name also leaves the choice to a person. When the tree cannot be read, nothing is tied.
 - A looser guess, counting shared words, is used only where a wrong answer costs nothing (a suggested destination); it never makes a tie.
 - The first time a person opens a Resolve project that is tied to nothing, the app asks them once whether to set it up, and they can then pick or create its folder on the server.
 - The first tie wins and cannot be set again; two at the same moment cannot both win. A second attempt is told "already mapped. Ask an admin to change it."
@@ -507,8 +507,8 @@ While Resolve has a timeline open, the app looks at every clip on every video an
 | Plays here only | In the shared folder but written with this computer's own path, so it is offline on every other computer. | Repointed to the shared spelling on its own (see "Clips stored under this computer's own spelling are repointed to the shared spelling without asking"). |
 | Outside the shared folder, present here | It will never reach the server or other editors. | Offered to the editor to fix, unless skipped (see "A clip outside the shared tree raises a window offering to fix it"). |
 | Another computer's private path, not here | It can never come online here. | Named to the editor, once per path (see "Clips pointing at a path only another editor's computer has are named to the editor"). |
-| The shared drive letter is wrong on this computer | The letter is not mapped at sign-in, or points at the wrong folder: a set-up problem. | One warning per breakage, naming the first such clip. It says the clips will show offline in Resolve while transfers carry on, and on Windows offers to repair the drive letter (see "The editor repairs the shared drive letter"). Once clips resolve again, a later breakage warns again. |
-| Missing | Written the shared way, drive letter healthy, file not on this computer (normal for an original never downloaded to a remote editor's computer); an empty path counts as missing. | Counted as missing, unless a usable proxy is here (see "A clip whose original is not here is not missing when its proxy is"). If this computer itself moved that file when the studio moved it, the editor is offered to point the clip at its new place. |
+| The shared drive letter is wrong on this computer | The letter is not mapped at sign-in, or points at the wrong folder: a set-up problem. | One warning per breakage. It says the clips will show offline in Resolve while transfers carry on, and on Windows offers to repair the drive letter (see The app on each editor's computer: Drive letters and network drives, "Windows warns when the drive letter does not lead to the synced folder, and repairs it in one click", for the warning's words, and "The editor repairs the shared drive letter"). Once clips resolve again, a later breakage warns again. |
+| Missing | Written the shared way, drive letter healthy, file not on this computer (normal for an original never downloaded to a remote editor's computer); an empty path counts as missing. | Counted as missing, unless a usable proxy is here (see "A clip whose original is not here is not missing when its proxy is"). A clip whose file the studio moved follows it (see Proxies and file moves: Relinking Resolve after a move, "Resolve's clips follow a moved file now or when the project next opens" and "An offline clip that moved on the server offers to relink itself"). |
 
 A clip whose file exists at its shared path is never flagged, offered for fixing or warned about. A clip inside the b-roll archive whose original is not on this computer is normal on a remote computer (only clips sent to Resolve are brought down), so it is never counted as missing, whether reached through this computer's tree or the server's drive.
 
@@ -540,11 +540,11 @@ Resolve does not re-read a file swapped under an existing clip. When a clip's fi
 
 ### An editor relinks offline clips to files found in the tree
 
-The editor can ask the product to find the files for offline clips, for just the open timeline's clips or for the whole project. For each clip the product looks for files of the same name in the shared tree. When several are found, they are ranked by the longest matching end of the path, then by the folder most other clips were found in, then by the larger file, and clips with more than one possible file are shown first so the editor can choose. Nothing is relinked to a shortcut, to a file that is not playable media of the clip's kind, or into any place the product may delete (its own bin of removed files among them). Every relink is recorded so it can be undone.
+The editor can ask the product to find the files for offline clips, for just the open timeline's clips or for the whole project. For each clip the product looks for files of the same name in the shared tree. When a missing clip's file already exists in the tree with the same name and the same size, the editor is offered a relink to it, never a second copy. When several files of the same name are candidates, the one whose folder path matches the clip's old path most closely wins; only when that leaves a tie does the larger file (the original) beat a smaller one (a proxy); identical backups are no conflict. A match that is uncertain or ambiguous is never applied silently: clips with more than one possible file are shown first, the editor sees each candidate's path, size and a preview, and picks one before anything is relinked. When a clip cannot be relinked because the drive holding its copy cannot be reached, the result says that drive is offline. Nothing is relinked to a shortcut, to a file that is not playable media of the clip's kind, or into any place the product may delete (its own bin of removed files among them). Every relink is recorded so it can be undone.
 
 - Who: the editor at that computer.
 - On its own: the best candidate for each clip, from the ranking above.
-- By hand: the editor sees each pick before it is made and chooses another candidate for any clip.
+- By hand: the editor sees each uncertain pick, with each candidate's path, size and a preview, before it is made, and chooses another candidate for any clip.
 
 ### Resolve holds its media files open
 
@@ -552,7 +552,7 @@ Resolve keeps the files it uses open, so they cannot be moved, renamed, replaced
 
 ### Changes the product makes in Resolve unasked are limited and retried by themselves
 
-Changes made without anyone pressing a button (repointing a clip to the shared spelling, attaching proxies) run for a given project and kind at most once every 15 minutes, and at most 8 times a day per project across all kinds; the limits survive restarts and updates, and a clock put back does not stretch them. A change held back by a limit is carried out by itself as soon as the limit allows, without a restart. Reaching the daily limit is shown to the editor in the app's Resolve status and on the dashboard as a set-up problem on that computer (a computer that keeps rewriting a project is set up wrongly). Waiting changes are kept once each, and checked against Resolve at most once per pass however many projects or clips wait. A large batch never blocks noticing which project is open, new findings, or quitting and updating.
+Changes made without anyone pressing a button (repointing a clip to the shared spelling, attaching proxies, relinking clips after the studio moved their files, see Proxies and file moves: Relinking Resolve after a move, "Resolve's clips follow a moved file now or when the project next opens") run for a given project and kind at most once every 15 minutes, and at most 8 times a day per project across all kinds; the limits survive restarts and updates, and a clock put back does not stretch them. A change held back by a limit is carried out by itself as soon as the limit allows, without a restart. Reaching the daily limit is shown to the editor in the app's Resolve status and on the dashboard as a set-up problem on that computer (a computer that keeps rewriting a project is set up wrongly). Waiting changes are kept once each, and checked against Resolve at most once per pass however many projects or clips wait. A large batch never blocks noticing which project is open, new findings, or quitting and updating.
 
 A change counts only when Resolve shows it took; one that changed nothing is not tried again until the file or clip changes. A busy or absent Resolve leads to a later retry, a real refusal is not retried until the file or clip changes, and repeats are summarised rather than listed one by one. Repeating checks ask cheap questions first and remember each answer until the file's size or date changes, while a real deletion still shows within the next report. FIX ALL and other work started by a button are never limited.
 
@@ -565,7 +565,7 @@ Present once the app has anything to say about Resolve:
 - "Connected to Resolve", or red "Not connected to Resolve right now".
 - Red "Resolve has not answered <what it asked> for Ns. Nothing is wrong with your sync; Resolve itself is busy" after more than 20 seconds.
 - "Project open: <name>" or "No project is open in Resolve".
-- Each when not zero and the project has been checked, in red: "N clips are stored outside your synced folder, so nothing is backing them up"; "N clips in this project are offline"; "N clips point at a drive letter this computer does not have"; "N clips were left alone: their path is not one CC Sync may rewrite"; then the "SCAN WHOLE PROJECT" button.
+- Each when not zero and the project has been checked, in red: "N clips outside the tree: nothing is backing them up"; "N missing: offline in this project"; "N on the wrong drive: they point at a drive letter this computer does not have"; "N clips were left alone: their path is not one CC Sync may rewrite"; then the "SCAN WHOLE PROJECT" button.
 - For up to 3 projects not open whose clips exist only on this computer: red "N clips in '<project>' are only on this computer. Open that project in Resolve and press FIX ALL"; beyond that "...and N more projects".
 - "Proxies attached to clips: N", plus ", N clips re-read after the file changed" and ", N could not be attached: <why>" (red when any failed).
 - Red "N clips still on the preview copy: the editing proxy did not arrive (<why>). Send them to Resolve again to ask for it."
@@ -606,7 +606,7 @@ Outside the b-roll archive, a clip whose original is not on this computer is not
 
 ### What Resolve checks when a proxy is attached
 
-Facts about Resolve: it pairs a proxy with its clip only by exact file name, so a proxy carries exactly the original's name, byte for byte, on every computer. When a file is attached as a clip's proxy, Resolve checks it matches (timecode and frame count) and may refuse; a proxy whose timecode is missing or differs from its source's is refused, so every proxy carries exactly the timecode its source's timecode track states (see Proxies and file moves: What a proxy must be). Messages: "Proxy relinked to <path>"; "Resolve wouldn't accept <path> as this clip's proxy" (remembered, so that proxy no longer counts as usable for that clip); "Resolve didn't answer. Make sure a project is open, then try again." (not remembered). Each attached proxy is recorded and can be undone. The product can read a clip's proxy state as Resolve shows it: a resolution such as "1920x1080" when online, "Offline" when attached but unreachable, "None" when there is none.
+Facts about Resolve: it pairs a proxy with its clip only by exact file name, so a proxy carries exactly the original's name, byte for byte, on every computer. When a file is attached as a clip's proxy, Resolve checks it matches (timecode and frame count) and may refuse; a proxy whose timecode does not match its source's is refused, so every proxy carries its original's timecode by the rule in Proxies and file moves: What Resolve accepts as a proxy, "A proxy's timecode matches its original's in the form Resolve reads". Messages: "Proxy relinked to <path>"; "Resolve wouldn't accept <path> as this clip's proxy" (remembered, so that proxy no longer counts as usable for that clip); "Resolve didn't answer. Make sure a project is open, then try again." (not remembered). Each attached proxy is recorded and can be undone. The product can read a clip's proxy state as Resolve shows it: a resolution such as "1920x1080" when online, "Offline" when attached but unreachable, "None" when there is none.
 
 #### Lessons
 
@@ -631,10 +631,9 @@ Each warning is shown once while it stays the same, and again only after it has 
 
 ### Every editor's computer receives the shared LUT library and stills gallery without ticking anything
 
-Two shared libraries reach every editor's computer by default: the LUTs folder ("LUT library") and the stills folder ("Resolve gallery"), both under the tree's Assets folder. The server sets them up on the NAS if missing, and every editor's computer receives them, except the computers of suspended editors. They are not projects: they cannot be ticked, never appear among projects and are never counted. A site can replace the list with its own folders under Assets (the change takes effect within seconds); an entry with no letter or digit, or one that would clash with an earlier one, is left out. A library already set up somewhere other than where the site says is left alone. When the libraries cannot be set up, a problem opens on the dashboard: "The shared asset libraries (the LUT library) could not be set up: <error>. Editors will see their LUTs missing in Resolve." The repair: check the NAS's file sharing, then the site's shared-folder setting. It closes itself on the next success. Within a library, video, unfinished transfers and operating-system clutter (Mac folder records, Windows thumbnail caches and folder settings, temporary files, folders named __MACOSX and files whose names start with "._") never travel, and that rule cannot be undone by accident.
+Two shared libraries reach every editor's computer by default: the LUTs folder ("LUT library") and the stills folder ("Resolve stills gallery"), both in the tree's Assets folder by default. The server sets them up on the NAS if missing, and every editor's computer receives them, except the computers of suspended editors. They are not projects: they cannot be ticked, never appear among projects and are never counted. A site can replace the list with its own folders in the tree (the change takes effect within seconds); the setting, its entries and their checks are described in The server: installing it and keeping it running: Settings and secrets, "The kind of NAS, the project layout and the shared libraries". A library already set up somewhere other than where the site says is left alone. When the libraries cannot be set up, a problem opens on the dashboard saying the shared libraries could not be set up, naming the error, and that editors will see their LUTs missing in Resolve. The repair: check the NAS's file sharing, then the site's Shared libraries setting. It closes itself on the next success. Within a library, video, unfinished transfers and operating-system clutter (Mac folder records, Windows thumbnail caches and folder settings, temporary files, folders named __MACOSX and files whose names start with "._") never travel, and that rule cannot be undone by accident.
 
-- Who: an admin chooses the libraries.
-- Setting: Shared asset libraries. Does: which folders under Assets reach every editor's computer without being ticked. Default: the LUT library and the Resolve gallery. Who: an admin. Applies to: the site. Search words: shared libraries, LUT library, gallery, assets.
+- Who: an admin chooses the libraries, with the site's Shared libraries setting (default: the LUT library and the Resolve stills gallery).
 
 ### Resolve picks up shared LUTs it missed at launch without a restart
 
@@ -809,12 +808,25 @@ A remote editor who holds only proxies can bring just enough of a camera raw ori
 
 ### An editor asks for originals from inside Resolve
 
-The app adds entries to Resolve's own Scripts menu: "Bring originals - selected media pool clips", "Bring originals - timeline clips between In and Out", "Bring originals - whole timeline", "Stop originals - selected media pool clips", "Stop originals - timeline clips between In and Out", "Stop originals - whole timeline"; the clip under the playhead can be asked for, or stopped, too. Every way of asking for originals has a way to stop. The app acts on the request within a couple of seconds.
+On a computer connected to the studio, the app puts a CC Sync entry in Resolve's own Scripts menu every time it starts (even with Resolve open), keeps it current, removes entries it no longer offers and never touches anything the editor put there. Resolve shows new script entries only after it restarts. The entries are:
+
+1. "Bring originals - selected media pool clips"
+2. "Bring originals - timeline clips between In and Out" (with no In and Out marks, the clip under the playhead)
+3. "Bring originals - whole timeline"
+4. "Stop originals - selected media pool clips"
+5. "Stop originals - timeline clips between In and Out" (or the clip under the playhead)
+6. "Stop originals - whole timeline"
+
+Every way of asking for originals has a way to stop. Each entry counts every media pool clip once, skipping titles and generators; between In and Out means every clip on every video and audio track that overlaps that range. The request is picked up within about 2 seconds and is answered even while syncing is paused.
+
+Answers appear in Resolve's console, each beginning "CC Sync: ": "asked for the originals of N clip(s). CC Sync will confirm."; "asked to stop bringing the originals of N clip(s). CC Sync will confirm."; "this script runs from inside DaVinci Resolve (Workspace > Scripts)."; "no project is open."; "no clips are selected in the media pool. Select some and run this again."; "no timeline is open."; "no clips from the media pool sit between the In and Out marks."; "no In and Out marks are set and there is no clip under the playhead."; "this timeline has no clips from the media pool."; "could not find your home folder, so the request was not sent."; "could not write to <folder>, so the request was not sent."; "something went wrong, nothing was sent (<error>)." The app then confirms in a notification (below).
+
+If Resolve does not seem to be installed for this user, the app says "DaVinci Resolve does not seem to be installed for this user (<path> is missing)." and starts anyway.
 
 - Each clip is turned into its file. A multicam or compound clip is turned into its angles' files. A path in the studio's drive spelling or in this computer's own spelling (a Mac's mounted drive) both work.
 - Each file is matched to the ticked project that holds it. Files in no ticked project, and files that are not camera originals (proxies, unfinished, hidden or non-video files), are counted and reported, not asked for. Files in an upload-only project are sent, so the server's refusal reaches the editor.
-- The pick is recorded for that project and this computer, and an accepted pick starts the download at once (see Sync: What syncs where).
-- If the server cannot be reached or fails, the request is kept and tried again; parts already answered are not sent twice. Up to 10,000 clips go in one request. A request not answered within 1 hour, or one that cannot be read, is dropped and the editor is told so.
+- The pick is recorded for that project and this computer, as made from Resolve, and an accepted pick starts the download at once (see Sync: What syncs where).
+- If the server cannot be reached or fails, the request is kept and sent again; no part of it is sent twice. Up to 10,000 clips go in one request. A request not answered within 1 hour, or one that cannot be read, is dropped and the editor is told so.
 
 The editor gets one notification per request, built from these parts in this order:
 
@@ -828,6 +840,8 @@ The editor gets one notification per request, built from these parts in this ord
 - with no refusal and no success it starts "Nothing was queued:" (or is just "Nothing was queued." when there is nothing else to say).
 
 - Who: the editor at that computer.
+- When the help for the editing program is off: no entries are put in Resolve, and originals are picked from the project's page only.
+- Windows and macOS: offered on both. Asking never flashes a window on Windows.
 
 #### Lessons
 

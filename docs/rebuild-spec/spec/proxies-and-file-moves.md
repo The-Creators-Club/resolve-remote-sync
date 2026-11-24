@@ -10,6 +10,8 @@ A proxy lives in a folder named "Proxy" beside its original, with the same file 
 
 On every editor's computer the app looks for originals in this computer's projects that have no proxy, tells the editor about them, and gets the missing proxies made. Making a proxy is heavy work of the kind the studio's computers share: which able and free computer makes a given proxy is decided as for all such work (see Work shared out across the computers: Choosing who runs what), and it is always a computer that can read the original. Everything in this section about how making behaves (waiting until nobody is at the keyboard, giving way to Resolve, keeping the drive from filling) holds on whichever computer makes it.
 
+An editor can also send one clip's proxy making to a chosen computer at once: the choice is offered beside the clip's preview and on each incoming clip, and is a pick from the studio's known computers (see Work shared out across the computers: Choosing who runs what, "Choosing a computer is a pick from the studio's known computers").
+
 Telling and making are switched separately for each computer. A computer with both off neither looks nor makes, and says so in its proxy line ("switched off"), so nobody mistakes silence for "all covered".
 
 - Who: an editor for their own computer, or an admin for any computer, sets the two switches.
@@ -49,26 +51,24 @@ The notification is shown at most once while the same gap lasts (a new gap start
 
 ### Proxies are made only while nobody is at the computer
 
-Making starts only after 5 minutes with no keyboard or mouse use. If the computer cannot tell how long it has been idle, someone is taken to be there. When the editor touches the keyboard or mouse, pauses syncing, presses stop, or the app is shutting down, the clip being made is abandoned within about 2 seconds, its unfinished file is removed, the clip goes back to the front of the list, and no further clip is started. The reason shown is one of "you're back at the keyboard", "syncing is paused", "you asked it to stop", "the app is shutting down".
+Making starts only after the computer's quiet time (5 minutes unless changed) with no keyboard or mouse use: the same quiet time all shared work waits for. If the computer cannot tell how long it has been idle, someone is taken to be there. When the editor touches the keyboard or mouse, pauses syncing, presses stop, or the app is shutting down, the clip being made is abandoned within about 2 seconds, its unfinished file is removed, the clip goes back to the front of the list, and no further clip is started. The reason shown is one of "you're back at the keyboard", "syncing is paused", "you asked it to stop", "the app is shutting down".
 
 Making runs below normal priority and with no window, so the computer stays usable and Resolve keeps its full speed for its own work, renders included.
 
-- Setting: Wait this long without input before making proxies. Does: how long the keyboard and mouse must be untouched before proxies are made. Default: 5 minutes. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: idle, away from keyboard, wait before encoding, idle time.
-- See Work shared out across the computers: When a computer counts as free and able.
+- See Work shared out across the computers: When a computer counts as free and able, "A computer takes shared work only while nobody is using it", for the quiet time and who sets it.
 
 ### Proxy making keeps the drive from filling
 
-Before writing a proxy, the free space on the drive that will hold it is checked against the larger of 20 GB and 5% of that drive. Below it, the clip is skipped (never counted as a failure) and the editor is told "only X GB free on the drive holding <folder> (CC Sync keeps Y GB clear so syncing and Resolve's cache do not run out)". A notification titled with the brand and "low disk space" says "CC Sync stopped making video proxies: <reason>. Free some space and they will resume on their own.", at most once a day. The editor's computer and the dashboard show "CC Sync stopped making proxies: <reason>. They start again on their own once there is room." This clears on its own with the next clip that has room. If free space cannot be read, making goes ahead.
+Before writing a proxy, the drive that will hold it is checked: what is about to be written plus the computer's one free-space floor ("Keep this much free on the sync drive", 20 GB unless changed) must fit. When it does not, the clip is skipped (never counted as a failure) and the editor is told "only X GB free on the drive holding <folder> (CC Sync keeps Y GB clear so syncing and Resolve's cache do not run out)". A notification titled with the brand and "low disk space" says "CC Sync stopped making video proxies: <reason>. Free some space and they will resume on their own.", at most once a day. The editor's computer and the dashboard show "CC Sync stopped making proxies: <reason>. They start again on their own once there is room." This clears on its own with the next clip that has room. If free space cannot be read, making goes ahead.
 
-- Setting: Keep this much space free when making proxies. Does: the floor below which no proxy is written, as the larger of a size and a share of the drive. Default: 20 GB and 5% (zero switches either part off). Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: free space, disk full, low space, reserve.
-- See Sync: Disk space.
+- See Sync: Disk space, for the floor and who sets it.
 
 ### Proxy making gives way to Resolve
 
-An idle computer makes several proxies at once, using the whole computer. Whenever DaVinci Resolve is open or rendering, it makes only one at a time, even when the editor asked for proxies now, so Resolve stays responsive; within about a minute of Resolve closing it widens again. A setting stops all making while Resolve runs, including when the editor asked for proxies now; with it on, if the app cannot tell whether Resolve is running, it takes Resolve to be running.
+An idle computer makes several proxies at once, using the whole computer. While DaVinci Resolve is rendering, the computer starts no proxy, whatever its hold-back setting. While Resolve is merely open, it starts none unless the computer's hold-back for Resolve (the same one all shared work obeys, on unless changed) is off; with the hold-back off it makes one at a time, so Resolve stays responsive. Both hold even when the editor asked for proxies now. Within about a minute of Resolve closing, making widens again. With the hold-back on, if the app cannot tell whether Resolve is running, it takes Resolve to be running.
 
-- Setting: Make no proxies while Resolve is open. Does: holds all proxy making back while Resolve runs. Default: off. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: Resolve open, pause proxies, hold back, editing program running.
-- When the help for the editing program is off: making does not watch for Resolve and this setting is not shown.
+- See Work shared out across the computers: When a computer counts as free and able, "A computer takes shared work only while nobody is using it", for the hold-back and who sets it.
+- When the help for the editing program is off: making does not watch for Resolve.
 
 ### A clip that keeps failing is set aside so the others are made
 
@@ -96,7 +96,7 @@ One state is shown at a time, the first that applies, in this order:
 6. this computer cannot make proxies ("waiting: the tools needed to make proxies are not installed here"); it still says which clips have none;
 7. nothing to do;
 8. waiting because someone is at the keyboard ("waiting until you're away from the keyboard");
-9. waiting because Resolve is open ("waiting: DaVinci Resolve is open", only with "Make no proxies while Resolve is open" on);
+9. waiting because Resolve is open ("waiting: DaVinci Resolve is open", only with the computer's hold-back for Resolve on);
 10. making proxies.
 
 The state is worked out again right after each look for missing proxies, so "nothing to do" is never shown while clips are waiting. When the computer becomes able to make proxies, making starts without a restart.
@@ -153,10 +153,7 @@ For each computer, the dashboard's per-computer view shows: the proxy-making sta
 
 ### A computer making proxies stays awake and says why it should not shut down
 
-While any proxy is being made the computer is kept from sleeping. On Windows a shutdown is met with the reason "still making video proxies so the rest of the team can see this footage (N clip(s) left, M at once)". Once making stops the computer may sleep again. When the app quits, proxy making is stopped first, leaving no unfinished file.
-
-- Windows and macOS: only Windows shows a reason at shutdown.
-- See The app on each editor's computer: Starting, staying running and crashing.
+While proxies are being made the computer is kept awake, and on Windows a shutdown is met with the reason "still making video proxies so the rest of the team can see this footage (N clip(s) left, M at once)", under the one rule for all heavy work, 8-hour limit included (see The app on each editor's computer: Starting, staying running and crashing, "A computer doing heavy work stays awake and warns before shutting down"). When the app quits, proxy making is stopped first, leaving no unfinished file.
 
 ### A computer is equipped to make proxies with nothing for the editor to install
 
@@ -254,7 +251,7 @@ A proxy with a colour look (a LUT) burned into its picture is useless for editin
 
 ### Raw camera clips get their proxies from Blackmagic Proxy Generator
 
-Blackmagic RAW, RED and Canon RAW clips can be read only by DaVinci Resolve and its Blackmagic Proxy Generator. Such clips are counted as missing a proxy and as "needs Resolve" (Blackmagic RAW also on its own), are never failed as broken, and are handed to Blackmagic Proxy Generator, which comes with Resolve and is Resolve itself started in a special mode. Every clip CC Sync can read itself gets its proxy from CC Sync; only formats it cannot read go to the generator. A proxy the generator makes is checked like any other proxy.
+Blackmagic RAW, RED and Canon RAW clips can be read only by DaVinci Resolve and its Blackmagic Proxy Generator. Such clips are counted as missing a proxy and as "needs Resolve" (Blackmagic RAW also on its own), are never failed as broken, and are handed to Blackmagic Proxy Generator, which comes with Resolve and is Resolve itself started in a special mode. Every clip CC Sync can read itself gets its proxy from CC Sync; only formats it cannot read go to the generator. A proxy the generator makes is checked like any other proxy. Raw clips dropped into Timeline Cards are proxied like any other raw clip in the tree, by a computer that can read them and has the generator; while none can be made, the interview's page says so (see Timeline Cards: footage in, ready to cut: Grouping clips and building the multicam, "Every take is lined up by sound to within a frame").
 
 The generator takes no list of files: it watches folders listed in its own settings and makes a proxy for every clip there that has none. Its window opens idle, with a Start button.
 
@@ -336,7 +333,7 @@ Just before each proxy is made, the clip is skipped, silently and without counti
 
 ### A proxy appears under its real name only when it is finished
 
-While being made, a proxy has an unfinished name in the "Proxy" folder (created if missing), and a file under an unfinished, temporary or lock name never travels to any other computer by any route. When it is finished, if a proxy for that clip appeared meanwhile under any accepted name (for example downloaded from the server), the new one is thrown away and the clip counts as done. Otherwise it takes its real name. If that is refused (for example Resolve holds the file open), it counts as a failure and the finished file stays under its unfinished name: "could not put the finished proxy in place (...): it is still there as <name>". More generally, a file whose size or time is still changing never travels; it travels once it has been still for a set time (see Sync: Files that must never sync).
+While being made, a proxy has an unfinished name in the "Proxy" folder (created if missing), and a file under an unfinished, temporary or lock name never travels to any other computer by any route. When it is finished, if a proxy for that clip appeared meanwhile under any accepted name (for example downloaded from the server), the new one is thrown away and the clip counts as done. Otherwise it takes its real name. If that is refused (for example Resolve holds the file open), it counts as a failure and the finished file stays under its unfinished name: "could not put the finished proxy in place (...): it is still there as <name>". More generally, a file whose size or time is still changing never travels; it travels once it has been still for a set time (see Sync, part 2: Clocks and file age, "A file is sent only once it has stopped changing").
 
 ### Leftovers of an interrupted proxy or copy are cleared at the next start
 
@@ -364,7 +361,7 @@ While CC Sync copies files for the editor (bringing media into a project, gather
 
 ### Anything set aside is kept as long as promised
 
-Anything CC Sync sets aside instead of deleting is kept at least as long as people are told it will be, and is never removed while the NAS does not hold the same file (see Sync: Deletions and removing a project).
+Anything CC Sync sets aside instead of deleting is kept for the period people are told, or less when the holding folder passes its size limit or the drive falls below its free-space floor, as the status says; and it is never removed while the NAS does not hold the same file (see Sync: Deletions and removing a project).
 
 #### Lessons
 
@@ -395,7 +392,7 @@ Refusals, each with its reason:
 When it is done: "moved", "<from> is now <to> on the server (N proxy file(s) with it); N computer(s) told to follow." When the original moved but some proxies could not: "moved, some proxies stayed", "<from> is now <to> on the server, but these proxy files did not move: <list>. Move them by hand or run the move again once whatever is holding them has let go." The admin is told what moved where, how many proxies moved and failed, and which computers must follow. A file moved by hand on the NAS instead would come back at its old path from every computer still holding it there, which is why moves go through here.
 
 - Who: an admin ("only an admin can move files on the server").
-- Ways in: from the project's own page, and from the Footage Sorter when it moves a clip inside a project.
+- Ways in: from the project's own page. The Footage Sorter's moves inside a project reach every computer the same way, under their own rules (see "A move made in the Footage Sorter inside a project reaches every editor's copy").
 - Name and search words: Move on the server and on every computer. Search words: move file, rename file, move folder, relocate footage, rename clip.
 - When the help for the editing program is off: the question and the messages say nothing about relinking.
 
@@ -407,7 +404,13 @@ A clip counts as fully moved only when all its files have moved. Until then the 
 
 ### A move made in the Footage Sorter inside a project reaches every editor's copy
 
-When the Footage Sorter moves a clip that is inside a project, the move is made exactly as "Move on the server and on every computer", so every editor's computer follows it. The clip and its destination must each be inside an active CC Sync project; otherwise the move fails with "<path> is in no CC Sync project, so no editor's copy can follow it". A refusal is shown in the Sorter as its error. Moves into a project from outside every project (for example from a transfer folder) are plain moves on the server.
+When the Footage Sorter moves a clip that is inside a project (on its own once the clip is sorted, or because someone signed in moved a clip elsewhere or put it back), the move reaches every editor's computer, and Resolve on each, exactly as "Move on the server and on every computer" does. It needs no admin and is never refused for lack of one. A clip is never moved in part: when any of its proxies could not follow (something already there, held open, unreadable), the whole clip stays where it is and is listed in the Sorter for a person to decide, so a Sorter move never ends as "moved, some proxies stayed".
+
+A move out of a project to a place no active CC Sync project covers is refused with "<path> is in no CC Sync project, so no editor's copy can follow it". A refusal is shown in the Sorter as its error. A move into a project from outside every project (for example from a transfer folder) is a plain move on the server.
+
+In the move's history, "who asked" is the person whose sorting or hand move led to it, and the notice each editor gets names that person.
+
+- Who: anyone signed in, for a move or a put-back; a move the Sorter makes on its own once a clip is sorted needs nobody.
 
 - See The Footage Sorter and camera cards: Moving footage on the NAS.
 
@@ -429,6 +432,12 @@ A move reaches:
 A computer that works straight from the NAS is never told to move its copy again, unless it holds a separate copy of its own. Ticks made for a person rather than a computer are never told. Each computer files its copy only where its own plan says (below). Paths are compared exactly, letter by letter, with accents folded: underscores, percent signs and every other character match only themselves, so a folder with a look-alike name is never moved by mistake.
 
 - See Sync: Wired or remote, and Sync: A plan belongs to a computer.
+
+### Renaming a b-roll collection is a move every computer follows
+
+Changing a b-roll collection's name in the archive is a move made through the product like any other. It is made on the NAS in one rename of the collection's folder, never a copy. It reaches every computer known to hold clips under that collection (the archive clips each one fetched for its editor), which moves its copies with their proxies and relinks Resolve, exactly as for a move inside a project. Nothing is deleted. The refusals that speak of projects (an unknown or inactive project at either end, a path outside the projects tree) do not apply to it.
+
+- See The b-roll archive: Describing and indexing clips, "An admin sets how each collection is described and transcribed".
 
 ### A move is offered to computers only once the NAS has really moved it
 
@@ -499,7 +508,7 @@ A warning, "a file move was never confirmed", has one entry per computer and old
 
 ### Every move is recorded
 
-Every move through CC Sync is recorded: the source project and its folder as it was then, the source path, the destination project and folder as it was then, the destination path, whether it was a folder, how many proxies moved with it, who asked (an admin, or "detected" for a hand move on the NAS) and when, the move's state with a detail, the move it put back, and the move that put it back. Every move also goes into the audit history with from, to, folder or not, who asked and how many computers were told. Requests for original files of the moved item follow it to the new place as soon as the move is done or partly done.
+Every move through CC Sync is recorded: the source project and its folder as it was then, the source path, the destination project and folder as it was then, the destination path, whether it was a folder, how many proxies moved with it, who asked (an admin, the person whose sorting or hand move in the Footage Sorter led to it, or "detected" for a hand move on the NAS) and when, the move's state with a detail, the move it put back, and the move that put it back. Every move also goes into the audit history with from, to, folder or not, who asked and how many computers were told. Requests for original files of the moved item follow it to the new place as soon as the move is done or partly done.
 
 #### Lessons
 
@@ -513,10 +522,10 @@ Each computer that holds a copy moves it the same way, with its proxies, and poi
 
 The computer's answer, shown to the admin for that computer, is one sentence. Answers that count as done: "nothing at the old path on this computer"; "already where the server has it"; "moved", with ", N proxy file(s) with it" and "; N proxy file(s) were in use and stayed at the old path" as they apply. A failure answers "could not move it on this computer: <error>", and is tried again as set out under Moves that reach every computer.
 
-The editor is told, with the name of the admin who asked, or "your administrator":
+The editor is told, with the name of the person who asked (for a Footage Sorter move, the person whose sorting or move led to it), or "your administrator":
 
-- title "… file moved": "<admin> moved '<name>' to <where> on the server. Your copy followed and Resolve was relinked.", or "… Your copy followed. The clip will reconnect the next time you open that project in Resolve.";
-- on the first failure, title "… file move needs attention": "<admin> moved '<name>' to <where> on the server, but your copy could not follow yet: <detail>. Nothing was deleted and CC Sync will keep trying.";
+- title "… file moved": "<who> moved '<name>' to <where> on the server. Your copy followed and Resolve was relinked.", or "… Your copy followed. The clip will reconnect the next time you open that project in Resolve.";
+- on the first failure, title "… file move needs attention": "<who> moved '<name>' to <where> on the server, but your copy could not follow yet: <detail>. Nothing was deleted and CC Sync will keep trying.";
 - after a week, title "… file move blocked": "Your copy of '<name>' still could not be moved to <where> after a week of trying: <detail>. Nothing was deleted; ask your admin."
 
 A computer has followed a move only when its copy and its proxies have moved and every Resolve clip under it points at the new place; until then it shows as "moved, Resolve not repointed yet".
@@ -553,7 +562,7 @@ No local file is set aside until the server is seen holding the same file, at th
 
 ### A project folder moved on the server is followed before anything syncs
 
-When a project's folder has moved on the server, each editor's computer moves its own copy of the project folder to match before that project syncs anything. Any upload reading from the old folder is ended first ("its folder is being moved to where the server now keeps it"), and the project is relinked in Resolve. If the move cannot be carried out on this computer, the project does not sync at all, nothing is created at the new place meanwhile, and the project shows as blocked with the reason: "Could not move this project's folder". A stray folder at the new place (for example one holding only proxies) never counts as the move; the move completes only into the folder really moved. The message clears as soon as the two places agree, and the project is never shown as fine while its syncing is still held.
+When a project's folder has moved on the server (through the product, or by hand on the NAS, see "A project folder moved or renamed by hand on the NAS is followed"), each editor's computer moves its own copy of the project folder to match before that project syncs anything, and the project is relinked in Resolve (see "Resolve's clips follow a moved file now or when the project next opens"). What the editor sees, and what happens when their copy cannot follow, are in Sync, part 2: Project folders on an editor's computer, "When an admin renames or moves a project on the server, every editor's copy follows by itself".
 
 #### Lessons
 
@@ -565,7 +574,7 @@ When a project's folder has moved on the server, each editor's computer moves it
 
 After a move, every clip in Resolve's media pool at the old place (or inside the old folder) is pointed at the new place, written in the shared drive's spelling so the project still opens on other computers, and can be undone like every other change CC Sync makes in Resolve. Old and new places are compared ignoring letter case and accent spelling. A folder renamed or moved is one move, and every clip under it is relinked once the whole folder has arrived. Answers: "Resolve not relinked (<reason or 'not open'>)", "N Resolve clip(s) relinked, M could not be", or "Resolve relink failed (see the log)".
 
-When Resolve is closed or open on another project, the relink waits, and is tried again when the open project changes and at most every 5 minutes, for up to 30 days, until it succeeds. Every Resolve project that uses a moved file is relinked when it next opens, and the editor is told. The same holds when a whole project's folder moved.
+When Resolve is closed or open on another project, the relink waits: whether it can run is looked at again when the open project changes and at most every 5 minutes, for up to 30 days, until it succeeds. The relink is a change made in Resolve unasked, so it counts against the limit on such changes and runs as soon as that limit allows (see Resolve on the editor's computer: Missing clips, relinking and refreshing, "Changes the product makes in Resolve unasked are limited and retried by themselves"). Every Resolve project that uses a moved file is relinked when it next opens, and the editor is told. The same holds when a whole project's folder moved.
 
 - See Resolve on the editor's computer: Missing clips, relinking and refreshing, and Fixing media: copying in, rehearsals and undo.
 - When the help for the editing program is off: nothing is relinked; the copy still moves.
@@ -604,7 +613,7 @@ When the evidence for a hand move is weaker than the rule above (for example the
 
 ### Every hand move is recognised or the admin is told how many were not
 
-Every hand move is recognised however many happen at once and however the NAS is looked over. If, even so, one look finds more hand moves than can be followed, the admin is shown a serious problem saying exactly how many were not followed, which stays until dismissed.
+Every hand move is recognised however many happen at once and however the NAS is looked over. If, even so, one look finds more hand moves than can be followed, the admin is shown a serious problem saying how many were found and exactly how many were not followed. It is a one-off error: it closes by itself after 24 hours without being seen again.
 
 - See The dashboard: Problems the server finds.
 
@@ -661,7 +670,7 @@ About every 2 minutes, for clips in the open Resolve project whose original is i
 
 ### Some clips are deliberately not pointed at a proxy
 
-If the clip already points at that exact proxy and Resolve still cannot play it, the proxy itself is damaged: "Resolve already points at this proxy and still cannot play it, so the proxy file itself is damaged. Delete it and CC Sync will make it again." In the b-roll archive only, an MP4 in the "Proxy" folder is the browser preview, not an editing proxy; when the full-quality original is on this computer, it is not attached: "This file is the b-roll browser preview, not an editing proxy, and the full quality original is already on this computer. CC Sync left the clip on the original so you are not cutting at preview quality." Outside the archive an MP4 proxy is attached normally.
+If the clip already points at that exact proxy and Resolve still cannot play it, the proxy itself is damaged: "Resolve already points at this proxy and still cannot play it, so the proxy file itself is damaged. Delete it and CC Sync will make it again." In the b-roll archive only, an MP4 in the "Proxy" folder is the browser preview, not an editing proxy, and it is never attached as a clip's proxy, whether or not the full-quality original is on this computer. When the original is on this computer, the editor is told: "This file is the b-roll browser preview, not an editing proxy, and the full quality original is already on this computer. CC Sync left the clip on the original so you are not cutting at preview quality." Outside the archive an MP4 proxy is attached normally.
 
 - See The b-roll archive: Previews made for the archive.
 
@@ -672,9 +681,7 @@ Each run gives the editor one sentence built from: "Repointed N proxy file(s) to
 
 ### A missing clip whose file is already in the tree is relinked, never copied
 
-When a missing clip's file already exists in the shared tree with the same name and size, the person is offered a relink to it, never a second copy. When several files of the same name are candidates, the one whose folder path matches the clip's old path most closely wins; only when that leaves a tie does the largest file (the original) beat a smaller one (a proxy); identical backups are no conflict. A match that is uncertain or ambiguous is never applied silently: the person sees each candidate's path, size and a preview, and picks one before anything is relinked. When a clip cannot be relinked because the drive holding its copy is unreachable, the result says that drive is offline.
-
-- See Resolve on the editor's computer: Missing clips, relinking and refreshing.
+When a missing clip's file already exists in the shared tree with the same name and size, the person is offered a relink to it, never a second copy (see Resolve on the editor's computer: Missing clips, relinking and refreshing, "An editor relinks offline clips to files found in the tree").
 
 ### A whole project is checked and its stray media gathered into its folder
 

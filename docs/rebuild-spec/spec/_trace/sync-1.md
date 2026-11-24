@@ -47,7 +47,7 @@
 - 14-033 | A plan can be copied from one computer to another of the same person
 - 15-081 | Admins are told when a tick has not taken effect
 - 15-097 | Having nothing ticked is never a fault
-- 16-024 | Unticking can be undone within a minute at no cost
+- 16-024 | left out: settled by the joins (2026-11-24, sync-1 F4)
 - 20-041 | Each computer has its own sync plan
 - 20-042 | Each computer has its own sync plan
 - 20-044 | The rules every tick and untick follow, wherever it is made
@@ -80,7 +80,7 @@
 - 15-083 | Admins are told when a computer holds over 200 GB of recovery copies
 - 16-013 | A delete on an editor's computer never reaches the NAS or any other computer ; Files deleted or replaced on the NAS are kept for a year
 - 16-018 | A project whose folder disappears from the NAS is never deleted
-- 20-083 | Unticking can be undone within a minute at no cost ; The product asks an admin before taking many projects off computers at once
+- 20-083 | The product asks an admin before taking many projects off computers at once
 - 01-031 | Only a person restarts downloads after a safety stop ; Safety stops survive restarts, and one that cannot be saved still holds
 - 02-009 | Old files are cleared out a slice at a time
 - 02-010 | Downloads stop themselves when the server suddenly looks wrong ; Only a person restarts downloads after a safety stop
@@ -439,7 +439,7 @@
 - U-16-3 | settled: a count that finds fewer than a tenth of the previous files, or no originals where there were some
 - U-16-5 | behind the glass
 - U-20-1 | settled: the fixed limit is 3, as two items state
-- U-20-6 | settled: the one-minute grace, the 24-hour rule and the allowance are written as what the product does
+- U-20-6 | settled: the 24-hour rule and the allowance are written as what the product does; the one-minute grace was dropped by the joins (2026-11-24, sync-1 F4)
 
 ## Still unsettled
 
@@ -494,6 +494,7 @@
 - 02-003 | the admin's counters for the quick upload of new clips, its on/off and settle-time settings, and its 200-file and 30-minute limits: a second way of finding new files, an arrangement; the promised two minutes is kept
 - 09-009 | the per-computer settings of how often the computer looks (3 seconds for the timeline, 5 minutes for a full check, 2 minutes for new proxies, 1 minute for ticks and after catching up): polling of the build; the promised times are kept
 - 09-010 | the 2-minute wait before a new proxy is fetched belongs to Clocks and file age in part 2; "20 GiB" written as 20 GB
+- 20-083 | the one-minute grace before an untick takes effect: dropped by the joins (2026-11-24, sync-1 F4); an untick takes effect at once and Undo on the dashboard puts it back
 - 02-024 | the per-computer switch for letting a large upload carry on in the background, and the 10 seconds of grace: they exist because a cut-off upload cannot resume
 - 02-028 | the second rule ("did not exit after N s - killed"): an inside of how transfers are ended
 - 02-025 | a background upload in a project about to follow a rename being ended first: an inside
@@ -537,16 +538,16 @@
 ## Joins with other capabilities
 
 - Proxies and file moves / Moves that reach every computer | A project is a folder on the NAS at any depth, marked as a project | what each computer does when a project or file is moved on the server
-- Resolve on the editor's computer / Bins, clip sorting and imports | An editor asks for originals from inside Resolve | how a clip in Resolve is matched to its file
+- Resolve on the editor's computer / Grading from the server's originals | An editor asks for originals from inside Resolve | the menu entries, what the editor is told and how a request is handled
 - The dashboard / Ticking and unticking | Projects ticked on a computer sync one at a time, in the order set for that computer | the tick and order controls
 - The dashboard / Ticking and unticking | The rules every tick and untick follow, wherever it is made | the places a tick is made
-- The dashboard / Ticking and unticking | A wired computer syncs nothing and cannot be ticked | the locked box
-- The dashboard / Ticking and unticking | Ticking warns when the proxies may not fit | where the warning appears
+- The dashboard / Ticking and unticking | A wired computer syncs nothing and cannot be ticked | the locked box and its sentence
+- The dashboard / Ticking and unticking | Ticking warns when the proxies may not fit | the whole warning, its figures and its cases
 - The dashboard / Each computer's state | An admin sees each computer's stops and pauses | the per-computer view
 - The dashboard / Each computer's state | The dashboard shows each computer's free space and colours it | the per-computer view
 - The dashboard / Each computer's state | The dashboard shows why nothing is moving on a computer | the per-computer view
 - The app on each editor's computer / Installing and setting up | Setting up a computer starts with choosing remote or wired | the rest of set-up
-- The app on each editor's computer / Installing and setting up | Choosing the sync folder on macOS checks the drive is really mounted | the Windows checks
+- Sync, part 2 / Project folders on an editor's computer | Choosing the sync folder on macOS checks the drive is really mounted | the Windows checks
 - The Footage Sorter and camera cards / Sorting into shoots, people and cameras | The Footage Sorter includes a folder instead of copying a clip twice | the reviewed plan and "elsewhere" clips
 - Sync, part 2 / What is owed | The editor can see whether it is safe to close the laptop | what is owed and by which computer
 - Sync, part 2 / What is owed | A computer holding footage the server lacks stays marked so | the owed record
@@ -556,6 +557,12 @@
 - Sync, part 2 / Saying truthfully what the sync is doing | Files edited on two computers at once are both kept | how conflicts are shown
 - Sync, part 2 / Computers joining and changing | Each computer has its own sync plan | renames and a computer's identity
 - Accounts, privacy and the legal paperwork / Suspending, disabling and removing a person | Only computers holding a full tick for a project receive its files | a suspended editor's computers receive nothing
+- The dashboard / Ticking and unticking | A plan can be copied from one computer to another of the same person | undoing a tick change
+- The app on each editor's computer / Windows, dialogs and notifications | The app lists this computer's ticked projects and how each is doing | the one list of states
+- Sync, part 2 / Saying truthfully what the sync is doing | Syncing waits for a short list of reasons, each in its own words | the one list of reasons, their order and words
+- Sync, part 2 / Clocks and file age | Some files never travel at all | a file still changing does not travel yet
+- Sync, part 2 / What is owed | A drive pulled out with work owed is named and reminded about | what counts as owed and its summary
+- The server: installing it and keeping it running / Settings and secrets | The studio's shared libraries reach every computer without a tick | the Shared libraries setting
 
 ## Settled from the present product
 
@@ -565,3 +572,47 @@
 
 - sync-1-U1 | the editor changes a computer's own sync settings in the app's settings for their own computer, and an admin can change them for any computer from the dashboard; only an admin may change the download safety limits
 - sync-1-U4 | no figure: an update waits for the file in flight up to a limit the product states
+
+## Joins settled
+
+- dashboard-1 F18 | no change here: dashboard-1 gives its queue the reorder control
+- dashboard-1 F19 | changed: The rules every tick and untick follow, wherever it is made | the lead's ruling: "you can only change your own projects (admins excepted)" and "unknown or inactive project '<name>'"; the all-wired sentence and the person-wide skip of wired computers stay
+- dashboard-1 F20 | changed: A wired computer syncs nothing and cannot be ticked | the locked box points to dashboard-1's sentence instead of giving its own
+- dashboard-1 F21 | changed: Ticking warns when the proxies may not fit | one sentence pointing to dashboard-1, which takes the person-wide and column cases
+- dashboard-1 F22 | changed: The dashboard shows each computer's free space and colours it | the "probably stopped" guess dropped; why a computer stopped comes only from the reason it reported
+- dashboard-2 F4 | no change here: dashboard-2 widens its stop explanation
+- dashboard-2 F5 | no change here: sync-1 already holds the stop with 24 hours by default and up to 720
+- editor-app F22 | changed: Choosing the sync folder on macOS checks the drive is really mounted | the Windows pointer goes to sync-2's "The editor picks the folder for the project tree when setting up"
+- editor-app F23 | no change here: editor-app narrows its refusal
+- music F3 | no change here: broll changes its floor setting's text
+- resolve-on-the-editors-computer F3 | changed: The studio's shared libraries reach every computer without a tick | points to the site's "Shared libraries" setting in server-install-and-running-1, whose default is these two
+- resolve-on-the-editors-computer F10 | changed: An editor asks for originals from inside Resolve | reduced to what the pick does to syncing and a pointer to "Grading from the server's originals"
+- sync-1 F1 | changed: The rules every tick and untick follow, wherever it is made | refusal wording as ruled (same change as dashboard-1 F19)
+- sync-1 F2 | no change here: dashboard-1 and sync-2 change to every file
+- sync-1 F3 | no change here: the lead ruled sync-1 stands (empty folders come down, page 2 answer 2)
+- sync-1 F4 | changed: Unticking can be undone within a minute at no cost (removed) ; A plan can be copied from one computer to another of the same person | the grace dropped; an untick takes effect at once and Undo is dashboard-1's
+- sync-1 F5 | changed: An editor removes a project from their computer in one action | shows dashboard-1's sentence word for word
+- sync-1 F6 | no change here: dashboard-1, dashboard-2 and fleet-jobs say "downloads"
+- sync-1 F7 | no change here: sync-1 already holds the stop in full with "app"
+- sync-1 F8 | changed: The app lists this computer's ticked projects and how each is doing | replaced by a pointer to editor-app's one closed list
+- sync-1 F9 | no change here: editor-app and sync-2 add the unknown-owed case
+- sync-1 F10 | no change here: fleet-jobs and sync-2 drop the per-computer stop
+- sync-1 F11 | changed: An editor picks camera originals to come down to one computer | the picture and playback no longer depend on the Footage Sorter
+- sync-1 F12 | changed: A full tick sends a project's camera originals up and brings its proxies and other files down ; Each kind of file travels only in its own direction | a proxy made on this computer goes up, never replacing one; only proxies that came down never go up
+- sync-1 F13 | changed: The recovery folder empties itself by age and size ; The editor can open the recovery folder and see what it holds | no clearing removes a file the NAS lacks; the status sentence names the earlier clearing
+- sync-1 F14 | changed: Some files never travel at all | one line pointing to sync-2's "A file is sent only once it has stopped changing"
+- sync-1 F15 | no change here: proxies-and-file-moves uses this piece's one floor
+- sync-1 F16 | changed: An editor asks for originals from inside Resolve | one line and a pointer (same change as resolve-on-the-editors-computer F10)
+- sync-1 F17 | no change here: sync-2 limits its check to camera originals
+- sync-1 F18 | changed: Some files never travel at all ; An upload-only tick sends every file up and brings down only the empty folders | whatever a YouTube download leaves behind never travels
+- sync-1 F19 | changed: Syncing waits for a short list of reasons, each in its own words | the six-item list replaced by a pointer to sync-2's reasons table
+- sync-1 F20 | no change here: sync-2 takes this piece's drive phrases
+- sync-1 F21 | no change here: sync-2 deletes its Drive reminders setting
+- sync-1 F22 | changed: A drive pulled out with work owed is named and reminded about | keeps the notices (2-hour snooze already fixed) and points to sync-2 for what counts as owed
+- sync-1 F23 | changed: A full tick sends a project's camera originals up and brings its proxies and other files down | a YouTube original comes down by itself to the requester's computer only
+- sync-1 F24 | changed: Sync now runs every transfer this computer has switched on at once | says what the round trip did when it ends
+- sync-2 F7 | no change here: sync-2 makes the folder layout for upload-only projects
+- sync-2 F9 | no change here: sync-2 adds the app as a way in; "The app shows one line" stands
+- sync-2 F10 | changed: The editor is told about files that will never upload because of a name clash or a wrong clock ; The editor is shown files that will never upload and included folders that do not work ; Removal is refused while anything here is missing from the server | future-dated files upload like any other; only their dates are wrong
+- sync-2 F11 | changed: Files edited on two computers at once are both kept | the count and up to 20 paths, marked as cut; points to sync-2's heading
+- youtube F8 | no change here: youtube rewrites its sentences; sync-1's exception is made under sync-1 F23

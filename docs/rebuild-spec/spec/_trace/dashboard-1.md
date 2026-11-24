@@ -26,7 +26,7 @@
 - 13-035 | Each computer's issues are listed worst first, each explained
 - 13-037 | Each computer shows the work in progress on it
 - 13-038 | A computer's details fold out
-- 13-039 | An admin resumes a computer's stopped proxy download ; An admin asks a computer why, from its details
+- 13-039 | An admin resumes a computer's stopped downloads ; An admin asks a computer why, from its details
 - 15-105 | Every status is red, amber or green and the worst wins
 - 15-113 | Each computer leads with one headline
 - 17-067 | How fresh the dashboard's picture is
@@ -452,7 +452,7 @@
 - sync / What syncs where | An editor or an admin ticks a project for a computer | what a tick brings down and sends up, and what borrowed folders are.
 - sync / Upload only | Full sync or upload only, and switching between them | what upload only does.
 - sync / Deletions and removing a project | An editor, an admin or the editor's own computer unticks a project | the app unticking before removing its copy.
-- sync / Safety stops | An admin resumes a computer's stopped proxy download | why proxy download stops itself and resuming from the app.
+- sync / Safety stops | An admin resumes a computer's stopped downloads | why proxy download stops itself and resuming from the app.
 - proxies-and-file-moves / Moving footage through the product | Each computer's issues are listed worst first, each explained | moving a project folder so every computer follows.
 - proxies-and-file-moves / Moves made by hand on the NAS | Files moved by hand on the NAS are reported as they are followed | how a move made by hand is recognised and followed.
 - resolve-on-the-editors-computer / Fixing media: copying in, rehearsals and undo | Each computer's issues are listed worst first, each explained | gathering clips that live only on one computer.
@@ -477,3 +477,53 @@
 - dashboard-1-U2 | shown from one minute apart, mailed from five
 
 - dashboard-1-U1 | slow means longer than a minute; the left-out problem's words are written in
+
+## Joins settled
+
+- accounts-privacy-legal F1 | changed: A computer that cannot sign in is still shown, and admins are told | "disabled" dropped: suspended or removed only (the pointer to the accounts sub-topic keeps its heading as it stands)
+- accounts-privacy-legal F3 | changed: An admin sees every person and computer in one place | home here, named "People and computers"; now carries the accounts list's details (counts, columns, actions, NAS login columns, unreadable list, 30-second refresh, "admins only", people known to the fleet without an account)
+- accounts-privacy-legal F4 | changed: Anyone signed in can create a project ; An admin archives a project and brings it back | "On sites that control access per project" dropped in both; access is always per project, pointing to "Each project is reachable only by its members"
+- accounts-privacy-legal F5 | changed: Anyone signed in can create a project | per the ruling: per-site condition dropped, "the creator is given access" kept
+- dashboard-1 F1 | changed: Each computer leads with one headline ; Each computer's issues are listed worst first, each explained ; A computer withholds kinds of information by choice | issues, notes and problems depending on a withheld kind are not raised (and close silently); a withheld open project shows the "not reported" tag, not "could not check"
+- dashboard-1 F3 | changed: Each computer shows the work in progress on it | "cards not running" uses the five state words, green only on running, restarted within about a minute, "until the app is restarted" only after 5 failed starts; points to Timeline Cards' heading
+- dashboard-1 F4 | changed: Everything the server knows is wrong is in one list | home here, words kept; took dashboard-2's undisputed details ("checked against N things every M minutes", checks run afresh on opening, a failed installation among the open problems)
+- dashboard-1 F5 | no change here: dashboard-2 changes; this piece already says within five minutes and a minute or two
+- dashboard-1 F6 | changed: A link can lead to any place on a page | home here; took dashboard-2's "once that place has arrived" and "without fighting a person who has already started scrolling"
+- dashboard-1 F7 | no change here: editor-app changes; "never present in the computer's diagnostics" already agrees
+- dashboard-1 F8 | changed: The kinds of problem the server finds and where each leads | three shared-work rows added, leading to the work page, with a pointer to fleet-jobs for each rule
+- dashboard-1 F9 | no change here: the Footage Sorter piece drops its claim; nothing added
+- dashboard-1 F10 | no change here: this piece stands (keeps the menu entry and the "not working" page); other pieces change
+- dashboard-1 F11 | changed: Problems close themselves when they are over | "more moves by hand at once than could be followed" named among the one-off errors
+- dashboard-1 F12 | changed: The kinds of problem the server finds and where each leads | the vendor-feed row replaced by the fourteen version rows (serious as error), one computer's leading to it, the rest to the list of builds; pointer to releases-and-updates
+- dashboard-1 F13 | changed: An admin asks one computer to do something and is told when it will happen | trial clause now ", as an offer of a held-back version to this computer alone"; says these are the sentences for a pushed update too, pointing to releases-and-updates
+- dashboard-1 F14 | changed: The kinds of problem the server finds and where each leads | two footage rows (warning, to the computer), only with the editing-program help on and never for a computer withholding the kind
+- dashboard-1 F15 | changed: A new Resolve project with no folder leads the editor to pick or create one | the automatic pairing now points to Resolve on the editor's computer's tying rule
+- dashboard-1 F16 | changed: The kinds of problem the server finds and where each leads | three private-network rows (error, to the health of the server's own work)
+- dashboard-1 F17 | changed: The kinds of problem the server finds and where each leads ; A computer quiet for a day or red for an hour is raised as a problem | row added (error, health of the server's own work); stands beside each silent computer's own problem
+- dashboard-1 F18 | changed: Each person's sync queue shows their ticked projects in order | move to the front or set any order for one computer, also on the per-computer view; Ways in added
+- dashboard-1 F19 | changed: An editor or an admin ticks a project for a computer ; Choosing whose plan and which computer a tick changes | refusal sentences replaced by a pointer to sync-1; a whole-person tick leaves out wired computers
+- dashboard-1 F20 | no change here: home here; the sentence stands as written
+- dashboard-1 F21 | changed: Ticking warns when the proxies may not fit but never refuses | home here; took sync-1's whole-person and whole-column cases, Cancel unticks, unknown figures say nothing
+- dashboard-1 F22 | changed: Each computer's free space is shown with a plain verdict | red under the computer's own floor (20 GB unless it reports another), the floor shown
+- dashboard-1 F23 | changed: Each computer leads with one headline | slot 1 only fault reasons; nothing ticked, upload only here, the editor's pause and the studio-wide stop take the muted information slot
+- dashboard-1 F25 | changed: Each computer's issues are listed worst first, each explained | the computer's YouTube state and its reason for a clip it did not download, pointing to YouTube downloads
+- dashboard-2 F2 | changed: The kinds of problem the server finds and where each leads | unencrypted-connection row added (error, to the computer), pointing to accounts-privacy-legal
+- dashboard-2 F5 | changed: The Overview is the home page ; Fleet-wide trouble is shown above the computers | "unless you choose another length" added; the stop now pointed to sync-1's heading
+- dashboard-2 F6 | changed: The settings search finds settings only | groups are the builder's proposal the owner approves
+- editor-app F10 | changed: What computers can be asked to change is shown before asking ; A person sees every setting that concerns them and where it is changed | only whether it takes shared work and which kinds can be asked (pointer to accounts-privacy-legal); lending time read-only, changed on the computer; the drive reminder setting gone
+- fleet-jobs F13 | changed: Each computer shows the work in progress on it | "lending until" kept; "marked as a warning when the work reported one" dropped
+- fleet-jobs F17 | no change here: the waiting and 14-day expiry are already this piece's one rule for requests to one computer
+- proxies-and-file-moves F3 | changed: Each computer's issues are listed worst first, each explained ; The server counts what each project holds on the NAS | "project folder moved" advice and the refused-count fix both: put it back, or rename or move its folder on the server, pointing to the hand-move heading; nothing says a project is moved through the product
+- proxies-and-file-moves F4 | changed: Files moved by hand on the NAS are reported as they are followed | the fixed 500 and the deletions consequence dropped; the serious problem names found and not followed, closes as a one-off error
+- releases-and-updates F2 | changed: Builds on offer are listed in a fixed order | served, then held, then the vendor's offer; each group shows current and newest, only older folded
+- releases-and-updates F3 | changed: Fleet-wide trouble is shown above the computers | "never checked is not stale" dropped; stale is never checked or over 7 days, by pointer
+- releases-and-updates F4 | changed: Fleet-wide trouble is shown above the computers | own vendor-feed line dropped, pointing to the Overview banner in releases-and-updates
+- resolve-on-the-editors-computer F2 | changed: Each computer's issues are listed worst first, each explained | the menu's words: "N on the wrong drive", "N other projects with clips only here"
+- sync-1 F1 | changed: An editor or an admin ticks a project for a computer | refusals point to sync-1's rules
+- sync-1 F2 | changed: Full sync or upload only, and switching between them ; An admin sets what each computer syncs in one grid ; What is waiting is listed per person, computer, project and direction | upload only sends every file (system clutter and temporary files excepted), not only video originals, per the settled ruling
+- sync-1 F3 | changed: Full sync or upload only, and switching between them ; An admin sets what each computer syncs in one grid ; What is waiting is listed per person, computer, project and direction | upload only brings down the empty folder structure and nothing else
+- sync-1 F4 | no change here: sync-1 drops its minute's grace; this piece's "takes effect at once" and undo within the hour stand
+- sync-1 F5 | no change here: home here; the sentence stands as written
+- sync-1 F6 | changed: An admin resumes a computer's stopped downloads (renamed from "An admin resumes a computer's stopped proxy download") ; Each computer's issues are listed worst first, each explained ; Fleet-wide trouble is shown above the computers ; Each computer shows the work in progress on it ; An admin asks one computer to do something and is told when it will happen ; An admin reads the history of who changed what ; Files waiting are on hold only for the computer's own reason | "downloads", not "proxy download", for the safety stop and its Resume
+- sync-2 F1 | changed: Each computer leads with one headline | as dashboard-1 F23
+- sync-2 F2 | changed: Each computer leads with one headline ; A computer that cannot sign in is still shown, and admins are told | uses "Not syncing: this computer cannot sign in to the server: <reason>"

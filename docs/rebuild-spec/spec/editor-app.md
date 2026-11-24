@@ -16,7 +16,7 @@ There is one program for Windows and one for macOS. It never opens a console win
 
 Anyone signed in to the dashboard can download the installer. The download is the full clean-install and repair package (never the bare app), named with its version. The page offering it is headed "INSTALLER", "for a new editor computer, or to repair one", and says: "The full clean-install and repair package for a new editor computer. Save it to that computer's own disk: running it off the shared drive locks the file for everyone, and the setup wizard refuses it." For each system it shows the version, the size, "published <ago>", a shortened checksum (the full one on pointing at it) and a download button. The one that matches the browser is marked "this computer" and is what a single click downloads: a Mac gets the macOS installer, Windows gets the Windows one, and any other browser (Linux, a browser that hides its system) is shown the choice instead of a guess. On a phone the page adds: "On a phone: this package cannot be run here. Download it and send it to the editor's own computer, Windows or macOS, and run it there."
 
-With nothing published for a system: "Nothing published for this platform yet." A link followed when nothing is published says "No <platform> installer has been published for this studio yet, so there is nothing to download. Ask whoever set this dashboard up for the installer.", with a line telling admins how to publish one (see Releases and updates: Making and publishing a release). A published installer whose file has gone says "installer file is missing on the server: re-publish it".
+With nothing published for a system: "Nothing published for this platform yet." A link followed when nothing is published says "No <platform> installer has been published for this studio yet, so there is nothing to download. Ask whoever set this dashboard up for the installer.", with a line telling admins to take the installer from the vendor (see Releases and updates: Customer sites and the vendor's release feed, "An admin brings one version from the vendor onto the site by hand"). An installer whose file has gone says that the installer file is missing on the server, and tells admins to take it from the vendor again in the same way.
 
 A new editor has no sign-in and is not yet on the studio's private network, so an admin can hand them the installer as a file or as a download link that works from anywhere without signing in. The installer carries a "start here" note: copy the installer to the Desktop first and run it from there; how to get past the operating system's warnings (see "The download page walks the editor past the operating system's warnings"); how Resolve is connected; how updates arrive; how to uninstall; and never to map a server share to a drive letter by hand.
 
@@ -89,9 +89,9 @@ Success shows "connected: the dashboard is answering", and only then is Next ena
 
 Before removing anything, set-up checks that it has what it needs to finish: the app it carries, the site's settings, a valid sign-in, and a usable place for the editor's copy of the projects. If it cannot finish, it stops with nothing removed and says why.
 
-- The editor's local project folder can never be a bare drive or volume root (a whole disk such as D:\ or a whole volume on a Mac); choosing one is refused with the reason.
+- A remote editor's local project folder can never be a bare drive or volume root (a whole disk such as D:\ or a whole volume on a Mac); choosing one is refused with the reason. A computer that works straight off the server uses the site's drive letter as its tree root. The full list of checks on the chosen folder is in Sync: Project folders on an editor's computer, "The editor picks the folder for the project tree when setting up".
 - When the chosen place has less than 200 GB free, set-up warns with the figure and lets the editor go on. It never refuses on space, and says nothing when space cannot be measured.
-- Before asking an editor to launch Resolve once, set-up checks that Resolve is installed; if it is not, it says that Resolve Studio must be installed first.
+- While the help for the editing program is on, set-up checks whether Resolve is installed. A missing Resolve never stops set-up: it becomes a note on the finish page (see Resolve on the editor's computer: Setting Resolve up: edition, scripting switch, preferences, "Installing the app sets Resolve up for the studio").
 - One set-up run uses one drive letter and one tree name: the site's, else the copy of the site's settings kept from the same dashboard if it is less than 30 days old, else it stops and says it could not get the studio's settings.
 
 ### The install shows every step live, can be retried, and gives up after 30 minutes
@@ -130,7 +130,7 @@ Set-up records the identity of the studio's server so that the computer refuses 
 
 ### The finish page says whether the computer is ready, and what happens next
 
-Set-up says done only after the app is installed and visibly running, the computer has reported in to the dashboard, its project drive answers and Resolve can be reached; otherwise it names the step that failed. An install on a fresh or a used computer ends with the app running, syncing without any hand edits once approved, and the computer waiting for the admin's approval.
+Set-up says done only after the app is installed and visibly running, the computer has reported in to the dashboard and its project drive answers; otherwise it names the step that failed. Resolve missing or never opened does not make the computer not ready: it is a note on the finish page (see Resolve on the editor's computer: Setting Resolve up: edition, scripting switch, preferences, "Installing the app sets Resolve up for the studio"), and with the help for the editing program off there is no such note. An install on a fresh or a used computer ends with the app running, syncing without any hand edits once approved, and the computer waiting for the admin's approval.
 
 When a remote editor's install finishes with no problems, the finish page is headed "DONE: WAITING FOR YOUR ADMIN TO APPROVE THIS COMPUTER". It says the app is installed and signed in as the editor, that nothing syncs until the admin approves this computer, and that the computer is already waiting on the dashboard for that approval with the editor's name and the computer's name (see Sync: Computers joining and changing). It shows the dashboard address, the support contact from the site's settings, where the install log is, and a copy-log button.
 
@@ -231,7 +231,7 @@ Once any computer is installed, the studio's drive letter and tree name are not 
 
 ### The app starts whenever the editor signs in to the computer, and set-up confirms it is running
 
-The app is installed for the editor's own account and set to start whenever they sign in to the computer. Every install leaves an entry in the Start menu (on a Mac, the app in the person's own programs folder) named after the product, which starts the installed app. Set-up starts the app at once and checks about 3 seconds later: "the app is running (check your tray)" (menu bar on a Mac), or a warning that it did not stay running, how to start it by hand and where its log is. Started from a remote session, the app is started in the editor's own desktop session, not in the remote one.
+The app is installed for the editor's own account and set to start whenever they sign in to the computer. If Windows Task Manager has switched the app's start at sign-in off, installing or updating the app switches it back on. Every install leaves an entry in the Start menu (on a Mac, the app in the person's own programs folder) named after the product, which starts the installed app. Set-up starts the app at once and checks about 3 seconds later: "the app is running (check your tray)" (menu bar on a Mac), or a warning that it did not stay running, how to start it by hand and where its log is. Started from a remote session, the app is started in the editor's own desktop session, not in the remote one.
 
 Everything the app needs keeps running while it runs, on Windows and on macOS alike: any long-running part of the app's work that stops is brought back (see "The app keeps its own work going when part of it stops"), and nothing the app needs dies with an update. A wrong or unreadable setting never stops the app starting: it starts, shows its icon and names the setting that is wrong (see "A damaged settings file never runs the computer on the wrong settings").
 
@@ -257,7 +257,7 @@ The relaunch limit holds exactly, even when the app cannot save its records (a f
 
 ### A version that cannot stay up is replaced by the version before
 
-When a newly installed version keeps failing to start, the computer goes back to the version it ran before, the failed version is never installed again by itself, and the editor and the admin are told: "⚠ The vX update kept crashing, so CC Sync went back to the previous version. Your admin has been told". If there is no earlier version to go back to, the app is left down and the admin is told that a person must step in. See Releases and updates: Rolling back and withdrawing a build.
+When a newly installed version keeps failing to start, the computer goes back to the version it ran before, the failed version is never installed again by itself, and the editor and the admin are told, in the sentence given in Releases and updates: Rolling back and withdrawing a build, "A new version that keeps crashing puts the previous one back by itself". If there is no earlier version to go back to, the crashing version is relaunched no more than three times an hour and then left down, and the admin is told that a person must step in.
 
 
 ### Every crash is written down on the computer and counted for the admin
@@ -282,14 +282,12 @@ What the editor and admin see:
 Nothing is brought back while the editor has paused syncing or an admin has stopped it for the whole studio, or while that cannot be told. Every automatic retry grows its wait to at most 30 minutes, never piles up duplicates, and starts again promptly once the other end answers. Long work that keeps making progress is never cut off by a fixed clock; it is stopped only when it has made no progress for a set time. Anything the app schedules keeps running on battery, and work that stops anyway shows on the computer and the dashboard.
 
 - On its own: brings back background work that stopped or stopped progressing.
-- By hand: the editor turns automatic recovery off in the app's settings; the status then says "... it is not being restarted: automatic restarts are switched off on this computer".
-- Setting: Bring stopped work back automatically. Does: lets the app restart its own syncing and background work when it stops. Default: on. Who: the editor on that computer. Applies to: a computer. Search words: restart, recover, stopped, background, watchdog.
 
 ### The editor can restart the app
 
 "Restart CC Sync" in the menu and "RESTART CC SYNC NOW" in the settings window restart the app in place. A restart is refused, and nothing is restarted, while work it would cut off is under way: "Can't restart while a CC Sync window is open or media is being copied in. Try again once it's done." If the restart fails, the editor is told and the app carries on running. No automatic restart or update ever starts during a copy, a relink or a sharing job.
 
-The app's link to Resolve is renewed on its own whenever Resolve quits and is started again; the editor never has to restart the app for it (see Resolve on the editor's computer: Connecting to Resolve's scripting: launch, stalls and death).
+The app's link to Resolve is renewed on its own whenever Resolve quits and is started again; in that ordinary case the editor never has to restart the app for it. When Resolve cannot be reached even so, the advice the editor is given, which may include restarting the app, is in Resolve on the editor's computer: Connecting to Resolve's scripting: launch, stalls and death, "What the editor is told when Resolve cannot be reached".
 
 - Who: the editor at the computer.
 - Ways in: the menu, the settings window.
@@ -304,11 +302,11 @@ When media is being copied into the synced folder, Quit first asks: "CC Sync is 
 
 ### A computer doing heavy work stays awake and warns before shutting down
 
-While the computer is doing heavy work for b-roll or music (analysing, or downloading the one-off analysis download it needs), it is kept from idle sleep, and a shutdown is met with "still indexing <b-roll|music> (N <clips|tracks> left)" or "still downloading what <b-roll|music> analysis needs". This holds only while work is really moving or moved recently, and never for longer than 8 hours in a row. For syncing, see Sync: Uploads that cannot resume, shutdown and sleep.
+While the computer is doing heavy work for b-roll or music (analysing, or downloading the one-off analysis download it needs), or is making proxies, it is kept from idle sleep, and a shutdown is met with "still indexing <b-roll|music> (N <clips|tracks> left)", "still downloading what <b-roll|music> analysis needs" or, while proxies are made, "still making video proxies so the rest of the team can see this footage (N clip(s) left, M at once)". This holds only while work is really moving or moved recently, and never for longer than 8 hours in a row; once the work stops the computer may sleep again (see Proxies and file moves: Making proxies on editors' computers, "A computer making proxies stays awake and says why it should not shut down"). For syncing, see Sync: Uploads that cannot resume, shutdown and sleep.
 
 - When the b-roll archive is off: nothing is said about b-roll work.
 - When music is off: nothing is said about music work.
-- Windows and macOS: a Mac laptop on battery sleeps when its lid is closed whatever the app does. When uploads are owed, the editor is warned that closing the lid on battery stops them, and the dashboard shows this as the reason the computer stopped.
+- Windows and macOS: the reason at shutdown while proxies are made is shown on Windows only. A Mac laptop on battery sleeps when its lid is closed whatever the app does. When uploads are owed, the editor is warned that closing the lid on battery stops them, and the dashboard shows this as the reason the computer stopped.
 
 ### On Windows the icon comes back by itself, and a computer without it keeps working
 
@@ -425,9 +423,17 @@ Every line answers when clicked: it either does what it says or says "not now" w
 
 ### Field backup opens from the menu
 
-While the camera cards part is on and field backup is on for this computer, "Field backup..." in the menu opens the field backup page (see The Footage Sorter and camera cards: Downloading originals and sharing folders). If that page cannot be opened, only it is lost; the rest of the app carries on.
+While the camera cards part is on and field backup is on for this computer, "Field backup..." in the menu opens the field backup page (see The Footage Sorter and camera cards: Copying a card, "An editor can copy a card with no network at all", and The sorter page, "The field backup page on an editor's computer keeps itself up to date"). Field backup is off on every computer until it is switched on for that computer. If that page cannot be opened, only it is lost; the rest of the app carries on.
 
 - When camera cards with the Footage Sorter is off: the line is absent.
+
+### The editor opens Timeline Cards in a window of its own from the app
+
+While Timeline Cards is on, a line in the app's menu opens the Timeline Cards editor in a window of its own, with no browser around it (see Timeline Cards: the editor: Opening episodes and keeping the editor running, "The app on the editor's computer opens the editor in a window of its own"). That window is part of the one app: it has no installer of its own, carries the app's version, and updates with the app, keeping its settings and everything kept on the computer.
+
+- Who: the editor at the computer.
+- Ways in: the app's menu.
+- When Timeline Cards is off: the line is absent and the window cannot be opened.
 
 #### Lessons
 
@@ -439,7 +445,7 @@ While the camera cards part is on and field backup is on for this computer, "Fie
 
 Every notification is the operating system's own message, shown at the app's icon and headed with the studio's brand (read at the moment it is shown) and the product's mark; on Windows the taskbar and notifications show the product, never the program file's own icon or an inner name. With no icon, notifications wait (see "On Windows the icon comes back by itself, and a computer without it keeps working").
 
-A notification too long for the system (over 250 characters) is shortened by cutting the middle, keeping its opening and its last sentence, so the closing instruction survives; its title is cut to 60 characters. On macOS, line breaks inside a notification become spaces. The same notification is repeated at most once every 30 minutes, and the first one is never held back. A sync drive pulled out gives one warning, and reminders follow only while uploads the server does not yet have are owed (see Sync: The sync drive).
+A notification too long for the system (over 250 characters) is shortened by cutting the middle, keeping its opening and its last sentence, so the closing instruction survives; its title is cut to 60 characters. On macOS, line breaks inside a notification become spaces. The same notification is repeated at most once every 30 minutes, and the first one is never held back. A sync drive pulled out gives one warning, and reminders follow only while uploads the server does not yet have are owed or while what is owed cannot be told; a drive that stays not answering gets its own repeating reminder (see Sync: The sync drive, "A drive pulled out with work owed is named and reminded about").
 
 Any download the app starts announces itself: a notification names it and says where to see its progress, and another says when it is ready.
 
@@ -480,15 +486,15 @@ It updates several times a second. Closing it leaves the work running, and it ca
 
 ### The editor sees each ticked project with what it is doing and why
 
-The app's window lists every project ticked for this computer (see Sync: What syncs where, "The app lists this computer's ticked projects and how each is doing"). Each row has the project's name, its mode, its state, the state of its uploads, its proxy downloads and its other project files, and a sentence:
+The app's window lists every project ticked for this computer (see Sync: What syncs where, "The app lists this computer's ticked projects and how each is doing"). Each row has the project's name, its mode, its state, the state of its uploads, its proxy downloads and its other project files, and a sentence. A project's state comes from one closed list: "up to date", "syncing now", "waiting its turn", "paused", "blocked" (with its reason), "there is a problem", "not synced to this computer" and "not known". The sentences:
 
 - blocked, with the reason, when a move made on the server could not be followed on this computer;
 - blocked, "Waiting for its filter list from the server. It starts by itself once that arrives." when the product cannot yet confirm which files in that project must never sync;
 - paused, "Sync is paused on this computer.";
-- syncing, "Syncing now (N of M).";
-- waiting, "Waiting its turn." for projects still due this round, and waiting with no sentence otherwise.
+- syncing now, "Syncing now (N of M).";
+- waiting its turn, "Waiting its turn." for projects still due this round, and no sentence otherwise.
 
-Only the project being synced shows live states; the others show "waiting" or "paused". Proxy downloads show "off" for an upload-only project or a computer that keeps no proxies; other project files show "off" for an upload-only project. The same window lists the projects waiting for their filter list, one sentence for each shared library or included folder that is not working (the only place in the app it is listed; the status sentence names it only when it is what holds syncing, and the dashboard shows it too), and the last few moves made on the server to this computer's projects with what happened to each (old and new place, when, and whether Resolve was relinked; see Proxies and file moves: Following a move on an editor's computer). An empty plan says to tick projects on the dashboard.
+Live progress figures show only on the project being synced, but any project can show "up to date", "blocked" or "there is a problem". Proxy downloads show "off" for an upload-only project or a computer that keeps no proxies; other project files show "off" for an upload-only project. The same window lists the projects waiting for their filter list, one sentence for each shared library or included folder that is not working (the only place in the app it is listed; the status sentence names it only when it is what holds syncing, and the dashboard shows it too), and the last few moves made on the server to this computer's projects with what happened to each (old and new place, when, and whether Resolve was relinked; see Proxies and file moves: Following a move on an editor's computer). It also shows the one line saying whether it is safe to close or unplug this computer, worked out for the signed-in person and naming each of their computers that still owes uploads, in the same sentences as the dashboard (see Sync: What is owed, "Every editor is told whether it is safe to shut down or unplug their computer"). An empty plan says to tick projects on the dashboard.
 
 
 ### When the project open in Resolve has no home on the server, the editor is asked once
@@ -508,15 +514,15 @@ When the project open in Resolve has no home on the server, the editor is asked 
 
 Shortly after starting, the app shows one of:
 
-- "NOT SYNCING: CC Sync isn't fully set up on this computer. <where to copy diagnostics>." when a setting is missing or wrong;
-- otherwise, when the licence has not been accepted, "NOT SYNCING: <the licence sentence>", and the licence is offered (see "Nothing syncs until the licence is accepted, and the app asks within a minute");
+- "Sync: not set up yet", the app's one status sentence for this (see Sync: Saying truthfully what the sync is doing, "The app's menu says in one phrase what syncing is doing now"), when a setting is missing or wrong, with the longer explanation in the settings window's WHAT IS NOT SET UP list (see "A computer that is not fully set up names what is missing");
+- the same "Sync: not set up yet" when the licence has never been accepted on this computer, and the licence is offered (see "Nothing syncs until the licence is accepted, and the app asks within a minute");
 - on the first start after an update, about three seconds in, "Update complete. Now running v<version>."
 
 If the tray or menu-bar icon cannot be shown, the app still runs and syncs without it.
 
 ### A computer that is not fully set up names what is missing
 
-The worst set-up problem is shown as one sentence saying what is missing and what to set. In the settings window, "WHAT IS NOT SET UP" lists up to three problems, worst first. While a problem stands, the sync status reads "NOT SYNCING: this computer isn't fully set up: <first problem, or 'see the log'>", and the menu carries a greyed line "⚠ NOT SET UP: nothing will sync (Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN)".
+The worst set-up problem is shown as one sentence saying what is missing and what to set. In the settings window, "WHAT IS NOT SET UP" lists up to three problems, worst first. While a problem stands, the sync status reads "Sync: not set up yet" (the one status sentence, see Sync: Saying truthfully what the sync is doing, "The app's menu says in one phrase what syncing is doing now"), the WHAT IS NOT SET UP list carries the longer explanation, and the menu carries a greyed line "⚠ NOT SET UP: nothing will sync (Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN)".
 
 The app checks its settings at start and whenever they are saved, and says which problems stop all syncing and which only switch one feature off.
 
@@ -558,7 +564,7 @@ The raw error goes only to the log and the diagnostics. The editor sees:
 | a project folder was deleted while still ticked | "A project folder was deleted on this computer while still ticked. Untick it on the dashboard, or use Tray > Settings > REMOVE '<project>' FROM THIS COMPUTER." |
 | a transfer stopped moving | "This transfer stopped moving and was restarted. If it keeps happening, check the drive is connected." |
 | the disk is full | "Your disk is full. Free up space and it will resume." |
-| the server refused this computer's sign-in | "The server rejected this computer's login. <where to copy diagnostics>." |
+| the server refused this computer's sign-in | "⚠ The server rejected this computer's sign-in, so your admin cannot see whether you are syncing.", with SIGN IN AGAIN… (see "A sign-in never expires on its own, and a refused one is said plainly") |
 | the server cannot be reached | "Can't reach the server.", with an instruction to check the computer's connection to the studio's network |
 | anything else, or no error at all | "Something went wrong. <where to copy diagnostics>." |
 
@@ -572,7 +578,7 @@ The computer remembers across restarts when a report last got through and how th
 - never accepted: "⚠ The dashboard has never accepted a report from this computer. Your work may not be visible to your admin. Copy diagnostics for them";
 - otherwise: "⚠ The dashboard has not accepted a report for <duration>, so your admin cannot see whether this computer is syncing".
 
-When this computer's clock is 60 seconds or more off the server's: "⚠ This computer's clock is <how far ahead or behind> the server's. Sync will not work correctly until it is fixed" (see Sync: Clocks and file age).
+When this computer's clock is more than 60 seconds off the server's: "This computer's clock is <N ahead of/behind> the server's. Turn on setting the time automatically." (see Sync: Clocks and file age, "Each computer's clock is measured against the server's and a gap is shown").
 
 ### The menu carries a line for each piece of work under way
 
@@ -583,9 +589,13 @@ Each line is present only while it applies:
 - "Waiting for you to finish signing in in the browser (240 s left)" during a YouTube sign-in (no countdown when it is unknown);
 - "CC Sync is <transcribing|converting|running a job> for the studio while you work because <reason>", only when an admin has sent a piece of work to this computer whatever it is doing (see Work shared out across the computers: Choosing who runs what);
 - a warning that this computer could not get what YouTube downloads need to process video;
-- "N b-roll clips could not be indexed: <first file name> (<reason>), and M more" (or "... could not be indexed. See the log" when the reasons are unknown).
+- while this computer analyses a b-roll drop, one line in clips: a warning for the drop first, when there is one (for example the graphics card refusing for lack of memory); "Downloading what b-roll analysis needs… P %"; "Indexing b-roll… D of T (stops when you're back)" (without the tail when started with START NOW); "B-roll indexing waits until you're away: N clips queued"; "B-roll indexing paused: N clips left";
+- "N b-roll clips could not be indexed: <first file name> (<reason>), and M more" (or "... could not be indexed. See the log" when the reasons are unknown), with up to 20 failed clip names and their reasons in the settings window;
+- while this computer analyses music, one line in tracks: "Downloading what music analysis needs… P %"; "Indexing music… D of T (stops when you're back)" (without the tail when started now); "Music indexing waits until you're away: N tracks queued"; "Music indexing paused: N tracks left"; and the music failure line, which says in tracks what the b-roll failure line says in clips.
 
-- When YouTube downloads are off: no YouTube line. When the b-roll archive is off: no b-roll line.
+What a b-roll or music drop is waiting for, and what each button below answers, are worded in The b-roll archive: Describing and indexing clips, "The computer doing the work shows what describing is doing, and the person at it can pause, resume, start now or cancel", and Music: Imports across computers, "An editor sees music analysis on their computer while it is doing it". The buttons that act on that work are in the settings window, while a drop exists: "RESUME B-ROLL INDEXING" when paused, otherwise "INDEX B-ROLL NOW (don't wait until I'm away)" (only while waiting) and "PAUSE B-ROLL INDEXING", then "SHOW B-ROLL INDEXING PROGRESS" and "CANCEL THE B-ROLL BATCH…"; and for music "RESUME MUSIC INDEXING" when paused, otherwise "INDEX MUSIC NOW (don't wait until I'm away)" (only while waiting) and "PAUSE MUSIC INDEXING", then "SHOW MUSIC INDEXING PROGRESS" and "CANCEL THIS MUSIC DROP…".
+
+- When YouTube downloads are off: no YouTube line. When the b-roll archive is off: no b-roll line and no b-roll button. When music is off: no music line and no music button.
 
 ### The settings window ranks its warnings, merges repeats and shows at most six
 
@@ -600,7 +610,7 @@ Identical sentences are merged into one with " (xN)". At most 6 show, then "and 
 - "⚠ N clips skipped for now and still not syncing - Settings > SCAN WHOLE PROJECT offers them again" (clips the editor put off for 30 minutes; see Resolve on the editor's computer: Fixing media: copying in, rehearsals and undo);
 - "⚠ A background task failed on this computer (N reports saved). Copy diagnostics for your admin";
 - after 8 failed attempts to install an update: "⚠ CC Sync could not install the update to vX N times, so it has stopped trying. <where to copy diagnostics>";
-- "⚠ The vX update kept crashing, so CC Sync went back to the previous version. Your admin has been told".
+- the warning that an update kept crashing and CC Sync went back to the previous version (its sentence is in Releases and updates: Rolling back and withdrawing a build, "A new version that keeps crashing puts the previous one back by itself").
 
 When anything is wrong, the help and diagnostics are in reach at once, without scrolling (see "The settings window gathers everything about this computer and keeps itself current").
 
@@ -629,6 +639,8 @@ The description covers, each part saying so in its own line when it cannot be re
 - the last report the dashboard accepted ("NEVER (nothing this computer has sent was accepted)"), failures in a row, and the clock difference with the server ("+Ns (this computer is AHEAD/BEHIND)" or "not measured yet");
 - recent crashes and recent recoveries of the app's own work;
 - the last 40 lines of the log.
+
+When this computer or the studio withholds a kind of information, the description follows the rule in Accounts, privacy and the legal paperwork: What the product records about a person, "Diagnostics hide what a computer withholds": with the Resolve project, the file list or the bins withheld, every project name reads "<project>" and every path in the studio's folders "<root>/<file>"; a withheld idle time is left out; and the description ends with a note naming what was withheld.
 
 The same description also reaches the dashboard by itself when a kind of syncing newly falls into an error, and when an admin asks the computer for it (see The dashboard: Reports from computers). An admin's request counts as answered only once it has succeeded, and is tried again until then.
 
@@ -678,19 +690,17 @@ At set-up the dashboard address is required ("ask your admin for it", with an ex
 
 Nothing syncs and no report naming the person is sent until the editor signs in, at set-up or from the app. Signing in sends the username and password, with the app's version, the system, the processor kind and the computer's name (cut to 48 characters), and waits up to 15 seconds, never following a redirect. With no dashboard address set it is refused at once. The same limits on attempts apply as on the dashboard.
 
-On success the computer is the editor's: the sign-in is kept on the computer, readable only by their account; syncing starts if nothing else holds it; any update the dashboard offers this computer, or the reason one is held back, comes with the answer (see Releases and updates: Offering an update to a computer); and, at set-up, the site's settings (tree name, drive letter, brand, which parts are on) are fetched and a copy kept, a copy no older than 30 days from the same dashboard being used where a value is needed and the fetch fails. Each computer has its own sign-in, labelled with the computer's name; signing in again on the same computer replaces that computer's, and a person may have at most 16 computers signed in, the least recently used one beyond that being signed out (see Accounts, privacy and the legal paperwork: How a computer proves who it belongs to).
+On success the computer is the editor's: the sign-in is kept on the computer, readable only by their account; syncing starts if nothing else holds it; any update the dashboard offers this computer, or the reason one is held back, comes with the answer (see Releases and updates: Offering an update to a computer); and, at set-up, the site's settings (tree name, drive letter, brand, which parts are on) are fetched and a copy kept, a copy no older than 30 days from the same dashboard being used where a value is needed and the fetch fails. Each computer has its own sign-in, labelled with the computer's name; signing in again on the same computer replaces that computer's, and signing in on a new computer never takes anything away from the person's other computers (see Accounts, privacy and the legal paperwork: How a computer proves who it belongs to).
 
-On failure the editor sees the server's own sentence and what to do next, for every kind of refusal, and the password is cleared:
+On failure the editor sees the server's own sentence and what to do next, for every kind of refusal, and the password is cleared. The sentences the server gives are those of the dashboard's own sign-in (see Accounts, privacy and the legal paperwork: Passwords, sessions and failed sign-ins, "What a refused sign-in says"):
 
 | Refusal | What the editor is told |
 |---|---|
-| wrong username or password | "invalid username or password" |
-| the account is not one of this studio's | "'<name>' is not an account on this dashboard - ask an admin to create it" |
+| wrong password, a name that is not an account here, or a person who is suspended or removed | "sign-in refused - check your username and password, then try again" (it never says which half was wrong, nor that a name is not an account) |
 | the account is not allowed to sync | "'<name>' is not an editor on this dashboard - ask an admin to give the account the editor role" |
-| the person is removed, suspended or disabled | the sentence for that case (see Accounts, privacy and the legal paperwork: Suspending, disabling and removing a person) |
 | membership cannot be checked right now | "cannot confirm your account right now: try again shortly" |
-| too many attempts | "too many sign-in attempts - try again shortly" |
-| sign-in not available on the server right now | "sign-in is not available on this server right now - try again shortly" |
+| too many attempts | "Too many sign-in attempts. Try again in a minute." or "Too many sign-in attempts. Try again in N minutes." |
+| sign-in not set up on the server | "login not configured on the server" |
 | the address is plain http on the internet | "Not sent: the dashboard address is plain http on the internet. Ask your admin for its https address." |
 | a redirect | the dashboard answered with a redirect: ask your admin for its direct address |
 | a reply that cannot be used (often a wrong clock) | "The server's sign-in reply couldn't be used. If this keeps happening, check this computer's clock is correct, then copy diagnostics for your admin (Tray > Settings > HELP)." |
@@ -741,7 +751,7 @@ The settings window then shows "⚠ CC Sync cannot read this computer's id file,
 
 ### Nothing syncs until the licence is accepted, and the app asks within a minute
 
-Nothing syncs on a computer until someone there has accepted the current licence (see Accounts, privacy and the legal paperwork: The licence a person accepts). The app offers it within a minute of starting, offers it again until it has been answered, counts closing it as unanswered, starts syncing as soon as it is accepted, and the dashboard names the licence as the reason the computer is not syncing. The menu carries "► Accept the licence agreement to start syncing…" while it holds syncing.
+Nothing syncs on a computer where no licence has ever been accepted until someone there accepts the current one (see Accounts, privacy and the legal paperwork: The licence a person accepts). The app offers it within a minute of starting, offers it again until it has been answered, counts closing it as unanswered, starts syncing as soon as it is accepted, and the dashboard names the licence as the reason the computer is not syncing. The menu carries "► Accept the licence agreement to start syncing…" while it holds syncing. When a newer version of the licence is published, a computer that accepted an earlier one is asked for the new one in the same way while its syncing goes on (see Accounts, privacy and the legal paperwork: The licence a person accepts, "A new licence version asks everyone again without stopping their sync").
 
 ### Switching a computer between remote and wired is confirmed first
 
@@ -773,11 +783,12 @@ Each computer holds its own settings, set at install and changeable on the compu
 
 - the editor's name, used to suggest where media the editor adds should go;
 - the computer's sync folder (required);
+- whether this is a remote or a wired computer, set only on the computer itself and never from the dashboard (see Sync: Wired or remote);
 - the drive letter Resolve's clip paths use, from the site's settings (P: by default, also on a Mac), used to spot clips with the wrong drive;
 - the folder inside the tree suggested for media the editor adds;
 - where each library is on this computer (below).
 
-The settings of the app's own working are below as setting lines. The other parts' settings on this computer are described with the part they belong to: wired or remote, keeping proxies, keeping the computer awake, the warning at shutdown, the recovery folder's size, the free space kept on the sync drive and the time for each project, each changed by the editor in this window for their own computer or by an admin from the dashboard, and the download safety limits, changed only by an admin (see Sync); pop-ups about clips outside the tree and how long a shown clip stays quiet, the warning when Resolve's scripting stops answering, attaching synced proxies, projects to leave alone, the shared LUT and stills links and grading from the server's originals (see Resolve on the editor's computer); analysing b-roll and music on this computer, the wait before work while the editor is away and whether it waits for Resolve to close, the free-space floor, where dropped files wait and how long finished drops are kept (see The b-roll archive, Music, and Work shared out across the computers); whether this computer takes shared work (see Work shared out across the computers: What a computer can honestly offer).
+The settings of the app's own working are below as setting lines. The other parts' settings on this computer are described with the part they belong to: keeping proxies, keeping the computer awake, the warning at shutdown, the recovery folder's size, the free space kept on the sync drive and the time for each project, each changed by the editor in this window for their own computer or by an admin from the dashboard, and the download safety limits, changed only by an admin (see Sync); pop-ups about clips outside the tree and how long a shown clip stays quiet, the warning when Resolve's scripting stops answering, attaching synced proxies, projects to leave alone, the shared LUT and stills links and grading from the server's originals (see Resolve on the editor's computer); analysing b-roll and music on this computer, the wait before work while the editor is away and whether it waits for Resolve to close, the free-space floor (see The b-roll archive, Music, and Work shared out across the computers); whether this computer takes shared work (see Work shared out across the computers: What a computer can honestly offer).
 
 The b-roll archive is found on this computer at "Assets/B-roll Archive" inside the computer's tree, music at "Assets/Music" and projects at "Projects", unless a person sets another folder on this computer; with no tree set there is no b-roll default. On a Mac a library with no folder set is looked for as a mounted network volume of that name, or that name followed by -1 or -2 (macOS adds these when a volume of the same name is already mounted). A change takes effect without restarting the app. Setting the b-roll archive to a folder of one's own switches off fetching missing clips when sending to Resolve (see The b-roll archive: Sending a clip to Resolve).
 
@@ -787,7 +798,7 @@ The b-roll archive is found on this computer at "Assets/B-roll Archive" inside t
 
 ### A value set on the computer always wins
 
-Each setting is its built-in default, then what the computer's role implies, then what the studio's site settings provide, then what is set on the computer. Anything set on the computer itself wins. A blank or zero value from the site never switches anything off on a computer.
+Each setting is its built-in default, then what the computer's role implies, then what the studio's site settings provide, then what is set on the computer. Anything set on the computer itself wins, with one exception: a limit only the site may set is never overridden from the computer. Above all, a kind of reporting the studio has switched off stays off on every computer, shows as off and cannot be switched back on there (see Accounts, privacy and the legal paperwork: What the product records about a person). A blank or zero value from the site never switches anything off on a computer.
 
 ### A setting changed anywhere changes only that setting, and an update never resets one
 
@@ -802,6 +813,8 @@ A change to the site's settings (a part switched on or off, the studio's name or
 ### The product's pages reach Resolve on the editor's computer through the app, and only the studio's pages may
 
 The b-roll, music and YouTube pages are served by the server, and Resolve can be driven only on the computer it runs on, so when an editor presses send to Resolve on one of those pages, their own browser hands the request to the app on their own computer. Only pages from the studio's own dashboard address may do this; an admin can add further exact web addresses that may. The dashboard address set in the site's settings must be exactly the address editors type in their browsers, and the site's settings say so; a refused request names both the address it came from and the addresses allowed. Nothing a page sends ever runs as a script on the computer, and repeated status checks from a page cause only a bounded amount of work.
+
+The app also answers at a local status address that any browser on that computer can open in a tab. It says whether the app is running and can take requests from the product's pages, so when a page cannot reach the app, the editor can tell whether the app or the browser is to blame: if the status address answers that all is well, the browser is blocking the page.
 
 If another program on the computer is in the way, sending to Resolve is simply absent: the rest of the app, syncing above all, carries on, and the problem is shown in the app and reported (see "Admins are told when the product's pages cannot reach the app on a computer"). Something unexpected inside a request is answered with "CC Sync failed to handle that request: see its log"; a request is never left unanswered.
 

@@ -13,7 +13,7 @@ The server runs on exactly two kinds of NAS, both fully supported from the same 
 
 The kind of NAS is chosen once (set-up offers the two; TrueNAS is the default). A blank or any other value is refused with "unknown NAS kind '<x>': allowed values: truenas, synology"; the server never guesses or falls back to TrueNAS. A step that one kind of NAS does not allow to be done from outside is refused with a message telling the admin what to do on the NAS's own screens instead.
 
-Everything that needs to act on the NAS itself (editor accounts, access groups, snapshot checks, recovery commands, information about the NAS) works once the server has been given its way in to the NAS (see "The server's way in to the NAS"); until then those features say they are not set up, and everything else works.
+Everything that needs to act on the NAS itself (editor accounts, access groups, snapshot checks, recovery commands, information about the NAS) works once the server has been given its way in to the NAS (see "Set-up task: Connect to your NAS"); until then those features say they are not set up, and everything else works.
 
 The NAS's version and name are shown to the admin wherever the NAS reports them.
 
@@ -36,7 +36,7 @@ Where the tree's shared folder does not yet exist on a Synology, set-up creates 
 
 | | TrueNAS | Synology (DSM) |
 |---|---|---|
-| What the server signs in to the NAS with | a limited access key for a dedicated account (preferred), or the admin password | a dedicated admin account's password; DSM has no access keys |
+| What the server signs in to the NAS with | a limited access key for a dedicated account, never the admin password | a dedicated admin account's password; DSM has no access keys |
 | Accounts that count as system accounts | numbered below 1000 | numbered below 1024 or from 170,000 up; built-in names admin, guest, anonymous, root, system, http; names starting "sc-" (package accounts) |
 | Usernames | matched exactly | matched without regard to letter case |
 | An editor's home folder | made by the server under the site's homes folder and made private | made by DSM; checked, never changed |
@@ -73,11 +73,13 @@ What the person installing is told while the NAS installs it:
 
 On a fresh install every part of the server starts once and stays up, every folder it writes exists and is writable by the account it runs as, and every part of it holds the same shared secrets, so editors connect without any repair. A fresh install done as the published guide says reaches, in the browser, the making of the first admin, sign-in, working folder sync and reachability over the private network, and every required set-up check can pass. Following only the published guide, a newcomer on a clean NAS reaches first sync, first update and first rollback with one Windows and one Mac editor.
 
-The server ships with the licence agreement, the third-party licence texts, the guide to how the product works and the guide to setting up an editor's computer. A guide that is missing from a build does not stop anything: the help says that guide is not installed. A build with no licence agreement in it cannot complete set-up: the licence step says no licence agreement is included and cannot be accepted.
+The server ships with the licence agreement, the third-party licence texts, the guide to how the product works and the guide to setting up an editor's computer. A guide that is missing from a build does not stop anything: the help says that guide is not installed. What set-up's licence task shows for a build with no licence agreement in it is in Accounts, privacy and the legal paperwork: The licence a person accepts, "The server's set-up asks the admin to accept the licence".
 
 Installing again over a server that is already there and running leaves the running server untouched. Whether a server is already there is answered "installed", "not installed" or "could not tell" with the NAS's own reason; "could not tell" is never taken as "not installed", and the person is never advised to delete a server that may be running.
 
 A first install ends by showing where to open the dashboard: its private address on the studio's private network.
+
+What the person installing is told about later updates, and how an installation is renewed from each kind of NAS's app screen when an update needs it, keeping every setting, is in Releases and updates: The server updating itself, "Some server updates need the installation renewed on the NAS".
 
 - Who: the person installing the server, on the NAS.
 
@@ -92,7 +94,7 @@ On first start, and again whenever it starts, the server makes sure of these, cr
 
 Every folder the server creates, parent folders included, gets the site's owner, group and permissions, writable by the server and by editors over the share:
 
-- **On TrueNAS** everything in the tree belongs to the editors' group (or, where each project has its own people, to that project's group), every folder makes new files inside it take the same group, and the folders above each project are protected so that one editor cannot delete another editor's project folder. If the storage area forbids those permission changes, the admin is told that the protection or the group inheritance is missing and why it was blocked; the ownership is still correct.
+- **On TrueNAS** everything in the tree belongs to the editors' group, and each project's folder to that project's group, every folder makes new files inside it take the same group, and the folders above each project are protected so that one editor cannot delete another editor's project folder. If the storage area forbids those permission changes, the admin is told that the protection or the group inheritance is missing and why it was blocked; the ownership is still correct.
 - **On Synology** permissions come only from Synology's inherited access rules and the server never changes a mode or an owner. Set-up checks the tree carries an inherited rule letting the editors' group read, write and delete; if it is missing, it first has Synology re-apply inheritance, then adds the rule itself, and reports which it did. A folder that has lost its Synology access rules is reported with the warning that new files there inherit nothing and land writable by everyone (Synology's file transfer creates files with no restriction), and the repair: re-apply Synology's inherited permissions to it, never change its mode, which deletes the Synology access list. On Synology the folders above each project are not protected against deletion by other editors.
 
 The server acts on the NAS as a real NAS account and group, read from the NAS itself, never a fixed account number (the two kinds of NAS number accounts differently). The account and its group are always set together or not at all; a half-set pair is warned about at start. At every start, if that account does not own the server's data folder, the admin is warned, naming the account and the owner it found, where each came from, and the fix: give the folder to that account. No warning ever advises running the server with administrator rights.
@@ -123,7 +125,7 @@ Each task offers:
 
 A check or action that breaks shows the task as failed, "internal error: <detail>", never an error page. The state of every task (its status, detail, time and whether it was skipped) is kept, so a server restarted mid-way resumes where the admin was. "Stuck, or something here looks wrong? Send it to <support contact>."
 
-The tasks, in order: the licence; your admin account; your studio; storage check; syncing on the server; done (these are all required); then the optional ones: reaching the dashboard over the private network, the server's way in to the NAS, protect your data, editors, software for editors, signing key for updates, who should we tell. (The server's own secrets need no task: the server makes them.) Every value set-up checks can be entered in set-up itself, and every finding's next action can be done from the product's pages, never by editing a file or reinstalling. Set-up never requires a task the admin cannot complete.
+The tasks, in order: the licence; your admin account; your studio; storage check; syncing on the server; done (these are all required); then the optional ones: Connect to your private network, Connect to your NAS, protect your data, editors, software for editors, signing key for updates, who should we tell. (The server's own secrets need no task: the server makes them.) Every value set-up checks can be entered in set-up itself, and every finding's next action can be done from the product's pages, never by editing a file or reinstalling. Set-up never requires a task the admin cannot complete.
 
 Until every required task is done, an admin who signs in without asking for a particular page lands on set-up instead of the overview, and the menu carries a set-up mark. Never an editor: an editor lands on the overview. If the server cannot tell whether set-up is finished, the normal landing is used. The same task list stays available to an admin in settings afterwards.
 
@@ -133,30 +135,31 @@ Until every required task is done, an admin who signs in without asking for a pa
 
 ### Before any account exists anyone may start set-up, and after that only an admin
 
-With the dashboard's own accounts and no account yet, anyone who opens set-up may read the task list, read and accept the licence, and create the first admin, which signs that browser in at once. Creating the first admin is refused when the studio does not use the dashboard's own accounts, when an admin already exists ("an admin account already exists"; two people submitting at once cannot both succeed), or with the account rule that failed. Any other task answers "create the admin account first (step 2), then this step opens". Creating the first admin is recorded with the visitor's address.
+With no account yet, anyone who opens set-up may read the task list, read the licence, and create the first admin, which signs that browser in at once. Creating the first admin is refused when an admin already exists ("an admin account already exists"; two people submitting at once cannot both succeed), when the name given is the NAS's own administrator account, ignoring capitals ("use a separate account"), or with the account rule that failed. Any other task, accepting the licence included, answers "create the admin account first (step 2), then this step opens". Creating the first admin is recorded with the visitor's address.
 
-Once any account exists, or when the studio signs in by NAS account or single sign-on, every part of set-up needs a signed-in admin ("log in first", "admins only"), and set-up never offers to create an account.
+Once any account exists, every part of set-up needs a signed-in admin ("log in first", "admins only"), and set-up never offers to create an account.
 
 - Who: anyone, until the first account exists; then an admin.
 
 ### Set-up task: the licence
 
-The licence text is shown, with "I have read and accept this agreement." The accept button works only once that box is ticked. "Accepting is recorded with the agreement's version." Accepted, the task shows "accepted (<who and when>)". The licence counts as accepted only when someone accepted the licence that is now present: a new version of the agreement puts the task back to "to do". With no licence agreement in the build the task shows "(no licence agreement is included in this build)" and cannot be accepted. See Accounts, privacy and the legal paperwork: The licence a person accepts.
+The first task on the list, and a required one: an admin reads and accepts the licence agreement. Its text, states and wording are in Accounts, privacy and the legal paperwork: The licence a person accepts, "The server's set-up asks the admin to accept the licence".
 
-- Who: anyone before the first account exists; then an admin.
+- Who: an admin.
 
 ### Set-up task: your admin account
 
 "Create your admin account" (required): "A local account for you. No NAS credential is involved."
 
-- With the dashboard's own accounts, a name and password form: "Makes the first admin account and signs you in with it." The task is done ("admin account: <names>") once any account exists, else "no admin account yet". The form is replaced by "an admin account already exists" or "could not check: <reason>" as the case is.
-- With sign-in by NAS account or by single sign-on, the task carries a box for the names of the accounts that may administer the dashboard, and is done as "admins are NAS accounts (<kind of NAS>): <names>" or "admins are your identity provider: <names>". With none it asks for them, adding under single sign-on that the identity provider's own admin mark is only noted at sign-in and makes nobody an admin. Each name is 1 to 64 letters, digits, ".", "_", "@", "\" or "-", several separated by commas; at least one is required ("enter at least one account name").
+- A name and password form: "Makes the first admin account and signs you in with it." The task is done ("admin account: <names>") once any account exists, else "no admin account yet". The form is replaced by "an admin account already exists" or "could not check: <reason>" as the case is.
+- The task also carries the list of the accounts that are always admins (see Accounts, privacy and the legal paperwork: Who may sign in, "The admins are named at install, and are never the NAS's own administrator"), several names separated by commas; the first admin's name starts it. A list that names nobody is refused ("name an editor account, not the NAS administrator"), and so is one that names the NAS's own administrator account, ignoring capitals ("use a separate account").
+- Every name, in the form and in the list, has the one shape of a sign-in name (see Accounts, privacy and the legal paperwork: Who may sign in, "A sign-in name has one shape, and a name accepted anywhere works everywhere").
 
 - Who: anyone before the first account exists; then an admin.
 
 ### Set-up task: your studio
 
-"Your studio" (required): "Name, tree name, drive letter and the project layout." The form asks for the studio's name, a short name (defaulting to the studio's name), the name of the tree ("the top folder"), the drive letter editors see the tree on ("on Windows", for example P:\), and the layout of a project. When signed in, the form is filled from the present settings, never over text being typed. Only changed, non-blank fields are saved: "nothing changed" or "saved". Done as "<studio name> / <tree name>" once all of these have values, otherwise "not set: <which>".
+"Your studio" (required): "Name, tree name, drive letter and the project layout." The form asks for the studio's name, a short name (defaulting to the studio's name), the name of the tree ("the top folder"), the drive letter editors see the tree on ("on Windows", for example P:\), the layout of a project, and the studio's time zone, which every schedule follows (see The server: installing it and keeping it running: NAS speed, load and clock, "Schedules run on the studio's own clock"). When signed in, the form is filled from the present settings, never over text being typed. Only changed, non-blank fields are saved: "nothing changed" or "saved". Done as "<studio name> / <tree name>" once all of these have values, otherwise "not set: <which>".
 
 The project layout is learned from the studio's own projects: the admin points set-up at one or more sample project folders, and set-up takes from them where projects sit in the tree (how many folder levels, for example year, then series, then project) and which folders every new project starts with. No folder name of this product's is required anywhere; the admin can then edit what was learned. The values are the same settings described under "Settings and secrets".
 
@@ -179,9 +182,9 @@ The project layout is learned from the studio's own projects: the admin points s
 
 - Who: an admin.
 
-### Set-up task: reaching the dashboard over the private network
+### Set-up task: Connect to your private network
 
-A new site starts with every secure default on and serves the dashboard only over a secure address on the studio's private network: no public port, no relay, except links deliberately made public (see The b-roll archive: Client folders and links). This task turns done only when the dashboard really answers over the private network at a valid secure address, as seen from outside the server; answering only to the server itself is not enough. Every editor's computer is given an address it can actually reach, never assumed to be the address on the studio's own network. See The server: installing it and keeping it running: Connections and credentials.
+A new site starts with every secure default on and serves the dashboard only over a secure address on the studio's private network: no public port, no relay, except links deliberately made public (see The b-roll archive: Client folders and links). The optional task "Connect to your private network" publishes the dashboard there and checks it; its button, its states and when it turns done are in The server: installing it and keeping it running: Connections and credentials, "The server joins the private network and publishes the dashboard there with https". Every editor's computer is given an address it can actually reach, never assumed to be the address on the studio's own network.
 
 - Who: an admin.
 
@@ -197,27 +200,26 @@ A new site starts with every secure default on and serves the dashboard only ove
 
 - Who: an admin.
 
-### The server's way in to the NAS
+### Set-up task: Connect to your NAS
 
-To manage editors' accounts, groups, permissions and snapshots, the server needs a way in to the NAS, entered in set-up's "the server's way in to the NAS" task and never shown back:
+To manage editors' accounts, groups, permissions and snapshots, the server needs a way in to the NAS, entered in set-up's "Connect to your NAS" task and never shown back (the task's form is in The server: installing it and keeping it running: Connections and credentials, "The admin connects the server to the NAS once in the set-up wizard"):
 
-- On TrueNAS, a limited access key for a dedicated account (preferred), or the NAS administrator's password; the two are never sent together. The server signs in as the key's own account, and a refused sign-in names the account that was presented. TrueNAS revokes an access key that is ever used over an unencrypted connection, so the server never talks to the NAS unencrypted. Each request waits up to 30 seconds.
-- On Synology, the password of a dedicated administrator account; a blank one is refused. The server signs in under a session of its own, so it never signs the admin's own browser out of DSM. Sign-in failures are said in words: wrong account or password; account disabled; no permission to sign in; a two-step code is needed ("give the dashboard an account with two-step sign-in off"); wrong two-step code. An expired session is retried once; any other DSM error is given with its number and a plain explanation (for example no privilege, no such user, user already exists, password policy, no such group). Each request waits up to 15 seconds.
-- The NAS's certificate is checked: by default the first one seen is remembered and a different one later refused; the admin can instead pin it or have it checked against the usual authorities. The NAS's remote-shell identity is remembered the same way, and a different one, or a damaged record of it, is refused.
+- On TrueNAS, a limited access key for a dedicated account, and only that. The server signs in as the key's own account, and a refused sign-in names the account that was presented. TrueNAS revokes an access key that is ever used over an unencrypted connection, so the server never talks to the NAS unencrypted. Each request waits up to 30 seconds.
+- On Synology, the password of a dedicated administrator account; a blank one is refused. The server signs in under a session of its own, so it never signs the admin's own browser out of DSM. What each sign-in failure and DSM error is said as, and the retry of an expired session, are in The server: installing it and keeping it running: Connections and credentials, "A Synology must run DSM 7 with every service the product needs". Each request waits up to 15 seconds.
+- Every identity the NAS presents is checked before anything is sent to it (see The server: installing it and keeping it running: Connections and credentials, "The product makes sure it is talking to the studio's own NAS", and its setting "the NAS's identity").
 
-The credential is stored exactly as entered, whatever characters it holds. See The server: installing it and keeping it running: Connections and credentials.
+The credential is stored exactly as entered, whatever characters it holds.
 
 - Who: an admin.
-- Setting: Trusting the NAS's certificate. Does: decides whether the server remembers the NAS's first certificate, holds to one the admin pins, or checks it against the usual authorities. Default: remember the first one seen. Who: an admin. Applies to: the site. Search words: certificate, NAS trust, fingerprint, pin, TLS.
 
 ### Editor accounts on the NAS are made and managed by the dashboard
 
 The dashboard makes and looks after each editor's account on the NAS under the same rules on both kinds of NAS, and never touches an account it did not make. Every editor is in the studio's editors' group, created if missing.
 
-- A username starts with a lowercase letter, followed by up to 31 lowercase letters, digits, dots, underscores or hyphens. A sign-in key is accepted when it starts with one of the standard key types.
+- A username has the one shape of a sign-in name (see Accounts, privacy and the legal paperwork: Who may sign in, "A sign-in name has one shape, and a name accepted anywhere works everywhere"). A sign-in key is accepted when it starts with one of the standard key types.
 - The dashboard can check the NAS answers (which also proves it may read users and groups), list editors, create or update an editor with their sign-in key and full name, set a password, and delete an editor.
 - It refuses to change, set the password of or delete a system or built-in account ("<name> is a system account: refusing to modify it. Pick a different username." or "<name> is a DSM built-in account"), or any existing account not already in the editors' group ("<name> already exists on the NAS and is not in the editors' group: refusing to take over an account this dashboard did not create. Add it to the group by hand first, or pick a different username.").
-- A new account gets the full name (default the username), the editors' group, a random password nobody is told (always meeting a mixed-case-and-digit policy), the sign-in key, and Windows file sharing. On TrueNAS its home folder is made under the site's homes folder and made private to the editor; if that cannot be confirmed within two minutes the admin is warned that file transfers may fail with a vague sign-in error. Password sign-in to the remote shell is switched off where the NAS allows it. On Synology the account has no expiry and no notification mail, and its home is made by DSM; if the home does not exist the admin is told "DSM's User Home service is off. Turn it on in Control Panel > User & Group > Advanced, then try again."
+- A new account gets the full name (default the username), the editors' group, the person's own account password where the studio uses the shared folders, changed whenever the person's password is (see Accounts, privacy and the legal paperwork: Who may sign in, "Every person has one account, and a studio may put its single sign-on in front"), the sign-in key, and Windows file sharing. An editor's NAS account only ever transfers files: it never has a login to the NAS itself. On TrueNAS its home folder is made under the site's homes folder and made private to the editor; if that cannot be confirmed within two minutes the admin is warned that file transfers may fail with a vague sign-in error. Password sign-in to the remote shell is switched off where the NAS allows it. On Synology the account has no expiry and no notification mail, and its home is made by DSM; if the home does not exist the admin is told "DSM's User Home service is off. Turn it on in Control Panel > User & Group > Advanced, then try again."
 - After setting a key the result is checked and the admin warned of anything that did not take: the key, Windows file sharing or group membership; on Synology a home writable by others (the remote shell then refuses the key without saying why; repair by re-applying Synology's inherited permissions, never by changing the folder's mode), the key folder or key file with the wrong owner or permissions, or an interactive login shell (none is needed). On creation, a key that could not be installed is a warning and the account is kept.
 - A second computer for the same editor adds its key beside the existing ones on Synology (reported "already there" when it is); if it cannot be written that is an error and the computer's approval stays pending. On TrueNAS updating an editor replaces the key.
 - In the editor list on Synology, Windows file sharing always shows as on, an account whose expiry state is not normal shows as locked, and the key shows only as "(installed)" or empty.
@@ -227,8 +229,6 @@ The dashboard makes and looks after each editor's account on the NAS under the s
 - Who: an admin.
 - Ways in: see Accounts, privacy and the legal paperwork: Who may sign in.
 - Setting: Checking each editor's sign-in key on the NAS. Does: when on, the list of people looks up each editor's key on the NAS every time it is shown; off makes the list faster. Default: on. Who: an admin. Applies to: the site. Search words: sign-in key, editors list, NAS check, people page.
-- Setting: What editors may do on the NAS. Does: whether editors' NAS accounts may only transfer files or also have a full remote shell. Default: only transfer files. Who: an admin. Applies to: the site. Search words: editor shell, file transfer only, NAS access, remote shell.
-
 ### A new project's folders are laid down on the NAS
 
 An admin creates a project at the place in the tree the studio's layout gives (for example year, then series, then project), or at any depth; names with spaces are fine. The year, series and name may not be empty, contain a slash, start with a dot or contain "..", and are refused naming the bad part.
@@ -236,10 +236,9 @@ An admin creates a project at the place in the tree the studio's layout gives (f
 - Inside it the studio's standard folders are made, each reported as created or already there. Proxy folders are not made.
 - Refused before anything is created, with "Nothing was created": the target is inside an existing project, or already contains a project two or more levels down (the one found is named).
 - Ownership and permissions are re-applied over the whole new project for the editors' group (or the project's own group).
-- On TrueNAS, where each project has its own people, the project gets its own group on the NAS, named from the project's identity and kept within the NAS's 32-character limit for group names (shortened, with a short code to keep it unique). On Synology the project's group is given access, but the admin is always told that the share-wide editors' rule still reaches that folder and still lets every editor in: they must break inheritance on that folder in Synology's File Station and remove the editors' entry, because Synology offers no way to do it from outside.
+- Each project is open only to its own people. On TrueNAS the project gets its own group on the NAS, named from the project's identity and kept within the NAS's 32-character limit for group names (shortened, with a short code to keep it unique). On Synology the project's group is given access, but the admin is always told that the share-wide editors' rule still reaches that folder and still lets every editor in: they must break inheritance on that folder in Synology's File Station and remove the editors' entry, because Synology offers no way to do it from outside.
 
 - Who: an admin.
-- Setting: Who may see each project. Does: whether each project is private to its own people or shared by all editors. Default: private to its own people. Who: an admin. Applies to: the site. Search words: project privacy, project group, access, private projects.
 
 ### A project keeps a permanent identity
 
@@ -261,7 +260,7 @@ Actions that sweep across a whole tree or cannot be undone (re-applying ownershi
 
 ### A shared Resolve project database on the NAS is set up safely
 
-Where the studio keeps a shared Resolve project database on the NAS, the server gives it a random password (never the well-known one Resolve's database ships with), lets it accept connections only from the studio's network and the private network, and backs it up with the server's data. Each editor's computer reaches it at an address it can really reach, so Resolve collaborators see each other's real addresses on the studio's network and the private network alike, never an address inside the server.
+Where the studio keeps a shared Resolve project database on the NAS, the server gives it a random password (never the well-known one Resolve's database ships with), lets it accept connections only from the studio's network and the private network, and copies it every night, keeping each copy 30 days (see Resolve on the editor's computer: Project libraries and projects, "Every shared Resolve project library is backed up every night"). Each editor's computer reaches it at an address it can really reach, so Resolve collaborators see each other's real addresses on the studio's network and the private network alike, never an address inside the server.
 
 - When the help for the editing program is off: not offered.
 
@@ -292,7 +291,10 @@ However the server is started, a missing secret is made or the server refuses to
 
 It tells the admin to give the server's data folder to the account the server runs as (naming both).
 
+An admin changes the secret that keeps people and computers signed in from settings, never by reinstalling; what then happens to existing sign-ins, and retiring the previous secret, are in Accounts, privacy and the legal paperwork: How a computer proves who it belongs to, "Changing the server's own secrets signs nobody out".
+
 - On its own: makes every missing secret at first start, from which ones are not yet kept.
+- By hand: an admin changes the sign-in secret from settings.
 
 ### Secrets an admin enters are checked and never shown back
 
@@ -311,7 +313,7 @@ Saving refusals: "this step has nothing to fill in here", "not a setting of this
 
 ### Adding clips to the b-roll index is always guarded
 
-Adding clips to the b-roll index always needs the server's secret for it, even from a signed-in person. The b-roll part does not come up when that secret is missing or weak (the rule above), and its status then says that no usable secret is set, so adding to the index cannot be guarded; the admin can let the server make one or switch b-roll off. See The b-roll archive: Describing and indexing clips.
+Adding clips to the b-roll index always needs the server's secret for it, even from a signed-in person. When none is set the server makes it itself (see "The server makes and keeps its own secrets"), so only a weak secret an admin supplied in its place leaves additions unguarded. The b-roll part then does not come up, and its status says that no usable secret is set, so adding to the index cannot be guarded; the admin can let the server make one or switch b-roll off. How the archive shows that it is not working is in The b-roll archive: Replacing the search index, "Search never stops because of an update"; adding clips is in The b-roll archive: Describing and indexing clips.
 
 - When the b-roll archive is off: no such secret is needed and nothing is said.
 
@@ -319,10 +321,9 @@ Adding clips to the b-roll index always needs the server's secret for it, even f
 
 A sign-in set-up that would leave nobody able to sign in is refused when saved, with a message naming the problem, and the server likewise refuses to start on one:
 
-- a sign-in method that is not one of the three offered (the dashboard's own accounts, NAS accounts, single sign-on): "Left as it is, every password would be refused";
+- a sign-in method that is not one of the two offered (the product's own accounts, or those accounts with single sign-on in front): "Left as it is, every password would be refused";
 - secure-only sign-in forced while the dashboard has no secure address;
-- single sign-on chosen with the identity provider's address or the dashboard's registration with it missing, or a provider address that is not secure (plain is allowed only to the same machine);
-- sign-in by NAS account chosen with no NAS address: "no password can ever be checked and nobody could sign in", offering the dashboard's own accounts or the NAS's address as the fix.
+- single sign-on chosen with the identity provider's address or the dashboard's registration with it missing, or a provider address that is not secure (plain is allowed only to the same machine).
 
 Every setting is read and checked once at start; a value the server cannot use refuses the start, naming the value and the ones allowed.
 
@@ -334,12 +335,12 @@ Set once in the site's settings and handed to every editor's app, every installe
 
 - the studio's name and a short name (blank: the full name, used in tight spots such as the tray's tooltip); a support contact (blank: the vendor's, shown as a hint); the product name (default "CC Sync"); and the tray logo (blank: the product's own mark; a mark shipped with the app, or a picture on the editor's computer, white on transparent). These show in the dashboard's header, on the sign-in page and in every tray. Every label that uses a technical word explains it on pointing;
 - the tree's name, the drive letter editors see it on (default P:), where the tree lives on the NAS, and its Windows network path;
-- where editors' computers transfer files to (the NAS and its port, default 22), the NAS's key that their computers check, and whether editors have only file transfer;
+- where editors' computers transfer files to (the NAS and its port, default 22), and the NAS's key that their computers check;
 - the layout of a project, the folders every new project starts with, and the shared libraries every editor gets;
-- whether each project is private to its own people or shared by all editors;
 - the b-roll archive's default collection and its label, and the folder holding the studio's own shoots;
 - the release feed (blank: off) and how vendor releases are taken (see Releases and updates: Customer sites and the vendor's release feed);
-- the server's own sync identity and the dashboard's address.
+- the server's own sync identity and the dashboard's address;
+- the studio's time zone (see The server: installing it and keeping it running: NAS speed, load and clock, "Schedules run on the studio's own clock").
 
 The site description that editors' computers and installers read is open before anyone signs in and never contains a secret, a person, a project, a list of paths or a key. Blank means "this site was not told". Beside the values above it gives what a computer needs to reach the server's files and to verify it is talking to the right server, the fixed list of video file kinds treated as originals (not configurable), the release feed's location (only when it is a secure address), the kind of NAS, the switches of the parts and features that are off unless the site turns them on, the site's four reporting switches (see Accounts, privacy and the legal paperwork: What the product records about a person), and the b-roll indexing quality: "good" (needs about 8 GB of graphics memory) or "best" (needs about 12 GB).
 
@@ -370,7 +371,7 @@ An admin sets the kind of NAS (only the two supported kinds are offered), the la
 
 - Who: an admin.
 - Setting: Folders in every new project. Does: the folders laid down inside each new project. Default: learned from the sample projects shown at set-up. Who: an admin. Applies to: the site. Search words: project template, folders, new project, layout.
-- Setting: Shared libraries. Does: folders in the tree every editor's computer gets, such as the LUT library and the Resolve stills gallery. Default: the LUT library and the stills gallery. Who: an admin. Applies to: the site. Search words: shared libraries, LUTs, stills, assets.
+- Setting: Shared libraries. Does: folders in the tree every editor's computer gets, such as the LUT library and the Resolve stills gallery. Default: the LUT library and the Resolve stills gallery. Who: an admin. Applies to: the site. Search words: shared libraries, LUTs, stills, assets.
 
 ### Every setting is made in the dashboard and kept through every update
 
@@ -393,13 +394,12 @@ Every setting of the site is made in one place, the dashboard (in set-up or in s
 When a part is switched on but something it needs is not there, the dashboard says so to the admin, never as a refusal:
 
 - YouTube downloads on with no assistant key: the YouTube page reports it has no working key until one is set;
-- Timeline Cards on with no place for its data: it says it has nothing to serve;
+- Timeline Cards on with no place for its data: it keeps its place in the menu, and opening it shows the page saying it is not working right now, that it has no place for its data, and that admins have been told (see The dashboard: Overview, menus and finding things, "Each part's state is shown on the Overview");
 - the Footage Sorter on with no card pool; cloud-state or backup folders that are not full places on the NAS, or set without a pool; a cloud-state folder inside the pool (not used); no source or destination folders; any folder outside the pool (a move between disks would fail).
 
-A new site starts with every one of the six switchable parts off (the b-roll archive, music, YouTube downloads, Timeline Cards, the Footage Sorter with camera cards) except the help for the editing program, which is on. The extra measures against YouTube's blocking are off (and can be on only when YouTube downloads are on), and automatic updates of editors' apps are off. YouTube downloads are always tried on the requesting editor's own computer first.
+A new site starts with every one of the six switchable parts off (the b-roll archive, music, YouTube downloads, Timeline Cards, the Footage Sorter with camera cards) except the help for the editing program, which is on. The extra measures against YouTube's blocking are off (and can be on only when YouTube downloads are on), and automatic updates of editors' apps are off. YouTube downloads are always tried on the requesting editor's own computer first. Each part is switched on and off with the setting "Switchable parts" (see The whole product: The rebuild itself, "An admin switches each part on and off for the whole site").
 
 - Who: an admin.
-- Setting: Which parts are on. Does: switches each optional part on or off for the site; see The whole product. Default: every part off except the help for the editing program, which is on. Who: an admin. Applies to: the site. Search words: parts, modules, features, enable, switch on.
 
 ### Transfers to editors always stay within what the NAS can serve
 
@@ -460,7 +460,7 @@ The dashboard shows the version the server is running now, read from the running
 
 ### Settings take effect without a restart, and no page restarts the server
 
-A setting saved in set-up or settings takes effect when it is saved; nobody has to restart the server for it. No page of the product, the dashboard or any part, can restart the shared server. Where the server must be restarted (for example after the NAS was repaired), the admin does it from the NAS's own app screen, and the server comes back by itself after a crash or a NAS restart unless someone stopped it.
+A setting saved in set-up or settings takes effect when it is saved; nobody has to restart the server for it. No page of the product, the dashboard or any part, can restart the shared server. Updating the server and going back to an earlier version from the dashboard are an admin's deliberate acts, not such a restart, and keep the dashboard answering throughout (see "Updating the server never takes the dashboard away"). Where the server must be restarted (for example after the NAS was repaired), the admin does it from the NAS's own app screen, and the server comes back by itself after a crash or a NAS restart unless someone stopped it.
 
 ### After a restart the server comes back as it was
 
@@ -539,9 +539,9 @@ The server keeps point-in-time snapshots of two things on the NAS: the whole pro
 
 ### A snapshot is taken before anything risky and sweeping
 
-Before an update, a reinstall, or any change of ownership that walks a whole folder tree, a snapshot of what is about to change is taken. On TrueNAS a folder that is not its own storage area is snapshotted through the one containing it, and the admin is told so; a folder not on a pool is refused. On Synology the whole shared folder is snapshotted; a place not inside a shared folder is refused. The snapshot is labelled with what it was for and when (on Synology the label becomes the snapshot's description). A snapshot that already exists under that name counts as taken.
+Before an update, a reinstall, any change of ownership that walks a whole folder tree, or putting back a folder move, a snapshot of what is about to change is taken. On TrueNAS a folder that is not its own storage area is snapshotted through the one containing it, and the admin is told so; a folder not on a pool is refused. On Synology the whole shared folder is snapshotted; a place not inside a shared folder is refused. The snapshot is labelled with what it was for and when (on Synology the label becomes the snapshot's description). A snapshot that already exists under that name counts as taken.
 
-If no snapshot can be taken, the change does not go ahead: the admin is told why, how to set up regular snapshots, and may go ahead anyway only by accepting in words that the change has nothing behind it. Every such change ends by saying "this change had a snapshot behind it: yes", or "NO" with the reason, and every attempt (what for, the place, the time, the result) is kept in the history.
+If no snapshot can be taken, the change does not go ahead: the admin is told why, how to set up regular snapshots, and may go ahead anyway only by accepting in words that the change has nothing behind it. Putting back a folder move is the exception: it deletes nothing, so it takes a snapshot when it can and goes ahead when it cannot, without asking. Every such change ends by saying "this change had a snapshot behind it: yes", or "NO" with the reason, and every attempt (what for, the place, the time, the result) is kept in the history.
 
 - Who: an admin.
 
@@ -563,9 +563,9 @@ Just before switching versions, the studio's data (including the b-roll archive'
 | somebody has actually restored from a backup this year | "missing" when no restore has been recorded or the last is over 365 days old; otherwise "protected". |
 | files deleted on the server are kept for a year | "cannot verify" until the server has read the projects since it started, or when there are none; "missing" for each project whose deleted files are kept nowhere ("files deleted on the server for this project are not kept anywhere"); otherwise "protected" with the shortest keeping time in days. Repair: untick and re-tick the project. |
 | deleted-file copies on editors' computers are within their limit (a warning, not an error) | From each computer's reported size of its kept deleted files: "cannot verify" when none has reported; "missing" for each computer over 50 GB; otherwise "protected", saying that the 14-day half of the rule is not checked. |
-| somebody is told when this server finds a problem | "protected" only when mail or a web address is set for alerts and something was actually delivered through it in the last 30 days; otherwise "missing" ("nobody is told when something breaks here" when nothing is set), quoting how many checks the server makes. Repair: choose mail or a web address in the alert settings and press "Send a test". |
+| somebody is told when this server finds a problem | "protected" only when alert delivery shows as working, by the one rule of The dashboard: Alerts by mail, "The dashboard says whether alerts are really reaching anyone"; otherwise "missing" ("nobody is told when something breaks here" when nothing is set), quoting how many checks the server makes; "cannot verify" when the delivery record cannot be read. When an admin has recorded the choice to tell nobody, the line stays "missing" and reads that nobody is told, by the admin's own choice. Repair: choose mail or a web address in the alert settings and press "Send a test". |
 
-Every line that is "missing" is a serious problem on the home page, "a safety net is not there"; every line that cannot be verified, or whose check failed, is a warning, "a safety net this server cannot check". Neither is raised before the list has been worked out once. A skip in set-up never turns a line green. The weekly report lists every line. See The dashboard: Problems the server finds.
+Every line that is "missing" is a serious problem on the home page, "a safety net is not there"; every line that cannot be verified, or whose check failed, is a warning, "a safety net this server cannot check". Neither is raised before the list has been worked out once, and the alert line raises neither while it is missing by the admin's recorded choice to tell nobody. A skip in set-up never turns a line green. The weekly report lists every line. See The dashboard: Problems the server finds.
 
 - Who: an admin.
 - Name and search words: Protection. Search words: protection, backups, snapshots, safety, what is protected.
@@ -660,7 +660,7 @@ Every large write onto the server's data disk (a new version, extra software a p
 
 The server watches free space on its own data disk and on the NAS's pools. A serious problem, "the server is running out of space", is raised and mailed when under 10 percent or under 2 GB is free, whichever comes first; the fix: remove old kept versions or backups the dashboard lists, or enlarge the volume. Free space that cannot be read is "could not check" ("That is not the same as knowing it is fine."). The NAS's pools are warned about before they fill, including when snapshot space is what is filling them. The dashboard shows how much of the data disk is used and by what. The home page also says when there is no off-site copy, and when a shared Resolve project database is not backed up.
 
-Everything the server keeps expires by a stated age or count: snapshots (above), backups (at most 8, 8 GiB), kept versions (the running one and the one to go back to), crash reports (the newest 20), histories (the last 20 restores and rehearsals; the newest 2000 runs of background work), and its own log, kept to at most about 100 MB (the oldest dropped first), so nothing can fill the NAS.
+Everything the server keeps expires by a stated age or count: snapshots (above), backups (at most 8, 8 GiB), the nightly copies of a shared Resolve project database (30 days, counted apart from those backups), kept versions (the running one and the one to go back to), crash reports (the newest 20), histories (the last 20 restores and rehearsals; the newest 2000 runs of background work), and its own log, kept to at most about 100 MB (the oldest dropped first), so nothing can fill the NAS.
 
 
 #### Lessons
@@ -671,7 +671,7 @@ Everything the server keeps expires by a stated age or count: snapshots (above),
 
 ### The NAS copies the studio's work off site every night
 
-Every night the NAS itself copies off site what is needed to rebuild a client render: for every project ticked for off-site backup, its 1080p proxies, audio, stills, graphics and project files, plus every Resolve project (the editing program's database backups). No editor's computer needs to be on. The off-site copy is encrypted so that the storage host can read no file names and no contents.
+Every night the NAS itself copies off site what is needed to rebuild a client render: for every project ticked for off-site backup, its 1080p proxies, audio, stills, graphics and project files, plus every Resolve project (the editing program's database backups), and, when the Footage Sorter is on, its daily backup of the record of every copy (see The Footage Sorter and camera cards: The record of every copy, "The record survives losing the NAS"). No editor's computer needs to be on. The off-site copy is encrypted so that the storage host can read no file names and no contents.
 
 - It runs each night at 04:15 by default; the time and on or off can be set; a missing or broken schedule means the defaults. Only one run at a time. A run that fails is not tried again that night. A run that finds nothing changed makes no new off-site snapshot.
 - Upload speed is capped lower in working hours than overnight (12 MB/s from 08:00, 30 MB/s from 23:00), so editors' transfers keep most of the studio's uplink by day.
@@ -741,7 +741,7 @@ The question "is the dashboard up?" always answers, even when unhealthy, so inst
 
 ### The server answers only on the studio's networks and comes back by itself
 
-The server answers on its address on the studio's network and on the private network, never on every address; the default port is 8480. It comes back by itself after a crash or a NAS restart unless someone stopped it. The NAS's own app list shows whether it is healthy: the NAS asks about once a minute, allows it about two minutes to start, gives each answer about ten seconds, and shows it unhealthy after three failures in a row.
+The server answers only on the NAS itself and on its publication on the private network, never on every address; the default port is 8480. It comes back by itself after a crash or a NAS restart unless someone stopped it. The NAS's own app list shows whether it is healthy: the NAS asks about once a minute, allows it about two minutes to start, gives each answer about ten seconds, and shows it unhealthy after three failures in a row.
 
 ### The server re-checks the facts the product relies on every 15 minutes
 
@@ -821,15 +821,13 @@ When the server cannot reach its own syncing, a serious problem says "the server
 
 Every problem the server can detect reaches a person on the home page and by message, with a plain diagnosis and the next action (see The dashboard: Problems the server finds, and Alerts by mail). Beyond that:
 
-- With no alert destination set, or nothing delivered in 30 days, the home page and the protection list say "nobody is being told"; a delivery record that cannot be read shows "cannot verify".
+- Whether alerts are really reaching anyone is judged by one rule, shown on the alert channel's status line (see The dashboard: Alerts by mail, "The dashboard says whether alerts are really reaching anyone"). With no alert destination set, or nothing delivered in 30 days, the home page and the protection list say "nobody is being told"; a delivery record that cannot be read shows "cannot verify". When an admin has recorded the choice to tell nobody, the warning ends, but the home page and the protection list still read that nobody is told, by the admin's own choice, and never show it as green.
 - When an alert destination is first set, everything open at that moment is sent at the next check, and the save says so.
 - An optional daily "still here" message, counting computers and problems, lets the owner notice when messages stop.
 - Delivering alerts finishes within two minutes a round; overrunning that is itself a problem, and a slow mail server never stalls or restarts the server.
-- Alert mail checks the mail server's certificate and name by default; a mismatch names the host, and only an admin's explicit setting turns the check off.
+- Alert mail checks the mail server's certificate and name by default; a mismatch names the host, and only an admin's explicit setting turns the check off (the setting "Verify the mail server's certificate", see The dashboard: Settings and setup, "Every setting of the site").
 - The server alerts once, within minutes, when its own network link is down or its sign-in to the private network nears expiry, and when many computers fall silent together.
 - A repeated identical answer is written to the log once, and again only when its state or detail changes, even across a restart.
-
-- Setting: Checking the mail server's certificate. Does: whether alert mail refuses a mail server whose certificate or name does not match. Default: on. Who: an admin. Applies to: the site. Search words: mail certificate, mail server, secure mail, alerts mail.
 
 ### The server checks itself twice a day and the owner can approve a fix by reply
 

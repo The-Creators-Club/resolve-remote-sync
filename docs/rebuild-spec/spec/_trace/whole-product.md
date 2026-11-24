@@ -314,10 +314,34 @@
 - The dashboard / Security of pages | Nothing that carries a sign-in crosses the public internet unencrypted | the warning when a computer connects unencrypted over the public internet.
 - The dashboard / Phones and the installed app | A phone can install a page as an app without signing in first | what is reachable signed out for installing.
 - The app on each editor's computer / Settings, records and background work | Only the studio's own dashboard can make the app on an editor's computer act | where the dashboard address and the extra address are set on a computer.
-- YouTube downloads / How YouTube throttles and refuses | An admin switches each part on and off for the whole site | the site-wide switch for getting round YouTube's blocking.
+- YouTube downloads / Signing in to YouTube | An admin switches each part on and off for the whole site | the site switch "YouTube's extra measures against being blocked".
 - Releases and updates / Pushing updates and seeing who has what | An admin switches each part on and off for the whole site | automatic updates switched on for the site.
 - Accounts, privacy and the legal paperwork / What the product records about a person | A change to the site's settings reaches every computer without a restart | the switches on what computers report.
-- The server: installing it and keeping it running / Settings and secrets | Dates are the studio's dates | the studio's time zone.
+- The server: installing it and keeping it running / NAS speed, load and clock | Dates are the studio's dates | the studio's time zone ("Schedules run on the studio's own clock").
 - Timeline Cards: the editor / Shortening, the edit chat and the assistant | A conversation with the assistant is kept per cut list | the edit chat and transcript search that hold conversations.
 - Timeline Cards: the editor / Search and the transcript panel | A person picks how strong an assistant answers, where offered | the strength picker on the search panel.
 - The dashboard / Settings and setup | A site may instead connect an assistant through a subscription signed in on the server | dashboard-2 writes the guided setup as notice, download, sign-in and test; the owner kept it (2026-11-24), off by default and switched on only by accepting the notice in the set-up; dashboard-2 should match.
+
+## Joins settled
+
+- accounts-privacy-legal F19 | changed: A change to the site's settings reaches every computer without a restart | an unreadable copy now counts every switchable kind of reporting as withheld (not on); syncing and the checks behind it keep running
+- cards-editor-3 F2 | changed: A person picks how strong an assistant answers, where offered | summaries, the montage builder and shortening use the edit chat's chosen strength; a one-person search is a scope of the search panel at its chosen strength
+- cards-editor-4 F10 | changed: A conversation with the assistant is kept per cut list | the edit chat also starts afresh when the house style changed or after more than an hour cold, pointing to cards-editor-4
+- dashboard-1 F10 | changed: A part that is missing or broken never stops anything else | a switched-on part that cannot work keeps its menu place and opens a "not working right now, why, admins told" page; also on the problems list and the overview's state of the parts
+- dashboard-2 F8 | changed: Dates are the studio's dates | points to server-install-and-running-2 "Schedules run on the studio's own clock" for the one studio time zone
+- dashboard-2 F12 | no change here: dashboard-2 changes; this piece already says a refused click gets the note above its control
+- editor-app F27 | changed: Only the studio's own dashboard can make the app on an editor's computer act | another allowed address is added by an admin for the site; the editor keeps only correcting their own computer's dashboard address
+- server-install-and-running-1 F10 | changed: Dates are the studio's dates | same pointer as dashboard-2 F8, no longer to server-install-and-running-1's Settings and secrets
+- whole-product F1 | changed: One switch turns the assistant off for the whole site ; A conversation with the assistant is kept per cut list | the keeping period still runs while the assistant is off; a cut list's conversation lasts at most that period
+- whole-product F3 | changed: A conversation with the assistant is kept per cut list | transcript search dropped from the per-cut-list rule (and the "no cut list open" sentence with it), pointing to cards-editor-3's search sheet
+- whole-product F4 | changed: What the assistant costs is shown before it runs, and a site can cap it | routine work counts against the one daily budget, no allowance of its own
+- whole-product F5 | changed: What the assistant costs is shown before it runs, and a site can cap it | a run a person starts is refused with the budget sentence; work running on its own waits for the next day's budget
+- whole-product F6 | no change here: cards-footage-in changes; this piece already says no assistant message is left with it off
+- whole-product F7 | changed: A change to the site's settings reaches every computer without a restart | the safe-side rule covers the Timeline Cards editor in a browser as well as the app; cards-editor-5 changes its own sentence
+- whole-product F8 | changed: A site may connect more than one kind of assistant and pin one ; A feature that needs the assistant says plainly when it cannot be used | the Footage Sorter's Ask, footage-in's translation, line-up and first sort and the board's assistant added to the per-feature list and the "No assistant is connected." sentence; footage-in and the board, as Timeline Cards features, join the made-for-one-kind list, the Sorter's Ask works with any kind (my call: no piece states it)
+- whole-product F9 | no change here: music changes; this piece already says nobody is told to ask themselves
+- whole-product F10 | no change here: the name here is already "Switchable parts"; server-install-and-running-1 drops its own line
+- whole-product F12 | no change here: this piece already holds "no assistant has a working key" with where an admin connects one; youtube changes
+- whole-product F13 | no change here: this piece already says finding out a state costs no call; youtube changes
+- whole-product F14 | changed: Nothing runs on a computer that its person or the vendor did not put there | YouTube's downloader and a kept-up-to-date subscription assistant program take the newest checksum-verified build, never older, without a button
+- youtube F1 | changed: An admin switches each part on and off for the whole site | the switch is named "YouTube's extra measures against being blocked" and points to youtube's "A site decides whether signed-in YouTube sessions may be used on editors' computers"

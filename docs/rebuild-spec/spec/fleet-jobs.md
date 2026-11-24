@@ -1,6 +1,6 @@
 # Work shared out across the computers
 
-The product needs heavy work done: transcribing speech, making small preview copies of clips, pulling the sound out of clips, drawing waveforms, analysing b-roll and music, copying camera cards and drives, and reading what is on a drive. Every such piece of work is done on one of the studio's computers that is able and free, and this is the one place that decides which. Each editor decides whether their computer takes part, which kinds of work it takes, and can lend it for a while even when they are at it. An admin sees every piece of work that is waiting, running and finished, can start one now on a chosen computer, cancel it or try it again, and always gets an honest answer, in words, to "why is this not running". This is always available and cannot be switched off; a kind of work that belongs to a part that is switched off is not shown anywhere, not even as a tick box.
+The product needs heavy work done: transcribing speech, listening to sound recordings for names, lining clips up by their sound, making small preview copies of clips, pulling the sound out of clips, drawing waveforms, making editing proxies, converting YouTube downloads, and analysing b-roll and music. Every such piece of work is done on one of the studio's computers that is able and free, and this is the one place that decides which. Each editor decides whether their computer takes part, which kinds of work it takes, and can lend it for a while even when they are at it. An admin sees every piece of work that is waiting, running and finished, can start one now on a chosen computer, cancel it or try it again, and always gets an honest answer, in words, to "why is this not running". This is always available and cannot be switched off; a kind of work that belongs to a part that is switched off is not shown anywhere, not even as a tick box.
 
 ## When a computer counts as free and able
 
@@ -10,29 +10,31 @@ A computer is given a piece of shared work only after nobody has touched its key
 
 | Kind of work | Nobody at the keyboard or mouse for |
 |---|---|
-| Transcribing speech, preview copies, analysing b-roll or music | the computer's quiet time, 5 minutes unless changed. A clip or track whose analysis fails is tried twice in all, then left as failed until a person asks again |
+| Transcribing speech, listening to sound recordings, lining clips up by their sound, preview copies, making editing proxies, converting YouTube downloads, analysing b-roll or music | the computer's quiet time, 5 minutes unless changed |
 | Pulling the sound out of a clip, drawing a waveform | 1 minute |
-| Copying a camera card, copying a drive, reading a drive | no wait: a person started it by plugging something in |
 
-A computer also takes no new shared work while Resolve is open on it, and never while Resolve is rendering, whether or not anyone is at the keyboard.
+A computer also takes no new shared work while Resolve is open on it, and never while Resolve is rendering, whether or not anyone is at the keyboard. The computer's quiet time and its hold-back for Resolve are the only ones: making proxies, describing b-roll and analysing music wait for the same two.
+
+A person's own b-roll or music drop has a further way past the wait. The person who dropped it (or an admin) can start it now, pause it, resume it or cancel it, from the drop on its page, and the person at the computer doing the work can do the same from the app there. Start now makes a waiting drop work at once, even with someone at the computer or Resolve open, until it ends or is paused; music's choice to have a drop analysed now is this same start now. While such work runs on a computer someone is working at, it stays under the site's share of that computer's capacity. What each control says is in The b-roll archive: Describing and indexing clips, "The computer doing the work shows what describing is doing, and the person at it can pause, resume, start now or cancel", and in Music: Adding tracks to the library, "A person pauses, resumes, starts now or cancels their drop".
 
 How long nobody has been at a computer is always told correctly, however long the computer has been switched on. Whenever it cannot be told, or the answer cannot be read, every part of the product treats someone as being at the computer.
 
 - On its own: whether a computer is free, from how long its keyboard and mouse have been left alone and whether Resolve is open or rendering.
-- By hand: the person at the computer can lend it now, which skips the wait (see "The person at a computer can lend it to shared work for a while"); an admin can start a piece of work now (see "An admin can start waiting work now, on a chosen computer"); and the computer's quiet time and the hold-back for Resolve are settings of the computer.
+- By hand: the person at the computer can lend it now, which skips the wait (see "The person at a computer can lend it to shared work for a while"); an admin can start a piece of work now (see "An admin can start waiting work now, on a chosen computer"); the person who dropped b-roll or music can start, pause, resume or cancel their drop; and the computer's quiet time and the hold-back for Resolve are settings of the computer.
 - Setting: Quiet time before shared work. Does: how long nobody must have used this computer before it takes heavy shared work; 0 means it never waits, which is how a computer nobody sits at is set, and its wait is then shown as "no wait". Default: 5 minutes. Who: the computer's own person, on the computer. Applies to: a computer. Search words: idle, quiet time, away, wait, fleet.
 - Setting: Hold shared work back while Resolve is open. Does: when on, this computer takes no new shared work while Resolve is open on it. Default: on. Who: the computer's own person, on the computer. Applies to: a computer. Search words: Resolve open, editing, hold back, fleet work.
+- Setting: Share of a working computer that a b-roll or music drop may use. Does: caps how much of a computer's capacity describing b-roll or analysing music takes while someone is working at that computer. Default: 60%. Who: an admin. Applies to: the site. Search words: capacity, background, usable, indexing load, share.
 - Windows and macOS: on Windows only the person's own session counts, so another user signed in to the computer or a remote session does not make it busy. On macOS the time since the last input is read from the system. On any other system it can never be told, so work that waits for quiet never runs there.
 
 ### Work already running is finished when the person comes back
 
-When someone starts using the keyboard or mouse, or opens Resolve, the computer takes no new shared work, but finishes the piece it is running. A long piece of work is never killed because its person came back.
+When someone starts using the keyboard or mouse, or opens Resolve, the computer takes no new shared work, but finishes the piece it is running. A long piece of work is never killed because its person came back. For describing b-roll and analysing music the piece is one clip or one track: the clip or track under way is finished and saved, and no further one starts until the computer is free again. Making proxies is the one kind that does not finish: within seconds of the person coming back it stops, the part-made proxy is thrown away, and that clip is made again later (see Proxies and file moves: Making proxies on editors' computers, "Proxies are made only while nobody is at the computer").
 
 ### The person at a computer can lend it to shared work for a while
 
 From the app on their own computer, the person at it can lend the computer to shared work now, for a set time. The menu item reads "Take fleet jobs now (N min)", where N is the computer's lending period. While it is lent the item reads "Taking fleet jobs until HH:MM (click to stop)" with a tick ("Taking fleet jobs now (click to stop)" when the end time cannot be read). Turning it on says "Taking fleet jobs for the next N minutes, even while you work."; turning it off, or the time running out by itself, says "Back to taking fleet jobs only while you are away."
 
-Until the end time the computer takes any kind of work it can do without waiting for quiet and even with Resolve open, and it becomes first choice for transcribing, preview copies, sound and waveforms. It does not lift the rest after a failure, nor any other reason a computer is passed over. An end time that cannot be read, or has passed, counts as not lent. Work taken while lent records "You lent this computer to the fleet, so it took this job while you are here." The dashboard shows a lent computer as "volunteering until <time>", in the viewer's local time.
+Until the end time the computer takes any kind of work it can do without waiting for quiet and even with Resolve open, and it becomes first choice for transcribing, preview copies, sound and waveforms. It does not lift the rest after a failure, nor any other reason a computer is passed over. An end time that cannot be read, or has passed, counts as not lent. Work taken while lent records "You lent this computer to the fleet, so it took this job while you are here." The dashboard shows a lent computer as "lending until <time>", in the viewer's local time (see The dashboard: Each computer's state, "Each computer shows the work in progress on it").
 
 The item is present only while this computer takes shared work.
 
@@ -40,13 +42,11 @@ The item is present only while this computer takes shared work.
 - Ways in: from the app on that computer only. Nothing on the dashboard lends a computer.
 - Setting: Lending period. Does: how long one click of "Take fleet jobs now" lends this computer: "LEND THIS COMPUTER FOR N minutes AT A TIME (click for M)" steps through 15, 30, 60 and 120 minutes, saying "One click of 'Take fleet jobs now' will lend this computer for M minutes." Default: 30 minutes. Who: the computer's own person, on the computer. Applies to: a computer. Search words: lend, volunteer, take jobs now, fleet.
 
-### A computer's own heavy work comes first
+### Work on one computer takes turns
 
-A computer's own heavy work for its own editor (making proxies for it, see Proxies and file moves: Making proxies on editors' computers) comes before shared work. While it is busy with its own heavy work, it takes no shared work and says "This computer is busy with your own work, so it is not taking fleet work." with what that work is; when it cannot be checked whether it is busy, it counts as busy. Being busy with its own work never counts against the computer: it is not rested as if work had failed.
+All heavy work on one computer, whichever part asked for it, is shared work and takes turns: nothing starts on a graphics card that other work on that computer is using. When a computer has both b-roll to describe and proxies to make, describing goes first: proxy making waits while describing runs, and says so ("indexing b-roll first", see Proxies and file moves: Making proxies on editors' computers, "What proxy making on a computer is doing, in one line"). Waiting its turn never counts against a computer: it is not rested as if work had failed.
 
-All work on one computer's graphics card takes turns: shared work never starts on a graphics card that the computer's own work is using.
-
-Only one progress window for the computer's own heavy work is open at a time: opening another closes the first. A set-up problem with the computer's own proxy making does not stop shared work.
+Only one progress window for proxy making is open at a time: opening another closes the first. A set-up problem with proxy making on a computer does not stop its other kinds of shared work.
 
 ### A computer says in one sentence whether it is taking shared work and why not
 
@@ -55,14 +55,13 @@ The computer's state is one sentence, shown in its menu and its settings window 
 1. "Fleet jobs are switched off on this computer."
 2. "This computer is not connected to the studio's server, so it cannot be given work."
 3. "Your admin has stopped syncing for the whole fleet, so this computer is not taking work of any kind." (also when the stop cannot be checked)
-4. "This computer is running a fleet job." ("Your admin asked this computer to run a fleet job now." when the admin started it now.)
+4. "This computer is running a fleet job." (also while the computer is lent). While work an admin started now runs, the sentence is the app's menu line "CC Sync is <transcribing|converting|running a job> for the studio while you work because <reason>" (see The app on each editor's computer: The tray or menu-bar icon and its menu, "The menu carries a line for each piece of work under way").
 5. "This computer is not set up for any of the kinds of work the fleet queues." followed by "It is set to take only: <kinds>." or a sentence naming what it lacks for the kinds that are queued.
-6. "This computer is busy with your own work, so it is not taking fleet work." with what that work is, or that it could not be checked.
-7. "Somebody is at this computer, so it is not taking fleet work. It waits for <N minutes> of quiet." (also when it cannot be told)
-8. "Resolve is open here, so this computer is not taking fleet work." (also when that cannot be checked)
-9. "This computer is ready for fleet work."
+6. "Somebody is at this computer, so it is not taking fleet work. It waits for <N minutes> of quiet." (also when it cannot be told)
+7. "Resolve is open here, so this computer is not taking fleet work." (also when that cannot be checked)
+8. "This computer is ready for fleet work."
 
-Sentences 7 and 8 are skipped while the computer is lent and for work an admin started now; nothing skips sentences 1 to 6. A computer that is free and simply has nothing to do counts as taking work. The sentence describes only the present check, never a reason left over from an earlier one. On the dashboard the same state reads "Taking fleet work", "Taking fleet work while nobody is using it", "Not taking work: switched off on this computer", "Not taking work: <reason>", or "Not taking work: not heard from" for a computer that has gone quiet.
+Sentences 6 and 7 are skipped while the computer is lent and for work an admin started now; nothing skips sentences 1 to 5. A computer that is free and simply has nothing to do counts as taking work. The sentence describes only the present check, never a reason left over from an earlier one. On the dashboard the same state reads "Taking fleet work", "Taking fleet work while nobody is using it", "Not taking work: switched off on this computer", "Not taking work: <reason>", or "Not taking work: not heard from" for a computer that has gone quiet.
 
 - Ways in: the app's menu and settings window on the computer, the computer's own row on the dashboard, and the per-computer view.
 
@@ -75,17 +74,15 @@ For each piece of work, every computer is either able to take it or passed over 
 3. The computer lacks something the work needs (see "Work that needs something a computer lacks says exactly what is missing").
 4. "syncing is stopped by your admin for the whole fleet".
 5. "this computer has not been heard from since <time> (<N min / N h / N days> ago), so it cannot take anything until it is switched on": after 15 minutes of silence. A time that cannot be read is not treated as silence.
-6. "syncing is stopped on this computer".
-7. "this computer has an update waiting to apply". An update that cannot reach that computer does not hold work back: the computer stays able for every kind it can do, and the admin is shown why it was not updated.
-8. "this computer's proxy download stopped itself, so it is not in a state anyone should add work to" (see Sync: Safety stops).
-9. "this computer is already holding job #<number> (<kind>)".
-10. "this computer has not said what it can do".
-11. "fleet jobs are switched off on this computer".
-12. "this computer takes only <kinds> jobs, not <kind>".
-13. "this computer is busy with its own work" (naming the work).
-14. "this computer is resting until <time> (<why, by default 'a job failed here'>)".
-15. Somebody is at the computer: "somebody is at this computer (idle <N> s, <kind> needs <M> s)", "this computer cannot say how long it has been idle, which counts as somebody being at it", or "this computer's idle answer is unreadable".
-16. Another computer is better placed, and the minute it is given first has not run out (see "The best-placed able computer is asked first").
+6. "this computer has an update waiting to apply". An update that cannot reach that computer does not hold work back: the computer stays able for every kind it can do, and the admin is shown why it was not updated.
+7. "this computer's downloads stopped themselves, so it is not in a state anyone should add work to" (see Sync: Safety stops).
+8. "this computer is already holding job #<number> (<kind>)".
+9. "this computer has not said what it can do".
+10. "fleet jobs are switched off on this computer".
+11. "this computer takes only <kinds> jobs, not <kind>".
+12. "this computer is resting until <time> (<why, by default 'a job failed here'>)".
+13. Somebody is at the computer: "somebody is at this computer (idle <N> s, <kind> needs <M> s)", "this computer cannot say how long it has been idle, which counts as somebody being at it", or "this computer's idle answer is unreadable".
+14. Another computer is better placed, and the minute it is given first has not run out (see "The best-placed able computer is asked first").
 
 Only computers heard from in the last 15 minutes are ever offered work or counted as able; a computer that has gone quiet is named as the reason a piece of work waits.
 
@@ -110,22 +107,28 @@ When a computer is missing a tool because fetching that tool keeps failing on it
 
 | Kind of work | Shown to people as | Asked for by | What the computer needs |
 |---|---|---|---|
-| Transcribing speech | Transcribe audio (uses the graphics card) | Timeline Cards | a graphics card with at least the memory the work states (6 GB unless the work says otherwise), the transcription set-up, and the episodes folder |
+| Transcribing speech | Transcribe audio (uses the graphics card) | Timeline Cards, and the Footage Sorter for its own folders | a graphics card with at least the memory the work states (6 GB unless the work says otherwise), the transcription set-up, and the folder the recordings are in |
+| Listening to a sound recording for names and introductions | Listen to sound recordings for names | the Footage Sorter | what transcribing needs (the whole recording is transcribed by the product's own transcription), and the folder the recording is in |
+| Lining clips up by their sound | Line clips up by their sound | Timeline Cards | the video tools, and the folders the clips are in |
 | Small preview copy of a clip | Make small preview copies of video | Timeline Cards | the video tools, and the folders the clip and its copy are in |
 | Pulling the sound out of a clip | Pull the audio out of video | Timeline Cards | the video tools, and the folders the clip and its sound are in |
 | Drawing a clip's waveform | Draw audio waveforms | Timeline Cards | the video tools, and the folders the clip and its waveform are in |
+| Making an editing proxy | Make proxies on this computer | Proxies and file moves | a way to read the original, the tools to make proxies, and for raw camera clips Blackmagic Proxy Generator |
+| Converting a YouTube download | Convert YouTube downloads | YouTube downloads | the video tools, and the folder the clip is in |
 | Analysing b-roll clips | Analyse b-roll | the b-roll archive | what the b-roll archive says the analysis needs |
 | Analysing music | Analyse music | music | what music says the analysis needs |
-| Copying a camera or recorder card | Copy camera cards | the Footage Sorter | the card plugged into this computer |
-| Copying a drive | Copy drives | the Footage Sorter | the drive plugged into this computer |
-| Reading what is on a drive | Read drives | the Footage Sorter | the drive plugged into this computer |
 
-A kind exists only while the part that asks for it is switched on. What the analysis of b-roll and of music needs, and what a person is shown about it, is in The b-roll archive: Describing and indexing clips, and in Music: Adding tracks to the library. What a card copy and a drive copy do is in The Footage Sorter and camera cards: Copying a card.
+Transcription waits for a computer with a usable graphics card. Only when no computer of the studio's has one, or when a person picks a computer without one (see "Choosing a computer is a pick from the studio's known computers"), does it run on that computer's processor, and the person is told the reason and that it will be much slower.
 
-- When Timeline Cards is off: the four Timeline Cards kinds do not exist, and no computer shows a tick for them.
+A kind exists only while the part that asks for it is switched on; transcription exists while either Timeline Cards or the Footage Sorter is on. What the analysis of b-roll and of music needs, and what a person is shown about it, is in The b-roll archive: Describing and indexing clips, and in Music: Adding tracks to the library. What making a proxy needs is in Proxies and file moves: Making proxies on editors' computers, and what converting a download does is in YouTube downloads.
+
+Copying a camera or recorder card, copying a drive and reading a drive are not shared work. They start as soon as whoever may start them asks (anyone signed in for a card copy, an admin for a drive copy, or the editor at the computer in field backup with no network), on the computer the card or drive is in, whether or not someone is using it, and none of the rules in this capability holds them back: not the quiet time, not one piece at a time, not "Let the fleet use this computer" or its kind ticks, not the studio-wide limits, and not the need to reach the server. The only controls a computer has over them are the Footage Sorter's "Watch for cards and drives on this computer" and "Field backup on this computer" (see The Footage Sorter and camera cards: Copying a card, "There is one card copy, and it starts at once on the computer the card is in").
+
+- When Timeline Cards is off: lining up, preview copies, sound and waveforms do not exist, transcription is asked for only by the Footage Sorter, and no computer shows a tick for what does not exist.
+- When camera cards with the Footage Sorter is off: there is no listening to recordings, and transcription is asked for only by Timeline Cards. With both off, there is no transcription.
+- When YouTube downloads are off: there is no converting of downloads.
 - When the b-roll archive is off: there is no b-roll analysis.
 - When music is off: there is no music analysis.
-- When camera cards with the Footage Sorter is off: there are no card copies, drive copies or drive reads.
 
 ### A computer offers only work it has checked it can do right now
 
@@ -133,8 +136,7 @@ A computer is offered a kind of work only when it really can do it at that momen
 
 - it offers a kind only after checking that the very tools that kind uses start on it;
 - it offers work only on folders it can read right now: a drive that has been unplugged is absent, and work on it goes to a computer that has it;
-- it offers transcription only when it has a graphics card with enough memory and the transcription set-up;
-- it offers card and drive work only while the Footage Sorter is on and a card or drive is plugged in, and it reads one drive at a time.
+- it offers transcription only when it has the transcription set-up and a graphics card with enough memory, or when no computer of the studio's has a usable graphics card, or when a person picked it for the work.
 
 Nothing a computer says about itself is ever misread as "cannot": something the server does not recognise is never taken to mean the computer is unable. A computer that has never said what it can do is offered no work that needs anything, and is shown as "this computer has not said what it can do". Work of a kind the app on a computer cannot do is handed straight back, as not worth trying again on that computer.
 
@@ -150,7 +152,7 @@ Where a kind of work needs tools that the computer does not have (the video tool
 In the app's settings window on their own computer, an editor can set:
 
 - "Let the fleet use this computer", on by default. Turning it on says "This computer will take work for the fleet again."; turning it off says "This computer will stop taking work for the fleet." Beneath it: "Fleet work runs only while you are away from this computer."
-- One on/off row per kind of work, each named as in the table above, all on by default. Turning one off or on says "This computer will <no longer do this | now do this> for the fleet: <kind>." Turning off the last one is refused: "That is the last kind of work this computer takes. Untick 'Let the fleet use this computer' instead."
+- One on/off row per kind of work, each named as in the table above, all on by default. The row for making editing proxies is the computer's one "Make proxies on this computer" setting (see Proxies and file moves: Making proxies on editors' computers, "Clips with no proxy are found and their proxies are made"). Turning one off or on says "This computer will <no longer do this | now do this> for the fleet: <kind>." Turning off the last one is refused: "That is the last kind of work this computer takes. Untick 'Let the fleet use this computer' instead."
 - The lending period (see "The person at a computer can lend it to shared work for a while").
 
 This is how an editor keeps a laptop out of one kind of work without leaving shared work altogether. With every kind ticked, the computer also takes any kind of work added later. Each change takes effect at once.
@@ -166,28 +168,7 @@ From the dashboard, the person a computer belongs to, or an admin, can ask that 
 
 What the dashboard shows for the computer: whether it is taking work now (and why not), what it is running, which kinds it takes ("every kind" or "not reported"), how long it waits before it starts, and its graphics card. Then "Let the fleet use this computer" and one tick per kind ("every kind" ticks them all, and the kind ticks are unavailable while fleet use is off), each sent as soon as it is changed, asking only for what changed. The ticks show what the computer WILL do: a waiting ask if there is one, otherwise what the computer is doing. Beneath them: "Asked of <computer> the next time it is in touch. Fleet work only runs while nobody is using the computer." and "To lend it now, or stop the job it is running, use the app on that computer."
 
-Refusals:
-
-- not the computer's owner or an admin: "Only the person this computer belongs to, or an admin, can change it."
-- an unknown computer: "<person> has no computer called <computer>."
-- anything other than the two settings: "Only these can be changed from here: whether the fleet may use the computer, and which kinds of work it takes."
-- unticking the last kind, refused before anything is sent: "That is the last kind of work this computer takes. Untick Let the fleet use this computer instead."
-- a kind of work that does not exist.
-- a computer never heard from: "<computer> has not been heard from yet." (the controls are replaced by this sentence)
-- a computer that must update first: "<computer> must update CC Sync before this can be changed from here. Update it, or change it in its own settings window." (the controls are replaced by this sentence)
-- nothing would change: "Nothing to ask: it already works that way."
-
-One ask per computer waits at a time. A new change while one waits is folded into it, the newer value winning for each setting. A waiting ask can be withdrawn ("Withdrawn. Nothing is asked of it now." or "There was nothing waiting to withdraw."). An ask is applied once, however often it reaches the computer, and an answer to an older ask changes nothing. The state shown under the computer:
-
-- "Asked <ago>. <computer> gets it the next time it is in touch."
-- "Sent to <computer> <ago>. Waiting for its answer."
-- "<computer> could not save it yet and will try again: <detail>" (it tries again after 5 minutes)
-- "In effect." (for 10 minutes after the answer, then nothing)
-- "<computer> refused: <detail>"
-- "<computer> was not in touch for 14 days, so the request was dropped."
-- nothing, when withdrawn or when there is none.
-
-When the ask is applied, the editor at that computer is told once: "<Who> asked this computer to stop taking fleet work / take fleet work again / take every kind of fleet work / take only these kinds of fleet work: <kinds>." ("Your administrator" when no name is given, and a name is cut to 64 characters.) Every step is recorded in the dashboard's history of who did what.
+How the ask is made, what it refuses, how it waits for the computer and expires, the states shown under the computer, and what the editor at that computer is told are in Accounts, privacy and the legal paperwork: What each person may see and reach, "A person or an admin asks one of the person's computers to change its settings".
 
 - Who: the computer's owner, or an admin.
 - Ways in: the computer's own page on the dashboard, the per-computer view, and a person's own account page for their computers; the same two settings on the computer itself (previous behaviour).
@@ -198,8 +179,7 @@ For each computer, the dashboard shows:
 
 - its state sentence (see "A computer says in one sentence whether it is taking shared work and why not");
 - how long nobody has used it: "<n> s with nobody using it" under a minute, "<n> min with nobody using it", "no wait" for a computer that never waits, or "not reported";
-- the work running now: "<kind> on <file>, <n>%" (the file and the percentage only when known);
-- "volunteering until <time>" while its person has lent it;
+- the work running on it, and "lending until <time>" while its person has lent it, as The dashboard: Each computer's state, "Each computer shows the work in progress on it" shows them;
 - its graphics card's name and memory, when known.
 
 - Who: an admin for every computer, and each person for their own computers.
@@ -207,7 +187,7 @@ For each computer, the dashboard shows:
 
 ### What an admin can learn about what a computer is able to do
 
-For every computer, an admin can see what it has for shared work: whether it has a graphics card and its name and memory, whether it has a hardware video encoder, whether the video tools run, whether transcription is ready and if not why (not fetched yet, missing, or incomplete), how many processors it has and how loaded it is, which of the studio's shared folders it can reach right now, whether the Footage Sorter's card and drive work is on there, whether shared work is on, its quiet time, the kinds it takes, how long nobody has used it ("cannot tell" when unknown), whether Resolve is open and which project, until when it is lent, and its state sentence. These facts are never more than a minute old while the computer is in touch. When it is not, the last known facts are kept and shown with their age. No credentials or paths are shown.
+For every computer, an admin can see what it has for shared work: whether it has a graphics card and its name and memory, whether it has a hardware video encoder, whether the video tools run, whether transcription is ready and if not why (not fetched yet, missing, or incomplete), how many processors it has and how loaded it is, which of the studio's shared folders it can reach right now, whether shared work is on, its quiet time, the kinds it takes, how long nobody has used it ("cannot tell" when unknown), whether Resolve is open and which project, until when it is lent, and its state sentence. These facts are never more than a minute old while the computer is in touch. When it is not, the last known facts are kept and shown with their age. No credentials or paths are shown.
 
 - Who: an admin.
 - Name and search words: what a computer can do. Search words: graphics card, encoder, capabilities, transcription ready, computer abilities.
@@ -224,7 +204,7 @@ Every piece of heavy work a part asks for is done by exactly one computer. Two c
 
 ### Waiting work is taken in a fair order
 
-Waiting work is taken oldest first, except that sound and waveforms go ahead of preview copies, so an editor can listen to a clip before they can watch it. Work an admin started now goes first. A long backlog of one kind never hides another kind, and a piece that some computer can do is offered however many pieces that nobody can do are waiting ahead of it. A computer narrows what it takes by its own settings, but is never given a piece it was not able for at that moment.
+Waiting work is taken oldest first, except that sound and waveforms go ahead of preview copies, so an editor can listen to a clip before they can watch it. Work an admin started now goes first. When an editor plays a clip in Timeline Cards whose media is not ready yet, that clip's waiting media moves to the front, rather than more work being started at once. On one computer, describing b-roll goes before making proxies (see "Work on one computer takes turns"). A long backlog of one kind never hides another kind, and a piece that some computer can do is offered however many pieces that nobody can do are waiting ahead of it. A computer narrows what it takes by its own settings, but is never given a piece it was not able for at that moment.
 
 ### The best-placed able computer is asked first
 
@@ -234,7 +214,8 @@ Among the computers able to do a piece of work, the best placed is asked first. 
    - transcribing: a computer its person has lent now, then a graphics card with room for the work plus 1 GB to spare, then any graphics card;
    - preview copies: a computer lent now, then a hardware video encoder;
    - sound and waveforms: a computer lent now, then a computer set as wired to the server, which reads footage fastest;
-   - card copies, drive copies and drive reads: no preference (the card or drive is in one computer);
+   - describing b-roll: the computer the clips were dropped from, when it is able;
+   - every other kind: no preference of its own;
 2. holding less shared work right now;
 3. being less loaded (a computer that cannot say how loaded it is counts as not loaded, never as a penalty);
 4. having been left alone longer.
@@ -246,18 +227,18 @@ Names never break a tie. For the first minute after a piece of work is asked for
 
 ### Work can be meant for one named computer
 
-A piece of work can name the one computer that should do it. Every other computer is passed over with "this job is for <computer> only", and the named computer is asked at once, with no minute given to a better-placed one. Work meant for one computer stays meant for it even while that computer is away.
+A piece of work can name the one computer that should do it. Every other computer is passed over with "this job is for <computer> only", and the named computer is asked at once, with no minute given to a better-placed one. Work meant for one computer stays meant for it even while that computer is away. Describing b-roll clips that an editor chose to have indexed in place, where they lie on their own computer, is always meant for that computer, since no other can read them (see "Work names its files inside the studio's shared folders").
 
 ### An admin can start waiting work now, on a chosen computer
 
-On the work page, an admin can start any waiting piece of work now, on any able computer or on one computer picked from the list. Work started now skips three waits only: the rest after a failure on that computer, the wait for nobody to be at the computer (it is taken even with someone at it or Resolve open), and the minute given to the best-placed computer. It still waits while syncing is stopped for the whole fleet or on that computer, while an update waits to apply there, while that computer's proxy download has stopped itself, while the computer is already doing shared work or its own heavy work, while shared work is off on it, and while that kind is unticked on it. Only that piece is taken. It records "Your admin asked this computer to run this job now, without waiting for you to step away." The Footage Sorter starts its card and drive copies this way, because a person is waiting at the card.
+On the work page, an admin can start any waiting piece of work now, on any able computer or on one computer picked from the list. Work started now skips three waits only: the rest after a failure on that computer, the wait for nobody to be at the computer (it is taken even with someone at it or Resolve open), and the minute given to the best-placed computer. It still waits while syncing is stopped for the whole fleet, while an update waits to apply there, while that computer's downloads have stopped themselves, while the computer is already doing shared work, while shared work is off on it, and while that kind is unticked on it. Only that piece is taken. It records "Your admin asked this computer to run this job now, without waiting for you to step away."
 
 - Who: an admin.
 - Ways in: the work page.
 
 ### Choosing a computer is a pick from the studio's known computers
 
-Wherever a person chooses which computer does a piece of work (an admin starting work now, an editor choosing which computer makes a clip's proxy from its preview, see Proxies and file moves: Making proxies on editors' computers), the choice is a pick from the studio's known computers, and the work is sent at once. A name is typed only when no computer is known. For each computer the pick shows whose it is, its name, whether it is in touch (computers heard from recently first, then by name), when it was last heard from, whether it takes shared work and which kinds ("every kind" when none are named), what it has (graphics card and memory, hardware encoder, video tools, transcription, processors, shared folders), how long nobody has used it ("cannot tell" when unknown), whether it can do this piece and why not, and the work it is doing now. No credentials or paths are shown.
+Wherever a person chooses which computer does a piece of work (an admin starting work now; an editor choosing which computer makes a clip's proxy from its preview, see Proxies and file moves: Making proxies on editors' computers; whoever asked for a transcription, or an admin, choosing which computer does it, see Timeline Cards: footage in, ready to cut: Speech-to-text: facts and situations, "A person can transcribe clips from the editor"), the choice is a pick from the studio's known computers, and the work is sent at once. A name is typed only when no computer is known. For each computer the pick shows whose it is, its name, whether it is in touch (computers heard from recently first, then by name), when it was last heard from, whether it takes shared work and which kinds ("every kind" when none are named), what it has (graphics card and memory, hardware encoder, video tools, transcription, processors, shared folders), how long nobody has used it ("cannot tell" when unknown), whether it can do this piece and why not, and the work it is doing now. No credentials or paths are shown.
 
 - Who: anyone allowed to ask for the work.
 
@@ -267,12 +248,12 @@ Placing a cut into Resolve, and any editing inside Resolve, is never shared work
 
 ### Media for Timeline Cards is made by the studio's computers first, and by the server when none can
 
-When Timeline Cards needs a clip's sound, preview copy or waveform, the piece is offered to the studio's computers first. While it is being made the clip shows "making"; when the file is there, it is ready. The server makes the file itself when:
+When Timeline Cards needs a clip's sound, preview copy or waveform, the piece is offered to the studio's computers first. What the clip shows while it is made or after it failed, and when the editor asks again for a copy that failed, is in Timeline Cards: the editor: Media the browser gets, "A clip whose sound is still being prepared is dimmed on the lane", "Each clip's picture copy comes from its own media, and a failure is remembered until the media changes" and "Each clip's waveform is made once, fine enough for 1/200 of a second, and reused"; such a later request is a new piece of work. The server makes the file itself when:
 
 - the answer to "why is this not running" says no computer will ever be able to (none able, the named computer unknown, none heard from), or
 - the computers have used up their tries on it, for any reason other than the clip having no sound or no picture, which are final.
 
-While the hold-up is only passing (computers busy, the limit reached, waiting for quiet, a computer resting), Timeline Cards keeps waiting. Work the server takes over is never handed back to the computers; it resumes after the server restarts, and if it fails on the server too it is given up with the error. The server never makes a file a computer is already making, and if a computer's copy arrives while the server is also making one, the server's is thrown away. Work is shared out only for files in the studio's shared folders; anything else is made by the server. Transcription is never taken over by the server: it needs a graphics card. The server takes over a piece only when it can start it now; otherwise the piece is given up and shown as given up.
+While the hold-up is only passing (computers busy, the limit reached, waiting for quiet, a computer resting), Timeline Cards keeps waiting. Work the server takes over is never handed back to the computers; it resumes after the server restarts, and if it fails on the server too it is given up with the error. The server never makes a file a computer is already making, and if a computer's copy arrives while the server is also making one, the server's is thrown away. Timeline Cards media is shared out only for files in the studio's shared folders; any other is made by the server. Transcription is never taken over by the server. The server takes over a piece only when it can start it now; otherwise the piece is given up and shown as given up.
 
 The explanation of such a piece reads "the computers could not finish this, so the server is making it; it never goes back to the computers".
 
@@ -285,7 +266,7 @@ The explanation of such a piece reads "the computers could not finish this, so t
 
 ### A computer does one piece of shared work at a time
 
-A computer is never given a second piece of shared work while it is doing one. The one exception is reading a drive, which is light: a computer may read one drive beside one other piece of work, but never two drives at once; a second drive read is left waiting for later. Media for one clip is never made twice at once: however many people open the same clip, there is at most one piece of work making each file.
+A computer is never given a second piece of shared work while it is doing one. For making proxies, an idle computer makes several proxies at once, and together they count as its one piece of shared work. Otherwise proxy making follows the general rules: never while Resolve is rendering, and not while Resolve is open unless that computer's hold-back is off (see Proxies and file moves: Making proxies on editors' computers, "Proxy making gives way to Resolve"). Media for one clip is never made twice at once: however many people open the same clip, there is at most one piece of work making each file.
 
 On Windows, shared work runs with no window and at low priority, so it does not slow the person at the computer.
 
@@ -298,16 +279,15 @@ Across the whole studio, at most this many pieces of each kind run at once:
 | Kind | At most at once |
 |---|---|
 | Transcribing speech | 2 |
-| Copying a drive | 2 |
 | Every other kind | 4 |
 
 The limit holds at every moment, even when several computers ask in the same instant. A piece held back by the limit is explained as "<N> <kind> job(s) are already running, which is this fleet's limit (<limit>); it starts as soon as one finishes", and starts as soon as one finishes. Work the server has taken over does not count towards the limit.
 
-- Setting: How many of each kind run at once. Does: the studio-wide limit for each kind of shared work. A value below 1 counts as 1. Default: 2 for transcribing and for drive copies, 4 for every other kind. Who: an admin. Applies to: the site. Search words: limit, at once, concurrent, fleet cap, how many jobs.
+- Setting: How many of each kind run at once. Does: the studio-wide limit for each kind of shared work. A value below 1 counts as 1. Default: 2 for transcribing, 4 for every other kind. Who: an admin. Applies to: the site. Search words: limit, at once, concurrent, fleet cap, how many jobs.
 
 ### The server makes no media while a card is being copied to the NAS
 
-While a camera or recorder card is being copied to the NAS, the server makes no preview copies, sound or waveforms itself: the work waits until the copy is done, so the copy is not slowed. See The Footage Sorter and camera cards: Drives, speed and interruptions.
+While a camera or recorder card is being copied to the NAS, the server makes no preview copies, sound or waveforms itself: the work waits until the copy is done, so the copy is not slowed.
 
 #### Lessons
 
@@ -317,11 +297,11 @@ While a camera or recorder card is being copied to the NAS, the server makes no 
 
 ### Progress is shown as it goes, never as a made-up zero
 
-While a piece of work runs, its progress is shown as a real percentage when it is known and as "running" when it is not, never as a made-up 0%. Progress moves at least every 30 seconds while work runs; a long transcription shows its progress as it goes (also whenever it has moved by 1%). A transcription counts the files to do, which one is under way and how far through it; a preview copy, sound or waveform counts how far through the clip it is; card and drive copies add how many files and bytes are done.
+While a piece of work runs, its progress is shown as a real percentage when it is known and as "running" when it is not, never as a made-up 0%. Progress moves at least every 30 seconds while work runs; a preview copy, sound or waveform counts how far through the clip it is. What a person watching a transcription sees, at least every 3 seconds, is in Timeline Cards: footage in, ready to cut: Speech-to-text: facts and situations, "What transcribing needs and what a person sees while it runs".
 
 ### The work page shows what is waiting and running, and why any of it is not moving
 
-The work page is for admins. It keeps itself up to date without reloading. It opens with "Work the fleet does for itself: transcriptions, preview copies, sound and waveforms, analysis, card and drive copies." and "A piece of work goes to a computer that can do it. What this page is for is a queue that is not moving, and why. That answer is under each row, per computer, in words."
+The work page is for admins. It keeps itself up to date without reloading. It opens by naming the kinds of work the fleet does for itself (those in "The kinds of shared work and what each needs"), and "A piece of work goes to a computer that can do it. What this page is for is a queue that is not moving, and why. That answer is under each row, per computer, in words."
 
 - A summary: "<N> waiting, <N> running[, <N> made on the server][, <N> given up in the last <N> h]", and "The oldest has waited <time>."
 - Per kind: "<kind> <running>/<limit>", with "full: the next one waits for a free slot" at the limit.
@@ -376,7 +356,7 @@ Whenever a running piece of work is cancelled, stopped, or ended by the app quit
 
 ### A studio-wide stop or the app closing puts running work back to waiting
 
-When an admin stops syncing for the whole fleet (see The dashboard: Stopping and resuming the fleet), or the app on a computer quits, the work running there stops and goes back to waiting, to be done when a computer can; it is not counted as a failure of that computer. While the fleet is stopped, no computer takes any shared work.
+When an admin stops syncing for the whole fleet (see Sync: Studio-wide stops and the editor's pause, "An admin stops syncing on every computer with a reason"), or the app on a computer quits, the work running there stops and goes back to waiting, to be done when a computer can; it is not counted as a failure of that computer. While the fleet is stopped, no computer takes any shared work.
 
 ### Only the computer doing a piece of work can end it or change it
 
@@ -398,7 +378,7 @@ When a computer doing a piece of work goes quiet (switched off, asleep, unplugge
 
 ### A computer whose access is refused says so and takes no work
 
-When the server refuses a computer's access (its person suspended, disabled or removed, see Accounts, privacy and the legal paperwork: Suspending, disabling and removing a person), the computer stops the work it is running at once, takes no new work, and shows that it is not taking work, adding "This computer's fleet work is not being accepted right now: ask the studio to check this account." A piece it had already finished can still be handed in. The next time the server accepts it, the message clears by itself.
+When the server refuses a computer's access (its person suspended or removed, see Accounts, privacy and the legal paperwork: Suspending, disabling and removing a person, "Stopping a person takes effect everywhere at once"), the computer stops the work it is running at once, takes no new work, and shows that it is not taking work, adding "This computer's fleet work is not being accepted right now: ask the studio to check this account." A piece it had already finished can still be handed in. The next time the server accepts it, the message clears by itself.
 
 #### Lessons
 
@@ -410,15 +390,19 @@ When the server refuses a computer's access (its person suspended, disabled or r
 
 Each piece of work moves from waiting, to running on one computer, to one of three endings: done, failed, or given up. When it fails:
 
-- A failure that is about the work itself (the clip has no sound, no picture or no samples, or the file is not in the studio's folders at all) ends it at once as failed, with that reason in plain words, and it is not tried again: "this job failed and will not be tried again: <reason>".
+- A failure that is about the work itself (the clip has no sound, no picture or no samples, a music track cannot be read or analysed, or the file is in none of the folders a piece may name) ends it at once as failed, with that reason in plain words, and it is not tried again: "this job failed and will not be tried again: <reason>".
 - A failure of the computer (a tool that would not start, a folder it could not reach, a time limit run out, the computer going quiet) sends it back to waiting, to be tried on another computer, until its tries are used up.
 - When its tries are used up it is given up: "given up after <N> attempt(s): <last error, or 'no error recorded'>", unless the server takes it over (see "Media for Timeline Cards is made by the studio's computers first, and by the server when none can").
 
 | Kind | Tries |
 |---|---|
-| Transcribing speech | 3 |
-| Preview copies | 3 |
-| Sound, waveforms, card copies, drive copies, drive reads | 2 |
+| Transcribing speech, listening to recordings | 3 |
+| Preview copies, editing proxies | 3 |
+| Sound, waveforms, lining clips up, converting downloads | 2 |
+| Describing a b-roll clip | 2 |
+| Analysing a music track | tried again only after a failure of the computer doing it |
+
+A b-roll clip whose describing fails twice is left as failed until a person asks again. A music track that cannot be read or analysed fails at once with its reason and is not tried again; only a failure of the computer doing it (it stopped, crashed or went quiet) sends the track to be tried again on another computer.
 
 ### A computer where work just failed rests before it is given more
 
@@ -437,7 +421,7 @@ Every piece of work has one overall answer, in words:
 - some computer can take it: "<N> computer(s) can take this job; one will start it shortly";
 - no computer has ever been in touch: "no computer has ever been in touch with this server";
 - meant for one computer never heard from: "this job is for <computer> only, and no computer of that name has ever been in touch"; meant for one that cannot take it now: "this job is for <computer> only, and it cannot take it: <why>";
-- otherwise: "no computer can take this job right now: <why>", naming the reason of the computer nearest to taking it, for example "somebody is at it", "it cannot do this kind of work", "it has not been heard from in the last 15 minutes", "it is busy with its own work"; when that reason is a missing tool whose fetching keeps failing, it adds ". On <person>/<computer>, <cause>".
+- otherwise: "no computer can take this job right now: <why>", naming the reason of the computer nearest to taking it, for example "somebody is at it", "it cannot do this kind of work", "it has not been heard from in the last 15 minutes"; when that reason is a missing tool whose fetching keeps failing, it adds ". On <person>/<computer>, <cause>".
 
 Beside the sentence, the answer says whether the hold-up will pass by itself ("the fleet will get to it": computers busy, the limit, waiting for quiet, a computer resting, a named computer away) or not (no computer able, the named computer unknown, no computer in touch), and the two always point at the same cause. It also says how many computers could ever do it, and how many of that kind are running against the limit.
 
@@ -486,7 +470,7 @@ When a piece finishes, the admin sees how long it took, how much faster than rea
 
 ### Work names its files inside the studio's shared folders
 
-A piece of work names its files as a shared folder (the studio's project tree, the Timeline Cards episodes, the media folder, the footage) and a path inside it, never as a full path, so the same piece can be done on any computer, wherever that computer keeps those folders. A computer that does not have the folder, or cannot reach it right now, is passed over ("this computer has no <folder> it can reach right now"), and the piece may be done elsewhere. A path that climbs out of its folder, a full path, an empty path, or one with unprintable characters fails the piece with a sentence saying so.
+A piece of work names its files as a shared folder (the studio's project tree, the Timeline Cards episodes, the media folder, the footage) and a path inside it, never as a full path, so the same piece can be done on any computer, wherever that computer keeps those folders. The one other folder a piece may name is a folder an editor chose on their own computer in that computer's own chooser, for b-roll indexed in place; such a piece is meant for that computer only (see "Work can be meant for one named computer"). A computer that does not have the folder, or cannot reach it right now, is passed over ("this computer has no <folder> it can reach right now"), and the piece may be done elsewhere. A path that climbs out of its folder, a full path, an empty path, or one with unprintable characters fails the piece with a sentence saying so.
 
 A piece that makes a file must say where it goes: nothing guesses a place in somebody's episodes. Its name defaults to the source's own name. A name that no computer can write (empty, a dot name, or holding a "/" or a control character) is refused when the work is asked for, with "the output name is not a plain file name: it cannot be a dot name or hold a '/' or a control character". A name only Windows cannot write (holding a ":" or a "\") is never given to a Windows computer, and is made on a Mac or by the server.
 
@@ -494,11 +478,11 @@ A piece that makes a file must say where it goes: nothing guesses a place in som
 
 ### A computer transcribes an episode's folder
 
-A transcription names a folder in the Timeline Cards episodes and its episode, and can ask for speakers to be told apart. A folder with nothing left to transcribe finishes at once at 100%. When done, the transcripts made are listed. What the transcripts hold is in Timeline Cards: footage in, ready to cut: The transcript and its English.
+A transcription names a folder in the Timeline Cards episodes and its episode, or, when the Footage Sorter asks for it, a folder of its own footage. Every transcription tells speakers apart. A folder with nothing left to transcribe finishes at once at 100%. When done, the transcripts made are listed. What the transcripts hold is in Timeline Cards: footage in, ready to cut: The transcript and its English.
 
 ### A small preview copy of a clip is made for Timeline Cards
 
-A preview copy is at most 480 lines tall, never enlarged, with a fresh picture every second so it can be jumped about in quickly, and stereo sound. A computer whose graphics card can encode video uses it; others encode on the processor. A clip with no picture fails as "no video track" and is not tried again.
+A clip's small picture copy is picture-only, at most 480 lines tall, never enlarged, with a fresh picture every second so it can be jumped about in quickly. A computer whose graphics card can encode video uses it; others encode on the processor. A clip with no picture fails as "no video track" and is not tried again; this failure belongs to a clip's small picture only. The interview's own preview, which keeps the camera sound, is a different file (see Timeline Cards: footage in, ready to cut: Footage files and files made from them, "Every interview gets a small preview exactly as long as its sound").
 
 ### A clip's sound is made for Timeline Cards
 

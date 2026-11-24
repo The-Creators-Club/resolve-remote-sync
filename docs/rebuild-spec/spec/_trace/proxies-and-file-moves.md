@@ -189,10 +189,11 @@
 - Anything set aside is kept as long as promised | written from PRX-055
 - A clip's proxies move and are renamed with it | leftover proxies are remembered and carried by the next move (PRX-059)
 - Moves a computer refuses | a move naming an unsafe place is shown to the admin as refused instead of ignored silently
-- A project folder moved on the server is followed before anything syncs | a stray folder at the new place never counts as the move, and the message clears on its own (PRX-061, PRX-062)
+- A project folder moved on the server is followed before anything syncs | (the stray-folder rule and the clearing message, PRX-061 and PRX-062, are held by sync-2's passage this one points to since the joins, 2026-11-24)
 - A possible hand move with weaker evidence waits for an admin | written from PRX-081
 - A project folder moved or renamed by hand on the NAS is followed | each refusal is shown to the admin (PRX-062)
-- A missing clip whose file is already in the tree is relinked, never copied | written from PRX-089, PRX-090, PRX-091, PRX-092
+- A missing clip whose file is already in the tree is relinked, never copied | written from PRX-089; the ranking, review and offline-drive parts (PRX-090, PRX-091, PRX-092) are held by resolve-on-the-editors-computer since the joins (2026-11-24)
+- Renaming a b-roll collection is a move every computer follows | added by the joins (2026-11-24, proxies-and-file-moves F1), from BRO-017
 - A whole project is checked and its stray media gathered into its folder | written from PRX-093, PRX-094, PRX-095, PRX-096
 - A backup of chosen timelines takes only the media they use | written from PRX-097
 - A new project gets the studio's folder template without disturbing what is there | written from PRX-098
@@ -244,8 +245,8 @@
 - Sync / Deletions and removing a project | A proxy made on an editor's computer is never removed by syncing | the holding place for removed files and its tidying
 - Sync / Deletions and removing a project | Anything set aside is kept as long as promised | how long the holding place keeps files
 - Sync / Deletions and removing a project | A file moved to a place this computer does not sync is set aside, never deleted | the dated holding place for removed files
-- Sync / Files that must never sync | A proxy appears under its real name only when it is finished | unfinished and still-changing files never travel
-- Sync / Disk space | Proxy making keeps the drive from filling | the free-space floor
+- Sync, part 2 / Clocks and file age | A proxy appears under its real name only when it is finished | still-changing files never travel
+- Sync / Disk space | Proxy making keeps the drive from filling | the computer's one free-space floor, also used for proxy making
 - Sync / Wired or remote | Every computer that holds the moved item is told | which computers work straight from the NAS
 - Sync / A plan belongs to a computer | Every computer that holds the moved item is told | which projects and borrowed folders each computer syncs
 - Sync / Safety stops | Proxies moved by hand on the NAS are moved on each computer, not downloaded again | the download safety stop and what counts as a deletion
@@ -256,10 +257,16 @@
 - Resolve on the editor's computer / Fixing media: copying in, rehearsals and undo | A whole project is checked and its stray media gathered into its folder | copying media in and its undo
 - The dashboard / Each computer's state | The dashboard shows each computer's proxy coverage | the per-computer view
 - The dashboard / Problems the server finds | Every proxy on the server has its original beside it | where the server's findings are shown
-- The dashboard / Problems the server finds | Every hand move is recognised or the admin is told how many were not | the serious problem shown until dismissed
+- The dashboard / Problems the server finds | Every hand move is recognised or the admin is told how many were not | the serious problem, closed as a one-off error after 24 quiet hours
 - The dashboard / Alerts by mail | Admins are told when a computer never confirmed a move | the warning reaching the admin
 - The app on each editor's computer / Starting, staying running and crashing | A computer making proxies stays awake and says why it should not shut down | sleep and shutdown on the editor's computer
 - The Footage Sorter and camera cards / Moving footage on the NAS | A move made in the Footage Sorter inside a project reaches every editor's copy | the Sorter's own moves
+- Work shared out across the computers / When a computer counts as free and able | Proxies are made only while nobody is at the computer ; Proxy making gives way to Resolve | the computer's one quiet time and one hold-back for Resolve
+- Work shared out across the computers / Choosing who runs what | Clips with no proxy are found and their proxies are made | the pick of a computer for one clip's proxy
+- Timeline Cards: footage in, ready to cut / Grouping clips and building the multicam | Raw camera clips get their proxies from Blackmagic Proxy Generator | what the interview's page says while no raw proxy can be made
+- Sync, part 2 / Project folders on an editor's computer | A project folder moved on the server is followed before anything syncs | what the editor sees, and what happens when their copy cannot follow
+- Resolve on the editor's computer / Missing clips, relinking and refreshing | Resolve's clips follow a moved file now or when the project next opens | the limit on changes made in Resolve unasked
+- The b-roll archive / Describing and indexing clips | Renaming a b-roll collection is a move every computer follows | where the collection's name is changed
 - The b-roll archive / Previews made for the archive | Some clips are deliberately not pointed at a proxy | the browser preview kept in the Proxy folder
 - The server: installing it and keeping it running / Snapshots, restoring and the server's disk | An admin puts a move back | the snapshot before a folder move is put back
 
@@ -272,3 +279,36 @@
 ## Settled by the owner 2026-11-24
 
 - proxies-and-file-moves-U1 | making proxies is on by default on every computer, under the usual rules (only while nobody is at the keyboard, giving way to Resolve, never filling the drive)
+
+## Joins settled
+
+- broll F1 | changed: Some clips are deliberately not pointed at a proxy | the browser preview is never attached as a proxy, whether or not the original is here; its message kept for when it is
+- dashboard-1 F11 | changed: Every hand move is recognised or the admin is told how many were not | "stays until dismissed" dropped; a one-off error that closes after 24 quiet hours (lead's ruling)
+- editor-app F16 | changed: A computer making proxies stays awake and says why it should not shut down | points to editor-app's stay-awake rule with its 8-hour limit; the shutdown reason kept since editor-app quotes it
+- fleet-jobs F7 | changed: Proxies are made only while nobody is at the computer ; Proxy making gives way to Resolve ; What proxy making on a computer is doing, in one line | own idle and Resolve settings dropped; the computer's one quiet time and hold-back for Resolve used, with pointers; per the coordinator's decision, no proxy is started while Resolve renders whatever the hold-back, none while Resolve is open unless the hold-back is off, then one at a time
+- footage-sorter-and-camera-cards-2 F6 | changed: A move made in the Footage Sorter inside a project reaches every editor's copy | a clip whose proxy cannot follow stays whole and is listed; no "some proxies stayed" for a Sorter move
+- proxies-and-file-moves F1 | changed: Renaming a b-roll collection is a move every computer follows | new heading: a collection rename is a move reaching every computer holding its clips, relinking Resolve, deleting nothing
+- proxies-and-file-moves F2 | changed: Raw camera clips get their proxies from Blackmagic Proxy Generator | raw clips dropped into Timeline Cards are proxied like any raw clip, pointer to cards-footage-in
+- proxies-and-file-moves F3 | no change here: dashboard-1 changes its advice and points to "A project folder moved or renamed by hand on the NAS is followed"
+- proxies-and-file-moves F4 | no change here: dashboard-1 drops its 500; the "stays until dismissed" part is done under dashboard-1 F11
+- proxies-and-file-moves F5 | no change here: the text stands (proxy making is shared work); fleet-jobs changes
+- proxies-and-file-moves F6 | no change here: already says b-roll describing goes first; fleet-jobs changes
+- proxies-and-file-moves F7 | changed: Clips with no proxy are found and their proxies are made | the pick of a computer for one clip's proxy, beside its preview and on each incoming clip, pointing to fleet-jobs
+- proxies-and-file-moves F8 | no change here: the server check keeps its camera-ending tolerance and the exact-name rule; footage-sorter-and-camera-cards-1 changes
+- proxies-and-file-moves F9 | changed: An admin moves a file or folder on the server and every computer follows ; A move made in the Footage Sorter inside a project reaches every editor's copy ; Each editor's computer moves its own copy and the editor is told ; Every move is recorded | Sorter moves need no admin; who asked is the person whose sorting or move led to it, named in the editor's notice
+- proxies-and-file-moves F10 | changed: A move made in the Footage Sorter inside a project reaches every editor's copy | the one refusal is for a move out of a project to no active project; into a project from outside is a plain move
+- proxies-and-file-moves F11 | no change here: already agrees; resolve-on-the-editors-computer points here
+- proxies-and-file-moves F12 | changed: A missing clip whose file is already in the tree is relinked, never copied | shrunk to one line and a pointer (with F13)
+- proxies-and-file-moves F13 | changed: A missing clip whose file is already in the tree is relinked, never copied | full description left to resolve-on-the-editors-computer; one line and a pointer here
+- proxies-and-file-moves F14 | changed: A project folder moved on the server is followed before anything syncs | "Could not move this project's folder" dropped; points to sync-2
+- proxies-and-file-moves F15 | changed: A project folder moved on the server is followed before anything syncs | shrunk to what happens and a pointer to sync-2's editor-side passage
+- resolve-on-the-editors-computer F7 | no change here: this piece already holds the relink after a move in full; the other pieces point here
+- resolve-on-the-editors-computer F8 | changed: Resolve's clips follow a moved file now or when the project next opens | 5 minutes is how often it looks; the relink counts against the limit on changes made unasked, with a pointer
+- resolve-on-the-editors-computer F9 | no change here beyond F12 and F13: the lead's rulings on F12 and F13 make resolve-on-the-editors-computer the home of the ranking, while this ruling says the opposite; followed F12 and F13, reported to the lead
+- server-install-and-running-1 F13 | no change here: server-install-and-running-1 changes
+- sync-1 F11 | no change here: sync-1 changes
+- sync-1 F12 | no change here: sync-1 changes
+- sync-1 F13 | changed: Anything set aside is kept as long as promised | kept for the stated period, or less when the folder passes its size or the drive its floor; never removed while the NAS lacks it
+- sync-1 F14 | changed: A proxy appears under its real name only when it is finished | pointer now goes to Sync, part 2: Clocks and file age
+- sync-1 F15 | changed: Proxy making keeps the drive from filling | own floor setting and the 5% share dropped; what is written plus the computer's one floor must fit
+- sync-2 F7 | no change here: sync-2 changes

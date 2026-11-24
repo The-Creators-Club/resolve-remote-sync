@@ -6,9 +6,9 @@
 - 14-019 | The set-up wizard walks the first admin through setting up the server ; Set-up task: the licence ; Set-up task: your admin account ; Set-up task: your studio
 - 16-061 | The server runs on a TrueNAS or a Synology NAS
 - 16-063 | Editor accounts on the NAS are made and managed by the dashboard
-- 16-064 | Editor accounts on the NAS are made and managed by the dashboard ; The server's way in to the NAS
+- 16-064 | Editor accounts on the NAS are made and managed by the dashboard ; Set-up task: Connect to your NAS
 - 16-065 | The server runs on a TrueNAS or a Synology NAS
-- 16-066 | Editor accounts on the NAS are made and managed by the dashboard ; The server's way in to the NAS ; The server runs on a TrueNAS or a Synology NAS
+- 16-066 | Editor accounts on the NAS are made and managed by the dashboard ; Set-up task: Connect to your NAS ; The server runs on a TrueNAS or a Synology NAS
 - 16-067 | Facts about TrueNAS and Synology the person setting up meets
 - 16-068 | Set-up checks that the Synology's secure file transfer is switched on
 - 16-069 | left out: for the builders only
@@ -73,11 +73,11 @@
 - 17-004 | A sign-in set-up that would lock everyone out is refused
 - 17-006 | left out: for the builders only
 - 17-059 | Every setting is made in the dashboard and kept through every update
-- 17-061 | Every setting is made in the dashboard and kept through every update ; The server's way in to the NAS ; A new project's folders are laid down on the NAS
+- 17-061 | Every setting is made in the dashboard and kept through every update ; Set-up task: Connect to your NAS ; A new project's folders are laid down on the NAS
 - 17-075 | The server makes and keeps its own secrets
 - 17-085 | Secrets an admin enters are checked and never shown back ; Settings take effect without a restart, and no page restarts the server
 - 19-034 | Adding clips to the b-roll index is always guarded
-- 21-005 | Secrets an admin enters are checked and never shown back ; The server's way in to the NAS
+- 21-005 | Secrets an admin enters are checked and never shown back ; Set-up task: Connect to your NAS
 - 21-028 | A part switched on but missing something it needs says so
 - 21a-008 | Secrets an admin enters are checked and never shown back
 - 21b-006 | Secrets an admin enters are checked and never shown back
@@ -87,7 +87,7 @@
 - 21c-026 | Secrets an admin enters are checked and never shown back ; The server makes and keeps its own secrets
 - 21d-001 | left out: an arrangement (the promise is under Every setting is made in the dashboard and kept through every update)
 - 21d-002 | The kind of NAS, the project layout and the shared libraries ; Editor accounts on the NAS are made and managed by the dashboard ; A new project's folders are laid down on the NAS
-- 21d-003 | The server's way in to the NAS
+- 21d-003 | Set-up task: Connect to your NAS
 - 21d-004 | left out: an arrangement (the promise is under Secrets an admin enters are checked and never shown back)
 - 17-086 | Settings take effect without a restart, and no page restarts the server
 - 21-023 | Updating the server never takes the dashboard away ; An update is kept only when the new version really serves ; Reinstalling never deletes what the server holds
@@ -490,7 +490,7 @@
 - A part that needs extra software on the server gets it when switched on | fetched on its own when a part is switched on, with a try-again button, instead of by the person installing
 - Set-up task: your studio | the project layout is learned from sample project folders (SRV-017)
 - Set-up task: editors | checks that the first editor's computer can list, read, write and delete (SRV-011)
-- Set-up task: reaching the dashboard over the private network | done only when the dashboard answers over the private network at a secure address (SRV-016, SRV-030)
+- Set-up task: Connect to your private network | done only when the dashboard answers over the private network at a secure address (SRV-016, SRV-030)
 - Every change to the NAS names the NAS first and asks before anything sweeping | done in the browser; typing the NAS's name replaces a terminal prompt
 - A shared Resolve project database on the NAS is set up safely | written from SRV-012 and SRV-013
 - Settings take effect without a restart, and no page restarts the server | an admin restarts from the NAS's app screen (SRV-056, SRV-041)
@@ -551,8 +551,8 @@
 ## Joins with other capabilities
 
 - The server: installing it and keeping it running / Connections and credentials | What a NAS must have before the server goes on it | joining the NAS to the private network and editors' computers reaching it
-- The server: installing it and keeping it running / Connections and credentials | Set-up task: reaching the dashboard over the private network | the secure address and reachability
-- The server: installing it and keeping it running / Connections and credentials | The server's way in to the NAS | the limited key and NAS credentials in full
+- The server: installing it and keeping it running / Connections and credentials | Set-up task: Connect to your private network | the secure address and reachability
+- The server: installing it and keeping it running / Connections and credentials | Set-up task: Connect to your NAS | the limited key and NAS credentials in full
 - Accounts, privacy and the legal paperwork / The licence a person accepts | Set-up task: the licence | what accepting records and re-consent
 - Accounts, privacy and the legal paperwork / Who may sign in | Editor accounts on the NAS are made and managed by the dashboard | adding a person and their computer
 - Accounts, privacy and the legal paperwork / What the product records about a person | The site's identity and layout reach every editor's computer and every page | the four reporting switches
@@ -560,7 +560,7 @@
 - Releases and updates / Customer sites and the vendor's release feed | The site's identity and layout reach every editor's computer and every page | the release feed and how vendor releases are taken
 - The b-roll archive / Describing and indexing clips | Adding clips to the b-roll index is always guarded | adding clips to the index
 - The b-roll archive / Replacing the search index | Going back never reaches a version that cannot read the studio's data | going back on a search index
-- The b-roll archive / Client folders and links | Set-up task: reaching the dashboard over the private network | the deliberately public links
+- The b-roll archive / Client folders and links | Set-up task: Connect to your private network | the deliberately public links
 - The dashboard / Problems the server finds | The protection list says what really stands between the studio and a loss | problems on the home page
 - The dashboard / Alerts by mail | Every problem the server finds reaches a person | alert destinations, test and the still-here message
 - The dashboard / Speed under load | The server stays quick under load | page speed
@@ -573,3 +573,48 @@
 ## Settled by the owner 2026-11-24
 
 - server-install-and-running-1-U1 | every one of the six switchable parts is off for a new site except the help for the editing program, which is on; YouTube's anti-blocking measures and automatic updates of editors' apps stay off
+
+## Joins settled
+
+- accounts-privacy-legal F4 | changed: A new project's folders are laid down on the NAS ; What the server sets up on the NAS by itself ; The site's identity and layout reach every editor's computer and every page | dropped the "Who may see each project" setting and its site-list line; every project is open only to its own people
+- accounts-privacy-legal F10 | changed: Set-up task: the licence ; Installing is one step on the NAS, and the rest happens in the browser ; Before any account exists anyone may start set-up, and after that only an admin | the task keeps its place and points to accounts-privacy-legal for text, states and wording; Who: an admin; before any account exists the licence can be read, not accepted
+- accounts-privacy-legal F12 | changed: Editor accounts on the NAS are made and managed by the dashboard ; The site's identity and layout reach every editor's computer and every page | dropped the "What editors may do on the NAS" setting; an editor's NAS account only ever transfers files (no conversion report or refusal was in this piece)
+- accounts-privacy-legal F13 | changed: Editor accounts on the NAS are made and managed by the dashboard | the NAS login carries the person's own account password where the studio uses the shared folders, changed with it, pointing to accounts-privacy-legal
+- accounts-privacy-legal F15 | no change here: the ruling says this piece already holds it ("Secrets an admin enters are checked and never shown back"); the other pieces point here
+- broll F10 | changed: Adding clips to the b-roll index is always guarded | says the server makes the secret when none is set, so only a weak supplied one leaves additions unguarded; points to broll's "Search never stops because of an update" for the not-working state
+- dashboard-1 F10 | changed: A part switched on but missing something it needs says so | Timeline Cards with no place for its data keeps its menu place and opens the "not working" page with its reason, pointing to dashboard-1
+- dashboard-2 F9 | changed: Every problem the server finds reaches a person ; The protection list says what really stands between the studio and a loss | as ruled with F6 and F7 here
+- dashboard-2 F10 | changed: Every problem the server finds reaches a person | dropped the "Checking the mail server's certificate" setting; points to dashboard-2's "Verify the mail server's certificate"
+- dashboard-2 F11 | no change here: dashboard-2 changes
+- editor-app F23 | no change here: editor-app changes; the lead's ruling (the site's drive letter, a whole drive such as P:\, is the tree root for a computer working straight off the server) already agrees with this piece's drive letter
+- footage-sorter-and-camera-cards-2 F9 | no change here: footage-sorter-and-camera-cards-2 changes and points here
+- resolve-on-the-editors-computer F3 | changed: The kind of NAS, the project layout and the shared libraries | this piece is the home; the "Shared libraries" default now reads "the LUT library and the Resolve stills gallery"
+- server-install-and-running-1 F1 | changed: Set-up task: your admin account ; Before any account exists anyone may start set-up, and after that only an admin | the admin list sits in the task, started by the first admin's name; an empty list or one naming the NAS's own administrator is refused with accounts-privacy-legal's messages; the first admin may not be the NAS's administrator (the lead's ruling, SRV-015 and page-09 9.6 A, agrees; it does not say how the list starts, so the first admin's name starting it stands)
+- server-install-and-running-1 F2 | changed: Set-up task: your admin account ; A sign-in set-up that would lock everyone out is refused ; Before any account exists anyone may start set-up, and after that only an admin | dropped sign-in by NAS account and the identity provider's admin mark; the product's own accounts, with single sign-on optionally in front
+- server-install-and-running-1 F4 | changed: Editor accounts on the NAS are made and managed by the dashboard ; Set-up task: your admin account | both point to accounts-privacy-legal's one shape of a sign-in name; "1 to 64" and the "@" and backslash dropped
+- server-install-and-running-1 F5 | changed: The server makes and keeps its own secrets | an admin changes the sign-in secret from settings; points to accounts-privacy-legal for existing sign-ins
+- server-install-and-running-1 F6 | changed: The protection list says what really stands between the studio and a loss ; Every problem the server finds reaches a person | both use dashboard-2's one rule and point to its status line
+- server-install-and-running-1 F7 | changed: The protection list says what really stands between the studio and a loss ; Every problem the server finds reaches a person | a recorded choice to tell nobody ends the warning; the line and home page still read nobody is told, by the admin's own choice, never green
+- server-install-and-running-1 F8 | no change here: dashboard-2 drops the installer's unlock; this piece already keeps the place fixed once a computer has joined (SRV-034)
+- server-install-and-running-1 F9 | no change here: this piece is the home; dashboard-2 points here
+- server-install-and-running-1 F10 | changed: Set-up task: your studio ; The site's identity and layout reach every editor's computer and every page | set-up asks the studio's time zone; both point to server-install-and-running-2's "Schedules run on the studio's own clock"
+- server-install-and-running-1 F11 | no change here: footage-sorter-and-camera-cards-2 drops its setting and points here
+- server-install-and-running-1 F12 | changed: The NAS copies the studio's work off site every night | the Footage Sorter's daily record backup goes off site each night when the Sorter is on (settled by the lead's ruling, SRT-107)
+- server-install-and-running-1 F13 | changed: A snapshot is taken before anything risky and sweeping | putting back a folder move takes a snapshot when it can and goes ahead when it cannot, without asking
+- server-install-and-running-1 F14 | changed: Settings take effect without a restart, and no page restarts the server | updating and going back from the dashboard are the admin's deliberate acts, not the forbidden restart
+- server-install-and-running-1 F15 | no change here: releases-and-updates changes
+- server-install-and-running-1 F16 | no change here: releases-and-updates changes and points here
+- server-install-and-running-1 F17 | changed: Installing is one step on the NAS, and the rest happens in the browser | points to releases-and-updates' "Some server updates need the installation renewed on the NAS"
+- server-install-and-running-1 F18 | changed: A shared Resolve project database on the NAS is set up safely ; The server's own data space is watched | copied nightly and kept 30 days (pointing to resolve), listed apart in what the server keeps
+- server-install-and-running-1 F19 | no change here: sync-2 drops the vendor appliance; this piece stays at two kinds of NAS
+- server-install-and-running-2 F1 | no change here: the ruling keeps this piece's prerequisite; part 2 changes
+- server-install-and-running-2 F2 | changed: Set-up task: Connect to your private network ; The set-up wizard walks the first admin through setting up the server | renamed from "Set-up task: reaching the dashboard over the private network"; the task list uses the name; button, states and done rule point to part 2 (SRV-030 stays met through that pointer)
+- server-install-and-running-2 F3 | no change here: part 2 changes (this piece now points there for the done rule)
+- server-install-and-running-2 F4 | changed: The server answers only on the studio's networks and comes back by itself | answers only on the NAS itself and on its publication on the private network
+- server-install-and-running-2 F5 | changed: Set-up task: Connect to your NAS ; Facts about TrueNAS and Synology the person setting up meets | TrueNAS way in is the limited key only; the administrator password and "never sent together" dropped
+- server-install-and-running-2 F6 | changed: Set-up task: Connect to your NAS ; The set-up wizard walks the first admin through setting up the server ; The server runs on a TrueNAS or a Synology NAS | renamed from "The server's way in to the NAS"; the task list and the pointer use the name
+- server-install-and-running-2 F7 | changed: Set-up task: Connect to your NAS | dropped "Trusting the NAS's certificate"; points to part 2's setting "the NAS's identity"
+- server-install-and-running-2 F8 | changed: Set-up task: Connect to your NAS | the certificate and remote-shell identity sentences replaced by a pointer to part 2's "The product makes sure it is talking to the studio's own NAS"
+- server-install-and-running-2 F9 | changed: Set-up task: Connect to your NAS | the Synology sign-in failures and session retry replaced by a pointer to part 2's "A Synology must run DSM 7 with every service the product needs"
+- whole-product F10 | changed: A part switched on but missing something it needs says so | dropped the "Which parts are on" setting; points to whole-product's "Switchable parts"
+- youtube F4 | no change here: releases-and-updates changes

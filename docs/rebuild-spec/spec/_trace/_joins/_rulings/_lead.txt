@@ -1,0 +1,23 @@
+# The lead's own rulings. Same shape as a settler's line; each replaces the
+# settler's line for that finding. Why, where it is not in the line itself, is
+# in _lead.md beside this file.
+
+# Looked up in the present product (the settler's `code` verdicts).
+cards-editor-1 F2 | instead | Looked up: a word tool pressed for a card that is not in the cut is refused with "That card is not in the cut, so the lane cannot act on its words." A button that can only refuse is a dead control (page 26.5 A), so cards-editor-3 offers on a shelf card only the Start and End buttons and Copy original; cards-editor-1 keeps the sentence for the one case left (the card left the cut between the press and the act).
+cards-editor-1 F5 | instead | Looked up: a dragged edge is pulled to the nearest safe cut point when it is within 9 pixels of it (16 on a touch screen), and holding Alt drags free; the safe points are aid 4's, so nothing snaps while aid 4 is off (page 24.2 A). There is no "nearest fitting safe gap within 2.5 s" rule for a drag. cards-editor-1 states this one rule in both of its places and drops the other; cards-editor-3's row for aid 4 says the same.
+cards-editor-5 F3 | instead | Looked up: the list of episodes shows no occupants and no "<who> was last in N min ago": nothing is held open on the server. cards-editor-4 drops that wording; cards-editor-5 adds nothing.
+cards-editor-5 F4 | instead | Looked up: the list of episodes offers no Close and has nothing to close ("nobody locks anything for anyone else"). cards-editor-4 drops the sentence about closing an episode and its confirmation; cards-editor-5 adds nothing.
+
+# Two settlers ruled this one differently. The simpler ruling stands: the
+# editor's card colours are Resolve's own clip colours, so they are sent as
+# they are and no pairing table exists.
+cards-to-resolve-and-exports F1 | same cards-editor-1 F12 |
+
+# Answer 4.17 removed the drive-reminder setting altogether, so it is not
+# "shown read-only" either.
+editor-app F10 | home accounts-privacy-legal | Asking a computer to change a setting is described in accounts-privacy-legal ("A person or an admin asks one of the person's computers to change its settings"): only whether it takes shared work and which kinds can be asked. How long it lends itself is shown read-only and changed on the computer (editor-app already says so). There is no sync-drive reminder setting at all (page 4.17 A: "no setting; every 30 minutes as ruled"): dashboard-1's "What computers can be asked to change" drops the shared-work time and the reminder, editor-app and accounts-privacy-legal drop any mention of a reminder setting, and dashboard-1 points to accounts-privacy-legal.
+
+# Held for the owner by the lead: it removes something an editor can do today
+# in one piece, and leaves a studio with the Footage Sorter off unable to hand
+# a client full-quality files. Question L1 on decision page 32.
+broll F6 | owner | L1. Whatever he answers there is ONE kind of link for downloading full-quality folders (the Footage Sorter's folder link, footage-sorter-and-camera-cards-3) and broll points to it instead of describing a "delivery link" of its own (page 21.5 A: two kinds of link, a folder to download and a client folder to preview; BRO-127 is met by the one link). What waits for him is who may make it and whether it exists while the Footage Sorter is off.

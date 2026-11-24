@@ -526,7 +526,7 @@ read the current code.
 | 3 | **Rewrite the inventory as one specification organised by what people do** (sync a project, make proxies, find b-roll, cut in Timeline Cards, and so on). No source-file tags, no route or config-key names, each capability described once, each capability linked to the knowledge-base entries that apply to it. | **Started 2026-11-13**, after the owner answered page 1 of the decision list. Method under "Step 3 as it is being done". **Extracts complete 2026-11-24: 47 of 47, 2,925 items, 431 readers' questions, 320 unsettled points** (`python docs/rebuild-spec/tools/check_extract.py` prints `OK`). **Writers finished 2026-11-24: 27 of 27 pieces written and passing** (`python docs/rebuild-spec/tools/check_spec.py` prints `OK`): 2,134 behaviours, 303 settings, 354 questions for the owner, 456 passages marked pending, 20 points still unsettled. What is left of step 3 is under "After the writers". |
 | 4 | **A decision list for the owner**: every overlap in what a person can do, every several-ways-in, every dormant or dead feature, each as a keep / cut / merge question with a recommendation. Only questions about WHAT the product does; never an engineering question. A question he has already answered in a past session is shown with his answer, not asked cold. The list itself stays behind; only his answers, restated as what the product does, reach the specification. | Page 1 (what can be switched on and off) asked and answered 2026-11-13: every recommendation accepted. Page 2 (seven places where he ruled two ways) asked 2026-11-13, **not yet answered**. **ALL ANSWERED 2026-11-24** (page 2 one by one; page 3 and most of page 4 one by one; then "accept all the recommendations"; page 31 one by one; each page records it, and the answers are written into all 27 pieces, which now carry 11 marks: the speed measurements, four things to try on a real Resolve or Synology, nothing else). Pages 3 to 31 as written: the 354 questions from the writers, one page per piece, and page 30, written by hand (what only he can answer), in `docs/rebuild-spec/decisions/` (index in `docs/rebuild-spec/DECISIONS.md`; made by `tools/build_decisions.py`, which never writes over a page that holds answers). |
 | 5 | **Three companions**: (a) the givens the rebuild must live with, taken from the knowledge base; (b) what information must still be there afterwards; (c) the look book: screenshots of every screen plus the look written as plain values. Plus the two sealed drawers: notes per chosen tool, and the old data's real formats. | Not started. |
-| 6 | **The purge check and the clean room**: the word scan, the blind reader, and a place for the rebuild session to run where the old build cannot be seen. | Not started. |
+| 6 | **The purge check and the clean room**: the word scan, the blind reader, and a place for the rebuild session to run where the old build cannot be seen. | **The word scan is written and passes (2026-11-24)**: `python docs/rebuild-spec/tools/word_scan.py` gathers about 3,000 names from the three codebases (libraries, files, classes, tables, settings, routes, and the tools the sealed drawer is filed by), looks for them in the pack, and fails on any hit not answered in `tools/word_scan_allow.txt`. One leak was found and removed. It catches names, not the shape of the old build: that is the blind reader's job. Run `check_spec.py --build` first, and run the scan again after every change to the pieces. The blind reader and the clean room: not started. |
 
 The fresh instance is then given the specification, the unsealed part of the
 knowledge base and the three companions, and nothing else. Everything in the
@@ -1197,11 +1197,35 @@ see one capability, with a script that proves nothing was skipped.
      one does), and `check_seams.py` fails if a heading said to hold a
      promise is later renamed. What crosses now: **2,175 lessons; 223
      sealed notes in 59 files.**
-   - **The joins.** 471 places where one piece leans on another. Known
-     disagreement: accounts says signing in is all it takes to join a
-     computer and no key is ever approved or pasted, while the server
-     piece, part 2, still speaks of each approved computer's key. Owed: a
-     pass per pair of capabilities that lean on each other most.
+   - **The joins: read, ruled, being fixed (2026-11-24).** All 474 places
+     where one piece leans on another were checked, one reader per piece
+     leaned ON (`tools/build_join_bundles.py`, brief
+     `spec/_trace/JOINS_BRIEF.md`, answers in `spec/_trace/_joins/`). They
+     found **373 disagreements** (249 contradictions, 69 things leaned on
+     that the other piece never says, 38 one thing under two names, 17 said
+     twice in full). Most are a piece still describing something the
+     owner's answers of 2026-11-24 removed. The readers passed 168 to the
+     owner; six settlers (brief `JOINS_SETTLE_BRIEF.md`, rulings in
+     `_joins/_rulings/`) then searched every lesson and answer and ruled
+     each one, and the lead checked where two settlers met and looked up
+     four facts in the present product (`_rulings/_lead.md`, `_lead.txt`).
+     `tools/merge_join_rulings.py` makes `_joins/RULINGS.txt`: **364
+     settled, 8 for the owner (five questions, decision page 32), 1 waiting
+     for a render test on a real Resolve.** One fixer per piece (brief
+     `JOINS_FIX_BRIEF.md`, its list from `build_join_bundles.py --fixes`)
+     then changes only its own piece and records every finding in its
+     trace under "Joins settled". When the owner answers page 32, give the
+     eight held findings a ruling in `_lead.txt`, run the two scripts and
+     send a fixer to each piece they name.
+   - **Every lesson checked against the owner's answers: done
+     2026-11-24.** The twenty overruled lessons found earlier were only the
+     ones a writer had flagged. One reader per capability then compared
+     every lesson with his answers (`knowledge-base/_cross/ANSWERS_BRIEF.md`,
+     reports in `_cross/_answers/`). The lead read each proposal: **77
+     lessons amended** (94 fields, `_cross/AMENDED.txt`, old words kept in
+     `_trace/amended.tsv`), 2 more withdrawn, 1 more sealed; 20 doubtful
+     proposals left as they were; two wait for the owner (page 32,
+     questions 6 and 7). What crosses: **2,172 lessons, 224 sealed notes.**
    - **Names shown on screen.** The writers put `[the assistant]` wherever
      on-screen text named the assistant, pending the owner's answer on
      whether its name shows. The calendar's maker is named in some Sorter

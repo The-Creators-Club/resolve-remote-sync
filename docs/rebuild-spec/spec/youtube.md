@@ -171,7 +171,7 @@ A session file holding no actual sign-in counts as no session. In every case the
 
 Facts about YouTube, each of which a download must meet:
 
-- Without proof that the request comes from a real player, YouTube refuses the media or serves only slow streams. Every computer that downloads, and the server, meet this demand. When one cannot, an admin is warned (see "Admins are warned when downloading on the server or a computer is not working"), and every failure keeps YouTube's own error text so it can be read.
+- Without proof that the request comes from a real player, YouTube refuses the media or serves only slow streams. While the site's switch for YouTube's extra measures against being blocked is on (see "A site decides whether signed-in YouTube sessions may be used on editors' computers"), every computer that downloads, and the server, meet this demand. When one cannot, an admin is warned (see "Admins are warned when downloading on the server or a computer is not working"), and every failure keeps YouTube's own error text so it can be read.
 - YouTube holds a single connection for a long video to a few MB/s. A long video still downloads at well over 10 MB/s on a fast line.
 - YouTube refuses some older uploads in their direct form while serving them as streamed segments. A download refused that way is tried as streamed segments before it is reported failed.
 - YouTube can list a clip's formats and then refuse its bytes, so nothing reports downloading as working until a real download has succeeded the way real jobs fetch.
@@ -208,16 +208,23 @@ One clip's failure or time limit fails that clip only: the job carries on with t
 
 ### A site decides whether signed-in YouTube sessions may be used on editors' computers
 
-Getting past YouTube's own blocks with a signed-in YouTube session on editors' computers is a site switch of its own, separate from switching YouTube downloads on, and off until a site turns it on. While it is off:
+YouTube's extra measures against being blocked are one site switch of their own, separate from switching YouTube downloads on, and off on a new site until an admin turns it on, because those measures touch YouTube's terms, which is a choice the studio makes knowingly. The switch covers every extra step the server and editors' computers take to get past YouTube's blocks:
 
+- proving that a request comes from a real player (see "YouTube demands proof that a request comes from a real player before it serves a video");
+- answering YouTube's in-page challenges;
+- signed-in YouTube sessions on editors' computers, so each editor can sign in to YouTube from the app and their own downloads can fetch age-restricted and blocked videos.
+
+While it is off:
+
+- neither the server nor any editor's computer proves it is a real player or answers YouTube's in-page challenges, and the health line shows what gets the server past YouTube's blocks as off;
 - no signed-in session is ever used for a download on an editor's computer, even one saved there before;
 - the sign-in controls are not offered in the app on the editor's computer;
 - saving a session is refused with "signing in to YouTube for downloads is not enabled for this site. Ask your administrator";
-- nothing extra is set up on editors' computers for it.
+- nothing extra is set up on the server or on editors' computers for it.
 
-Turning it on also lets editors' computers answer YouTube's in-page challenges, which signed-in downloads need. If a computer cannot be made ready for that, signed-in downloads stay off on that computer and it says why. If a setting cannot be read, it counts as off.
+Signed-in downloads on an editor's computer need that computer to answer YouTube's in-page challenges. If a computer cannot be made ready for that, signed-in downloads stay off on that computer and it says why. If a setting cannot be read, it counts as off.
 
-- Setting: Signed-in YouTube downloads on editors' computers. Does: lets each editor sign in to YouTube from the app so their own downloads can fetch age-restricted and blocked videos. Default: off. Who: an admin. Applies to: the site. Search words: youtube sign in, age restricted, cookies, blocked, bot check.
+- Setting: YouTube's extra measures against being blocked. Does: lets the server and editors' computers take extra steps to get past YouTube refusing them: proving requests come from a real player, answering YouTube's in-page challenges, and letting each editor sign in to YouTube from the app so their own downloads can fetch age-restricted and blocked videos. Default: off. Who: an admin. Applies to: the site. Search words: youtube blocked, bot check, anti-blocking, youtube sign in, age restricted, cookies.
 
 ### An editor signs in to YouTube with one click from the app
 
@@ -245,7 +252,7 @@ The sign-in control reads "Sign in to YouTube (for downloads)…" when never sig
 
 - Who: an editor, for their own computer.
 - Ways in: the one-click sign-in, or a cookies file exported from a browser.
-- When signed-in YouTube downloads on editors' computers is off: no sign-in control is shown.
+- When YouTube's extra measures against being blocked are off: no sign-in control is shown.
 - Windows and macOS: the browsers tried differ, as listed.
 
 ### An editor can instead give the app a cookies file exported from their browser
@@ -266,7 +273,7 @@ The state of the signed-in session on an editor's computer is judged from real d
 
 | State | When |
 |---|---|
-| none | no session saved, or the site does not allow signed-in downloads on editors' computers |
+| none | no session saved, or the site's switch for YouTube's extra measures against being blocked is off |
 | refused | YouTube has flagged the account: a real download with it was refused with "the page needs to be reloaded". The reason shown is "YouTube is refusing your signed-in session (the page needs to be reloaded). Downloads are continuing without it." |
 | stale | a real download with the session was refused with any of "cookies are no longer valid", "sign in to confirm you're not a bot", "sign in to confirm your age", "this video may be inappropriate for some users", "please sign in to view this video" or "login required"; the reason shown is YouTube's own phrase. A stale state more than 7 days old is marked as aged. It is recorded at most once per job. |
 | expired | the sign-in in the saved session has run out ("the login cookies in the file have expired") |
@@ -355,13 +362,13 @@ A typical editor's computer has no tools for fetching or converting video. The p
 
 Clips already downloaded with Opus sound or a picture Resolve cannot decode are found in the projects' YouTube folders and re-encoded to H.264 with AAC under their own names, the same way as a new download.
 
-When a downloaded clip on an editor's computer cannot be decoded and a proxy of it exists with exactly the same number of frames, the original is set aside and the proxy takes its place. When the frame counts differ, the clip is re-encoded instead.
+When a downloaded clip on an editor's computer cannot be decoded and a proxy of it exists with exactly the same number of frames, the original is set aside and the proxy takes its place. When the frame counts differ, the clip is re-encoded instead. This is the same repair the editor is offered when the open timeline uses such clips (see Resolve on the editor's computer: Multicams, frame rates and timelines, "The editor is warned when the open timeline uses VP9 originals").
 
 - On its own: which clips cannot be decoded, found from what is inside them.
 
 ### Before Resolve renders, the editor is told which clips would stop the render
 
-Fact about Resolve 21: it stops a render on some VP9 and AV1 clips from YouTube. Before a render, a timeline's sources are checked for such codecs, and the editor is told by name which clips will make it fail. See Timeline Cards: the hand-over to Resolve, and exports: Renders from Resolve.
+Fact about Resolve 21: it stops a render on some VP9 and AV1 clips from YouTube. Before a render, a timeline's sources are checked for such codecs, and the editor is told by name which clips will make it fail, with the repair offered (see Resolve on the editor's computer: Multicams, frame rates and timelines, "The editor is warned when the open timeline uses VP9 originals").
 
 #### Lessons
 
@@ -444,7 +451,7 @@ When the computer cannot tell whether the drive is there, it does not refuse on 
 
 Each job records which computer ran it, and the page shows it: "downloading on your computer" or "downloading on the server", with who is downloading in the tip, the downloading computer's live line ("clip i/n · 38% at 4.2 MB/s · 2:10 left"), and the free space that computer reported.
 
-Whenever a job runs on the server rather than the editor's own computer, or moves there, the page says why, once per distinct reason, in a plain sentence, never a bare error code, and adds what it means for the clips: the server downloads them, and YouTube originals only sync upwards, so the editor fetches one from the download history when they want it on their computer. The sentences:
+Whenever a job runs on the server rather than the editor's own computer, or moves there, the page says why, once per distinct reason, in a plain sentence, never a bare error code, and adds what it means for the clips: the server downloads them, and they still reach the computer of the editor who asked by themselves when that computer syncs the project (see "Downloaded clips reach the computer of the editor who asked"). The sentences:
 
 - the computer could not take it: "This computer cannot download right now: <reason>. The server is downloading these clips.";
 - the app on the computer is not answering: "Downloading on the server: the app on your computer is not answering", with a hint to check the app's status;
@@ -454,13 +461,13 @@ Whenever a job runs on the server rather than the editor's own computer, or move
 - the computer must update first: "This computer must be updated before it can download YouTube clips, so it did not download.";
 - the computer stopped partway and gave the rest back: its reason, said once, at any time in the few minutes after the job moved to it.
 
-The dashboard's per-computer view also states, for any computer that should have downloaded a clip and did not, that computer's reason (see The dashboard: Each computer's state).
+The dashboard's per-computer view also states, for any computer that should have downloaded a clip and did not, that computer's reason (see The dashboard: Each computer's state, "Each computer's issues are listed worst first, each explained").
 
 ### The owner of a computer can keep it out of YouTube downloads
 
 A computer may be kept out of YouTube downloads. Kept out, it never downloads and prepares nothing for downloading, and it is reported as "local YouTube downloads are switched off in config"; jobs then run on the server. Showing a downloaded clip in its folder, and fetching a clip from the NAS to this computer, still work.
 
-On the YouTube page, an "on this computer" switch shows and sets the same thing for the computer the page is open on. It is ticked by default, and a page that cannot read it treats it as ticked. Flipping it says "downloads will be offered to this computer first" or "downloads will run on the server. YouTube originals only sync upwards, so you can fetch one later from the download history." A job started while it is off runs on the server, and the page says so.
+On the YouTube page, an "on this computer" switch shows and sets the same thing for the computer the page is open on. It is ticked by default, and a page that cannot read it treats it as ticked. Flipping it on says "downloads will be offered to this computer first"; flipping it off tells the editor that downloads will run on the server and that the clips of their jobs still reach this computer by themselves when it syncs the project. A job started while it is off runs on the server, and the page says so.
 
 - Who: an editor, for their own computer.
 - Ways in: the "on this computer" switch on the YouTube page, and the computer's own settings in the app.
@@ -468,7 +475,7 @@ On the YouTube page, an "on this computer" switch shows and sets the same thing 
 
 ### The YouTube controls on an editor's computer appear only where they can be used
 
-The app on an editor's computer shows its YouTube controls (the progress and stop of a download) only when the site has YouTube downloads on and this computer is not kept out of them; the sign-in controls additionally need the site's switch for signed-in downloads on editors' computers. When it applies, they come with a warning that downloads on this computer may start failing, or that they are running on the server because this computer could not be made ready (see "An editor is warned when downloads on their computer may start failing").
+The app on an editor's computer shows its YouTube controls (the progress and stop of a download) only when the site has YouTube downloads on and this computer is not kept out of them; the sign-in controls additionally need the site's switch for YouTube's extra measures against being blocked. When it applies, they come with a warning that downloads on this computer may start failing, or that they are running on the server because this computer could not be made ready (see "An editor is warned when downloads on their computer may start failing").
 
 When the part is off, or the app cannot tell whether it is on, the computer behaves as if it were off: it prepares nothing for downloading, answers any request to download with "the YouTube downloader is off for this site, or switched off in config", and answers a request to show or fetch a downloaded clip with "the YouTube downloader is not enabled for this site". Quitting the app stops any YouTube download it was running; the server finishes the clips.
 
@@ -675,7 +682,7 @@ Newest first, 24 clips at a time, with OLDER for more and "showing N of M. Click
 
 ### Downloaded clips reach the computer of the editor who asked
 
-YouTube originals, like all original footage, only sync upwards: a clip downloaded on one computer reaches the server, and does not spread to every editor's computer by itself (see Sync: What syncs where). The clips of a job reach the computer of the editor who asked for them on their own, wherever they were downloaded, when that computer syncs the project. Any other editor fetches a clip in one click from the history.
+A YouTube original goes up to the server from the computer that downloaded it and does not spread to every editor's computer by itself (see Sync: What syncs where). The clips of a job reach the computer of the editor who asked for them on their own, wherever they were downloaded, when that computer syncs the project. Any other editor fetches a clip in one click from the history.
 
 
 ### An editor can open a downloaded clip's folder, or fetch it from the NAS
@@ -683,8 +690,8 @@ YouTube originals, like all original footage, only sync upwards: a clip download
 Clicking a clip in the download history, or a finished clip's row in a job's downloads, asks the app on the editor's computer to show it. The page names the clip by its place in the project tree, never by a full path; a place that leads outside the tree is refused.
 
 - When the file is on this computer, the file manager opens with it selected: "Showing <name> in <folder>". An application or disk image is shown, never opened.
-- When the file is not here but its folder is, the folder opens and the page offers GET IT FROM THE NAS: "<name> is not on this computer - opened <folder> instead. YouTube originals only sync up, so a clip another editor downloaded, or one the server downloaded, stays on the NAS until you ask for it." When neither is here, nothing opens and the same explanation is given.
-- GET IT FROM THE NAS copies that one file down from the project's folder on the NAS, showing "getting <file> from the NAS - N%", then "<name> is on this computer" and opens the folder. Otherwise: "the download finished but the file is not there - try again", the reason it failed (for example the drive is not connected), or "the download failed". A clip already here: "<name> is on this computer".
+- When the file is not here but its folder is, the folder opens and the page offers GET IT FROM THE NAS, telling the editor that the clip is not on this computer, that the folder was opened instead, and that a clip of a job they asked for arrives by itself when this computer syncs the project, while a clip from someone else's job stays on the NAS until they ask for it. When neither is here, nothing opens and the same explanation is given.
+- GET IT FROM THE NAS copies that one file down from the project's folder on the NAS, showing "getting <file> from the NAS - N%", then "<name> is on this computer" and opens the folder. A clip already here: "<name> is on this computer". Who may fetch, how many files a computer fetches at once, the wait while it is busy and when that wait gives up, and every refusal are those of the one fetch of a single missing file (see The b-roll archive: Sending a clip to Resolve, "A clip not on this computer yet is fetched first, with progress, and then placed"), worded for a video. While the computer is busy with other such downloads, the page shows the waiting state, never a failure.
 - If the app cannot be reached, must be updated first, or fails, the page names the folder "Projects/<path>" under the editor's sync drive, with COPY PATH ("path copied", or "copy it from the line above").
 
 Resolve always receives a downloaded clip's full original, never a preview of it, on every computer.
@@ -775,7 +782,7 @@ The page re-reads its health every two minutes. The main mark shows the assistan
 
 - how current the server's means of downloading is: "the running downloader is N days old"; amber with "(Nd old)" once it is past 21 days and could not update itself, saying "YouTube breaks downloaders deliberately, so downloads on this server may start failing."; red when the server has none;
 - something YouTube now requires before it serves a video, when missing;
-- whether what gets the server past YouTube's blocks is working, unreachable, failed to set up, or off;
+- whether what gets the server past YouTube's blocks is working, unreachable, failed to set up, or off (off while the site's switch for YouTube's extra measures against being blocked is off);
 - the last download ("last download: anonymous", or failed, with a rough age such as "3 min ago", or "no downloads yet"), with the state of the server's signed-in session in its tip;
 - the periodic test, when switched on.
 
@@ -799,7 +806,7 @@ Alerts, only while YouTube downloads are on (see The dashboard: Alerts by mail):
 | serious | "the YouTube downloader is not running" | downloading on the server is not working |
 | warning | "YouTube downloads are failing" | the last real download failed and the server's own test download failed too |
 | warning | "this server's YouTube downloader is old" | |
-| warning | the server's means of getting past YouTube's bot checks cannot be reached, or failed to set itself up | not raised when none is set up or its state is unknown |
+| warning | the server's means of getting past YouTube's bot checks cannot be reached, or failed to set itself up | not raised when none is set up, when the site's switch for YouTube's extra measures against being blocked is off, or when its state is unknown |
 
 The dashboard's per-computer view shows each computer's YouTube state: whether it can download, how current its means of downloading is, its last message (up to 300 characters) and when it was checked, whether its video tools are installed (naming up to 4 that failed, the cause and how many tries in a row have failed), and its last real download.
 
@@ -872,13 +879,12 @@ If the assistant fails, the job does not fail: it shows "<assistant problem> the
 
 Each search uses the assistant the site has set up at that moment, so a key added, changed or removed in settings applies to the next search with no restart (see The whole product: The assistant). Failures, each with an instruction on the page:
 
-- None set up: "this site has no working Assistant. An admin must set one up in settings. Until then no job can generate search terms." A MY TERM ONLY search still works.
+- None set up: "no assistant has a working key", with where an admin connects one (see The whole product: The assistant, "A feature that needs the assistant says plainly when it cannot be used"). A MY TERM ONLY search still works.
 - A key missing, rejected or not allowed, or an assistant whose sign-in has expired and cannot refresh: says so, names where an admin fixes it, and reads "Sign in again" wherever an expired sign-in shows.
-- An assistant that needs a permission the site has not given: "Assistant is not enabled for this site".
 - No answer in time (about three minutes): "did not answer within N s".
 - Unreachable; declined the request; an unusable or empty reply (tried once more first).
 
-A failed job carries the assistant's own reason, never a bare "no assistant". The page's health line carries the latest state, set by every real search and, while it is not well, re-checked on its own at least every five minutes until it passes. Only the assistant the admin chose is ever checked, so no paid call goes to one that will not be used. Keys never appear on the page.
+A failed job carries the assistant's own reason, never a bare "no assistant". The page's health line carries the latest state, set by every real search and, while it is not well, re-checked on its own at least every five minutes until it passes. That re-check never costs a call to the assistant: only an admin's test and a real search call it. Only the assistant the admin chose is ever checked, so no call goes to one that will not be used. Keys never appear on the page.
 
 - When the assistant is off: no assistant state, banner or control is shown, and searches are MY TERM ONLY.
 

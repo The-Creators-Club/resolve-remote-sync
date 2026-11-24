@@ -195,7 +195,7 @@
 - An admin adds or removes a source folder from the sources list | an admin does it in the one Sorter; a path is understood as the place on the server; the Mac hint
 - The Sorter's work through the day and night | a failure is shown in the Sorter's status, and two nights running is a problem the server found (it was only logged)
 - Showing a clip's file in the file manager on the person's own computer | opens on the person's own computer through the app, with a Copy fallback
-- The Sorter's settings | every setting on screen; one studio's own values (time zone, calendar start date, camera labels) become site settings with neutral defaults
+- The Sorter's settings | every setting on screen; one studio's own values (calendar start date, camera labels, time folders) become site settings with neutral defaults, this studio's carried over; the time zone is the studio's one zone held by the server piece
 - Connecting the studio's calendar | the connect control stays steady and a failure says why (SRT-172)
 - The Sorter is a page of the dashboard, behind its sign-in | what a person sees when the part is off, folder links included
 - Every recording gets a picture and a scrub filmstrip without anyone asking | a wrongly made filmstrip is remade, frames spread evenly to the end (SRT-155); background work never slows other pages or syncing (SRT-157, SRT-159)
@@ -211,8 +211,9 @@
 ## Parts of items left out
 
 - 38-006 | the calendar refresh interval (every 15 minutes, 5 minutes to one day): a setting only the build would tune; the figure stays in the text
-- 38-006 | the spare room a card copy leaves on its target drive (256 MB): a setting only the build would tune; the figure stays in the text
-- 38-006 | the crew card list refresh interval (every 15 minutes): a setting only the build would tune; the figure stays in the text
+- 38-006 | the spare room a card copy leaves on its target drive (256 MB): held by part 1 as the setting "Room kept spare on a place to copy to"; this text names it and points there (joins 2026-11-24, footage-sorter-and-camera-cards-1 F11)
+- 38-006 | the crew card list refresh interval (every 15 minutes): left out, the card-use page is part of the Sorter and nothing is fetched (joins 2026-11-24, footage-sorter-and-camera-cards-1 F12)
+- 38-006 | the studio time zone setting, bringing camera proxies, counting an unverified copy as done, and what to do on a name clash: dropped from the settings by the joins 2026-11-24 (footage-sorter-and-camera-cards-1 F7, F8, F9, F10); the one studio time zone, the per-copy "Back up proxies too", never Done with an unchecked file and always writing beside are held elsewhere
 - 35-048 | carrying out a move as an admin act, and planning moves: moves into final folders happen on their own with no approval (the owner's ruling of 2026-11-24); a person puts a clip back or moves it elsewhere afterwards
 - 37-028 | the Move… action in the header: replaced by the counts of what has moved, is about to and is held back (the owner's ruling of 2026-11-24)
 - 35-044 | "up to 2,000 per card": the size of one request, an arrangement
@@ -253,3 +254,31 @@
 - broll / Client folders and links | An admin sees every folder link and can switch one off at once | client folder links in the one list (Q5)
 - editor-app / Settings, records and background work | Clips on a card get their pictures from the computer holding the card | the app making card pictures, opening the file manager, and the field backup page
 - whole-product / The assistant | The assistant searches on a person's behalf and shows every search it ran | the assistant switched off site-wide
+
+## Joins settled
+
+- broll F5 | changed: An admin sees every folder link and can switch one off at once | the one list of every link handed outside the studio, both kinds each saying its kind, an admin reaches it while either part is on; "switched off", "ran out", "Switch off" kept (also covers this piece's F2)
+- dashboard-1 F10 | changed: The Sorter waits while it gets ready after the server starts | a Sorter that cannot load (or whose footage folder is not mounted) keeps its menu place and opens a "not working" page with the reason; also on the list of problems
+- footage-sorter-and-camera-cards-1 F7 | changed: The Sorter's settings | "Studio time zone" setting and its fixed offset dropped; points to the studio's one time zone
+- footage-sorter-and-camera-cards-1 F8 | changed: The Sorter's settings | "Bring the camera's proxies with a card copy" dropped; points to part 1's per-copy "Back up proxies too"
+- footage-sorter-and-camera-cards-1 F9 | changed: The Sorter's settings | "Count an unverified card copy as done" dropped
+- footage-sorter-and-camera-cards-1 F10 | changed: The Sorter's settings | "Same name, different file" dropped
+- footage-sorter-and-camera-cards-1 F11 | changed: The Sorter's settings | 256 MB sentence dropped; names part 1's "Room kept spare on a place to copy to" and points there
+- footage-sorter-and-camera-cards-1 F12 | changed: The Sorter's settings | 15-minute read of the crew's list of cards dropped
+- footage-sorter-and-camera-cards-1 F13 | changed: The Sorter's settings | only site-wide settings are admin-only; per-computer settings also the editor's for their own computer
+- footage-sorter-and-camera-cards-1 F14 | changed: New footage appears on its own once it has finished arriving | "as they happen" and the 2-second reconnect replaced by a pointer to part 1's card timings (also covers this piece's F6)
+- footage-sorter-and-camera-cards-1 F15 | changed: New footage appears on its own once it has finished arriving | the card the app brings the Sorter up on now points to part 1's "When a card goes in" with its exception (also covers this piece's F7)
+- footage-sorter-and-camera-cards-3 F3 | no change here: editor-app changes its pointer
+- footage-sorter-and-camera-cards-3 F4 | changed: Every recording gets a picture and a scrub filmstrip without anyone asking | every camera raw with no proxy says it has none yet, picture made as soon as a proxy appears
+- footage-sorter-and-camera-cards-3 F5 | no change here: part 1 drops "The first card is selected on its own"; this text already opens on "Choose where to look"
+- footage-sorter-and-camera-cards-3 F8 | changed: The Sorter's settings | "Time folders" default off on a new site, this studio's value carried over; part 2 points here
+- footage-sorter-and-camera-cards-3 F9 | no change here: this text already holds the three settings with their names and defaults; part 2 points here
+- footage-sorter-and-camera-cards-3 F10 | changed: Folder names sort in one fixed order that handles Chinese | a run of digits sorts by its value ("Day 2" before "Day 10")
+- footage-sorter-and-camera-cards-3 F11 | changed: The destination tree shows the final tree as it is, plus what is planned | change to assignments and audit added to the "at once" triggers
+- footage-sorter-and-camera-cards-3 F12 | changed: A full look through every footage folder | the page follows the look until it ends, however long it takes; part 2 points here
+- footage-sorter-and-camera-cards-3 F13 | changed: The Sorter's work through the day and night ; A full look through every footage folder | "site time" now the studio's one time zone, with a pointer; part 2 changes its clock
+- footage-sorter-and-camera-cards-3 F14 | changed: What needs an admin and what needs only a sign-in | planning every episode's and every interviewee's folders added to the admin list; part 2 changes its recording "Who" lines
+- footage-sorter-and-camera-cards-3 F15 | changed: On a desk the sources, the clips and a panel sit side by side ; On a phone the Sorter shows one of three views at a time | drives list in the sources (Source view), activity panel in the panel; "managing drives is in settings" dropped
+- footage-sorter-and-camera-cards-3 F16 | no change here: part 2 changes its line to admins only
+- footage-sorter-and-camera-cards-3 F17 | no change here: part 2 renames its button and points here
+- whole-product F8 | no change here: whole-product adds the Footage Sorter's Ask to its assistant lists

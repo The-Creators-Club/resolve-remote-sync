@@ -335,7 +335,7 @@
 
 ## Conflicts between an item and a lesson
 
-- SRT-112 | 35-029, 38-024 | the items have time folders off by default; the ruling files clips under the person in date-and-time subfolders. Written: time folders on by default.
+- SRT-112 | 35-029, 38-024 | the items have time folders off by default; the ruling files clips under the person in date-and-time subfolders. Written: time folders on by default. Since the joins (2026-11-24, footage-sorter-and-camera-cards-3 F8, the lead's ruling): the one setting lives in part 3, default off on a new site with this studio's own value carried over; card copies into staging use time folders whatever the setting.
 - SRT-092 | 37-084 | the item marks a clip bad only when it is only on a laptop or a card; the ruling also makes "only on a client drive" red and asks for outlined, gold and red states. Written: the ruling.
 - SRT-133 | 37-062, 36-040 | the items block the whole plan on any collision ("Nothing can be moved until they are fixed"); the lesson moves the clean clips and holds back a clashing clip whole. Written: the lesson.
 - SRT-140 | 35-034, 38-020 | the items refuse to move or rename a folder that holds files on disk; the ruling lets a person drag a folder under any parent and rename it. Written: the folder moves in the plan and its footage is sorted to the new place and moves there on its own, with every promise of a move.
@@ -353,7 +353,7 @@
 - Every clip carries a copy badge | outlined, gold and red states, a tape mark and the double-backup percentage (SRT-092, SRT-093)
 - Clips can be filtered by where their copies are, and sorted by fewest copies | filtering by computer, in every view of clips (SRT-091)
 - Clips that exist on tape | tapes by barcode and a restore request (SRT-094)
-- The NAS's footage goes to the cloud backup every night | the on and off switch, time and Run now on the record's page (SRT-108)
+- The studio's proxies, sound and project files go off site every night | the on and off switch, time and Run now on the record's page (SRT-108)
 - Drives are known by their own identity and noticed when plugged in | new files appear within about half a minute once unchanged across two looks (SRT-101)
 - Every place a copy was ever seen is kept | a checksum disagreement is recorded and shown instead of passing silently
 - The NAS's footage tree is walked every night and after each clean move | a nightly walk that could not run is shown instead of passing silently
@@ -431,10 +431,42 @@
 - footage-sorter-and-camera-cards (part 3) / The sorter page | every view in this piece | the page these lists, trees and dialogs sit on
 - proxies-and-file-moves / Moves that reach every computer | Moves in the folders editors sync reach every editor's computer | a move inside the synced folders followed on every editor's computer
 - proxies-and-file-moves / Moves made by hand on the NAS | Footage moved by hand is noticed and the plan follows it | hand moves on the NAS being noticed product-wide
-- server-install-and-running / Off-site backup | The NAS's footage goes to the cloud backup every night ; The record survives losing the NAS | the cloud backup itself and the folder it carries
+- server-install-and-running / Off-site backup | The studio's proxies, sound and project files go off site every night ; The record survives losing the NAS | the cloud backup itself and the folder it carries
 - cards-footage-in / Grouping clips and building the multicam | The Sorter proposes where each sound recording belongs | lining up by sound in footage-in does the same matching of a recording's sound to the cameras' sound; one matching should serve both
 - cards-footage-in / Speech-to-text: rulings | Every sound recording is listened to for names and introductions ; Recordings still unplaced can be transcribed in full for a fee | the product's own transcription of recordings
 - cards-footage-in / The transcript and its English | The Sorter proposes where each sound recording belongs | the studio's interview transcripts that recordings are compared against
 - fleet-jobs / Choosing who runs what | Every sound recording is listened to for names and introductions | listening and transcribing run on a computer able and free
 - accounts-privacy-legal / What the product records about a person | Drives are known by their own identity and noticed when plugged in | the per-computer switch for telling the studio about its drives
 - resolve-on-the-editors-computer / Missing clips, relinking and refreshing | Where each file of a sorted clip goes | grade files kept beside their original where Resolve reads them
+
+## Joins settled
+
+- accounts-privacy-legal F16 | no change here: accounts-privacy-legal adds drive reporting to its list (the lead's ruling)
+- accounts-privacy-legal F17 | changed: Drives are known by their own identity and noticed when plugged in | the drive-reporting switch is the editor's at that computer only, like every other reporting switch
+- cards-footage-in F14 | no change here: the two matchings keep their own limits; footage-in adds whole-hour shifts (the lead's ruling)
+- cards-footage-in F15 | changed: Every sound recording is listened to for names and introductions | a recording already heard is recognised by footage-in's rule (pointer) and reuses its one transcript
+- cards-footage-in F16 | changed: Every sound recording is listened to for names and introductions | the self-introduction phrases are replaced by a pointer to footage-in's one list
+- fleet-jobs F10 | no change here: fleet-jobs adds the kinds (the lead's ruling); this piece already says listening is heavy work on a computer able and free
+- fleet-jobs F11 | no change here: fleet-jobs lets the Footage Sorter ask for transcription (the lead's ruling)
+- footage-sorter-and-camera-cards-1 F5 | changed: A laptop in the field knows what is safe without reaching the studio | the hover text names the quick check, or every byte when a full check was asked
+- footage-sorter-and-camera-cards-1 F6 | changed: A laptop in the field knows what is safe without reaching the studio | a NAS copy counts wherever it is only once tied to this card
+- footage-sorter-and-camera-cards-2 F2 | changed: Footage is filed in day-and-camera time folders | staging copies use time folders whatever the setting; clips that cannot have one point to part 1's "loose" folder
+- footage-sorter-and-camera-cards-2 F3 | no change here: part 1 changes (SRT-145 outranks SRT-032); this piece's clock clue already stands
+- footage-sorter-and-camera-cards-2 F6 | no change here: proxies-and-file-moves changes; this piece's "A clip is never moved in part" already agrees
+- footage-sorter-and-camera-cards-2 F9 | changed: The studio's proxies, sound and project files go off site every night | heading renamed from "The NAS's footage goes to the cloud backup every night"; names what goes (never camera originals) and points to server-install-and-running-1
+- footage-sorter-and-camera-cards-2 F10 | no change here: sync-2 drops its chosen project; the Sorter is unchanged (the lead's ruling)
+- footage-sorter-and-camera-cards-3 F8 | changed: Footage is filed in day-and-camera time folders | the Time folders setting line dropped; points to part 3's "The Sorter's settings"
+- footage-sorter-and-camera-cards-3 F9 | changed: The studio's calendar is connected, read-only, so footage can be placed by shoot ; Each clip's camera label is decided on its own | three setting lines dropped, pointing to part 3; this studio's values given as carried over
+- footage-sorter-and-camera-cards-3 F10 | changed: The destination tree shows real, planned, suggested and held folders | folder order is a pointer to part 3
+- footage-sorter-and-camera-cards-3 F11 | changed: Footage is filed in day-and-camera time folders | the re-read interval and its triggers are a pointer to part 3
+- footage-sorter-and-camera-cards-3 F12 | changed: Rescan reads every source and destination again | a pointer to part 3's full look, keeping only "Scan complete" and "Moved outside the app" (also covers F4)
+- footage-sorter-and-camera-cards-3 F13 | changed: The NAS's footage tree is walked every night and after each clean move ; The record survives losing the NAS | 04:30 and 04:00 are in the studio's time zone, not the NAS's clock
+- footage-sorter-and-camera-cards-3 F14 | changed: The audio worklist says whose interview is on each recording ; A person decides a recording's folder and start ; Approved recordings are filed beside their video, and duplicates are set aside | deciding and approving recordings is anyone signed in; planning stays an admin's
+- footage-sorter-and-camera-cards-3 F15 | no change here: this piece already holds the drives list and the activity panel with Track, Scan and Edit; part 3 changes
+- footage-sorter-and-camera-cards-3 F16 | changed: Files dragged in from the file manager are found in the library and join the plan | the "add the folder" line is for an admin; anyone else is told to ask an admin
+- footage-sorter-and-camera-cards-3 F17 | changed: One recording's detail shows who it could be and plays it against the cameras | "Open in Explorer" becomes "Show in the file manager", pointing to part 3
+- proxies-and-file-moves F9 | no change here: proxies-and-file-moves changes; this piece already says the move needs nobody and records whose sorting led to it (also covers F7)
+- proxies-and-file-moves F10 | changed: Moves in the folders editors sync reach every editor's computer | own refusal sentence dropped; points to proxies-and-file-moves for the rule and its sentence (also covers F5)
+- resolve-on-the-editors-computer F6 | changed: Where each file of a sorted clip goes | "(Resolve reads the grade there)" dropped
+- server-install-and-running-1 F11 | changed: The studio's proxies, sound and project files go off site every night | own setting dropped; the record's page shows the server's "Nightly off-site backup" switch, time and Run now
+- server-install-and-running-1 F12 | no change here: server-install-and-running-1 lists the record's daily backup in the off-site copy; "The record survives losing the NAS" already agrees

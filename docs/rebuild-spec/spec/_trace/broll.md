@@ -638,15 +638,42 @@
 - Sync / Wired or remote | A clip not on this computer yet is fetched first, with progress, and then placed | a wired computer sees the NAS itself
 - Sync / The sync drive | The computer doing the work shows what describing is doing, and the person at it can pause, resume, start now or cancel | "the sync drive is not connected"
 - Music / Sending to Resolve | A clip not on this computer yet is fetched first, with progress, and then placed | the same one-file fetch
-- Music / Adding tracks to the library | Dropped files are cleaned away a week after they are no longer needed ; A drop holds at most 2,000 clips and is taken only if it fits | one keeping time and one free-space floor for both
+- Sync / Disk space | A drop holds at most 2,000 clips and is taken only if it fits | the computer's one free-space floor, "Keep this much free on the sync drive" (joins 2026-11-24, music F3); music writes nothing of a drop to the person's computer
 - YouTube downloads / Reaching the editor and Resolve | A clip not on this computer yet is fetched first, with progress, and then placed | the same one-file fetch
 - The Footage Sorter and camera cards / Downloading originals and sharing folders | A delivery link lets a client download full-quality files | sharing folders for download
 - The dashboard / Problems the server finds | Admins are told when the b-roll archive cannot be read | the standing problem
 - The dashboard / Alerts by mail | Admins are warned before a client link expires | the warnings
 - The dashboard / Overview, menus and finding things | Search never stops because of an update | a part shown as not working with its reason
-- The Footage Sorter and camera cards / Downloading originals and sharing folders | An editor manages the folder list and makes new folders | the Sorter's folder links appear in the same list as client folders
+- The Footage Sorter and camera cards / Downloading originals and sharing folders | An editor manages the folder list and makes new folders | the one list of links handed outside the studio ("An admin sees every folder link and can switch one off at once"), holding the Sorter's folder links and every client folder link, seen and switched off by an admin
+- Work shared out across the computers / When a computer counts as free and able | Describing keeps the computer it runs on usable | start now, pause, resume and cancel of a drop as a way past the wait, and the setting for the share of a working computer such work may use
+- The app on each editor's computer / Settings, records and background work | The page says whether the app on this computer is ready to do the work ; When the app on the editor's computer cannot be reached or refuses, the editor is told what to try | the app's local status address
+- The app on each editor's computer / Telling the editor what is wrong | The computer doing the work shows what describing is doing, and the person at it can pause, resume, start now or cancel | the menu line and the settings-window buttons for describing
+- The server: installing it and keeping it running / Settings and secrets | Search never stops because of an update | the guard on adding clips to the index and its two ways out
 
 ## Settled from the present product
 
 - broll-U1 | the figures in the text (8 and 12 GB, 16 and 24 GB on Apple Silicon, about 3.3 and 6.2 GB) are right, from the present product
 - broll-U2 | settled; the sentence on where the sound lands is in the text
+
+## Joins settled
+
+- broll F1 | no change here: the text already says the browser preview is never attached as a clip's proxy; proxies-and-file-moves changes
+- broll F3 | no change here: by the lead's ruling editor-app drops the two settings; dropped clips wait in the computer's synced tree and finished drops are kept 7 days, both fixed, as this text already says
+- broll F4 | changed: Describing keeps the computer it runs on usable | "loses at most the step in progress" replaced by: the clip under way is finished and saved and no further clip starts; "(stops when you're back)" kept, now worded in editor-app's menu line
+- broll F5 | changed: Editors gather archive clips into client folders, each with its own link ; An editor manages the folder list and makes new folders ; An editor revokes a link, reactivates it, or issues a new one ; An editor writes what the client reads, and sets when the link expires ; A client opens a link and sees only what is in that folder, with no sign-in ; A dead client link shows a page that says so and whom to ask ; Admins are warned before a client link expires ; A site switches the b-roll archive on and off | the Sorter's folder links leave this list, which points admins to the one list in footage-sorter-and-camera-cards-3; states and button take "switched off", "ran out", "Switch off" ("Link switched off"); the delivery-link mention in the list and the delivery-link behaviour left as they were (lead's note on F6); the "Revoke this link? ..." question described, not quoted; the client's own page sentences ("has expired") untouched
+- broll F7 | no change here: server-install-and-running-2 changes
+- broll F8 | no change here: resolve-on-the-editors-computer limits its frame-rate check to creating projects and building timelines; a sent clip goes in as it is, as this text says
+- broll F9 | changed: An editor sends the marked part of a clip to the timeline open in Resolve on their own computer | a clip landing one frame out is read back and laid again once; only one still wrong is removed with "placement failed"
+- broll F10 | changed: Search never stops because of an update | a weak admin-supplied secret for additions shows the archive as not working with server-install-and-running-1's reason and its two ways out; client links keep working through it
+- editor-app F7 | changed: The computer doing the work shows what describing is doing, and the person at it can pause, resume, start now or cancel | when the progress window opens and is reopened points to editor-app's "Long background work has a progress window the editor can close and reopen"; its second line described, not quoted
+- editor-app F8 | changed: The computer doing the work shows what describing is doing, and the person at it can pause, resume, start now or cancel | the menu line list and button labels replaced by a pointer to editor-app's "The menu carries a line for each piece of work under way" (line in the menu, buttons in the settings window); what a drop waits for and what each button answers stay here, as editor-app points back for them; "fetching the local indexing model" described unquoted
+- editor-app F15 | changed: The page says whether the app on this computer is ready to do the work ; When the app on the editor's computer cannot be reached or refuses, the editor is told what to try | the self-test points to editor-app's local status address
+- fleet-jobs F1 | changed: Describing keeps the computer it runs on usable | start now and the share of a working computer point to fleet-jobs' "A computer takes shared work only while nobody is using it"; this piece's setting "Share of a working computer that describing may use" removed, as fleet-jobs holds the one setting (coordinator's note 2026-11-24)
+- fleet-jobs F2 | changed: Describing keeps the computer it runs on usable | same change as broll F4
+- fleet-jobs F4 | no change here: fleet-jobs adds the dropper's computer to its ranking; this text already says so
+- fleet-jobs F5 | no change here: fleet-jobs names in-place work as meant for the dropper's computer; this text keeps indexing in place
+- music F2 | changed: A clip not on this computer yet is fetched first, with progress, and then placed | this is the home: adds that a computer set to sync nothing does not fetch, that a file still absent after the copy reads "file not found at <path> - is the share mounted?", and that the fetch, its limit, wait, 15-minute give-up and refusals serve tracks and YouTube originals, each sentence naming its item
+- music F3 | changed: A drop holds at most 2,000 clips and is taken only if it fits ; Dropped files are cleaned away a week after they are no longer needed | the floor setting becomes a pointer to sync-1's "Keep this much free on the sync drive" (no music in it); with the b-roll archive off there is no staging button or line
+- proxies-and-file-moves F1 | no change here: proxies-and-file-moves adds the collection rename; this text keeps its sentence and pointer
+- proxies-and-file-moves F6 | no change here: describing goes first, as this text already says; fleet-jobs states the order
+- youtube F8 | no change here: youtube changes; the one-file fetch still serves an editor who asks for a YouTube original on their computer

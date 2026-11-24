@@ -33,7 +33,7 @@ Facts about timecode, as Resolve counts it:
 
 The arithmetic for a cut needs its clip's real rate; a guessed rate once placed every clip of an episode at the wrong moment.
 
-- On its own: a clip's rate is the one Resolve reports for it; else the one measured when the clip was transcribed; else the one the cut list records for it; else the timeline's rate. A clip of unknown rate is taken as 29.97 drop-frame. The rate found is recorded on the cut list for each clip, and a cut list holding a rate that was only assumed is corrected from the measured one before anything is sent.
+- On its own: a clip's rate is the one Resolve reports for it; else the one measured when the clip was transcribed; else the one the cut list records for it; else the timeline's rate. A clip of unknown rate is taken at the site's "Frame rate when nothing states one" (29.97 drop-frame unless an admin has changed it; see Timeline Cards: footage in, ready to cut: Frame rates, "Each interview's frame rate and drop-frame are chosen on its own"). The rate found is recorded on the cut list for each clip, and a cut list holding a rate that was only assumed is corrected from the measured one before anything is sent.
 - By hand: each clip's rate and start timecode are shown in the cut list's facts and can be set there. A rate set by hand is never overwritten by a later measurement.
 
 ### A cut's in and out points sit 12 frames outside its words
@@ -48,7 +48,7 @@ When a cut is made from a stretch of transcript, it starts 12 frames before its 
 A send offers the new timeline's frame rate before anything is built. The default is the rate the cut list states; a cut list that states none is sent at 29.97 drop-frame. The person can instead keep the Resolve project's own rate. The rate is set while the new timeline is still empty, because a fact about Resolve is that a timeline's frame rate can be set only while it holds nothing. The timeline starts at the cut list's start timecode, 01:00:00:00 when it names none; a start that cannot be read is taken as 01:00:00:00, with a note. The dry run says "-- timeline pinned to X fps" when a rate other than the project's is set.
 
 - On its own: the rate and start, from the cut list, else 29.97 drop-frame at 01:00:00:00.
-- By hand: both can be changed in the cut list's facts, and the rate can be changed for one send on the Send tab.
+- By hand: the rate, or the Resolve project's own, is chosen for each send on the Send tab.
 
 #### Lessons
 
@@ -71,7 +71,13 @@ Each cut names its clip, and the clip is looked for in the target project's medi
 
 ### Clips the project lacks are brought into it before the cut is placed
 
-For every clip of the cut that the project's media pool does not hold, the hand-over brings it into the project first, instead of refusing: the file the clip's transcript was made from, as the editor's computer sees it, is imported and matched back by file name. An interview whose multicam is not yet in the project gets it, built in Resolve from the angles and the line-up Timeline Cards made when the footage came in (see Timeline Cards: footage in, ready to cut: Grouping clips and building the multicam), with the angle names and sync of that line-up, and placed in the `Multicams` bin. The dry run says "-- importing N clip(s) from the corpus first". A send is refused only for a clip that is neither in the project nor has a file the editor's computer can reach, and then every such clip is named at once (see "A send is refused before anything is placed when it cannot succeed").
+For every clip of the cut that the project's media pool does not hold, the hand-over brings it into the project first, instead of refusing: the file the clip's transcript was made from, as the editor's computer sees it, is imported and matched back by file name. An interview whose multicam is not yet in the project gets it, made from the angles and the line-up Timeline Cards made when the footage came in (see Timeline Cards: footage in, ready to cut: Grouping clips and building the multicam), with the angle names and sync of that line-up, and placed in the `Multicams` bin. A fact about Resolve: its scripting cannot create a multicam clip, so the multicam arrives by a way that never relies on a scripted multicam creation; where no such way exists for a multicam, the dry run names exactly the step the person takes in Resolve to make it before sending, and the send never claims to have made it.
+
+- A multicam that arrives is read back before any cut is placed: each angle's item count on its picture and sound tracks matches the line-up, and each item's source start is within one frame of the line-up's. An angle that is further out than one frame refuses the send, naming the interview and the angle that is out of sync, and nothing is placed. Where Resolve cannot report an item's source start, the person is told that this item was not checked, by name.
+- When the multicam cannot be made, the send is refused before anything is placed, and the person is told in a sentence naming the interview what stood in the way: no project open in Resolve, a multicam of that name already in the `Multicams` bin, Resolve refusing the clip, a dialog open in Resolve, or the multicam arriving under another name that Resolve would not let be corrected.
+- A multicam made here wears its interviewee's clip colour in Resolve from the moment it is made, read back like every property (see "Every name and property written into Resolve is read back"). Multicams already in the project are recoloured only by the action that asks first (see "An episode's multicams and a timeline's cuts can be coloured by speaker in Resolve").
+
+The dry run says "-- importing N clip(s) from the corpus first". A send is refused only for a clip that is neither in the project nor has a file the editor's computer can reach, and then every such clip is named at once (see "A send is refused before anything is placed when it cannot succeed").
 
 ### Each cut lands as a linked picture and sound pair on the first tracks
 
@@ -122,10 +128,12 @@ A fact about Resolve: a timeline clip gets a new id on every ripple move, and a 
 
 Every heading and note of the cut arrives on the new timeline as a timeline marker, one frame long:
 
-- A section heading becomes a marker named after the heading, in the section's own colour (Blue when it has none).
+- A section heading becomes a marker named after the heading, in the section's own colour (Blue when it has none). A section of any colour, Red and Green included, is sent in its own colour.
 - A note heading becomes a Green marker, and each note line a Green marker carrying its text as its note; an unmatched note line has "(unmatched) " in front.
+- A plain heading becomes a Red marker named after the heading.
 - Each is placed at the start of the black before the next cut, so a section that opens on black is marked at the black. Markers that belong to a cut go on that cut's first frame. Extra timeline markers go on their own frames.
-- Marker colours are matched ignoring case; an unknown colour becomes Blue. Red is kept for markers that report a problem, and Green for notes, so a marker read back from Resolve never turns a note into a section.
+- Marker colours are matched ignoring case; an unknown colour becomes Blue.
+- Read back from Resolve, a marker the cut list knows keeps the kind the cut list holds for it, whatever its colour. Only a marker the cut list does not know takes its kind from its colour: Green is a note, Red a plain heading, and every other colour a section.
 - A fact about Resolve: it keeps one marker per frame and silently refuses a second. So a marker that would share a frame moves to the next free frame, and none is lost.
 - Placing a marker moves no clip and changes nothing on any track.
 
@@ -144,7 +152,7 @@ The finished send says "N gap note(s): X as title(s) on the Gap notes track, Y a
 
 Each cut on the new timeline gets its clip colour: its own colour from the cut list, else its interviewee's colour. A colour set on a cut in the cards appears on that clip in the timeline Resolve receives, and is read back.
 
-Each of the 16 interviewee palette colours is paired with one of Resolve's clip colours, in order: Blue, Violet, Green, Teal, Tan, Chocolate, Pink, Navy, Purple, Olive, Yellow, Blue, Purple, Green, Orange, Navy, so the first 8 speakers get 8 different clip colours and they repeat after that. A colour chosen by hand that is not in the palette is matched to the nearest Resolve clip colour. Resolve's Brown is never used anywhere. Any colour picker offers Resolve's 16 clip colours minus Brown, in Resolve's own menu order: Orange, Apricot, Yellow, Lime, Olive, Green, Teal, Navy, Blue, Purple, Violet, Pink, Tan, Beige, Chocolate. A cut naming a colour that is not one of these is refused before anything is built, naming the cut.
+There is one set of colours: a cut's colour and an interviewee's colour are already Resolve's own clip colours (see Timeline Cards: the editor: Colours, "Each interviewee has a colour of their own"), and each is sent as it is, with nothing translated or paired. Resolve's Brown is never used anywhere. Any colour picker offers Resolve's 16 clip colours minus Brown, in Resolve's own menu order: Orange, Apricot, Yellow, Lime, Olive, Green, Teal, Navy, Blue, Purple, Violet, Pink, Tan, Beige, Chocolate. A cut naming a colour that is not one of these is refused before anything is built, naming the cut.
 
 - Pending: cards-to-resolve-and-exports-U1
 
@@ -159,7 +167,7 @@ For a chosen bin (default: the bin open in Resolve), each multicam clip is match
 
 Each cut's audio fade-in and fade-out arrive on its sound in Resolve at the lengths drawn on the cards and heard in the browser, in whole timeline frames (rounded), never negative, each shortened to the cut's own length if longer; zero means no fade. The picture is never faded. Each cut's manual gain (in steps of 0.1 dB, at most 30 dB up or down) arrives as that clip's level in Resolve, and is proven by reading the level back.
 
-A fact about Resolve: its scripting offers no way to set a clip's audio fades, keyframes, transitions or clip volume. Until the product has proven, by reading them back, that fades and gain arrived, every send and every export says plainly, with a count in words, each one it did not carry: "N audio fade(s) will not be applied: <reason>" and "N cut(s) carry a manual gain that is not yet carried into Resolve: the timeline will play them at the clips' own level". The editor's automatic levelling is its own playback only, and every send says so.
+The fade sentence and the gain sentence of a send say how many cuts carry fades and a manual gain that go on with them. A fade or a level Resolve would not take is told, naming the cut, in the read-back sentence of "Every name and property written into Resolve is read back". An export to a format that has no clip gain or no fades says so in its own list of what the file does not carry (see "Each export format carries some of the cut and says what it lost"). The editor's automatic levelling is its own playback only, and every send says so.
 
 ### Every name and property written into Resolve is read back
 
@@ -182,11 +190,7 @@ A fact about Resolve: its undo history is project-wide and counts every scripted
 
 ### Timeline Cards never connects to Resolve while Resolve is still starting
 
-A fact about Resolve: its scripting is served by a separate script server that Resolve starts late in its own launch, listening on TCP port 1144, and Resolve then registers with it. A program that connects in the short moment after that server starts and before Resolve has registered gets nothing, and takes the server down; Resolve then gives up scripting for the whole session, for every program on that computer, and the only cure is to quit Resolve and everything that talks to it and start them again in order. Asking Resolve's scripting for a connection when no server is there does not fail at once: it keeps trying for several seconds, so a program that "just checks whether Resolve is up" by connecting is inside that window when the server appears.
-
-So before every connection attempt, the computer's own network table is read, without connecting: Timeline Cards connects only when it shows the script server listening AND Resolve itself connected to it. When Resolve is closed, or the server is up but Resolve has not registered yet, Timeline Cards waits, never touching Resolve meanwhile, checks again about every 3 seconds and shows "Resolve is starting: waiting before connecting". This is a waiting state, not a failure, and it does not count towards giving up. Only when the check itself cannot be made (the table cannot be read, or the port is held by some other program) does it go ahead and connect. One connection is kept while it lasts; a lost one is dropped and the check is made again before reconnecting. The link to Resolve is let go after a minute with nothing asked. The same rule holds for every program on the computer that talks to Resolve.
-
-- Windows and macOS: the check is made on both.
+Timeline Cards talks to Resolve only when Resolve has finished starting, by the one rule every part of the product keeps (see Resolve on the editor's computer: Connecting to Resolve's scripting: launch, stalls and death, "The product never harms a Resolve session", and the facts behind it in "Facts about Resolve's scripting connection"). While Resolve is starting, the editor shows "Resolve is starting: waiting before connecting". This is a waiting state, not a failure, and it does not count towards giving up.
 
 ### Resolve showing a dialog answers nothing
 
@@ -230,12 +234,12 @@ The editor has one dialog for sending to Resolve, exporting, importing and follo
 ### Where the dialog and the script downloads are reached
 
 - Toolbar button "Export" (download icon, tooltip "Resolve and exports: export, import, send, follow"): opens the dialog on the Export tab, or closes it if it is open.
-- Sending is an action on the cut, not a button in the top bar: the cut's own actions hold "Send to Resolve", which opens the Send tab with a fresh dry run. When the dialog later closes after a successful send, a toast says "Sent to Resolve."; when it closes without a send, nothing is said; a failure toasts "Send to Resolve failed: <reason>".
+- Sending is an action on the cut, not a button in the top bar: the cut's own actions hold "Send to Resolve", which opens the Send tab with a fresh dry run. The Send to Resolve key, Alt+Shift+M, does the same. When the dialog later closes after a successful send, a toast says "Sent to Resolve."; when it closes without a send, nothing is said; a failure toasts "Send to Resolve failed: <reason>".
 - Command palette entries: "Send to Resolve" (found also by the words conform, timeline, library); "Export OTIO, FCPXML, EDL or the script" (opens Export); "Download the script as Markdown (.md)" (shows Ctrl+S); "Download the script as plain text (.txt)" (shows Ctrl+Shift+S); "Import a timeline from Resolve" (opens Import); "Follow Resolve's playhead" (opens Live); "Compare the cut list with its Resolve timeline" (compares now and opens Import).
 - Ctrl+S downloads the plain script as Markdown, from anywhere, including while typing in a text field; the browser's own "save page" is suppressed.
 - Ctrl+Shift+S downloads the plain script as plain text, same rules.
 - Exact: yes
-- When the help for the editing program is off: the "Send to Resolve", "Import a timeline from Resolve", "Follow Resolve's playhead" and "Compare the cut list with its Resolve timeline" entries are not offered, and the Export button's tooltip reads "Exports: export, import"; the export entries and both script keys work as above.
+- When the help for the editing program is off: Alt+Shift+M does nothing; the "Send to Resolve", "Import a timeline from Resolve", "Follow Resolve's playhead" and "Compare the cut list with its Resolve timeline" entries are not offered, and the Export button's tooltip reads "Exports: export, import"; the export entries and both script keys work as above.
 
 ### What is asked of the editor before a hand-over
 
@@ -254,6 +258,7 @@ Nothing is ever written into Resolve's saved projects from outside Resolve. Fact
 
 - Lead text: the cut goes to Resolve as a new timeline; first a dry run; nothing is written until Send is pressed.
 - "Timeline name" text field, pre-filled with the cut list's file name (trimmed, at most 200 characters). Typing in it throws away the current dry run and any "sent" result. Enter in the field runs the dry run.
+- A choice of the new timeline's frame rate: the rate the cut list states (29.97 drop-frame when it states none), or the Resolve project's own (see "The timeline a cut builds runs at a chosen frame rate and start"). Changing it throws away the current dry run, as the name does.
 - "Check the plan" / "Check again" button (shows "Checking" while busy) runs the dry run. Opening the Send tab with no dry run yet starts one by itself.
 - After a dry run that succeeded, five figures: cuts, clips, running time (m:ss), markers, gaps.
 - Below the figures: every reason a write would be refused as a warning line, then every note as an info line.
@@ -308,7 +313,7 @@ Nothing already in the project is changed. What arrives:
 A timeline built from a cut runs the cut list's length, give or take a frame per clip. Sending a cut list that is identical to the timeline it names writes nothing and says so, and cuts nobody touched keep their exact frames.
 
 - Who: anyone signed in who may open the cut list.
-- Ways in: from the Send tab of the editor's dialog, opened from the cut's own actions or the command palette.
+- Ways in: from the Send tab of the editor's dialog, opened from the cut's own actions, the Send to Resolve key (Alt+Shift+M) or the command palette.
 
 ### A send is refused before anything is placed when it cannot succeed
 
@@ -340,6 +345,8 @@ When the send starts, the page answers at once "N cut(s) sent to <machine>: Reso
 ### The cut list records the timeline it built
 
 After a successful send the cut list is re-read, its timeline name set to the name Resolve actually gave the timeline (which may be "<name> (2)"), with the time of the send and the computer it was sent on, its revision raised by one and the previous revision kept in its history. The page then shows the stamped cut list. This timeline is the one later compared with the cut list.
+
+A send from a cut list opened read-only builds its timeline and leaves the file as it was: nothing is stamped, and the news line ends " The cut list could not record it." Later comparisons then find that timeline by its name (see "A sent timeline is followed by its identity, not its name").
 
 ### Every sent timeline goes into the Timelines bin
 
@@ -405,9 +412,11 @@ Matching never uses Resolve's own ids: notes, colours and marks follow each cut'
 
 {{32-016}}
 
+Except that a cut that is not on the timeline goes onto the shelf named after its section, exactly as a deleted cut does (see Timeline Cards: the editor: Editing, undo and the cut list, "Deleting stages cuts on the shelf under their section's name and takes gaps out"); there is no "Not on the timeline" category, and the Staged row of the preview names the shelf the cut goes to. And an unknown marker that is Red becomes a plain heading, not a note: Green is a note, Red a plain heading, and every other colour a section.
+
 ### Accepted changes become ordinary edits on the cut list
 
-The changed cut list is compared with the current one. Rows are matched by id; cuts that lost theirs by clip and span (exact, inside, overlapping); headings, note rows and gaps by kind and words or length; shelf sections by kind and name. A matched cut's changes become ordinary field edits (edges in an order that never empties the span, fades, gain, colour, note, highlights), unless its clip, speaker or question mark changed, its colour is not a clip colour, or its new span is under 1/24 s or before 0: then the cut is replaced whole, keeping its old words and link and only the highlights still found in them. The order, new and removed rows, headings, the shelf and the remaining facts come in as one restoring edit; gap notes and summaries changed alone become their own edits. However many edits it takes, accepting is one step for undo.
+An accepted proposal becomes edits on the cut list in the one way any changed cut list does, the way a hand edit of the file is merged (see Timeline Cards: the editor: Editing, undo and the cut list, "The cut list file can be edited by hand, and the editor merges the change"): only what changed moves, and a cut removed in Resolve waits on the shelf named after its section. However many edits it takes, accepting is one step for undo.
 
 ### The editor always sees how far the Resolve timeline has drifted from the cut list
 
@@ -418,7 +427,7 @@ The changed cut list is compared with the current one. Rows are matched by id; c
 
 ### A cut list can be rewritten from its timeline in Resolve, keeping what only the cut list knows
 
-The whole cut is replaced from the timeline's clips and markers, as one revision, keeping: per matched cut its note, manual gain, person, transcript link and words (when the timeline has none); each clip's full name and start timecode; a heading matching a marker keeps its kind, and takes the marker's colour (the cut list's only when the marker has none); a Green marker that was a note line comes back as a note line inside the section it interrupted; markers after the last cut become empty headings at the end; the shelf, alternates and saved sequences come over whole; the header keeps its project, title and timing and records when and from which timeline it was updated. A cut's colour comes only from a colour set on the clip in Resolve. A marker read from Resolve with only a colour is a note when Green, a plain marker when Red, and a section in any other colour; a kind the cut list already holds for that marker is never changed by its colour. Refused while the cut list is read-only. A preview gives counts and the rows without writing. Afterwards the cut list reports in step with its timeline. Messages: "there is no timeline here to update this file from"; "Resolve answered with no timeline"; "this project file was built from '<a>' and the cards here are '<b>' -- updating it from a different timeline needs force: true"; "the file and <timeline> are already in step -- nothing to write"; "an edit is already being applied -- wait a moment"; note "<file> <- <timeline>: <summary> -- rev N".
+The cut list is brought up to date with its timeline in Resolve only through the Import proposal, previewed and accepted in whole or in part (see "An import becomes a proposal the editor previews before accepting"). The proposal built from the Resolve timeline keeps what only the cut list knows: per matched cut its note, manual gain, person, transcript link and words (when the timeline has none); each clip's full name and start timecode; a heading matching a marker keeps its kind, and takes the marker's colour (the cut list's only when the marker has none); a Green marker that was a note line comes back as a note line inside the section it interrupted; markers after the last cut become empty headings at the end; the shelf, alternates and saved sequences are left as they are; the header keeps its project, title and timing and records when and from which timeline it was updated. A cut's colour comes only from a colour set on the clip in Resolve. A marker read from Resolve with only a colour is a note when Green, a plain heading when Red, and a section in any other colour; a kind the cut list already holds for that marker is never changed by its colour. Refused while the cut list is read-only. Once accepted, the cut list reports in step with its timeline. Messages: "there is no timeline here to update this file from"; "Resolve answered with no timeline"; "this project file was built from '<a>' and the cards here are '<b>' -- updating it from a different timeline needs force: true"; "an edit is already being applied -- wait a moment".
 
 Updating from a timeline other than the one the cut list names is refused, naming both, until the editor confirms.
 
@@ -465,7 +474,7 @@ A computer does not start taking part when something stands in the way, and says
 5. the computer's programs cannot be listed: treated as one running, and the person is told that another program may be driving Resolve and the computer's programs could not be listed, so it is not starting;
 6. the app on this computer must be updated before its Resolve can take part, saying so.
 
-Once the obstacle is gone (signing in, closing the other program, a stop ending) it starts on its own within about a minute. After 5 failed starts in a row it stops trying until the app is restarted.
+Once the obstacle is gone (signing in, closing the other program, a stop ending) it starts on its own within about a minute, and the computer is looked at again on its own while it waits, so the editor need not restart anything. An obstacle on this list is a wait, never a failed start. Only a start that was tried and failed for some other reason counts: after 5 such failed starts in a row it stops trying until the app is restarted, and the computer's sentence says that it stopped trying and that restarting the app starts it again.
 
 ### Each computer shows whether its Resolve is taking part and if not why
 
@@ -477,7 +486,7 @@ Each computer reports one word and a sentence (up to 255 characters), seen on th
 - unreachable: the dashboard has not answered in the last 50 seconds (or nothing in the first 30 seconds): the last error, or that the dashboard has not answered this computer;
 - running: "serving <episodes> to <dashboard>", or, when updates from Resolve are set aside because no episode is open, that reason with "open an episode".
 
-Green needs a successful contact in the last 50 seconds. Also shown: when the dashboard last answered, the current timeline's name, and since when it has been running. Anything shown stopped is restarted within about a minute.
+Green needs a successful contact in the last 50 seconds. Also shown: when the dashboard last answered, the current timeline's name, and since when it has been running. Anything shown stopped is restarted within about a minute, except a computer stopped after 5 failed starts in a row, which stays stopped until the app is restarted (see "A computer says what stops its Resolve taking part").
 
 ### The Live tab follows Resolve's playhead and moves Resolve to the selected cut
 

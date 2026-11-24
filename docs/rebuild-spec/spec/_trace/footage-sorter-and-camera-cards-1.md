@@ -450,7 +450,7 @@
 - 38-Q10 | settled: there is one card copy, and every way of starting it obeys the same review and refusals
 - 38-Q12 | footage-sorter-and-camera-cards-1-Q22
 - 38-Q14 | answered: SRT-039 (a Sony camera's two-slot recording is recognised as one recording and shown as copies of each other)
-- U-01-7 | settled: field backup is on by default on every computer while the part is on (an item gives it)
+- U-01-7 | settled: field backup is off by default on each computer, offered only while the part is on (decision page 8.2, answered A; joins editor-app F13)
 - U-04-3 | not a question: the FIX ALL window belongs to Resolve on the editor's computer, and nothing in this piece leans on it
 - U-10-3 | settled: the copy's rules for conflicts, resuming and checking are written in this piece, and only the product's own copying is used (Q2)
 - U-35-2 | settled: those behaviours are written in parts 2 and 3 of this capability
@@ -565,20 +565,19 @@
 
 - 36-025, 35-064 | the setting for how often automatic backup looks (about every 10 minutes, kept in the text): a setting only the build would tune.
 - 06-054, 36-025 | the setting for how quickly the NAS must answer for a computer to count as at home (15 ms, kept in the text): a setting only the build would tune.
-- 10-018, 35-058 | the setting for the room kept spare on a destination (256 MiB, kept in the text): a setting only the build would tune.
 
 ## Joins with other capabilities
 
-- The app on each editor's computer / Starting, staying running and crashing | The app on an editor's computer watches for cards and drives | the app starts at sign-in, and Task Manager's switch is set back on by installing or updating.
+- The app on each editor's computer / Starting, staying running and crashing | The app on an editor's computer watches for cards and drives | the app starts at sign-in, and Task Manager's switch is set back on by installing or updating (held there; this piece points to "The app starts whenever the editor signs in to the computer, and set-up confirms it is running").
 - The app on each editor's computer / The tray or menu-bar icon and its menu | An editor can copy a card with no network at all | "Field backup…" is an entry in the app's menu.
 - The app on each editor's computer / Windows, dialogs and notifications | When a card goes in, the Footage Sorter comes up on it | the card notices are the app's notifications.
 - The app on each editor's computer / Settings, records and background work | Card settings a computer cannot read are reported, never ignored | the app's own settings and how it reports unreadable ones.
-- The dashboard / Each computer's state | Every card put in a reader appears within seconds, with no click | a computer that cannot report its cards is also shown on the per-computer view.
-- The dashboard / Alerts by mail | A report and a daily mail say what footage is not at home | mail delivery and its set-up; the overview says when mail is not set up.
+- The dashboard / Alerts by mail | A report and a daily mail say what footage is not at home | the daily mail goes to the alert recipients from the alert sender address, is listed among sent messages and tried again like the rest; the overview says when mail is not set up.
 - The dashboard / Overview, menus and finding things | The crew record which cards they used on which day | the card-use page and the card report have names and search words for the general search.
 - Accounts, privacy and the legal paperwork / What each person may see and reach | There is one card copy, and it starts at once on the computer the card is in | who is signed in and who is an admin.
 - Accounts, privacy and the legal paperwork / What the product records about a person | Every drive is known by its identity, and the product knows which computer it is plugged into | drive reporting sends nothing about the computer but its drives.
-- The server: installing it and keeping it running / Settings and secrets | Nightly work runs on the studio's clock | the studio's time zone and the backup folder are set at install.
+- The server: installing it and keeping it running / NAS speed, load and clock | The studio has one time zone, used for every time that carries none of its own ; Nightly work runs on the studio's clock | the one studio time zone, its setting and its default ("Schedules run on the studio's own clock"), asked at set-up.
+- The server: installing it and keeping it running / Settings and secrets | Nightly work runs on the studio's clock | the backup folder is set at install.
 - The server: installing it and keeping it running / Off-site backup | Which copies count, and when a file is backed up | the cloud backup counts for proxies and sound only.
 - Sync / Facts about the NAS and the operating systems | Which drives a computer can see, on Windows and on macOS | the operating systems' handling of drives.
 - Sync / What syncs where | The places a card can be copied to | the studio's footage share on the NAS that card copies land in.
@@ -600,3 +599,33 @@
 - footage-sorter-and-camera-cards-1-U2 | about every 10 minutes is right; the hourly figure is how often a watched folder is read again
 
 - footage-sorter-and-camera-cards-1-U3 | no separate reminder exists at present (laptop-only footage heads the daily mail); the owner's ruling asks for one every few days, and the text keeps it
+
+## Joins settled
+
+- accounts-privacy-legal F16 | no change here: accounts-privacy-legal adds drive reporting (only while the Footage Sorter is on) and the per-computer switch; this piece already says drives are reported only while the part is on
+- cards-footage-in F14 | no change here: two matchings with two purposes, each keeps its limits; cards-footage-in adds whole-hour shifts
+- dashboard-1 F9 | changed: Every card put in a reader appears within seconds, with no click | the join line claiming the per-computer view shows a computer that cannot report its cards is dropped (the behaviour text never said it); dashboard-1 adds nothing
+- dashboard-2 F7 | changed: A report and a daily mail say what footage is not at home | the daily mail goes to the alert recipients from the alert sender address through the alert mail settings, listed and tried again like every other message, in place of "the owner" and "Backups"
+- dashboard-2 F8 | changed: The studio has one time zone, used for every time that carries none of its own ; Nightly work runs on the studio's clock | the Studio time zone setting line, its UTC+8 default and the NAS-zone and universal-time fallback replaced by a pointer to server-install-and-running-2 "Schedules run on the studio's own clock"
+- editor-app F12 | changed: The app on an editor's computer watches for cards and drives | the Task Manager rule and its Windows and macOS line removed, pointing to editor-app's "The app starts whenever the editor signs in to the computer, and set-up confirms it is running"
+- editor-app F13 | changed: An editor can copy a card with no network at all | field backup is off by default on each computer (setting default off)
+- fleet-jobs F15 | no change here: fleet-jobs takes card copies, drive copies and drive reads out of shared work; this piece already says a card copy starts at once for anyone signed in, offline too in field backup
+- footage-sorter-and-camera-cards-1 F1 | no change here: fleet-jobs changes; this piece already holds the promise in "There is one card copy, and it starts at once on the computer the card is in", and no per-computer limit on drive reads was written here
+- footage-sorter-and-camera-cards-1 F4 | no change here: fleet-jobs keeps its own description and drops its pointer; part 1 unchanged by the ruling
+- footage-sorter-and-camera-cards-1 F5 | no change here: part 2 changes its hover text to this piece's quick check
+- footage-sorter-and-camera-cards-1 F6 | no change here: part 2 changes to this piece's rule (a NAS copy counts only once tied to this card)
+- footage-sorter-and-camera-cards-1 F7 | changed: The studio has one time zone, used for every time that carries none of its own ; Nightly work runs on the studio's clock | own setting, "Default: UTC+8" and the NAS-zone fallback replaced by a pointer to the one studio time zone; named zones still follow summer time
+- footage-sorter-and-camera-cards-1 F8 | no change here: part 3 removes its proxies setting and points to this piece's "Back up proxies too"
+- footage-sorter-and-camera-cards-1 F9 | no change here: part 3 removes its setting
+- footage-sorter-and-camera-cards-1 F10 | no change here: part 3 removes its setting
+- footage-sorter-and-camera-cards-1 F11 | changed: Room and path length are checked before anything moves | the spare room is now a site setting (admin, default 256 MiB), the message gives the amount set, and the other places carry on so the card gets a copy wherever there is room; the "left out" line for this setting is withdrawn
+- footage-sorter-and-camera-cards-1 F12 | no change here: part 3 drops its 15-minute read
+- footage-sorter-and-camera-cards-1 F13 | no change here: part 3 says the per-computer settings here are also the editor's for their own computer
+- footage-sorter-and-camera-cards-1 F14 | no change here: this piece is the home and already holds the timings; part 3 points here
+- footage-sorter-and-camera-cards-1 F15 | no change here: this piece is the home and already holds the exception; part 3 points here
+- footage-sorter-and-camera-cards-2 F2 | no change here: part 2 changes; this piece already gives the card's "loose" folder
+- footage-sorter-and-camera-cards-2 F3 | changed: A recorder's reset clock is corrected from its neighbouring files | the recorder's own time stamp is a clue tried first that sound and then speech may overrule (SRT-145 outranks SRT-032)
+- footage-sorter-and-camera-cards-3 F4 | no change here: part 3 changes; this piece already speaks of every camera raw video
+- footage-sorter-and-camera-cards-3 F5 | changed: Each card is listed under its computer with its state, its health and its copy | "The first card is selected on its own" dropped; a page opened with cards in readers asks where to look (pointer to part 3), a card the app brings the Sorter up on is still shown in its own view
+- proxies-and-file-moves F8 | changed: Where a card's files land | a camera's own proxy is copied into the Proxy folder under its clip's exact name, Sony's "S03" ending dropped
+- server-install-and-running-1 F10 | changed: The studio has one time zone, used for every time that carries none of its own ; Nightly work runs on the studio's clock | points to server-install-and-running-2's "Schedules run on the studio's own clock"; the join to Settings and secrets no longer names the time zone

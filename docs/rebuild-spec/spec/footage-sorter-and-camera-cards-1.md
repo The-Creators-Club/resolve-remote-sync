@@ -6,14 +6,13 @@ The Footage Sorter gets footage off camera cards and sound-recorder cards and in
 
 ### The app on an editor's computer watches for cards and drives
 
-While the Footage Sorter is on, the app on every editor's computer watches that computer's card readers and drives from the moment someone signs in to the computer, under the product's own name and icon. If Windows Task Manager has switched the app's start at sign-in off, installing or updating the app switches it back on. Watching runs whether or not anyone has the Footage Sorter open, and whether or not the computer can reach the studio at that moment.
+While the Footage Sorter is on, the app on every editor's computer watches that computer's card readers and drives from the moment someone signs in to the computer, under the product's own name and icon, since the app starts whenever someone signs in (see The app on each editor's computer: Starting, staying running and crashing, "The app starts whenever the editor signs in to the computer, and set-up confirms it is running"). Watching runs whether or not anyone has the Footage Sorter open, and whether or not the computer can reach the studio at that moment.
 
 Watching can be switched off for one computer. That computer then reports no cards and no drives and does not bring the Sorter up when a card goes in, and the Sorter says plainly, under that computer, that card watching is off there. When a computer is watching but cannot get its cards and drives through to the studio (it cannot reach the studio, or its sign-in is refused), the Sorter says so under that computer, with the reason, instead of only showing no cards.
 
 - Who: the editor for their own computer, and an admin for any computer.
 - Setting: Watch for cards and drives on this computer. Does: lets this computer notice camera cards and drives, bring the Sorter up on a new card, and tell the studio's record which drives are plugged in. Default: on. Who: the editor for their own computer, and an admin. Applies to: a computer. Search words: card watching, card reader, detect cards, drives, plugged in.
 - When the Footage Sorter is off: no computer watches for cards or reports drives, and this setting is not shown.
-- Windows and macOS: on Windows the start at sign-in can be switched off in Task Manager, and installing or updating the app switches it back on; on macOS the app starts at sign-in in the same way.
 
 ### Which drives a computer can see, on Windows and on macOS
 
@@ -93,7 +92,7 @@ The list of clips reloads when a copy ends, when a card finishes being read, is 
 
 ### Each card is listed under its computer with its state, its health and its copy
 
-Cards are listed under the computer they are in, sorted by drive and then by the card's serial. With no card anywhere: "No card in a reader. Put one in; this page looks every few seconds." A "Look again" control takes a fresh look at every drive of every watching computer at once. The first card is selected on its own; clicking a card selects it.
+Cards are listed under the computer they are in, sorted by drive and then by the card's serial. With no card anywhere: "No card in a reader. Put one in; this page looks every few seconds." A "Look again" control takes a fresh look at every drive of every watching computer at once. No card is selected on its own: a page opened while cards are already in readers asks where to look (see The Footage Sorter and camera cards: The sorter page, "Opening the page asks where to look and loads little"), except that a card the app brings the Sorter up on is shown in its own view (see "When a card goes in, the Footage Sorter comes up on it"). Clicking a card selects it.
 
 Each card shows:
 
@@ -357,9 +356,7 @@ An admin can have any folders on the NAS or on a watched drive checked for dead 
 
 ### The studio has one time zone, used for every time that carries none of its own
 
-The studio's time zone is a setting. Every camera time, calendar time and file time that does not state a zone of its own is read in this zone, every time the Sorter shows is shown in it, shoot folders are named in local time in it, and the Sorter's nightly work runs by it. A zone that is named (rather than a fixed offset) follows its own summer time.
-
-- Setting: Studio time zone. Does: decides how zone-less camera, calendar and file times are read, the times shown in the Sorter and the time its nightly work runs. Default: UTC+8. Who: an admin. Applies to: the site. Search words: time zone, clock, studio time, offset, local time.
+The Sorter follows the studio's one time zone, the one setting everything in the product follows (see The server: installing it and keeping it running: NAS speed, load and clock, "Schedules run on the studio's own clock"). Every camera time, calendar time and file time that does not state a zone of its own is read in this zone, every time the Sorter shows is shown in it, shoot folders are named in local time in it, and the Sorter's nightly work runs by it. A zone that is named (rather than a fixed offset) follows its own summer time.
 
 ### The Sorter works out when each clip was recorded
 
@@ -395,7 +392,7 @@ Only a trusted clock places a recording by its time; an unknown one uses the fil
 
 ### A recorder's reset clock is corrected from its neighbouring files
 
-A sound recorder with an unset clock writes wrong dates but keeps steady time, so recorder sound is placed by its content and the cameras' times, never by the recorder's own time stamp alone. Once one file is placed, the clock offset found for it estimates its neighbours' on the same kind of recorder, provided:
+A sound recorder with an unset clock writes wrong dates but keeps steady time, so the recorder's own time stamp is a clue tried first, which the recording's sound against the cameras' sound, and then its speech, may overrule. Once one file is placed, the clock offset found for it estimates its neighbours' on the same kind of recorder, provided:
 
 - the file counter order agrees with the clock order;
 - the neighbour is within 25 files and 14 days;
@@ -424,7 +421,7 @@ Every copy the product makes, from a card or from a drive, keeps the card file's
 
 ### Nightly work runs on the studio's clock
 
-The Footage Sorter's nightly work (its walk over the NAS, the daily backup of the record of every copy, and the cloud backup's next run) happens at night by the studio's time zone, and the daily mail at 08:00 by the same clock. When no studio time zone has been set, the NAS's own zone is used; when neither is known, the admin setting up the site is told that the nightly work will run on universal time.
+The Footage Sorter's nightly work (its walk over the NAS, the daily backup of the record of every copy, and the cloud backup's next run) happens at night by the studio's time zone, and the daily mail at 08:00 by the same clock (see "The studio has one time zone, used for every time that carries none of its own").
 
 #### Lessons
 
@@ -552,10 +549,10 @@ The card must be in a reader on that computer, and never on its system disk: oth
 
 The app on an editor's computer offers "Field backup…" in its menu, which opens field backup in the computer's default browser. Everything it needs is carried inside the app, so it loads nothing from anywhere else and works with no internet and no studio network. It lists the cards in this computer's readers and the places on this computer they can be copied to, copies a card to every ticked place at once, and shows for each card what is already on which drive ("Already holds <have> of <of> files on this card") and whether it is safe to format, all with no network. What it copies reaches the studio's record of every copy as soon as the computer is next online.
 
-Field backup is on by default on every computer while the Footage Sorter is on. Switched off for a computer, it is not offered in that computer's menu at all. If it is on but could not start on this computer, choosing it shows a notice that field backup could not start on this computer, saying why, and nothing else in the app is affected. When the app quits, field backup stops, and every copy it started is stopped cleanly first (see "A copy stops cleanly, and says why, when a card or drive is pulled, a drive fills, or the person presses Stop").
+Field backup is offered only while the Footage Sorter is on, and is off on each computer until it is switched on for that computer. Switched off for a computer, it is not offered in that computer's menu at all. If it is on but could not start on this computer, choosing it shows a notice that field backup could not start on this computer, saying why, and nothing else in the app is affected. When the app quits, field backup stops, and every copy it started is stopped cleanly first (see "A copy stops cleanly, and says why, when a card or drive is pulled, a drive fills, or the person presses Stop").
 
 - Who: the editor at that computer.
-- Setting: Field backup on this computer. Does: offers field backup in this computer's menu, so a card can be copied here with no network. Default: on. Who: the editor for their own computer, and an admin. Applies to: a computer. Search words: field backup, offline copy, laptop, on location, card backup.
+- Setting: Field backup on this computer. Does: offers field backup in this computer's menu, so a card can be copied here with no network. Default: off. Who: the editor for their own computer, and an admin. Applies to: a computer. Search words: field backup, offline copy, laptop, on location, card backup.
 - Name and search words: Field backup. Search words: field backup, offline, laptop, copy card, on location.
 - When the Footage Sorter is off: there is no field backup on any computer.
 
@@ -604,7 +601,7 @@ Every tick and untick is saved on the computer at once. On the next visit, the p
 
 The day is the local date (year-month-day) of the newest file on the card, or the date of the copy when no file has a time. When the label is blank or one cameras give every card ("NO NAME", "Untitled", Canon's default label, "NIKON", "LUMIX", "CANON", "SD", "SD Card", "USB Drive", "Removable Disk", "Disk", "New Volume", "Card", "DCIM" and the like), the card's serial is used instead. Characters not allowed in file names become underscores. On a drive or folder, the card's own folder tree is kept beneath the landing folder. A landing folder remembers which card it belongs to; when a folder of that name already belongs to a different card, the second card lands in "<day> <label> <serial>", so two cards with the same label never mix. A folder that does not say whose it is is taken to be this card's.
 
-Proxies copied off a card land in a Proxy folder inside the dated folder holding their originals, with matching base names, so the editing program finds them beside their clips. Main files are copied before their proxy folders.
+Proxies copied off a card land in a Proxy folder inside the dated folder holding their originals, each under its clip's exact name (an ending the camera adds to its own proxies, such as Sony's "S03", is dropped), so the editing program, which pairs a proxy with its clip only by exact name, finds them beside their clips. Main files are copied before their proxy folders.
 
 - On its own: each landing folder's name, from the card's files, label and serial.
 - By hand: a person can rename a landing folder before the copy starts; the name set is kept for that card.
@@ -804,9 +801,11 @@ A long copy runs steadily, and the person always sees its live speed. When a cop
 
 ### Room and path length are checked before anything moves
 
-Before anything is copied, each place is checked for room and for what is already there ("Looking", "looking at what is already there"). A place that is gone is refused at once: "<destination> is not there. Plug it in and try again."; "<destination> cannot be read. Is it still plugged in?". If what needs copying there, plus 256 MiB kept spare, is more than its free space, that place is refused before anything moves: "Not enough room on <destination>: <free> free, and this card needs <need> more (plus 268 MB kept spare). Nothing was copied there." The other places carry on. Only what still needs copying counts (a partial file counts only its missing part, and a clip already elsewhere counts nothing unless ticked). The free space of a folder not yet made is the free space of the drive it will be made on. Free space that cannot be read counts as enough, and the review says it is unknown.
+Before anything is copied, each place is checked for room and for what is already there ("Looking", "looking at what is already there"). A place that is gone is refused at once: "<destination> is not there. Plug it in and try again."; "<destination> cannot be read. Is it still plugged in?". If what needs copying there, plus the room kept spare (256 MiB unless an admin sets another amount), is more than its free space, that place is refused before anything moves: "Not enough room on <destination>: <free> free, and this card needs <need> more (plus 268 MB kept spare). Nothing was copied there." (268 MB is the default room kept spare; the message gives whatever amount is set). The other places carry on, so the card gets a copy wherever there is room. Only what still needs copying counts (a partial file counts only its missing part, and a clip already elsewhere counts nothing unless ticked). The free space of a folder not yet made is the free space of the drive it will be made on. Free space that cannot be read counts as enough, and the review says it is unknown.
 
 A destination path longer than 240 characters is warned about: "long path (<n>): <path>".
+
+- Setting: Room kept spare on a place to copy to. Does: how much free space a card copy leaves untouched on each place it copies to; a place that would be left with less is refused. Default: 256 MiB. Who: an admin. Applies to: the site. Search words: free space margin, spare room, disk full, room kept free.
 
 
 ### Card copies are as fast as a dedicated card-copying program
@@ -959,10 +958,10 @@ A report lists every original and sound recording with copies but none on the NA
 
 Sizes read in TB with one decimal from 1 TB, in GB with no decimals from 10 GB, otherwise in GB with one decimal.
 
-Every day at 08:00 studio time the report is mailed to the owner, from "Backups", with the subject "[backups] Not at home: <size>" plus " · ⚠ <size> only on a laptop" and " · N to answer". Footage resting only on a laptop gets its own reminder every few days while it stays that way. Nothing is sent when there is nothing to report. When mail is not set up, the overview says that these reminders cannot be sent, instead of saying nothing.
+Every day at 08:00 studio time the report is mailed to the alert recipients, from the alert sender address, through the alert mail settings, and is listed and tried again like every other message the product sends (see The dashboard: Alerts by mail, "An admin chooses who is told when the server finds a problem"), with the subject "[backups] Not at home: <size>" plus " · ⚠ <size> only on a laptop" and " · N to answer". Footage resting only on a laptop gets its own reminder every few days while it stays that way. Nothing is sent when there is nothing to report. When mail is not set up, the overview says that these reminders cannot be sent, instead of saying nothing.
 
-- Who: anyone signed in sees the report; the mail goes to the owner.
-- Setting: Daily mail about footage not at home. Does: mails the owner every morning what footage is not yet on the NAS. Default: on. Who: an admin. Applies to: the site. Search words: backups mail, not at home, daily report, laptop only, reminder.
+- Who: anyone signed in sees the report; the mail goes to the alert recipients.
+- Setting: Daily mail about footage not at home. Does: mails the alert recipients every morning what footage is not yet on the NAS. Default: on. Who: an admin. Applies to: the site. Search words: backups mail, not at home, daily report, laptop only, reminder.
 
 ### Drives and folders with automatic backup on are copied to the NAS when the computer is at home
 

@@ -266,7 +266,7 @@
 - CRX-064 | 39-022 | the item files the timeline in a chosen bin or the current one; the ruling puts every sent timeline in a root bin named Timelines; wrote the ruling, CRX-058's choosing a bin listed as not yet met
 - CRX-010 | 39-022 | the item uses the project's default rate when none is pinned; the ruling offers a rate defaulting to 29.97 drop-frame and keeps a rate the file states; wrote the ruling with the project's rate as a choice
 - CRX-063, CRX-054, CRX-052 | 32-005, 39-028, 39-029 | the items write the cut into the saved project while Resolve has it closed, closing it if open; the lessons let only an unreachable Resolve block a send and refuse a closed Resolve at the press; wrote a hand-over into a running Resolve (pending Q1)
-- CRX-041, CRX-042 | 39-023 | the item carries fades only one way and gain never; the rulings ask that both arrive in Resolve and be proven; wrote that, with the plain sentences until proven
+- CRX-041, CRX-042 | 39-023 | the item carries fades only one way and gain never; the rulings ask that both arrive in Resolve and be proven; wrote that (the standing "not yet carried" sentences went with the joins, 2026-11-24)
 - CRX-045, CRX-073 | 43-045 | the item replaces a cut that failed to land with a Red marker and carries on; the lessons ask that a send fail loudly and leave no partial timeline; wrote whole or nothing
 - CRX-104 | 41-039 | the item breaks subtitle lines at 60 characters (20 for Chinese); the ruling asks for sentence then clause breaks at about 95 English or 42 Chinese characters; wrote the ruling
 - CRX-075 | 42-021 | the item refuses an edit when no OffCuts timeline exists; the ruling says nothing removed is ever lost; the text makes the offcuts timeline when missing
@@ -278,7 +278,7 @@
 
 - Which frame rate a clip is taken to have | the rate set by hand in the cut list's facts is never overwritten by a measurement
 - A cut's in and out points sit 12 frames outside its words | a trimmed point is never moved again by the word timing
-- Clips the project lacks are brought into it before the cut is placed | an interview's multicam missing from the project is built in Resolve from footage-in's line-up and filed in the Multicams bin
+- Clips the project lacks are brought into it before the cut is placed | an interview's multicam missing from the project arrives made from footage-in's line-up (never by a scripted creation, else the dry run names the step in Resolve), is read back within a frame, wears its interviewee's colour at once, and is filed in the Multicams bin
 - A sent timeline is followed by its identity, not its name | the sent timeline is followed by its id, and a lost track is said (CRX-034, CRX-064)
 - A hand-over can be taken back | a send can be taken back from the dialog or the cut list's record, removing its timeline
 - What is asked of the editor before a hand-over | a person with several computers running Resolve picks which one the cut goes to
@@ -353,14 +353,16 @@
 - Timeline Cards: footage in, ready to cut / Grouping clips and building the multicam | Clips the project lacks are brought into it before the cut is placed | the angles, their names and the line-up a multicam is built from in Resolve
 - Timeline Cards: footage in, ready to cut / Frame rates | Which frame rate a clip is taken to have | the rate measured when a clip is transcribed
 - Timeline Cards: the editor / Editing, undo and the cut list | Accepted changes become ordinary edits on the cut list | the cut list's revisions and its undo
-- Timeline Cards: the editor / Notes and the staged shelf | An import is matched to the cut list cut by cut | the shelf and its "Not on the timeline" category
+- Timeline Cards: the editor / Editing, undo and the cut list | An import is matched to the cut list cut by cut | a cut not on the timeline goes onto the shelf named after its section, as a deleted cut does
+- Timeline Cards: the editor / Editing, undo and the cut list | Accepted changes become ordinary edits on the cut list | the one merge of a changed cut list, as for a hand edit of the file
 - Timeline Cards: the editor / Playback and audio | Audio fades and gain arrive in Resolve as set on the cards | the fade handles, gain and automatic levelling as heard
 - Timeline Cards: the editor / Sections and the overview | Sections, notes and gap notes arrive as markers | section kinds and colours, gap notes
-- Timeline Cards: the editor / Colours | Clip colours on a sent timeline | the interviewee palette
+- Timeline Cards: the editor / Colours | Clip colours on a sent timeline | the one set of colours, Resolve's clip colours, unique per interviewee in an episode
 - Timeline Cards: the editor / Resolve is optional | The Resolve and exports dialog | what the editor shows with the help for the editing program off
 - Timeline Cards: the editor / Selecting, deleting, inserting and keys | Where the dialog and the script downloads are reached | the cut's own actions and the command palette
 - Timeline Cards: the board / What the board is | The dry run counts everything and shows the plan cut by cut | the board hands only to the cut
-- Resolve on the editor's computer / Connecting to Resolve's scripting: launch, stalls and death | Timeline Cards never connects to Resolve while Resolve is still starting | the same rule for every program that talks to Resolve
+- Resolve on the editor's computer / Connecting to Resolve's scripting: launch, stalls and death | Timeline Cards never connects to Resolve while Resolve is still starting | the rule and the facts, held in "The product never harms a Resolve session" and "Facts about Resolve's scripting connection"
+- Timeline Cards: footage in, ready to cut / Frame rates | Which frame rate a clip is taken to have | the site setting "Frame rate when nothing states one"
 - Resolve on the editor's computer / Bins, clip sorting and imports | Clips the project lacks are brought into it before the cut is placed | importing clips into a project
 - The app on each editor's computer / Signing in, the computer's identity and the licence | Resolve on an editor's computer takes part in Timeline Cards through the app | the computer's sign-in and verified identity
 - The dashboard / Each computer's state | Each computer shows whether its Resolve is taking part and if not why | the per-computer view
@@ -372,3 +374,31 @@
 - cards-to-resolve-and-exports-U4 | the product never places name titles; name titles a person adds in Resolve are left where they are, never moved or lost by a later hand-over
 - cards-to-resolve-and-exports-U5 | a stretch of empty timeline of one minute or more marks its real end, by default; shown and settable by hand each time
 - cards-to-resolve-and-exports-U6 | pauses between captions under one second are bridged, as a setting
+
+## Joins settled
+
+- cards-editor-1 F11 | changed: Sections and notes arrive as markers | a plain heading goes as a Red marker named after it; a Red marker read back is a plain heading (24.12 A)
+- cards-editor-1 F12 | changed: Clip colours on a sent timeline | the separate palette and its pairing go; each colour is one of Resolve's clip colours and is sent as it is (also covers this piece's F1)
+- cards-editor-1 F13 | changed: Where the dialog and the script downloads are reached ; A sent cut arrives as a new timeline that matches it frame for frame | Alt+Shift+M opens the Send tab with a fresh dry run, listed among the ways in
+- cards-editor-2 F10 | changed: Accepted changes become ordinary edits on the cut list | own row-matching and replace-whole rules dropped; points to cards-editor-2's hand-edit merge
+- cards-editor-2 F11 | changed: An import is matched to the cut list cut by cut | "Except that" sentence after the carried item: a cut not on the timeline goes to the shelf named after its section; no "Not on the timeline" category
+- cards-editor-5 F5 | no change here: cards-editor-5 changes; this piece already makes sending an action on the cut
+- cards-editor-5 F6 | no change here: cards-editor-5 changes; this piece already has one Export button, always present, its tooltip changing with the help off
+- cards-footage-in F10 | changed: Clips the project lacks are brought into it before the cut is placed | the multicam arrives by a way that never relies on scripted creation, else the dry run names the step in Resolve; no claim of a scripted build
+- cards-footage-in F11 | changed: Which frame rate a clip is taken to have | an unknown clip rate comes from footage-in's site setting "Frame rate when nothing states one"
+- cards-to-resolve-and-exports F2 | changed: Sections and notes arrive as markers | Red no longer reserved; a section of any colour is sent in its colour and keeps its kind on reading back; the colour rule is only for markers the cut list does not know
+- cards-to-resolve-and-exports F3 | changed: Audio fades and gain arrive in Resolve as set on the cards | the standing "not yet carried" sentences and the fact about scripting volume go; a refusal is told by the read-back sentence; exports keep their format losses
+- cards-to-resolve-and-exports F4 | no change here: cards-editor-2 changes; this piece already says a cut list never changes Resolve until sent
+- cards-to-resolve-and-exports F5 | changed: Accepted changes become ordinary edits on the cut list ; A cut list can be rewritten from its timeline in Resolve, keeping what only the cut list knows | an accepted import goes through the hand-edit merge, a removed cut goes to the shelf, the whole-cut rewrite goes
+- cards-to-resolve-and-exports F6 | changed: The cut list records the timeline it built | a send from a read-only cut list is not stamped, the news line ends " The cut list could not record it.", later comparisons find the timeline by name
+- cards-to-resolve-and-exports F7 | no change here: the lead's ruling keeps this piece's order (Resolve's rate places the cuts; a hand value is not overwritten); cards-editor-2 changes
+- cards-to-resolve-and-exports F8 | changed: The timeline a cut builds runs at a chosen frame rate and start ; The Send tab shows a dry run and sends on one press | the rate (or the project's own) is chosen per send on the Send tab; "changed in the cut list's facts" dropped
+- cards-to-resolve-and-exports F9 | changed: A cut list can be rewritten from its timeline in Resolve, keeping what only the cut list knows | one way back, the Import proposal; what the rewrite kept is now how that proposal is built; its own rewrite, preview and revision messages go
+- cards-to-resolve-and-exports F10 | no change here: cards-editor-5 changes; this piece already shows what Resolve has open in the header, not as a send control
+- cards-to-resolve-and-exports F11 | changed: Clips the project lacks are brought into it before the cut is placed | a multicam is read back (counts per track, source starts within a frame), an angle out of sync refuses the send by name, and the failures are told
+- cards-to-resolve-and-exports F12 | changed: Clips the project lacks are brought into it before the cut is placed | a multicam made here wears its interviewee's clip colour at once, read back; the confirm-first action stays for existing multicams
+- cards-to-resolve-and-exports F13 | changed: Timeline Cards never connects to Resolve while Resolve is still starting | keeps only the waiting message and that waiting is not a failure; points to resolve-on-the-editors-computer for the rule and facts
+- cards-to-resolve-and-exports F14 | changed: A computer says what stops its Resolve taking part | an obstacle on the list is a wait, never a failed start; the restart rule is only for starts that failed for another reason, and the sentence says so
+- cards-to-resolve-and-exports F15 | no change here: the lead's ruling puts the codec check in resolve-on-the-editors-computer; youtube points there
+- dashboard-1 F3 | changed: Each computer shows whether its Resolve is taking part and if not why | the home of the state words now says the one case that stays stopped until the app is restarted
+- dashboard-2 F4 | no change here: dashboard-2 changes

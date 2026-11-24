@@ -8,7 +8,8 @@ Written by hand, 2026-11-24. The specification was written in 27 pieces by
 answers of 2026-11-24 and "one way to do each thing". One waits for a render
 test on a real Resolve. Eight findings need your word, and they come down
 to the first five questions below. Questions 6 and 7 came out of checking
-every lesson against your answers.
+every lesson against your answers, and question 8 out of repairing the
+pieces.
 
 Each has a recommendation. Nothing in the pieces that turns on these has
 been changed yet.
@@ -153,6 +154,28 @@ been changed yet.
   to accept or dismiss one at a time; the slider shortens the cut and you
   undo what you do not want.
 - (lesson CE1-028 and ten more; they stand as they were until you answer)
+
+## 32.8 The red "Send to Resolve" button in the editor's header: does it stay?
+
+- **The two sides:** the editor you use today has a red "Send to Resolve"
+  button in its header (and a row in the phone's More sheet). A ruling of
+  yours from 31 August, made on the page the editor has since replaced, says
+  sending is an action on the cut and "the top bar holds no such button". On
+  12 November you said the editor's screens, keys and gestures are kept
+  exactly. The settlers followed the August ruling, so the specification now
+  has no Send button in the header; and because nothing says where "the
+  cut's own actions" are, a fixer placed Send on the open cut list's row in
+  the Cut lists sheet, which is a place of its own invention.
+- **Options:** A: the header keeps its Send to Resolve button, exactly as
+  the editor has it today, and the August ruling is retired. B: no button in
+  the header; say where Send lives instead (the Cut lists sheet row, or
+  somewhere else you name). Either way its key and the command palette
+  entry stay, and pressing it opens the Send tab with a fresh dry run.
+- **Recommended:** A, because "keep the editor exactly" is your later word
+  and is about this editor, and it needs no new place to be invented.
+- **What you would notice:** with A nothing changes from what you use now.
+  With B the red button leaves the header.
+- (cards-editor-5 F5, cards-editor-1 F13; ruling CRX-065)
 
 ## Not for you, but still open
 

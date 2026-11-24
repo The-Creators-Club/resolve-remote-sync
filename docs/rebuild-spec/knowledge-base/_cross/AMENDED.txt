@@ -112,3 +112,8 @@ SYN-009 | must | A YouTube original goes up to the NAS and comes down by itself 
 SRT-150 | title | A long transcription run stopped partway through thousands of files. | the owner's answer, page 20, 20.6: only the product's own transcription; the rule about resuming is kept
 SRT-150 | why | A 6,246-file run (about 173 hours) stopped partway, and nothing already transcribed may be lost or done again. | the owner's answer, page 20, 20.6
 SRT-150 | must | An interrupted transcription run keeps every finished transcript and resumes unattended, skipping finished files. | the owner's answer, page 20, 20.6
+# The lead's own: nothing is capped or locked by an open episode any more
+# (the limit on open episodes was the present arrangement, CE3-105 withdrawn),
+# so nobody "closes" one; the rest of the lesson stands.
+CE2-131 | must | Presence follows a person actually working, offline or on a sleeping phone, and unsent work keeps an episode shown as occupied. | nothing is closed or capped by an open episode in the specification (CE3-105 withdrawn, joins cards-editor-5 F4), so the clause about a closer has nothing to test
+CE2-131 | title | An editor working offline looked gone from their episode. | as above: nobody is thrown out of an episode, because none is closed

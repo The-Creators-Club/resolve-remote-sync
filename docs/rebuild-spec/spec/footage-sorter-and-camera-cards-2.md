@@ -66,7 +66,7 @@ Adding a drive or a folder to the record is one action, and from then on, each t
 
 - On its own: which plugged-in drives and folders are scanned, from whether they were ever scanned, their free space and the age of their last scan.
 - By hand: an admin scans any drive, folder, the NAS or the cloud backup at once (see "An admin scans a drive, the NAS or the cloud backup now").
-- Setting: Tell the studio about this computer's drives. Does: whether this computer lists its drives and their tracked files for the record of every copy. Default: on. Who: an admin, or the person whose computer it is. Applies to: a computer. Search words: drive reporting, drives, privacy, record.
+- Setting: Tell the studio about this computer's drives. Does: whether this computer lists its drives and their tracked files for the record of every copy. Default: on. Who: the editor at that computer, and only there, like every other reporting switch. Applies to: a computer. Search words: drive reporting, drives, privacy, record.
 
 ### An admin tracks a drive by saying what it is and whose it is
 
@@ -166,10 +166,10 @@ Along its top the page shows:
 
 - "<n> waiting to send" when copies made here have not yet reached the studio's record;
 - whether the studio's record can be reached: "Record online" when the last attempt reached it, "Offline" when it did not, "Record not asked yet" when no attempt has been made, "No dashboard" when this computer has no dashboard set up;
-- how copies are verified, on hovering: a check by the copier after every file, or "every file read back in full and compared";
+- how copies are verified, on hovering: the quick check (the same size, identical first and last 1 MiB and, for camera video, the clip's index), or every byte read back and compared when a full check was asked for that copy (see part 1, "What makes a copy count as checked");
 - the computer's name.
 
-The laptop keeps its own copy of what the record knew, when it last reached it, about every drive plugged in then and the NAS, plus drives seen in the last 60 days that are not plugged in (never cards), with their names and kinds. Away from the studio it can therefore still say which of a card's files already have a safe copy. A card file's copy counts only when it really is a copy of this card's file and is still there: it matches by name, size and time (within 3 seconds) and then belongs to this card (a field copy carrying this card's identity at the file's place on the card, never one marked from a different card; otherwise a path ending with the file's path on the card, or, for a file at the card's top level, a place in this card's own landing folder); a copy on the NAS counts wherever it is, since footage there is moved into project folders. When the drive holding a copy is plugged in, the copy is checked there (size and time) and a missing or changed copy does not count; a copy on a drive not plugged in is believed. Copies made on this computer count the moment they are verified.
+The laptop keeps its own copy of what the record knew, when it last reached it, about every drive plugged in then and the NAS, plus drives seen in the last 60 days that are not plugged in (never cards), with their names and kinds. Away from the studio it can therefore still say which of a card's files already have a safe copy. A card file's copy counts only when it really is a copy of this card's file and is still there: it matches by name, size and time (within 3 seconds) and then belongs to this card (a field copy carrying this card's identity at the file's place on the card, never one marked from a different card; otherwise a path ending with the file's path on the card, or, for a file at the card's top level, a place in this card's own landing folder); a copy on the NAS counts wherever it is, since footage there is moved into project folders, but only once it is tied to this card: checked against this card's file, and never recorded as coming from another card (see part 1, "Which copies count, and when a file is backed up"), so the laptop and the studio give one answer. When the drive holding a copy is plugged in, the copy is checked there (size and time) and a missing or changed copy does not count; a copy on a drive not plugged in is believed. Copies made on this computer count the moment they are verified.
 
 The page's record section shows "Waiting to send: <n> copies", "Last tried: <how long ago>" or "not yet", and "Record on this laptop: <n> copies, updated <how long ago>" or "never", with the last attempt's problem or "No dashboard is set up here. Copies are kept on this laptop." Sending and refreshing happen on their own when a copy finishes and every 5 minutes while the page is open and nothing is copying; "Send and refresh now" ("Sending..." while it runs; unavailable while one runs or with no dashboard set up) does it at once, and the page refreshes 1.5 seconds later. Messages: "No dashboard is set up on this computer."; "The dashboard could not be reached. Copies are kept here and sent when it can."; "The record was not refreshed: <error>"; "Could not sync: <error>". When the studio cannot be reached, the laptop's copy stays as it was. Every verified copy the page makes reaches the studio's record, whatever its destination, the NAS included.
 
@@ -177,7 +177,7 @@ The page's record section shows "Waiting to send: <n> copies", "Last tried: <how
 
 ### The NAS's footage tree is walked every night and after each clean move
 
-The whole footage tree of the NAS is walked every night at 04:30 on the NAS's clock, after every move that finished cleanly, and when an admin presses scan now on the NAS. Only one walk runs at a time. It skips the folders the record never looks into and any folders an admin lists to leave out (paths inside the NAS tree, letter case ignored); left-out and unreadable folders are not judged, and the rest of the tree still is. It records the NAS's total and free space. Its progress updates about once a second. Refusals say that no NAS footage tree is set up, so the NAS cannot be scanned; that the NAS tree is not reachable; or that it cannot be read, with the error. When the nightly walk cannot run, that is shown as the last walk's outcome on the activity panel.
+The whole footage tree of the NAS is walked every night at 04:30 in the studio's time zone, after every move that finished cleanly, and when an admin presses scan now on the NAS. Only one walk runs at a time. It skips the folders the record never looks into and any folders an admin lists to leave out (paths inside the NAS tree, letter case ignored); left-out and unreadable folders are not judged, and the rest of the tree still is. It records the NAS's total and free space. Its progress updates about once a second. Refusals say that no NAS footage tree is set up, so the NAS cannot be scanned; that the NAS tree is not reachable; or that it cannot be read, with the error. When the nightly walk cannot run, that is shown as the last walk's outcome on the activity panel.
 
 - Setting: Folders the NAS walk leaves out. Does: folders inside the NAS footage tree that are never walked or judged. Default: none. Who: an admin. Applies to: the site. Search words: exclude, leave out, NAS folders, skip.
 
@@ -262,14 +262,12 @@ While the page is visible it checks for changes about every 30 seconds, every 2 
 
 ### The record survives losing the NAS
 
-Every day at 04:00 on the NAS's clock, and whenever an admin presses back up now, a consistent copy of the record is taken and checked for damage; a damaged copy is deleted and the error shown. The Sorter's own settings and sorting plan (not its pictures or caches) are copied alongside. They go into the folder the NAS carries to the cloud backup when one is set up, else beside the record. The newest 7 days are kept and older ones deleted. The last result (time, size, whether it worked, error, number of files) is shown with the activity and the cloud backup's status.
+Every day at 04:00 in the studio's time zone, and whenever an admin presses back up now, a consistent copy of the record is taken and checked for damage; a damaged copy is deleted and the error shown. The Sorter's own settings and sorting plan (not its pictures or caches) are copied alongside. They go into the folder the NAS carries to the cloud backup when one is set up, else beside the record. The newest 7 days are kept and older ones deleted. The last result (time, size, whether it worked, error, number of files) is shown with the activity and the cloud backup's status.
 
 
-### The NAS's footage goes to the cloud backup every night
+### The studio's proxies, sound and project files go off site every night
 
-The cloud backup of the NAS's footage runs every night and sends only new and changed files. The record's page has its on and off switch, its time and Run now, and shows the last run. A run never starts beside one in progress. The cloud backup itself is the server's (see The server: installing it and keeping it running: Off-site backup).
-
-- Setting: Nightly cloud backup of footage. Does: sends new and changed footage to the cloud backup every night. Default: off until a cloud backup is set up. Who: an admin. Applies to: the site. Search words: cloud backup, off-site, nightly, run now.
+Every night the cloud backup takes the studio's 1080p proxies, audio, stills, graphics and project files, and every Resolve project, never the camera originals, and sends only new and changed files. Which projects go, and the switch and time, are the server's (see The server: installing it and keeping it running: Off-site backup, "The NAS copies the studio's work off site every night"). The record's page shows the same switch ("Nightly off-site backup"), its time and Run now, and shows the last run. A run never starts beside one in progress.
 
 ### Clips that exist on tape
 
@@ -293,8 +291,7 @@ The page header always shows the calendar's state: connected, "● Google · syn
 
 - Who: an admin connects, disconnects and changes the settings; anyone signed in sees the status and the calendars and may ask for a sync now.
 - Ways in: the calendar state in the page header, the calendar settings, the refresh on the events list.
-- Setting: Calendars the Sorter reads. Does: which of the account's calendars count as shoots. Default: the account's main calendar. Who: an admin. Applies to: the site. Search words: calendar, shoots, Google, events.
-- Setting: Calendar start date. Does: events scheduled before this day are ignored; events are read up to one year after it. Default: 1 April 2026. Who: an admin. Applies to: the site. Search words: from date, calendar start, ignore before, events.
+- Which calendars are read and the day events are read from are the Sorter's settings "Calendars read" and "Calendar events from" (see part 3: The sorter page, "The Sorter's settings"); events are read up to one year after that day. This studio's start date, 1 April 2026, is carried over.
 
 ### The events list shows every shoot on the calendar by day
 
@@ -374,7 +371,7 @@ The model the camera wrote beats the folder name.
 
 - On its own: each clip's camera label, from the model the camera wrote, the file's kind, its name and its folder, as above.
 - By hand: a person sets the camera label of any selected clips from the clip's details or the clip menu; the clip keeps that label through every later scan.
-- Setting: Camera labels. Does: the words used for the A camera, B camera, Blackmagic camera, drone and sound in time folder names. Default: A-CAM, B-CAM, BMCC, DRONE, AUDIO. Who: an admin. Applies to: the site. Search words: camera label, A-CAM, B-CAM, camera folders.
+- The words used for the A camera, B camera, Blackmagic camera, drone and sound are the Sorter's setting "Camera labels" (see part 3: The sorter page, "The Sorter's settings"); this studio's A-CAM, B-CAM, BMCC, DRONE and AUDIO are carried over.
 
 ### The Sorter suggests a folder for each clip
 
@@ -421,7 +418,7 @@ A folder lists the clips assigned to it but not yet there, drawn with a dashed o
 
 ### Files dragged in from the file manager are found in the library and join the plan
 
-Dragging files over the page covers it with "Drop to find these clips in the library" (not while dragging clips or folders inside the page; dialogs handle their own drops). On drop, filed clips are loaded if needed and each file is matched by name, ignoring case (and by the folder name of an image sequence), using its exact size when a name appears more than once. Dropped on a destination folder, the matched clips are assigned there at once, show in that folder, and are selected ("<n> clip(s) → <dest>"). Dropped elsewhere, they are shown and selected ("<n> clip(s) selected - dropped from Explorer" or "<n> files dropped from Explorer"). "“<name>” matches <n> clips and none is the same size - showing all of them." Not found: "“<name>” is not in the library." or "<n> of those files are not in the library.", then "Add the folder they live in with ＋ folder in the Source pane, then Rescan."
+Dragging files over the page covers it with "Drop to find these clips in the library" (not while dragging clips or folders inside the page; dialogs handle their own drops). On drop, filed clips are loaded if needed and each file is matched by name, ignoring case (and by the folder name of an image sequence), using its exact size when a name appears more than once. Dropped on a destination folder, the matched clips are assigned there at once, show in that folder, and are selected ("<n> clip(s) → <dest>"). Dropped elsewhere, they are shown and selected ("<n> clip(s) selected - dropped from Explorer" or "<n> files dropped from Explorer"). "“<name>” matches <n> clips and none is the same size - showing all of them." Not found: "“<name>” is not in the library." or "<n> of those files are not in the library.", then, for an admin, "Add the folder they live in with ＋ folder in the Source pane, then Rescan."; anyone else is told to ask an admin to add the folder they live in (see part 3: The sorter page, "An admin adds or removes a source folder from the sources list").
 
 ### A clip already in its folder counts as in place
 
@@ -435,7 +432,7 @@ Each part that matches a folder already on disk, or already planned, differing o
 
 ### The destination tree shows real, planned, suggested and held folders
 
-"Destinations" shows the destination root with "<root path>  ·  <n> clips · <size>" and "+ folder" ("New folder at destination root"). The root is always open; other folders open with their arrow. Folders sort naturally (numbers in order, case ignored), and names match ignoring case, keeping the spelling of the existing folder.
+"Destinations" shows the destination root with "<root path>  ·  <n> clips · <size>" and "+ folder" ("New folder at destination root"). The root is always open; other folders open with their arrow. Folders sort in the Sorter's one name order (see part 3: The sorter page, "Folder names sort in one fixed order that handles Chinese"), and names match ignoring case, keeping the spelling of the existing folder.
 
 Every planned folder, every folder a clip is assigned to, every folder an event is bound to, every folder a suggestion points at for an unassigned clip, and every folder known to hold clips appears in the tree even when it is not on disk. Counts include subfolders: assigned, "+<suggested>", and size (on hovering, "<n> assigned directly here, <n> including subfolders" or "nothing assigned yet", plus "<n> suggested (not accepted)"); filed clips not yet loaded are counted from the server's summary. A folder is one of:
 
@@ -451,15 +448,14 @@ Clicking a folder shows the clips assigned or suggested to it or any folder bene
 
 ### Footage is filed in day-and-camera time folders
 
-Under the folder it is assigned to, each clip is filed in a time folder per day and camera, named "<YYYY-MM-DD> <HH.mm>-<HH.mm> <camera label>", for example "2026-08-09 08.54-15.06 A-CAM" (a dot instead of a colon, which Windows forbids). Clips are grouped by folder, camera label and local day; the range runs from the earliest to the latest recording time of that group. No time folder is made for clips kept in the card's layout, image sequences, stills, other files, clips with no recording time, or clips with no camera label: those land straight in the assigned folder. Card copies into the NAS's staging folder always use time folders.
+When time folders are on (the Sorter's setting "Time folders", see part 3: The sorter page, "The Sorter's settings"), under the folder it is assigned to, each clip is filed in a time folder per day and camera, named "<YYYY-MM-DD> <HH.mm>-<HH.mm> <camera label>", for example "2026-08-09 08.54-15.06 A-CAM" (a dot instead of a colon, which Windows forbids). Clips are grouped by folder, camera label and local day; the range runs from the earliest to the latest recording time of that group. No time folder is made for clips kept in the card's layout, image sequences, stills, other files, clips with no recording time, or clips with no camera label: those land straight in the assigned folder. Card copies into the NAS's staging folder use time folders whatever the "Time folders" setting; a card's clips that cannot have one go to that card's "loose" folder (see part 1: Copying a card, "Where a card's files land").
 
 An existing time folder for the same day and camera that already holds any of the group's clips (by the record, or by name and recorded size among its own files) is reused under its existing name and never renamed, even when the new range is wider; the person is warned "range widened: <fresh name> reused <existing name>". A folder with exactly the new name that holds none of the group's clips belongs to another shoot, so the new one becomes "<name> (2)", "(3)" and so on, in the order the folders are named. Every existing folder name, "(2)" suffixes included, is kept exactly.
 
-Before anything moves, the person sees, under each open destination folder, each time folder its assignments imply, with "<n> clips · <size>", "(existing, will merge)" when it exists already, and on hovering its path, "merges into <folder>", its camera and day, and "not created yet - the copy makes it". Clicking one selects its clips ("<n> clip(s) heading for <name>"). Nothing can be dropped on one. What is on disk is read again at least every 30 seconds, and at once after a change to assignments, a move, a card copy, a scan or an audit.
+Before anything moves, the person sees, under each open destination folder, each time folder its assignments imply, with "<n> clips · <size>", "(existing, will merge)" when it exists already, and on hovering its path, "merges into <folder>", its camera and day, and "not created yet - the copy makes it". Clicking one selects its clips ("<n> clip(s) heading for <name>"). Nothing can be dropped on one. How often what is on disk is read again is in part 3: The sorter page, "The destination tree shows the final tree as it is, plus what is planned".
 
 - On its own: each time folder's name and range, from the clips' recording times and camera labels, reusing an existing folder that holds any of them.
 - By hand: a person renames a time folder in the plan like any other folder, or assigns clips with the card's layout kept to have none; a name set by hand is never changed by a later pass.
-- Setting: Time folders. Does: whether sorted clips are filed in per-day, per-camera time folders under their folder. Default: on. Who: an admin. Applies to: the site. Search words: time folders, day folders, camera folders, date range.
 
 ### Planning every episode's folders and every interviewee's folder at once
 
@@ -529,7 +525,7 @@ When a clip has been sorted, its files go to its folder like this:
 
 - an image sequence moves as one whole folder;
 - with the card's layout kept, each file keeps its path below its source folder;
-- by the studio's convention (the default), main files go straight into the folder (or its time folder), a proxy from a folder named Proxy or Proxies or a Sony card's proxy folder goes into a "Proxy" folder inside it, keeping any deeper path, and the small file a Blackmagic camera writes beside each clip, and a grade file beside its original, stay beside their clip (Resolve reads the grade there);
+- by the studio's convention (the default), main files go straight into the folder (or its time folder), a proxy from a folder named Proxy or Proxies or a Sony card's proxy folder goes into a "Proxy" folder inside it, keeping any deeper path, and the small file a Blackmagic camera writes beside each clip, and a grade file beside its original, stay beside their clip;
 - with time folders on, into the time folder under the assigned folder.
 
 Every planned folder is created, even with nothing moving into it, so an episode's skeleton is made empty; held folders wait until a clip lands in them. The leftover files of a half-moved clip go with its next move. A clip that is only on a camera card in a reader is left to the card copy. A card's paths reported by a Windows computer are understood by Windows rules wherever they are handled.
@@ -585,7 +581,7 @@ Every move is written down before and after each item, so a power cut, a crash o
 
 ### Moves in the folders editors sync reach every editor's computer
 
-Footage in the folders editors' computers sync is moved so that every editor's copy follows (see Proxies and file moves: Moves that reach every computer). A proxy there moves only with its original, to exactly the planned place beside it; a plan that would leave a proxy behind holds that clip back: "a proxy moves only with its original (Proxy/<same name> beside it, to exactly the planned place), so <src> would be left behind. Move it by hand, or plan it without this proxy". When the server cannot make every editor's copy follow, the move of such footage is refused: "inside Projects, so every editor's copy must follow; this server has no way to make that happen for it".
+Footage in the folders editors' computers sync is moved so that every editor's copy follows (see Proxies and file moves: Moves that reach every computer). A proxy there moves only with its original, to exactly the planned place beside it; a plan that would leave a proxy behind holds that clip back: "a proxy moves only with its original (Proxy/<same name> beside it, to exactly the planned place), so <src> would be left behind. Move it by hand, or plan it without this proxy". A move that editors' copies cannot follow is refused, and its refusal is shown in the Sorter as its error (see Proxies and file moves: Moving footage through the product, "A move made in the Footage Sorter inside a project reaches every editor's copy").
 
 ### A move is checked afterwards and a list shows where everything went
 
@@ -613,7 +609,7 @@ The person sees one line, for example "3 re-keyed, 2 found in place, 1 moved by 
 
 ### Rescan reads every source and destination again
 
-Rescan (ignored and disabled while one runs) shows "Scanning… <n> clips", updated about every second, until it ends (the page stops watching after one hour). Then everything reloads: "Scan complete - <n> clips · <size>". If the scan found footage moved or renamed outside the Sorter and followed it: "Moved outside the app: <what>". A failure shows "Scan failed: <reason>". Moved clips show at their new place and can be sorted again, and every count and the destination tree follow what is on disk.
+Rescan is a full look through every footage folder (see part 3: The sorter page, "A full look through every footage folder"). When it ends everything reloads: "Scan complete - <n> clips · <size>", and, if it found footage moved or renamed outside the Sorter and followed it, "Moved outside the app: <what>".
 
 - Who: anyone signed in.
 
@@ -687,9 +683,9 @@ New interview transcripts are taken into account within about 15 seconds of appe
 
 ### Every sound recording is listened to for names and introductions
 
-Every sound recording that arrives is listened to on its own, as heavy work on one of the studio's computers able and free (see Work shared out across the computers), with no one starting it. The whole recording is used, not only its start, so a name said late is still found. Recordings with an identical copy elsewhere go last, otherwise smallest first. Work is kept as it goes: a recording already heard is not heard again unless asked, and a file that moved (same name, size, and length within 1 second) reuses what was heard. Missing files and files under 5 seconds are skipped.
+Every sound recording that arrives is listened to on its own, as heavy work on one of the studio's computers able and free (see Work shared out across the computers), with no one starting it. The whole recording is used, not only its start, so a name said late is still found. Recordings with an identical copy elsewhere go last, otherwise smallest first. Work is kept as it goes: a recording already heard is not heard again unless asked, and it is recognised as already heard by the same rule footage-in uses, which also knows the same file moved or copied elsewhere (see Timeline Cards: footage in, ready to cut: Speech-to-text: facts and situations, "A recording already transcribed is not transcribed again"); where footage-in has already transcribed the recording, the Sorter uses that one transcript. Missing files and files under 5 seconds are skipped.
 
-A roster person's Chinese name (3 or more syllables) matches when heard with the same sounds, even written with other characters; an English name matches whole, or by two of its parts of 5 or more letters; a single usable part is a weak "partial" match; a name in two episodes is marked ambiguous. Self-introductions are recognised from "我是", "我叫", "這位是", "我們今天訪問", "my name is", "I am called", and "we are" followed by an organisation. A name only mentioned, not used to introduce someone, is never credited as the speaker. Guesses are marked as guesses, and recordings that cannot be attributed are reported as such. Each finding keeps its quote and its time. Every recording is transcribed in full, with its language identified and speakers told apart, and camera clips with at least 20 seconds of sound are transcribed too. A recording and a camera clip that share enough of their words (runs of 4 words, or 6 characters in Chinese and Japanese; at least 3 runs and 5 % of the shorter) give the recording's folder and start, which is then confirmed by matching sound around that start against every clip in that folder. Listening never assigns anything.
+A roster person's Chinese name (3 or more syllables) matches when heard with the same sounds, even written with other characters; an English name matches whole, or by two of its parts of 5 or more letters; a single usable part is a weak "partial" match; a name in two episodes is marked ambiguous. Self-introductions are recognised from the product's one list of introduction phrases (see Timeline Cards: footage in, ready to cut: Grouping clips and building the multicam, "The interview starts at the crew's first question"). A name only mentioned, not used to introduce someone, is never credited as the speaker. Guesses are marked as guesses, and recordings that cannot be attributed are reported as such. Each finding keeps its quote and its time. Every recording is transcribed in full, with its language identified and speakers told apart, and camera clips with at least 20 seconds of sound are transcribed too. A recording and a camera clip that share enough of their words (runs of 4 words, or 6 characters in Chinese and Japanese; at least 3 runs and 5 % of the shorter) give the recording's folder and start, which is then confirmed by matching sound around that start against every clip in that folder. Listening never assigns anything.
 
 - On its own: who is named or introduces themselves on a recording, from what is heard.
 - By hand: a person reads the transcript, plays any line and assigns the recording anywhere (see "One recording's detail shows who it could be and plays it against the cameras").
@@ -720,7 +716,7 @@ The audio worklist carries a count of the recordings filed where the audio disag
 
 It can be filtered by verdict, each with its count (matched, misplaced, time-only, ambiguous, inferred and unmatched shown at first; confirmed, duplicate and not field sound hidden), by loose and filed, loose only or filed only, and by name or folder, with "<n> shown". "Approve visible with score ≥" (default 0.85, in steps of 0.05) approves every visible matched or misplaced recording at or above that score that has a folder and no decision yet, after "Approve <n> matches?" (or "Nothing visible at that score."). Recomputing the verdicts can be asked for.
 
-- Who: anyone signed in sees it; approving needs an admin.
+- Who: anyone signed in, approving included; the move then needs nobody.
 - Name and search words: Audio worklist. Search words: sound, recordings, whose interview, field audio, recorder.
 
 ### One recording's detail shows who it could be and plays it against the cameras
@@ -728,7 +724,7 @@ It can be filtered by verdict, each with its count (matched, misplaced, time-onl
 Opening one recording shows:
 
 - **Clip**: "<name> · <duration> · <size>", its path, recorder and counter, channels, bits, the recorder's clock and note, the true start, and "goes to" folder. **Heard**: "<scanned> of <duration> · <language>", "names only (no full transcript yet)" or "not yet", and whether it was taken from a moved copy. **Assigned / Filed in** ("unassigned · suggested <folder>").
-- A player of the clip's proxy (loading when played, keeping its place across a redraw); Assign to…, Unassign, Show in destinations, Open in Explorer.
+- A player of the clip's proxy (loading when played, keeping its place across a redraw); Assign to…, Unassign, Show in destinations, Show in the file manager (see part 3: The sorter page, "Showing a clip's file in the file manager on the person's own computer").
 - A disagreement: "⚠ Filed under <folder>, but this sounds like <name>", "From: <evidence>. Assign it below to queue the re-file."
 - **Who this could be**: every candidate with its name, confidence (score to two decimals), evidence, folder and Assign ("✓ here" when already there), or Pick folder… when no folder carries the name; each piece of evidence quoted with "▶ <time>" to play from there. Empty: a note that nothing matched and the transcript should be read, or "Waiting for the transcript."
 - **Why**: per candidate folder, the time evidence (estimated start, the clock anchors and offset, a table of shoot folders with overlap, padded overlap, clips and cameras) and the sound evidence (how many clips agree, the start, whose clock, best peak and margin, a table of the matches tried). "Nothing found anything yet." when there is nothing.
@@ -746,13 +742,13 @@ Nothing here assigns on its own.
 
 The decide section has a folder box suggesting shoot folders as the person types (up to 200, oldest first, with clip counts); buttons nudging the true start by -10 s, -1 s, -0.1 s, -1 frame, +1 frame, +0.1 s, +1 s, +10 s (a frame is 1/30 s) with the adjusted start shown; and "Re-check waveform here", which searches the clips within 60 seconds of the hand-set start (optionally in one folder only, within a minute either side) and reports a match with how many clips agree and the peak, offering "Use this start", or "No strong match here (<n> clips compared, best peak <p>)", or "No clips with sound to compare here." Then Approve, "B-roll ambience (no picture)", Reject (no folder), Clear decision, and a note. After a decision the list reloads and the next undecided visible recording opens. Errors are shown on the page.
 
-- Who: an admin decides.
+- Who: anyone signed in decides.
 
 ### Approved recordings are filed beside their video, and duplicates are set aside
 
 An approved recording is filed in the Audio folder inside its shoot's folder, or the folder the person named, moving there on its own like any sorted clip, with every promise of a move (see "Sorted footage moves into its folder on its own"). A loose duplicate is set aside in the duplicates folder, never deleted. Skipped: a recording already in that folder ("already there"), or one with an identical copy already at the destination. Held back: a recording whose shoot folder is itself still unsorted goes with its shoot ("the shoot is itself still unsorted; goes with it"); duplicates are never held. A different file with the same name at the destination is never overwritten: the recording is filed with "_1", "_2" and so on added to its name.
 
-- Who: an admin decides a recording's place; the move then needs nobody.
+- Who: anyone signed in decides a recording's place; the move then needs nobody.
 - Setting: Name of a shoot's sound folder. Does: the folder inside a shoot's folder that approved recordings are filed in. Default: "Audio". Who: an admin. Applies to: the site. Search words: audio folder, sound folder, recordings, filing.
 - Setting: Where duplicate recordings are set aside. Does: the folder loose duplicate recordings are moved into instead of being deleted. Default: a "Duplicates" folder in the NAS's staging folder. Who: an admin. Applies to: the site. Search words: duplicates, set aside, recordings, quarantine.
 

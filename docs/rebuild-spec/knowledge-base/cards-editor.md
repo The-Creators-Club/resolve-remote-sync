@@ -1495,9 +1495,9 @@ See also, filed under another capability:
 - Must: A storage change carries existing state across before use when ownership is certain; otherwise it keeps both and names both locations to the admin.
 - Kind: situation
 
-### CE2-131: An editor working offline could be thrown out of their episode.
+### CE2-131: An editor working offline looked gone from their episode.
 - Why: Presence was measured by server requests, so after 15 quiet minutes an offline editor looked gone, while an always-on computer kept its editor "in" for ever.
-- Must: Presence follows a person actually working, offline or on a sleeping phone; unsent work keeps an episode occupied; a closer is told who was last in and when.
+- Must: Presence follows a person actually working, offline or on a sleeping phone, and unsent work keeps an episode shown as occupied.
 - Kind: situation
 
 ### CE3-069: The offline rescue copy asked to save a growing file every minute.

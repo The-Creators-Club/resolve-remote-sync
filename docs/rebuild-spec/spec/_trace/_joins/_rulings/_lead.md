@@ -23,11 +23,17 @@ list as they run today.
   cards-editor-1 states this one rule in both places and cards-editor-3's
   aid 4 row matches.
 - cards-editor-5 F3 and F4: with the editor in use, the list of episodes
-  shows no occupants, no "<who> was last in N min ago" and no Close: nothing
-  is held open on the server, so there is nothing to close. Those lines
-  belonged to the page the editor replaced. cards-editor-4 drops the
-  sentence about who was last in an episode and about closing one;
-  cards-editor-5 adds nothing.
+  today shows no occupants, no "<who> was last in N min ago" and no Close:
+  those lines belonged to the page the editor replaced. **This look-up does
+  NOT settle F3.** The owner's ruling CE2-130 says who is in which open
+  project is visible to every signed-in person, and a ruling outranks what
+  the product happens to show (the wording went missing when the older page
+  was retired; nobody decided it should). So the list of episodes says who
+  is in each episode. The lead first ruled the opposite and two fixers
+  applied it; a fixer flagged the ruling and it was put back the same day.
+  F4 stands: no Close, because nothing is capped or locked by an open
+  episode. Lesson CE2-131 loses its clause about a closer
+  (`knowledge-base/_cross/AMENDED.txt`).
 
 ## Facts given to the settlers by the lead
 

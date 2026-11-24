@@ -137,3 +137,98 @@ lists.
   whatever the hold-back setting (lesson PRX-031 amended to say so).
 - fleet-jobs now holds the setting for the share of a working computer
   heavy work may use; broll's copy becomes a pointer.
+- footage-sorter-and-camera-cards-2: RENAMED "The NAS's footage goes to the
+  cloud backup every night" to "The studio's proxies, sound and project
+  files go off site every night". Pointers elsewhere must follow.
+- youtube: "A site decides whether signed-in YouTube sessions may be used on
+  editors' computers" no longer fits its text (it is now the one switch
+  "YouTube's extra measures against being blocked"); rename by hand and
+  repoint whole-product, dashboard-2 and youtube's own one pointer.
+- sync-1: its pointer for asking for originals from inside Resolve should
+  name the Resolve piece's "Grading from the server's originals: An editor
+  asks for originals from inside Resolve" (it still says "Bins, clip sorting
+  and imports"); and its pending mark sync-1-U2 belonged to the passage that
+  moved: decide whether it still applies.
+- music and broll say heavy work uses no more than "the share that computer
+  allows"; fleet-jobs holds that share as a SITE setting an admin sets (60%
+  by default, the owner's own figure). Make the two sentences say "the share
+  the studio allows" in the last pass.
+
+## More for the last pass (from the Sorter, board and editor fixers)
+
+- cards-footage-in's colour passage points to "Timeline Cards: the board:
+  Cards on the board"; the behaviour is "Every interviewee has one colour
+  everywhere" under that sub-topic: name the heading. GIVE to the
+  footage-in fixer.
+- cards-board: "Selecting several cards and acting on them at once" still
+  says cards can be deleted, while Delete now sets a card aside. No finding
+  says which act deletes a note card on the board. Decide (the editor's
+  "Deleting stages cuts on the shelf" rule is the natural one) and fix.
+- The words carried for item 29-028 say "the controller's Menu (which
+  toggles it)"; the settled rule is Menu tapped = caret in a find box, Menu
+  held 600 ms = the help sheet. Change the item's own words in
+  spec/_extracts/29.md.
+- cards-editor-3's aids table defaults the Fillers aid to "Not read";
+  cards-editor-1 says the fillers strike stays off until switched on. Both
+  wait for decision 32.3.
+
+## Carried words that now contradict a ruling (change the item's own words)
+
+A piece carries some passages word for word by a `{{id}}` line; a fixer cannot
+edit them and wrote an "Except that ..." sentence after each instead. In the
+last pass change the item's words in `spec/_extracts/<NN>.md` and take the
+"Except that" sentence out again.
+
+- 29-028 (cards-editor-1, perhaps cards-editor-5): "the controller's Menu
+  (which toggles it)"; settled: Menu tapped = caret in a find box, Menu held
+  600 ms = the help sheet.
+- 39-041 (cards-editor-2): the editor reloads and refuses an edit when the
+  file changed on disk ("the project file changed on disk -- reloaded, redo
+  your edit"); settled by answer 25.5: the change is merged in as edits.
+- 40-018 (cards-editor-2): the refusals "no timeline is open" and "that cut
+  is no longer on the timeline", notes on draft cards, notes re-matched to a
+  card on a timeline; all gone with answer 29.2.
+- 28-074 (cards-editor-2): a new gap goes "else at the end"; ruling CE1-038
+  refuses a gap at the very end.
+
+## Left open by the fixers, for the lead or the owner
+
+- cards-editor-2: RENAMED "Notes on cards and gaps while a cut is worked on
+  a live timeline" to "Notes on cards and gaps go with the cut when it is
+  handed over".
+- Nothing in the editor's shelf panel shows the board's alternates section
+  (its tabs are Staged, with All, Uncategorised and the named categories,
+  and Sequences). Where a person sees the alternates the board hands over
+  is undecided.
+- cards-editor-3: "Clicking a word puts the transcript playhead on it..."
+  still lists "the interview's reference audio"; and two lines of "A trimmed
+  or split cut's English..." still match by letters (the "other Chinese
+  script" line and the one about line-ups from earlier cuts).
+
+## From the cards-editor-4 fixer
+
+- RENAMED four headings (no other piece pointed at the old names): "Timeline
+  Cards has its own apps for Windows and Android that show the editor from
+  the studio's server" -> "Timeline Cards opens in the editor window on a
+  computer and in its own app on Android, from the studio's server"; "In the
+  Windows and Android apps, kept cut lists are real files in a folder the
+  person can open and move" -> "In the editor window and the Android app,
+  kept cut lists are real files in a folder the person can open and move";
+  "The Windows app installs per person or runs portable, and runs once" ->
+  "On a computer the editor window comes with the one app and updates with
+  it"; "The Windows app's window, links, permissions and downloads" -> "The
+  editor window's links, permissions and downloads".
+- Carried words to change at the source (then drop the "Except that"):
+  33-088 (on a computer the editor window uses the one app's dashboard
+  address; the server address is the Android app's only); 33-091 (the SERVER
+  section is on the Android app's settings page only); 33-052 (on a computer
+  the label reads "The editor window's project folder", default folder
+  Documents\Timeline Cards on Windows and macOS: the label is the FIXER'S
+  wording, no source gives it; decide or describe without quoting); 33-098
+  (closing the last editor window leaves the app running; the window opens
+  at the dashboard's address; on a Mac downloads go to Downloads; and it
+  says the menu bar is hidden until Alt, while cards-editor-5 makes the
+  header the window's title bar: make them agree).
+- The lead's look-up, extended: the list of episodes shows no occupants at
+  all, "is in it now" included (the editor's own code has no such words; they
+  were the retired page's). SENT to the fixers of cards-editor-4 and -5.

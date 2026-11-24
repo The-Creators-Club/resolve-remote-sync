@@ -43,7 +43,7 @@ Every episode's board opens from a short, memorable address, on a phone as on a 
 
 The board is a Markdown file, complete in itself and readable in any text program: its columns in order with their names, each card in order with its speaker, its original wording, its English and the reference of the paragraph it came from, and the board's notes. Opening a board file back in the product gives the same board. An episode's planning documents (its board and its versions, its notes, its story reports, its house style and its shortening rubric) are kept together in one place with the episode, where an editor finds them, never among the media files. They are named plainly by the episode and what each document is, and never carry the assistant's name.
 
-An editor whose computer takes the episode has its planning documents, as they stand, within minutes of any change, with nothing to press. A person can also ask for them to be brought up to date right now: that makes the full round trip at once and says what it did (see Sync: What syncs where).
+An editor whose computer takes the episode has its planning documents, as they stand, within minutes of any change, with nothing to press. To bring them up to date right now, an editor uses the app's "Sync now", which makes the full round trip at once and says what it did (see Sync: Studio-wide stops and the editor's pause, "Sync now runs every transfer this computer has switched on at once").
 
 - Who: anyone signed in who can open the board.
 - Name and search words: board file. Search words: board file, markdown, export board, planning document.
@@ -69,11 +69,11 @@ A person hands the board to the Timeline Cards editor, and its order becomes a c
 |---|---|
 | A theme column that plays | A section, in the same order, with the theme's name and a colour from the editor's fixed rotation of section colours by its position among the sections that play, Blue first, so the cut and the hand-over to the editing program always agree |
 | The cold-open group | The first section |
-| The alternates column | An alternates section, its cards placed and ready to swap in |
-| "Uncategorised" | A shelf category after the cut |
+| The alternates column | An alternates section on the bench; any of its cards can be put into the cut like a staged card |
+| "Uncategorised" | The plain shelf (shown as Uncategorised) |
 | A set-aside group that holds cards | A shelf category after the cut, named after the theme it belongs to |
 | A paragraph card | A cut on its interview's clip, with its speaker, colour and text, playing its highlighted part, or the whole paragraph when nothing is highlighted, through to its last word however long it is |
-| A note card | A note; an empty one reads "(empty card)" |
+| A note card | One note row per line of the card, in order, so a flag card of 12 lines lands as 12 consecutive note rows; an empty card is one note row reading "(empty card)" |
 | A card whose paragraph cannot be found | An "unmatched" note holding the card's text and a link to its paragraph |
 
 A paragraph card is tied to its paragraph and its timed words, so it lands without any search for its words. Before anything is written, a preview shows the beginning of the result first. Afterwards the person is told how many cards were placed and how many did not land (each of those with its number, paragraph, speaker, first words and the reason), how many notes, alternates and set-aside cards there are, and for each interview which clip its cards were placed on.
@@ -92,7 +92,7 @@ Handing over is one way: cutting never changes the board. Handing the board over
 
 A board holds three kinds of card.
 
-- A paragraph card holds one transcript paragraph: its original wording (for a Mandarin interview, the verbatim Chinese) and its English. It always knows which interview and which paragraph it came from. A paragraph is at least two sentences and at most a short passage, broken at sentence boundaries, with every character of the original kept and questions or chatter never merged into an answer (how paragraphs are made is in Timeline Cards: footage in, ready to cut: The transcript and its English). An interviewer's question is a paragraph card too, shown as a heading so it stands apart from answers.
+- A paragraph card holds one transcript paragraph: its original wording (for a Mandarin interview, the verbatim Chinese) and its English. It always knows which interview and which paragraph it came from. An answer paragraph is at least two sentences and at most a short passage, broken at sentence boundaries, with every character of the original kept and questions or chatter never merged into an answer (how paragraphs are made is in Timeline Cards: footage in, ready to cut: The transcript and its English, "The product breaks each transcript into paragraphs by meaning"). An interviewer's question is a paragraph card too, shown as a heading so it stands apart from answers.
 - A note card holds a person's own direction with no paragraph behind it (for example "b-roll: harbour at dawn"). It is part of the order but is not a quote, and it counts as no running time.
 - A paragraph from another episode's interview (for example from an earlier season) can be placed too. It plays from its own interview, and its speaker keeps the colour they have everywhere.
 
@@ -103,17 +103,17 @@ A card's full text can always be read wherever a decision is made about it, on t
 
 ### A card's speaker is the interviewee
 
-A card's speaker is the person interviewed, as getting footage in identified them (and as a person set by hand there), never a file name. Two transcripts of the same person (two shoot days, a follow-up interview, an online call) are one speaker everywhere: one colour, one count in speaker balance, one self-introduction.
+A card's speaker is the person interviewed, the interviewee whose interview it is, as getting footage in filed it (and as a person set by hand there), never a file name. Two transcripts of the same person (two shoot days, a follow-up interview, an online call) are one speaker everywhere: one colour, one count in speaker balance, one self-introduction. The labels of who speaks each line inside a transcript never change whose card it is.
 
-- On its own: the speaker comes from the interview's speaker, decided when the footage came in.
-- By hand: who is speaking is set by hand in Timeline Cards: footage in, ready to cut (Running on its own, with a hand on every decision), and the board follows it.
+- On its own: the speaker is the interviewee the interview is filed under, decided when the footage came in.
+- By hand: a person files an interview under another person in Timeline Cards: footage in, ready to cut (see Timeline Cards: footage in, ready to cut: Grouping clips and building the multicam, "The product decides which person each recording belongs to"), and the board follows it.
 
 ### Every interviewee has one colour everywhere
 
-Each interviewee has one colour, the same on the board, on their clips and on their cuts in the editor and in the hand-over. A paragraph card is its speaker's colour throughout: text, background and border. A legend on the board says which colour is whom. The palette is 16 colours in a fixed order: #1375a0, #ec4b93, #448f64, #00b5b8, #dbaf80, #966145, #f09ec1, #000035, #c8a9fe, #16552f, #b8ad4c, #4577a1, #7a3b8f, #2f6f5e, #a0522d, #5470c6. A person given a colour keeps it for good, across episodes too, and when more of their material is added.
+Each interviewee has one colour, the same on the board, on their clips and on their cuts in the editor and in the hand-over. A paragraph card is its speaker's colour throughout: text, background and border. A legend on the board says which colour is whom. There is one set of colours: each person's colour is one of the editor's clip colours (see Timeline Cards: the editor: Colours, "The clip colours and the marker colours are the editing program's own"). A colour is given when the person's first footage comes in (see Timeline Cards: footage in, ready to cut: Grouping clips and building the multicam, "Each interviewee is given a colour"); a person with no footage in yet reads "no colour assigned yet". A person given a colour keeps it for good, across episodes too, and when more of their material is added.
 
-- On its own: new interviewees are taken in alphabetical order, ignoring letter case, and each takes the first palette colour nobody in the episode has yet. With more than 16 people, colours repeat.
-- By hand: the owner can give any person another colour, and that person is recoloured everywhere from then on. A colour set by hand is never changed by a later automatic pass.
+- On its own: each new interviewee, in the order their footage arrives, takes the first clip colour nobody in the episode has yet, in this order: Blue, Violet, Green, Teal, Tan, Chocolate, Pink, Navy, Purple, Olive, Yellow, Orange, then the other three clip colours, Apricot, Lime and Beige. Brown is never given. Colours repeat only past the fifteenth person.
+- By hand: anyone signed in who can open Timeline Cards can give any person another colour, and that person is recoloured everywhere at once from then on. A colour set by hand is never changed by a later automatic pass.
 
 ### The part of a card that plays is highlighted on it
 
@@ -160,7 +160,7 @@ A person selects one card or many, with the same keys and gestures as in the Tim
 
 ### Setting cards aside and tagging the cold open
 
-The same key and the same gesture that move a cut to the shelf in the editor (see Timeline Cards: the editor: Notes and the staged shelf) set aside one card, or every selected card at once. Each set-aside card goes to the set-aside group of the theme it belongs with most, named after that theme, and arrives on the cutting editor's shelf under that name. A set-aside card counts as handled.
+The keys and the gesture that move a cut to the shelf in the editor set aside one card, or every selected card at once: Delete pressed twice (the first press arms it with a countdown), or Ctrl+X, or dragging a card onto its theme's set-aside group (see Timeline Cards: the editor: Selecting, deleting, inserting and keys, "Delete must be pressed twice, and the first press arms it with a countdown" and "Ctrl+X cuts cuts out of the cut and keeps them on the shelf"). Each set-aside card goes to the set-aside group of the theme it belongs with most, named after that theme, and arrives on the cutting editor's shelf under that name. A set-aside card counts as handled.
 
 Tagging a card for the cold open copies it into the cold-open group at the head of the board while the card itself stays where it was. The copy is marked as a copy, and does not count as a second appearance of the paragraph. Groups within a column carry visible numbers.
 
@@ -182,7 +182,7 @@ Every change to a board, made by hand, by the assistant, or by opening a board f
 
 ### Every change can be seen and undone
 
-Every change to the board is one undo step, back to exactly the board before it, whether a person or the assistant made it. Earlier states of the board are kept, and a person can see and return to any of them. Undo and redo use the same keys and gestures as in the Timeline Cards editor.
+Every change to the board is one undo step, back to exactly the board before it, whether a person or the assistant made it. Earlier states of the board are kept, and a person can see and return to any of them. Undo and redo use the editor's keys: Ctrl+Z undoes, and Ctrl+Shift+Z and Ctrl+Y redo (see Timeline Cards: the editor: Editing, undo and the cut list, "Ctrl+Z undoes, and Ctrl+Shift+Z and Ctrl+Y redo").
 
 - Who: anyone signed in who can open the board.
 
@@ -190,8 +190,8 @@ Every change to the board is one undo step, back to exactly the board before it,
 
 A board being worked on is never rebuilt from scratch, because that would throw away the arrangement. When another interview of the episode finishes processing after the board is in use, its paragraphs are offered as proposals at the end of the themes they fit, and nothing else on the board moves. Paragraphs already on the board are skipped and listed, so a transcript that grows brings in only its new paragraphs.
 
-- On its own: each new paragraph is proposed for the theme it fits best, at the end of that theme's order. Its card takes its speaker's colour.
-- By hand: a person takes, declines or drags each proposal, or takes them all into one chosen theme, or leaves some out (chatter can be left out), or ignores the proposals and drags paragraphs from the transcript himself. A paragraph not taken stays off the board and does not go to "Uncategorised". The person can give the new cards another colour, and is told whether the colour was the speaker's own or a new one.
+- On its own: each new paragraph is proposed for the theme it fits best, at the end of that theme's order. Its card always takes its speaker's one colour, which changes only when that person is recoloured everywhere.
+- By hand: a person takes, declines or drags each proposal, or takes them all into one chosen theme, or leaves some out (chatter can be left out), or ignores the proposals and drags paragraphs from the transcript himself. A paragraph not taken stays off the board and does not go to "Uncategorised".
 - When the assistant is off: nothing is proposed; the interview's transcript appears beside the board with its paragraphs marked as not yet on it.
 
 ### Putting the themes in story order with one action
@@ -216,7 +216,7 @@ A board of 2,700 cards and a million characters of text scrolls, pans and zooms 
 
 ### The board works by touch first, and by keys
 
-The board has the Timeline Cards editor's look and is built for touch first. Wherever the same act exists on the board and in the editor (selecting, moving, undo and redo), it uses the same keys and the same gestures, so nothing has to be learned twice. The keys of the editor are given in Timeline Cards: the editor (Selecting, deleting, inserting and keys).
+The board has the Timeline Cards editor's look and is built for touch first. Wherever the same act exists on the board and in the editor (selecting, moving, undo and redo), it uses the same keys and the same gestures, so nothing has to be learned twice. The keys and gestures for selecting, moving and setting aside are given in Timeline Cards: the editor: Selecting, deleting, inserting and keys (see "Mouse and keyboard on the cards select, open, re-order and move markers"), and undo and redo in Timeline Cards: the editor: Editing, undo and the cut list (see "Ctrl+Z undoes, and Ctrl+Shift+Z and Ctrl+Y redo").
 
 - Phone and desk: every act on the board can be done by touch on a phone or tablet and by mouse and keys on a desk.
 
@@ -236,11 +236,11 @@ Having read every paragraph of every interview of the episode, the assistant pro
 
 ### The first sort places every paragraph in one theme
 
-The first sort places every paragraph of the episode in exactly one theme, judging each paragraph's place against every theme and the whole episode at once, never piece by piece. A paragraph that would fit two goes to the single most relevant. Interviewer questions that set up an answer, chatter, and only light trims are set aside; every other paragraph goes into a theme, in order. A theme that ends up with no paragraphs is still shown, empty. After the sort the person is told how many themes there are, how many paragraphs were placed against how many exist, how many went to "Uncategorised", and whether every paragraph was placed exactly once (a mismatch is called out).
+The first sort places every paragraph of the episode in exactly one theme, judging each paragraph's place against every theme and the whole episode at once, never piece by piece. A paragraph that would fit two goes to the single most relevant. Interviewer questions that set up an answer, and only light trims, are set aside; chatter goes to "Uncategorised"; every other paragraph goes into a theme, in order. A theme that ends up with no paragraphs is still shown, empty. After the sort the person is told how many themes there are, how many paragraphs were placed against how many exist, how many went to "Uncategorised", and whether every paragraph was placed exactly once (a mismatch is called out).
 
 - On its own: which theme each paragraph goes into, decided from its substance in either language against each theme's description, or its name when the description is thin.
 - On its own: which answer each interviewer question belongs to, decided from the content: the answer it sets up, or that it sets up nothing and is non-content.
-- On its own: what is non-content and goes to "Uncategorised" (sound checks, door noise, filming and scheduling logistics, restarts, goodbyes, and questions that set nothing up).
+- On its own: what is non-content and goes to "Uncategorised": exactly the paragraphs marked as chatter when the footage came in, whether marked on its own or by hand (see Timeline Cards: footage in, ready to cut: The transcript and its English, "Off-topic chatter is set apart"), and questions that set nothing up.
 - On its own: the order of cards inside each theme, whether each theme opens, is body or ends the film, and the order of the body themes.
 - By hand: a person drags any card to another theme or place (its theme and its order), drags a question next to the answer he chooses, brings any card out of "Uncategorised" or a set-aside group into play, sets each theme's role, and renames, adds, removes or moves any theme. Nothing set by hand is undone by a later automatic pass.
 - When the assistant is off: no first sort is made.
@@ -275,7 +275,8 @@ Where he does not answer, these choices are made for him:
 | Where set-aside cards go | Into a set-aside group directly before the section they would belong to, named after that section |
 | How much is set aside | Lightly |
 | A cold open made of copied cards | The copies are dropped and the originals stay where they are |
-| Interviewer questions and chatter | One set-aside group, "Interviewer questions and chatter" |
+| Interviewer questions | One set-aside group, "Interviewer questions" |
+| Chatter | "Uncategorised", as in the first sort |
 | Special groups (a jettisoned theme, personal stories) | Hold only set-aside cards |
 | Self-introductions | Placed by the owner's rule |
 | Sections not yet read | Asked |
@@ -437,7 +438,7 @@ These hold in every re-order:
 
 ### Where each card goes in a re-order, and whether it plays
 
-For every card the assistant judges from what the card says which target section it belongs in and whether it plays there or is set aside there. Cards his notes name are fixed in the section they name, playing, and their neighbours are judged around them; a card named for two sections is put to him. Cards of a theme he sends wholesale to one section go there. Cards meant only for a set-aside group are always set aside. A set-aside card is still given the section it would have been in. Setting aside is light: only dead cards, unplayable fragments or clearly weaker repeats, and no card is ever dropped. Every card of the earlier order ends up exactly once: playing, set aside, or in the questions and chatter group. He gets a tally per section of cards playing, set aside and minutes, and a section far over its share of the running time is noted.
+For every card the assistant judges from what the card says which target section it belongs in and whether it plays there or is set aside there. Cards his notes name are fixed in the section they name, playing, and their neighbours are judged around them; a card named for two sections is put to him. Cards of a theme he sends wholesale to one section go there. Cards meant only for a set-aside group are always set aside. A set-aside card is still given the section it would have been in. Setting aside is light: only dead cards, unplayable fragments or clearly weaker repeats, and no card is ever dropped. Every card of the earlier order ends up exactly once: playing, set aside, in the "Interviewer questions" group, or in "Uncategorised" (chatter). He gets a tally per section of cards playing, set aside and minutes, and a section far over its share of the running time is noted.
 
 - On its own: each card's section, and whether it plays.
 - By hand: his notes fix any card, and after the re-order every card can be dragged.
@@ -464,9 +465,9 @@ A column is one of these kinds, which a person sees on the column itself:
 |---|---|---|
 | Theme | A section of the film | Plays |
 | Set-aside group | Cards set aside, named after the theme they belong with; one per theme | A shelf category of that name, when it holds cards |
-| Alternates | Alternative takes, not in the cut | An alternates section beside the cut, matched and ready to swap in |
+| Alternates | Alternative takes, not in the cut | An alternates section on the bench; any of its cards can be put into the cut like a staged card |
 | Cold open | Copies of cards tagged for the cold open | Plays first |
-| Uncategorised | Paragraphs with no content | A shelf category |
+| Uncategorised | Paragraphs with no content | The plain shelf (shown as Uncategorised) |
 
 In the board file, a set-aside group's heading begins "Staged" followed by the theme's name ("Staged - China actually scared" is the set-aside group of "China actually scared"; a bare "Staged" is the plain shelf), and an alternates column's heading begins "Alternates". Both are recognised in any letter case when a board file is opened, and two set-aside groups of the same name share one shelf.
 
@@ -487,15 +488,16 @@ A highlights cut is a separate board of about five minutes, made from a board by
 
 ### A montage board
 
-A montage is planned on a board of its own, from a pool of downloaded news and archive clips only, never the film's own interviews or their transcripts. A montage card names its exact clip and its in and out (minutes and seconds), with its quote and speaker above it, so it needs no finding. A person can describe the montage he wants and call the assistant to draft it: the draft is one story-ordered run of about 40 lines, freely rearrangeable. A search of the montage pool gives ranked, playable extracts that drag onto the board and into the cut. Lines are picked for quality: every clip is searched, the strongest lines are preferred, the mix of languages is only a tiebreak, a long run is allowed, and a soundbite voiced over by a translator is never used. A news montage favours newsreader delivery, spreads across many speakers, follows a clear story arc and ends on its strongest beat.
+A montage is planned on a board of its own, from the corpus clips (the episode's montage source clips: downloaded news and archive material, newsreaders included) only, never the film's own interviews or their transcripts. These are the same clips the editor's search calls "corpus clips" (see Timeline Cards: the editor: Search and the transcript panel, "The search sheet has pickers for which transcripts, how many results, which strength of assistant, and a fresh start"). A montage card names its exact clip and its in and out (minutes and seconds), with its quote and speaker above it, so it needs no finding. A person picks which clip folders the montage is drawn from, describes the montage he wants and calls the assistant to draft it: the draft is one story-ordered run of about 40 lines, freely rearrangeable, and any quote it could not place is listed. A revision of a described montage comes back in seconds. A search of the corpus clips gives ranked, playable extracts that drag onto the board and into the cut. Lines are picked for quality: every clip is searched, the strongest lines are preferred, the mix of languages is only a tiebreak, a long run is allowed, and a soundbite voiced over by a translator is never used. A news montage favours newsreader delivery, spreads across many speakers, follows a clear story arc and ends on its strongest beat.
 
 When a montage board is handed to the cut, each card plays its clip from its in to its out. A card with an in but no out, an interview card, or a paragraph from another episode becomes an unmatched note and is listed with the reason ("no pinned span", "needs matching"). A card with no clip becomes a plain note.
 
 - Who: anyone signed in who can open the board.
 - On its own: a board is treated as a montage when more of its cards name a clip than point at an interview paragraph, and otherwise as interviews.
 - By hand: a person sets a board to montage or interviews, and that choice is never changed by the product afterwards.
-- When the assistant is off: a montage is built by hand from searches of the pool.
+- By hand: a person picks the clip folders a montage is drawn from.
+- When the assistant is off: a montage is built by hand from searches of the corpus clips.
 
 #### Lessons
 
-- Met: BRD-045, BRD-046, BRD-047, BRD-048.
+- Met: BRD-045, BRD-046, BRD-047, BRD-048, CE3-054.

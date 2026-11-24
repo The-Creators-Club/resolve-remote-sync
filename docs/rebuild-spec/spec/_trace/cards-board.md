@@ -192,7 +192,7 @@
 - Every paragraph of the episode is accounted for | every count opens to its cards (BRD-020); a per-interview count of paragraphs not yet on the board
 - One shoot can feed several episodes, each with its own board | a story brief per episode, crossover marks, set and cleared by hand (BRD-007); an empty episode list is refused and the list kept
 - An episode's board opens from a short address on any device | the short address (BRD-008); an address naming a shoot but no episode shows the episodes instead of quietly opening the first
-- The board is a Markdown file kept with its episode | opening a board file back in gives the same board; bringing the planning documents up to date right now (BRD-010)
+- The board is a Markdown file kept with its episode | opening a board file back in gives the same board; bringing the planning documents up to date right now is the app's one "Sync now" (BRD-010)
 - The studio's house style, and an episode's own | "changing it starts a new conversation" (how the present assistant tooling holds the style) is replaced by: a change applies from the assistant's next answer on
 - A full re-order makes a new version of the board | the measured nine-and-a-half-hour run, the invoking phrases, the one-batch and four-at-a-time question shapes, the refusal of a plan whose card numbers drifted, the planning record and the strongest-assistant rule are left behind as arrangements of the present tooling; the promises kept are: only on explicit request, made from the board as it stood when asked, every doubt asked first as concrete options, cost and time stated first, progress shown
 - Every interviewee has one colour everywhere | a colour set by hand is never changed by a later pass
@@ -221,15 +221,21 @@
 
 ## Joins with other capabilities
 
-- sync / What syncs where | The board is a Markdown file kept with its episode | planning documents reach every editor's computer that takes the episode within minutes, and "sync now" makes a full round trip
-- cards-footage-in / The transcript and its English | A card is a paragraph, a note, or a paragraph from another episode | paragraphs are made there to the card size the board needs
-- cards-footage-in / Running on its own, with a hand on every decision | A card's speaker is the interviewee | who is speaking is decided and overridden there
+- sync / What syncs where | The board is a Markdown file kept with its episode | planning documents reach every editor's computer that takes the episode within minutes
+- sync / Studio-wide stops and the editor's pause | The board is a Markdown file kept with its episode | the app's one "Sync now" makes the full round trip and says what it did
+- cards-footage-in / The transcript and its English | A card is a paragraph, a note, or a paragraph from another episode | paragraphs are made there to the card size the board needs (the two-sentence floor is for answer paragraphs)
+- cards-footage-in / The transcript and its English | The first sort places every paragraph in one theme | the chatter mark (on its own or by hand) decides what goes to "Uncategorised"
+- cards-footage-in / Grouping clips and building the multicam | A card's speaker is the interviewee | which interviewee an interview is filed under is decided and overridden there
+- cards-footage-in / Grouping clips and building the multicam | Every interviewee has one colour everywhere | the colour is given when the person's first footage comes in
+- cards-editor / Colours | Every interviewee has one colour everywhere | the one set of colours is the editor's clip colours
+- cards-editor / Search and the transcript panel | A montage board | the montage pool is the editor's "corpus clips"
+- cards-editor / Editing, undo and the cut list | Every change can be seen and undone ; The board works by touch first, and by keys | the undo and redo keys
 - cards-footage-in / Running on its own, with a hand on every decision | The assistant proposes the themes | the theme proposal and first sort are the last automatic step of processing
 - cards-footage-in / Montages | A montage board | the montage pool of downloaded news and archive clips
 - cards-editor / Editing, undo and the cut list | The board hands its order to the cut | the cut list the board produces
 - cards-editor / Notes and the staged shelf | The board hands its order to the cut | set-aside groups arrive as shelf categories
 - cards-editor / Colours | The board hands its order to the cut | the fixed rotation of section colours, Blue first
-- cards-editor / Notes and the staged shelf | Setting cards aside and tagging the cold open | the key and gesture that move a cut to the shelf in the editor also set cards aside on the board
+- cards-editor / Selecting, deleting, inserting and keys | Setting cards aside and tagging the cold open | Delete pressed twice and Ctrl+X, the editor's moves of a cut to the shelf, also set cards aside on the board
 - cards-editor / Selecting, deleting, inserting and keys | The board works by touch first, and by keys | the board uses the editor's keys and gestures for select, move, undo
 - cards-editor / Shortening, the edit chat and the assistant | The studio's house style, and an episode's own | changing an episode's house style or rubric starts a new edit chat conversation
 - cards-to-resolve-and-exports / Placing, deleting and linking clips in Resolve | Every interviewee has one colour everywhere | the same colour is used on a person's clips and cuts in the hand-over
@@ -238,3 +244,25 @@
 ## Settled by the owner 2026-11-24
 
 - cards-board-U1 | the same key and gesture that move a cut to the shelf in the Timeline Cards editor set cards aside on the board
+
+## Joins settled
+
+- cards-board F2 | changed: The board hands its order to the cut | a note card becomes one note row per line, in order; an empty card one note row "(empty card)"
+- cards-board F3 | changed: A montage board | a person picks the clip folders, unplaced quotes are listed, a revision comes back in seconds; CE3-054 listed as met
+- cards-board F4 | changed: A montage board | the montage pool is "the corpus clips (the episode's montage source clips)", pointing to the editor's search scope
+- cards-board F5 | no change here: the board's setting names win and cards-editor-4 changes; the board already says a change applies in the edit chat too
+- cards-board F6 | no change here: the seven rules stay written here; cards-editor-4 drops its list and points here
+- cards-board F7 | changed: Every interviewee has one colour everywhere | alphabetical order dropped; colour given when first footage comes in, pointing to footage-in; "no colour assigned yet" before then
+- cards-board F8 | changed: Every interviewee has one colour everywhere | anyone signed in who can open Timeline Cards may recolour a person, everywhere at once
+- cards-board F9 | changed: A later interview joins a board in use without disturbing it | the sentence letting new cards take another colour removed; they always take the speaker's one colour
+- cards-board F10 | no change here: cards-footage-in changes; the board already sets a question aside in its answer's theme's set-aside group
+- cards-board F11 | changed: The first sort places every paragraph in one theme | "Uncategorised" takes exactly footage-in's chatter (on its own or by hand) plus questions that set nothing up; own list dropped
+- cards-editor-1 F1 | changed: Every change can be seen and undone ; The board works by touch first, and by keys | undo and redo keys named and pointed to cards-editor-2's "Ctrl+Z undoes, and Ctrl+Shift+Z and Ctrl+Y redo"
+- cards-editor-1 F12 | changed: Every interviewee has one colour everywhere | 16-value palette dropped; colours are the editor's clip colours, first unused in the ruled order, Brown never, repeating only past the fifteenth person
+- cards-editor-2 F6 | changed: Setting cards aside and tagging the cold open | Delete pressed twice, Ctrl+X and dragging onto the set-aside group named, pointing to cards-editor-1
+- cards-editor-2 F7 | changed: The board hands its order to the cut ; Columns that are set aside from the cut | "Uncategorised" lands on the plain shelf (shown as Uncategorised)
+- cards-editor-2 F8 | changed: A full re-order makes a new version of the board ; Where each card goes in a re-order, and whether it plays ; The first sort places every paragraph in one theme | the set-aside group holds interviewer questions only ("Interviewer questions"); chatter goes to "Uncategorised"
+- cards-editor-2 F9 | changed: The board hands its order to the cut ; Columns that are set aside from the cut | alternates land on the bench, any card put into the cut like a staged card; "ready to swap in" dropped
+- cards-footage-in F1 | changed: A card is a paragraph, a note, or a paragraph from another episode | "An answer paragraph is at least two sentences", pointing to footage-in's paragraph heading
+- cards-footage-in F2 | changed: A card's speaker is the interviewee | the speaker is the interviewee the interview is filed under; By hand points to "The product decides which person each recording belongs to"
+- sync-1 F24 | changed: The board is a Markdown file kept with its episode | the board's own sync request replaced by a pointer to the app's "Sync now"

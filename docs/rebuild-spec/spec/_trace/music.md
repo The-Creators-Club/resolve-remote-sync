@@ -230,6 +230,10 @@
 - server-install-and-running / Shares that go away, and checks that cannot run | Nothing is written to the library when its share is not there | judging a share mounted
 - broll / Bringing new footage in | Dropping audio anywhere on the music page adds it to the library | the shared question on free-space floors is written up there
 - whole-product / Could not check, refusals and nothing silent | A failed search or browse says why, and a late answer never replaces a newer one | how failures and unknowns are shown
+- broll / Sending a clip to Resolve | A track the editor's computer does not have yet is fetched from the NAS when sent | the one fetch of a single missing file: who fetches, two at once, the wait and its give-up, every refusal (joins 2026-11-24)
+- fleet-jobs / When a computer counts as free and able | A person chooses whether their drop is analysed now or while they are away | the quiet time, the hold-back for Resolve, start now and the share of a working computer (joins 2026-11-24)
+- editor-app / Telling the editor what is wrong | An editor sees music analysis on their computer while it is doing it | the music menu line, failure line and the settings window's buttons (joins 2026-11-24)
+- editor-app / Settings, records and background work | An editor sends a track to Resolve on their own computer in one of three ways | the app's local status address (joins 2026-11-24)
 
 ## Settled from the present product
 
@@ -238,3 +242,23 @@
 ## Settled by the owner 2026-11-24
 
 - music-U2 | recorder takes, voiceover, stings shorter than 30 seconds and recordings longer than 15 minutes are left out only when the product looks over a whole folder of mixed audio; a track a person drops in by hand is always taken, whatever its length
+
+## Joins settled
+
+- broll F4 | changed: A person chooses whether their drop is analysed now or while they are away ; Analysing music keeps the computer it runs on usable | the track under way is finished and saved and no further one starts, in place of losing the step in progress; memory given back as soon as the work stops
+- broll F8 | no change here: resolve-on-the-editors-computer limits its frame-rate check to creating projects and timelines; music already sends with no rate check
+- broll F9 | changed: A placed track lands at the playhead in the timeline that is open, or not at all | a track a frame out is read back and laid again once; only one still not in place is taken out with "placement failed"
+- editor-app F7 | changed: An editor sees music analysis on their computer while it is doing it | how the progress window opens by itself and is reopened now points to editor-app
+- editor-app F8 | changed: An editor sees music analysis on their computer while it is doing it | the menu line, failure line and buttons' labels now point to editor-app's menu line and settings window; the button answers stay here
+- editor-app F14 | changed: Analysing music keeps the computer it runs on usable | the shutdown warning's own wording replaced by a pointer to editor-app
+- editor-app F15 | changed: An editor sends a track to Resolve on their own computer in one of three ways | the app's local status address now points to editor-app's heading for it
+- fleet-jobs F1 | changed: A person chooses whether their drop is analysed now or while they are away | "Foreground" is fleet-jobs' start now, within the site's share of a working computer, pointing there (one core and no graphics card dropped)
+- fleet-jobs F2 | changed: A person chooses whether their drop is analysed now or while they are away | as broll F4; "(stops when you're back)" kept, now in editor-app's line
+- fleet-jobs F2 (coordinator's ruling, one share) | changed: Analysing music keeps the computer it runs on usable | "never more than half the processor" replaced by the one share of a working computer that shared work may use, pointing to fleet-jobs
+- music F2 | changed: A track the editor's computer does not have yet is fetched from the NAS when sent | keeps only the page's own two lines; who fetches, the limit, the wait and every refusal point to broll's one-file fetch
+- music F3 | no change here: broll drops music from its free-space floor; music already says a drop is never refused for space on the person's computer
+- music F5 | changed: An editor sees music analysis on their computer while it is doing it | keeps the window's heading and second line; what it shows, its buttons and closing point to editor-app
+- music F7 | no change here: fleet-jobs takes music's rule (a failure about the track is not retried; only a computer's failure sends it elsewhere), which music already states
+- music F8 | changed: A person chooses whether their drop is analysed now or while they are away | "Only when idle" waits for the computer's quiet time and its Resolve hold-back as set in fleet-jobs, not a fixed 5 minutes
+- music F10 | changed: A placed track lands at the playhead in the timeline that is open, or not at all | the track's length is its frame count converted from its own rate to the timeline's
+- whole-product F9 | changed: A failed search or browse says why, and a late answer never replaces a newer one | an admin is pointed to the overview's list of problems and the support contact, never to an admin

@@ -176,7 +176,7 @@ When no recorder sound is found for an interview, the multicam and the interview
 
 Before anything is made, each device's sound is compared with the reference device's:
 
-- First a constant offset for the whole device is searched for, far enough to find a source an hour either side of where its clock places it.
+- First a constant offset for the whole device is searched for, far enough to find a source an hour either side of where its clock places it. When nothing is found there, whole-hour shifts of its clock are tried in turn, so a recorder whose clock is on another time zone (5 hours out, say) is still lined up, and the interview's page notes the shift used.
 - Then each take is matched within 4 seconds of where that offset places it.
 - A match is trusted only when it is strong and clearly better than any other match more than half a second away.
 - Takes under 3 seconds, silent, with no sound, or with no reference sound under them are not measured.
@@ -186,7 +186,7 @@ Every take of every angle ends up within a frame of its sound. The interview's p
 
 A camera with no usable sound can be placed only by its clock: such an angle is marked unverified, for a person to check. The cameras found are shown per session, and the multicam never opens on an empty stretch.
 
-A raw camera file is heard and seen through its proxy. A raw file with no proxy yet waits for one to be made (see Proxies and file moves: Raw camera formats and Blackmagic Proxy Generator), and the interview's page names the camera it is waiting for.
+A raw camera file is heard and seen through its proxy. A raw file with no proxy yet waits for one to be made (see Proxies and file moves: Raw camera formats and Blackmagic Proxy Generator), and the interview's page names the camera it is waiting for. When no proxy can be made for it (the help for the editing program is off, or no able computer can make one), the interview's page names the camera and says that its clips are in a raw camera format CC Sync cannot make proxies from, and the interview carries on by itself if a proxy appears.
 
 - On its own: each device's offset and each take's place, from its sound against the reference.
 - By hand: a person can give a device's offset in seconds instead of measuring it, move one take by hand, accept an unverified angle as checked, or have a device placed by its clock alone, skipping the sound. Each is kept through every later pass.
@@ -246,7 +246,9 @@ The real start of an interview is where the crew asks the person to introduce th
 
 1. for a question: 自我介紹, 介紹一下, 介紹自己, 介紹您自己, 介紹你自己, 先介紹, 簡單介紹, 請介紹 (in either Chinese script), or, ignoring case, "introduce yourself", "introduce yourselves", "tell us who you are", "tell me who you are", "who you are and what you do", "your name and", "start by introducing";
 2. for a bare 介紹;
-3. for the answer, only in the first 10 minutes: a line that begins 我是, 我叫 or 大家好 after any filler, or "my name is", or "I'm" or "I am" followed within 100 characters by "and I".
+3. for the answer, only in the first 10 minutes: a line that begins 我是, 我叫, 大家好, 這位是 or 我們今天訪問 after any filler, or "my name is", "I am called", "I'm" or "I am" followed within 100 characters by "and I", or "we are" followed by an organisation.
+
+The phrases in the third search are the one list by which the product recognises someone introducing themselves, wherever it listens for one.
 
 The start is 0.75 seconds before the question (1.5 seconds before an answer), never before the window, so the opening question is included even when it is too faint to hear well. The interview's page shows the time chosen, how it was found, and the line with two lines either side; or "not found" with the lines heard and advice to widen or move the window.
 
@@ -262,10 +264,10 @@ The interview's preview shows the multicam's first angle. If that angle has no p
 
 ### Each interviewee is given a colour
 
-Each interviewee gets one colour, assigned when their first footage comes in and used for their cards on the board and for their multicam wherever it is shown, including in the editing program from the moment it is made there (see Timeline Cards: the board: Cards on the board, and Timeline Cards: the hand-over to Resolve, and exports: Undo, markers, titles, fades and properties). Until then a person sees "no colour assigned yet".
+Each interviewee gets one colour, one of the editor's clip colours, assigned when their first footage comes in and used everywhere: for their cards on the board and for their multicam wherever it is shown, including in the editing program from the moment it is made there (see Timeline Cards: the board: Cards on the board, "Every interviewee has one colour everywhere", and Timeline Cards: the hand-over to Resolve, and exports: Undo, markers, titles, fades and properties). Each new interviewee, in the order their footage arrives, takes the first clip colour nobody in the episode has yet, in the order given there. Until then a person sees "no colour assigned yet".
 
-- On its own: each interviewee's colour, when their footage first comes in.
-- By hand: a person can pick another colour for an interviewee. It is kept through every later pass.
+- On its own: each interviewee's colour, when their footage first comes in, in the order footage arrives.
+- By hand: anyone signed in who can open Timeline Cards can give an interviewee another colour, and that person is recoloured everywhere at once. It is kept through every later pass.
 
 #### Lessons
 
@@ -366,7 +368,7 @@ The messages a person can meet:
 
 ### Every word is timed, and a word's time is for finding it, not for cutting on it
 
-Every word carries its start, its end, its text and, when known, who is speaking. Mandarin words arrive from speech-to-text one character at a time, so characters are grouped back into real words before anything works on them; nothing assumes one timed word is one dictionary word. A word's time from speech-to-text does not mark exactly where the word starts in the sound, so it is never used as a frame-accurate cut point: anything that needs one measures the sound itself (see Timeline Cards: the editor: The lane: clicking, trimming, zooming and dragging). A card shows exactly the words audible within its cut, with none that are heard greyed out and none that are not heard shown.
+Every word carries its start, its end, its text and, when known, who is speaking. Mandarin words arrive from speech-to-text one character at a time, so characters are grouped back into real words before anything works on them; nothing assumes one timed word is one dictionary word. A word's time from speech-to-text does not mark exactly where the word starts in the sound, so it is never used as a frame-accurate cut point: anything that needs one measures the sound itself. A card shows exactly the words audible within its cut, with none that are heard greyed out and none that are not heard shown.
 
 ### The product decides who is speaking
 
@@ -439,7 +441,7 @@ Splitting or joining paragraphs that are already on the board never loses their 
 - On its own: where each paragraph begins and ends, from the transcript's text and its timing by the rules above.
 - By hand: a person can split a paragraph at a point they choose, join two paragraphs, and allow one paragraph to be longer than the limit. A break set by hand is kept through every later pass.
 - Setting: Longest paragraph. Does: the most speech one paragraph, and so one card, may hold before it is split. Default: 60 seconds, aiming at about 20. Who: an admin. Applies to: the site. Search words: paragraph length, card length, split paragraphs, 60 seconds.
-- When the assistant is off: paragraphs break at every pause of 1.2 seconds or more, within the same length limits, and a person sets any other break by hand.
+- When the assistant is off: paragraphs break at a pause of 1.2 seconds or more only where a sentence ends, within the same length limits; an answer fragment shorter than two sentences is merged into a neighbour, keeping the first one's address; and a person sets any other break by hand.
 
 ### Splitting a paragraph never changes a single character of what was said
 
@@ -447,7 +449,7 @@ A paragraph is split at points named by their exact opening words. For a paragra
 
 ### The product marks which paragraphs are the interviewer's questions
 
-Lines where the crew asks a question are marked as interviewer questions, in both languages, decided from what is said (the questions are buried in the run-on speech). A paragraph counts as a question when every line of it is marked. A question is kept directly above the answer it sets up, on the board as in the transcript, and travels with it; the assistant never puts a question into a cut on its own (see Timeline Cards: the editor: Shortening, the edit chat and the assistant).
+Lines where the crew asks a question are marked as interviewer questions, in both languages, decided from what is said (the questions are buried in the run-on speech). A paragraph counts as a question when every line of it is marked. In the transcript a question is kept as its own paragraph directly above the answer it sets up. On the board it goes to the set-aside group of its answer's theme (see Timeline Cards: the board: The owner's editorial rules, "Interviewer questions never play"); the assistant never puts a question into a cut on its own (see Timeline Cards: the editor: Shortening, the edit chat and the assistant).
 
 - On its own: which lines and paragraphs are interviewer questions, from their content.
 - By hand: a person can mark or unmark any line or paragraph as a question. The mark is kept through every later pass.
@@ -554,7 +556,7 @@ Lining up the English with the original works through what is new in the backgro
 
 Translating, lining up the English with the original and the first sort count against the site's one daily budget for the assistant, in money (see The whole product: The assistant). The episode's footage shows what footage-in has spent so far this day, what is left of the day's budget, and what is waiting for the next day's. Footage-in never fails for lack of budget: when the day's budget is spent, that work waits, every waiting selection falls back to Approximate at once, the interview says it is waiting for the next day's budget, and the work carries on by itself when the new day's budget opens. Work a person is waiting on is always taken before work running on its own.
 
-When the assistant is off or unavailable, lining up stands still with "Assistant is not available on this server (<why>)", waiting selections fall back to Approximate, and it starts again by itself within about a minute of the assistant coming back. When the assistant's own provider has run out for now, it pauses with "the server's Assistant budget is spent for now". When lining up gets no answer at all, waiting selections fall back to Approximate and the person is told that no answer came. Work waiting or under way carries on after the server restarts; a selection waiting when the server stops is told "the server is stopping". A new line-up shows on the page without reloading.
+When the assistant is on but unavailable, lining up stands still and a person is told so in the words of the editor's settings row (see Timeline Cards: the editor: The English a cut shows, "A settings row shows how far the English is lined up with the original"), and the episode's footage says it in the same words; waiting selections fall back to Approximate, and it starts again by itself within about a minute of the assistant coming back. When the assistant is switched off for the site, nothing about it is shown: waiting selections fall back to Approximate, and the English and word links are left for a person, each interview saying which (see "Clips dropped in become an interview ready to cut"). When the assistant's own provider has run out for now, it pauses with "the server's Assistant budget is spent for now". When lining up gets no answer at all, waiting selections fall back to Approximate and the person is told that no answer came. Work waiting or under way carries on after the server restarts; a selection waiting when the server stops is told "the server is stopping". A new line-up shows on the page without reloading.
 
 ### Word-link quality is measured before another way of linking is used
 
@@ -651,7 +653,9 @@ Files made from a recording (one-channel sound, previews, listening copies, wave
 
 ### Every interview gets a small preview exactly as long as its sound
 
-Beside each interview's sound the product makes a small preview: 480 lines tall keeping the picture's shape, at the multicam's frame rate, with a fresh full frame at least every second so it can be scrubbed, mono sound from the camera, exactly as long as the interview's sound, black before and after the picture, and lined up with the sound from its first frame. Several camera pieces are laid over one black background, each fitted to the first one's shape, their sounds mixed. A graphics card is used when one can be. Raw camera files are taken from their proxies. A listening copy and a waveform of every recording are made as soon as its sound is final, before anyone opens the editor, in bounded memory for a recording of any length, so several at once cannot exhaust a computer. A preview already there is kept unless a person asks for it to be made again.
+Beside each interview's sound the product makes a small preview, which is the interview's small picture wherever it plays: at most 480 lines tall and never enlarged, keeping the picture's shape, at the multicam's frame rate, with a fresh full frame at least every second so it can be scrubbed, mono sound from the camera, exactly as long as the interview's sound, black before and after the picture, and lined up with the sound from its first frame. Several camera pieces are laid over one black background, each fitted to the first one's shape, their sounds mixed. A graphics card is used when one can be. Raw camera files are taken from their proxies. A listening copy and a waveform of every recording are made as soon as its sound is final, before anyone opens the editor, in bounded memory for a recording of any length, so several at once cannot exhaust a computer. A preview already there is kept unless a person asks for it to be made again.
+
+Every montage clip with picture gets its own small picture, listening copy and waveform as soon as it lands. A clip's small picture is picture only, at most 480 lines tall and never enlarged.
 
 - By hand: a person can have the preview made again from the interview's page.
 
@@ -662,7 +666,7 @@ After a preview is made its sound is compared with the interview's sound at 5 po
 
 ### A preview that cannot be made never stops anything else
 
-Every recording without a preview gets one plain reason (not a multicam, its sound check failed, where its clips sit cannot be read, and so on), and the others carry on. The person sees how many previews were made, how many were already there and how many failed.
+Every recording of an interview that could not get a preview gets one plain reason (not a multicam, its sound check failed, where its clips sit cannot be read, and so on), and the others carry on. The person sees how many previews were made, how many were already there and how many failed.
 
 #### Lessons
 

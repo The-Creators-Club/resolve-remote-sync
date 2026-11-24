@@ -288,17 +288,50 @@
 ## Joins with other capabilities
 
 - cards-board / What the assistant may do | Clips dropped in become an interview ready to cut | the first themes and the first sort of every paragraph are the last automatic step
-- cards-board / Cards on the board | Each interviewee is given a colour | the interviewee's colour on their cards
-- cards-board / The owner's editorial rules | Off-topic chatter is set apart | chatter left out of the themes, questions kept above their answers
+- cards-board / Cards on the board | Each interviewee is given a colour | the interviewee's colour on their cards, and the clip colours in the order they are given ("Every interviewee has one colour everywhere")
+- cards-board / The owner's editorial rules | Off-topic chatter is set apart ; The product marks which paragraphs are the interviewer's questions | chatter left out of the themes; a question set aside in its answer's theme's set-aside group ("Interviewer questions never play")
+- cards-editor / The English a cut shows | Footage-in works most urgent first, within the site's daily budget | the settings row's wording when lining up cannot run ("A settings row shows how far the English is lined up with the original")
 - cards-to-resolve-and-exports / Placing, deleting and linking clips in Resolve | The interview's multicam is ready for the editing program without one being open | builds the multicam in Resolve with one angle per device, reads it back within a frame; must carry item 39-085's dialog facts and messages and item 39-083's read-back messages
 - cards-to-resolve-and-exports / Undo, markers, titles, fades and properties | Each interviewee is given a colour | the multicam wears the interviewee's colour in Resolve from the moment it is made
 - cards-editor / The English a cut shows | Word links and glosses inside each phrase ; A cut's English is the English of the words it plays | how the gloss and lit English show, and every card's English
 - cards-editor / Search and the transcript panel | A misheard Mandarin word can still be found | search finds soundalike spellings
 - cards-editor / Shortening, the edit chat and the assistant | The product marks which paragraphs are the interviewer's questions | the assistant never puts a question into a cut
-- cards-editor / The lane: clicking, trimming, zooming and dragging | Every word is timed, and a word's time is for finding it, not for cutting on it | cut points measured from the sound
 - fleet-jobs / Choosing who runs what | What transcribing needs and what a person sees while it runs ; Clips dropped in become an interview ready to cut | which able, free computer does the heavy work
 - proxies-and-file-moves / Raw camera formats and Blackmagic Proxy Generator | Every take is lined up by sound to within a frame | proxies made for raw camera files
 - footage-sorter-and-camera-cards / Sorting into shoots, people and cameras | Clips dropped in become an interview ready to cut | footage from cards arrives in the same place on its own
 - youtube / File names and what a file carries | Montage material is downloaded clips with a credit record | a download's channel, title, address and date as its credit
 - whole-product / The assistant | Footage-in works most urgent first, within the site's daily budget | the site's one daily budget in money, set by an admin, with the expected cost shown before each task
 - whole-product / The assistant | Clips dropped in become an interview ready to cut | the site-wide switch and what is left when it is off
+
+## Joins settled
+
+- cards-board F7 | changed: Each interviewee is given a colour | each new interviewee takes the first free clip colour in the order their footage arrives; pointer names the board's "Every interviewee has one colour everywhere"
+- cards-board F8 | changed: Each interviewee is given a colour | anyone signed in who can open Timeline Cards may recolour a person, everywhere at once
+- cards-board F9 | no change here: the board changes; this piece already gives one colour per person everywhere
+- cards-board F10 | changed: The product marks which paragraphs are the interviewer's questions | a question stays above its answer in the transcript, and on the board goes to its answer's theme's set-aside group, pointing to "Interviewer questions never play"
+- cards-board F11 | no change here: the board changes, pointing to this piece for what chatter is
+- cards-editor-1 F10 | changed: Every word is timed, and a word's time is for finding it, not for cutting on it | the pointer to the editor's lane dropped, CFI-059's sentence kept
+- cards-footage-in F1 | changed: The product breaks each transcript into paragraphs by meaning | assistant-off breaks fall at pauses only at sentence ends, answer fragments under two sentences merged into a neighbour
+- cards-footage-in F2 | no change here: the board changes its by-hand pointer to filing an interview under a person
+- cards-footage-in F3 | no change here: cards-editor-2 changes
+- cards-footage-in F4 | changed: Every interview gets a small preview exactly as long as its sound ; A preview that cannot be made never stops anything else | the interview's preview is its small picture; every montage clip with picture gets a small picture, listening copy and waveform when it lands; the no-preview reasons apply to a recording of an interview
+- cards-footage-in F5 | no change here: cards-editor-2 points to the carry-over companion
+- cards-footage-in F6 | no change here: cards-editor-3 changes
+- cards-footage-in F7 | no change here: cards-editor-3 changes
+- cards-footage-in F8 | no change here: this piece is the home and its rule already stands; cards-editor-3 points to it
+- cards-footage-in F9 | changed: Footage-in works most urgent first, within the site's daily budget | the quoted sentence dropped; points to the editor's settings row for the wording, the episode's footage uses the same words
+- cards-footage-in F10 | no change here: the hand-over changes
+- cards-footage-in F11 | no change here: the hand-over takes its rate from this piece's setting
+- cards-footage-in F12 | no change here: fleet-jobs drops its option; every transcription separates speakers
+- cards-footage-in F13 | changed: Every interview gets a small preview exactly as long as its sound | the interview's preview is at most 480 lines tall and never enlarged; a clip's small picture is picture only, at most 480 lines, never enlarged
+- cards-footage-in F14 | changed: Every take is lined up by sound to within a frame | the device search also tries whole-hour shifts and notes the one used
+- cards-footage-in F15 | no change here: the Footage Sorter changes to this piece's rule
+- cards-footage-in F16 | changed: The interview starts at the crew's first question | one list of self-introduction phrases, the union of both, held here
+- cards-to-resolve-and-exports F11 | no change here: the hand-over changes
+- cards-to-resolve-and-exports F12 | no change here: the hand-over changes
+- fleet-jobs F8 | no change here: fleet-jobs changes; this piece already says it
+- fleet-jobs F9 | no change here: this piece is the home and already promises progress at least every 3 seconds; fleet-jobs points to it
+- fleet-jobs F10 | no change here: fleet-jobs adds the kinds
+- proxies-and-file-moves F2 | changed: Every take is lined up by sound to within a frame | when no raw proxy can be made, the page names the camera, says its clips are in a raw camera format CC Sync cannot make proxies from, and carries on if a proxy appears
+- whole-product F5 | no change here: whole-product changes; this piece already has work running on its own wait for the next day's budget
+- whole-product F6 | changed: Footage-in works most urgent first, within the site's daily budget | the unavailable message kept only for an assistant that is on; with it switched off nothing about it is shown

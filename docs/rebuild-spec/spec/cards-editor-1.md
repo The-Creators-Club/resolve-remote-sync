@@ -31,7 +31,7 @@ On a desk the lane docks at the top or the bottom of the editor, by dragging or 
 - **Name row**: short speaker name and length ("15.4 s"), held at the clip's visible left edge, shown only when it fits whole (the name alone if only that fits, nothing if not). Not shown on very narrow clips, on a short track, or on the portrait phone's mini lane. After it, when it fits, a small tag: "English pick", "spoken words", or the no-English tag ("no English", "loading…" while the English is still being made, or the reason there is none).
 - **Words in the clip** (when the track is tall enough): the leading language's text wrapped inside the clip. Wrapping never changes as the lane scrolls sideways; a clip wider than the screen slides its words to stay in view; a narrow clip lays its words out at a readable width and cuts them at its edge. Latin words are never broken; text that does not fit ends with "…".
 - The second language shows under the first only if the first fitted completely and the second fits whole, a step smaller and quieter.
-- **Literal line** (when switched on in the lane bar and available): an italic word-for-word English line under the first, up to 3 lines, its word lit with the spoken one.
+- **Literal line** (aid 7 of the reading aids, the "Word by word" gloss, when it is switched on in the one place the reading aids are switched, and available): an italic word-for-word English line under the first, up to 3 lines, its word lit with the spoken one.
 - Text is dark on light clip colours and light on dark ones, so it is always readable.
 - **The lit word**: in the clip under the playhead, the word being spoken is washed and underlined; words already said stay at full brightness and words still to come are slightly dimmer. During an edge drag the lit word is the word the trim will cut to, and on a shortening drag the words that would go are faded and struck through in red. Nothing is lit in a pause more than 0.3 s after a word. In an English line the lit word is carried across by position, or exactly when the links between English and original words are known.
 - Words that have not been laid out yet appear within a frame or two; they never hold up the lane.
@@ -58,9 +58,9 @@ The language aids let the owner cut interviews in languages he cannot read.
 
 {{29-054}}
 
-Each aid is switched on or off by itself on each device. By default every aid is on for an interview whose language is not among the person's "languages I read", and off for one that is, except the faint strike through fillers, which is off until a person switches it on. Where an interview's words have not been analysed, the aids draw nothing and the editor says so quietly in one line; everything else works as usual.
+These marks are the lane's share of the ten reading aids. Which aids there are, where each is switched and what each defaults to are given once, with the reading aids (see Timeline Cards: the editor: The English a cut shows, "Ten reading aids help an editor cut speech in a language they do not read, each switched Off, on for languages not read, or on for all"); the lane draws the ones switched on for the clip's language. The faint strike through fillers is off until a person switches it on. Where an interview's words have not been analysed, the aids draw nothing and the editor says so quietly in one line; everything else works as usual.
 
-- Setting: Language aids. Does: shows or hides each reading aid (verbs, names and places, numbers and dates, negation and contrast, fillers, safe cut points, sentence numbers) in the lane's clips. Default: on for languages outside "languages I read", off for the others, the strike through fillers off everywhere. Who: anyone using the editor. Applies to: a computer. Search words: language aids, reading aids, grammar marks, safe cuts, verbs.
+- Setting: Language aids. Does: shows or hides each of the ten reading aids in the lane's clips, switched in the one place the reading aids give (see Timeline Cards: the editor: The English a cut shows, "Ten reading aids help an editor cut speech in a language they do not read, each switched Off, on for languages not read, or on for all"). Default: as the reading aids give it for each aid. Who: anyone using the editor. Applies to: a computer. Search words: language aids, reading aids, grammar marks, safe cuts, verbs.
 - Exact: yes
 
 ### A note on a gap shows inside the gap on the lane
@@ -256,12 +256,9 @@ The Overview button always shows on the top bar on a desk; it is never folded in
 
 ### The assistant writes a one-sentence summary of what each section says
 
-- The assistant writes one sentence (two at most, 35 words) on what a section says, from the cards between its heading and the next, each as "person: words" (in English where English exists). Refusals: "the section summary needs Assistant: <why>", "no marker at frame N", "nothing transcribed between this marker and the next"; asking again while one is being written just shows it running; "Assistant returned nothing" when nothing came back. A summary is kept per timeline under the section's title (repeated titles numbered #2, #3), so it survives trims and moves; renaming a section loses its summary. A summary whose section's words have changed since is marked stale.
-
-A summary whose section is gone is never guessed onto another section. Each summary fits in a few lines.
+The assistant writes a short summary of what a section says, from its cuts up to the next heading of any kind (a note row does not end it), into the cut list under the section's heading, as one undoable edit; what it says, what a person is told when it cannot be written and how an out-of-date summary is marked are given with the assistant's features (see Timeline Cards: the editor: Shortening, the edit chat and the assistant, "The assistant writes a one- or two-sentence summary of a section into the cut list, undoably").
 
 - When the assistant is off: no summary is written or offered.
-- Exact: yes
 
 ### Send to moves the selected cuts to the end of a chosen section
 
@@ -447,7 +444,7 @@ The safe-cut aid is aid 4 of the language aids.
 - Between two timed words of the original: a cut may end there when nothing on the left waits for a word on the right, nothing the left needs went right (an object, a "that" clause, the rest of a name) and the left has a verb or a sentence root; a cut may start there when only a new clause hangs off the left and the right has its own verb. A sentence end is safe both ways; so is a gap with only fillers before it in its sentence, or only fillers after it. A gap that splits one word is unsafe ("This splits the word "<w>"").
 - Drawn: a green tick when both ways are safe; a red tick only where a cut is tempting (a pause of 0.35 s or more, or punctuation in the gap) but would strand a clause; nothing for ordinary gaps inside a clause. A hollow green tick is safe for the words but has less than 0.12 s of silence (the cut will clip). Each tick has a reason, for example "A sentence ends here", "A whole thought ends here", "Cutting here strands a clause: "<w>" is left waiting for "<h>"", "There is no verb yet", "What follows has no verb of its own", "<h> loses its negation <w>". Without the language analysis there are no ticks. The ticks are hidden from screen readers and keep their colours in high-contrast mode.
 - In a gap an out point goes a little after the left word (half the pause, at most 0.12 s), an in point a little before the right word (half the pause, at most 0.08 s). Edges are judged with up to 40 words (and 20 s) of the clip on either side.
-- Dragging an edge (with aid 4 on) snaps to the safe gap nearest the edge within 2.5 s whose side fits it (an out edge needs "may end", an in edge "may start"), preferring a gap with a breath by 0.15 s.
+- Dragging an edge (with aid 4 on) pulls it to the nearest safe cut point when it is within 9 px of it (16 px on a touch screen); holding Alt drags free. Nothing snaps while aid 4 is off.
 - Alt+S (shortcut sheet: "Move the armed edge, or the picked words, to the nearest safe cut"), shown as a toast:
   - with words picked on the lane: moves both ends of the pick to safe boundaries inside its cut, each by the fewest words (up to 12; ties outward): "The pick now starts and ends where a cut leaves a whole thought." / "The pick already starts and ends at safe cuts." This works even when aid 4 is off;
   - else with an armed edge: moves it to the nearest safe cut within 6 s, one undo step: "The <in/out> point moved to the nearest safe cut. Ctrl+Z puts it back." / "No safer cut point near this edge (or its words are still being read)." (also when the nearest is under 0.02 s away). This works even when aid 4 is off;
@@ -524,8 +521,10 @@ The sheet's keyboard rows are grouped: "Anywhere" first, then "Lane (the clips h
 
 {{29-028}}
 
+Except that the controller opens and closes it with Menu held (600 ms); a quick press of Menu does not open it (see Timeline Cards: the editor: Phone and game controller, "The help sheet lists every controller button for each place").
+
 - Name and search words: the shortcuts sheet: shortcuts, keys, help, keyboard, controller.
-- Ways in: "?", the Shortcuts buttons, the H key, the controller's Menu button.
+- Ways in: "?", the Shortcuts buttons, the H key, the controller's Menu held.
 - Exact: yes
 
 ### The help sheet's rows for the cards, trim mode and words picked on the lane
@@ -560,7 +559,7 @@ While words are selected in the transcript panel, the insert key inserts them wh
 
 ### The keys for searching every transcript, the edit chat and Send to Resolve say so when their tool is not ready
 
-The key for "search every transcript" opens search; the key for "ask the assistant" opens or closes the edit chat; the key for "Send to Resolve" sends. When the tool behind a key has not started, a warning toast says so:
+The key for "search every transcript" opens search; the key for "ask the assistant" opens or closes the edit chat; the key for "Send to Resolve" opens the Send tab with a fresh dry run, as the cut's own action does, and nothing is sent until the person presses Send there (see Timeline Cards: the hand-over to Resolve, and exports: Sending a cut to Resolve, "The Send tab shows a dry run and sends on one press"). When the tool behind a key has not started, a warning toast says so:
 
 | Key's job | Tool failed to start | Tool not started yet |
 |---|---|---|
@@ -713,6 +712,8 @@ The sound is ramped at every new join that deleting or splitting words makes. A 
 ### Words chosen on another surface can be acted on by the lane, which says when it cannot
 
 {{29-052}}
+
+A card on the shelf offers no word tools, so "That card is not in the cut, so the lane cannot act on its words." is met only when a card leaves the cut between the press and the act.
 
 - Exact: yes
 

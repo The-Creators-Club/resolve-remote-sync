@@ -460,13 +460,14 @@
 
 ## Joins with other capabilities
 
-- Sync / What syncs where | Downloaded clips reach the computer of the editor who asked | YouTube originals only sync upwards like all original footage.
+- Sync / What syncs where | Downloaded clips reach the computer of the editor who asked | a YouTube original goes up from the computer that downloaded it and comes down by itself only to the computer of the editor who asked, when that computer syncs the project.
 - The dashboard / Each computer's state | The page always says where each job ran and why | the per-computer view states why a computer did not download.
 - The dashboard / Each computer's state | The editor and the dashboard are told what the filing is doing | the per-computer view shows the filing state.
 - The dashboard / Alerts by mail | Admins are warned when downloading on the server or a computer is not working | the alerts are delivered there.
 - The whole product / The assistant | The assistant behind search is the one the site has set up, and every failure is explained | the site's assistant, its keys and its off switch.
 - Resolve on the editor's computer / Bins, clip sorting and imports | Downloaded clips are filed into the open Resolve project's bins by themselves | importing into bins.
-- Timeline Cards: the hand-over to Resolve, and exports / Renders from Resolve | Before Resolve renders, the editor is told which clips would stop the render | the render check.
+- Resolve on the editor's computer / Multicams, frame rates and timelines | Before Resolve renders, the editor is told which clips would stop the render ; Clips already in the studio that Resolve cannot decode are found and fixed | the VP9 (and some AV1) warning checks the open timeline's originals and offers the same proxy-swap repair.
+- The b-roll archive / Sending a clip to Resolve | An editor can open a downloaded clip's folder, or fetch it from the NAS | the one fetch of a single missing file: who fetches, two at once, the wait and its give-up, every refusal.
 - Work shared out across the computers / Choosing who runs what | Every clip lands as a single MP4 file with H.264 picture and AAC sound at a constant frame rate | converting is heavy work done on an able and free computer.
 - Releases and updates / Offering an update to a computer | Every clip is named after its channel, title and YouTube id | a computer that must update before it can download is told so.
 - The app on each editor's computer / Settings, records and background work | An editor signs in to YouTube with one click from the app | the sign-in, cookies file, terms and filing controls live in the app's settings.
@@ -478,3 +479,21 @@
 ## Settled from the present product
 
 - youtube-U1 | nothing stops a download that writes nothing at present; the lesson requires the stop and no time is ruled, so the time is the builder's to choose and to show
+
+## Joins settled
+
+- cards-to-resolve-and-exports F15 | changed: Before Resolve renders, the editor is told which clips would stop the render | points to Resolve on the editor's computer's VP9 warning (which names AV1 too and offers the repair) instead of to Renders from Resolve; what it says of AV1 and VP9 left as it is (youtube F6 waits for a render test)
+- dashboard-1 F25 | changed: The page always says where each job ran and why | no change of substance (dashboard-1 adds the note); the pointer now names dashboard-1's heading "Each computer's issues are listed worst first, each explained"
+- fleet-jobs F10 | no change here: fleet-jobs adds converting YouTube downloads as a kind; this piece already calls it heavy work and points there
+- music F2 | changed: An editor can open a downloaded clip's folder, or fetch it from the NAS | GET IT FROM THE NAS keeps only its own progress lines and points to b-roll's one-file fetch for who fetches, the limit, the wait, the give-up and every refusal; the waiting state shows while the computer is busy, never a failure
+- sync-1 F18 | no change here: sync-1 and sync-2 take this piece's words ("Nothing a download leaves behind is ever uploaded by the sync", "it syncs nowhere"), which stay
+- sync-1 F23 | changed: Downloaded clips reach the computer of the editor who asked | youtube stands (the requester's clips arrive by themselves); "only sync upwards" reworded to "goes up from the computer that downloaded it", to match sync-1's new wording
+- whole-product F12 | changed: The assistant behind search is the one the site has set up, and every failure is explained | "no assistant has a working key", with where an admin connects one, replaces the old sentence; "Assistant is not enabled for this site" dropped
+- whole-product F13 | changed: The assistant behind search is the one the site has set up, and every failure is explained | the five-minute re-check costs no call to the assistant; only an admin's test and a real search do
+- whole-product F14 | no change here: whole-product adds the exception for programs that keep themselves current; this piece already says newest build, checked as genuine, never backwards
+- youtube F1 | changed: A site decides whether signed-in YouTube sessions may be used on editors' computers ; YouTube demands proof that a request comes from a real player before it serves a video ; An editor signs in to YouTube with one click from the app ; The app judges the editor's YouTube sign-in from real downloads and warns once when it lapses ; The YouTube controls on an editor's computer appear only where they can be used ; A health line on the page shows whether searching and downloading can work right now ; Admins are warned when downloading on the server or a computer is not working | one site switch, "YouTube's extra measures against being blocked", off on a new site, covering proof of a real player, in-page challenges and signed-in sessions on editors' computers; the real-player demand holds while it is on; the health line's "off" is this switch. The heading is kept word for word though it no longer fits (for the lead to rename with the pointers)
+- youtube F2 | no change here: dashboard-2 drops its copies and says each part's own site settings are in that part's piece; "The server's YouTube session" and "Periodic YouTube test" stay here as they are
+- youtube F3 | no change here: this piece's setting line and search words for YouTube downloads win; dashboard-2 points here
+- youtube F4 | no change here: releases-and-updates drops its refusal and points to "A server restart never loses a job", which stays as it is
+- youtube F5 | changed: Clips already in the studio that Resolve cannot decode are found and fixed | says its proxy swap is the same repair the VP9 warning offers, with a pointer there
+- youtube F8 | changed: The page always says where each job ran and why ; The owner of a computer can keep it out of YouTube downloads ; An editor can open a downloaded clip's folder, or fetch it from the NAS | the server hand-over sentence, the "on this computer" off message and the GET IT FROM THE NAS explanation now say the requester's clips arrive by themselves when their computer syncs the project and only others fetch by hand; the two shown sentences are described, not quoted, as no wording is given

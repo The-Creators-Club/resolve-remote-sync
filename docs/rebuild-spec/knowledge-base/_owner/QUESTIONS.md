@@ -489,7 +489,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **CE2-084** Finding words stays instant at hundreds of transcripts. Must: Find across 500 transcripts answers within a second, a newer keystroke cancels the older search, and the transcript panel redraws within 60 ms.
 - **CE2-096** Closing a tab must stop the assistant work it started. Must: Closing the tab cancels its assistant work within seconds, and interactive requests never wait behind background ones.
 - **CE2-123** An offline edit that could not be stored was shown as made. Must: If an offline edit cannot be stored, the page says so at once and the edit is not shown as saved.
-- **CE2-131** An editor working offline could be thrown out of their episode. Must: Presence follows a person actually working, offline or on a sleeping phone; unsent work keeps an episode occupied; a closer is told who was last in and when.
+- **CE2-131** An editor working offline looked gone from their episode. Must: Presence follows a person actually working, offline or on a sleeping phone, and unsent work keeps an episode shown as occupied.
 - **CE2-139** A phone paints an installed app's frame from its declared colours. Must: The declared theme and icon colours match the page's current look, and changing them is treated as visible to every installed phone.
 - **CE2-153** The lane's button bar does not fit a 390 px phone. Must: Every control bar, close included, fits and can be tapped on a 390 px portrait phone without clipping or sideways scrolling.
 - **CE2-172** The cut view must stay smooth on a phone at 500 cards. Must: At 500 cards one change updates the edit view on a mid-range phone within one frame (16 ms).

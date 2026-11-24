@@ -100,18 +100,18 @@ An interviewee stays listed whatever fails with their transcript. When their tra
 
 ### Dropping media files on the panel hands the clips to footage in and lists each one in the intake
 
-- Media files dragged from the desktop onto the panel highlight it (dashed cyan outline, the drop hint lights up). On drop, the panel switches to the list of transcripts and looks for the files in the episode by name and size.
-- While looking: "Looking for <name> under the episode" or "Looking for N files under the episode". With no cut list open: "open a cut list first, then drop the media on its transcripts". Nothing dropped: "nothing was dropped".
+- Media files dragged from the desktop onto the panel highlight it (dashed cyan outline, the drop hint lights up). On drop, the panel switches to the list of transcripts and looks for the files on the studio's storage by name and size, and uses each where it already is (see Timeline Cards: footage in, ready to cut: Footage files and files made from them, "A dropped file is found where it already is").
+- While looking, the panel names the file it is looking for on the studio's storage, or says how many files. With no cut list open: "open a cut list first, then drop the media on its transcripts". Nothing dropped: "nothing was dropped".
 - At most 100 files per drop. A name is ignored if empty, over 255 characters, holding a slash or backslash, "." or "..", or control characters. Only media kinds are taken: mp4, mov, mxf, mkv, m4v, avi, mts, m2ts, wav, mp3, m4a, aac, flac, ogg, opus, webm, braw, r3d. Anything else is reported as skipped. Duplicate names (case-insensitive) are taken once; names already in the intake are not looked for again.
-- Each name is looked for among the episode's media by name (case-insensitive) and, when a size was given, exact size; the first match in name order wins.
+- Each name is looked for on the studio's storage by name (case-insensitive) and, when a size was given, exact size; the first match in name order wins.
 - The intake holds at most 200 rows per episode (the oldest drop off) and is forgotten when the server restarts.
-- Result: "Added to the intake." plus, when some were not found, "One is / N are not in [the episode's media] yet: put it/them under the episode folder and drop again."; plus, when some were not media, "<name> is not media, so it was skipped" or "N files that are not media were skipped". Shown as a warning when either applies. Failure: "the intake did not take them: <reason>".
+- Result: "Added to the intake." plus, when some were not found, a line saying that one, or how many, are not on the studio's storage yet and that the person should put it or them there and drop again; plus, when some were not media, "<name> is not media, so it was skipped" or "N files that are not media were skipped". Shown as a warning when either applies. Failure: "the intake did not take them: <reason>".
 
 Every clip that is found is handed to footage in, which makes it ready to cut on its own, exactly as for clips dropped in anywhere else: the editor starts no step by hand and chooses no computer. How that happens, and every decision in it with its override by hand, is described in Timeline Cards: footage in, ready to cut.
 
 The intake box shows in the list of transcripts while it has rows, titled "Intake", with a Clear button that empties the list (work already under way carries on). Each row gives the file name and says plainly:
 
-- whether the file was found in the episode, and where; a row not found shows a "Not in [the episode's media]" chip and "Put it under the episode folder, then drop it again";
+- whether the file was found on the studio's storage, and where; a row not found shows a chip saying it is not on the studio's storage, and tells the person to put it there and then drop it again;
 - for a found file, what its clip still lacks (a transcript, a proxy), and that each lack goes away by itself as footage in finishes it.
 
 - Who: anyone who can open the editor.
@@ -130,9 +130,9 @@ The intake box shows in the list of transcripts while it has rows, titled "Intak
 
 ### Any transcript of the episode can be opened from the episode picker on its own
 
-The picker's third part lists every interview and clip transcript of the episode with person, clip, colour and whether it is already loaded. One opened on its own takes its timing from its own word timings, else its subtitles; with neither it can be read but has no word timing. Messages: "no such transcript in this episode"; "that transcript would not open: <error>".
+The episode's browser lists every interview and clip transcript of the episode with person, clip, colour and whether it is already loaded. One opened on its own takes its timing from its own word timings, else its subtitles; with neither it can be read but has no word timing. Messages: "no such transcript in this episode"; "that transcript would not open: <error>".
 
-The picker itself is described in Timeline Cards: the editor, Opening episodes and keeping the editor running.
+The browser itself is described with opening episodes (see Timeline Cards: the editor: Opening episodes and keeping the editor running, "The episode's browser lists every transcript and cut list, and several can be chosen at once").
 
 - Exact: yes
 
@@ -471,7 +471,7 @@ The English of every cut is built from the transcript's own line-ups of original
 
 - A cut inside one paragraph: its English is every phrase whose original words are all in the cut. A phrase the cut divides is cut at the word by the word links between the original and the English when there are any, else dropped when the cut holds under half of its words, else cut in proportion (phrases under 4 English words are kept whole). The English is approximate when an edge falls inside a phrase or a word of the cut belongs to no phrase. A trailing dash is removed.
 - Where several line-ups hold the cut, the first stands unless another leaves fewer of the cut's words without English at a cost of no more than about 14 English characters per recovered word (plus 10).
-- A cut across paragraphs: its letters are matched against the paragraphs (its head may be the tail of one, its end the head of another). Scattered unmatched letters are tolerated up to the larger of 4 letters or 15 % of the cut. A stretch of 6 or more unmatched letters is speech no paragraph holds (an interviewer's question, for example): that stretch shows as a gap in the original language, the rest of the cut still shows its English, and the English is marked approximate, as long as the paragraphs still hold at least 30 % of the cut's letters (and at least 8). A small part (under 4 words or 15 % of the cut) without English is left out; a larger part without English fails the whole cut.
+- A cut across paragraphs: the paragraphs it crosses are the ones its timed words are tied to (its head may be the tail of one, its end the head of another), never found by matching its text. Timed words tied to no paragraph are speech no paragraph holds (an interviewer's question, for example): that stretch shows as a gap in the original language, the rest of the cut still shows its English, and the English is marked approximate. A small part (under 4 words or 15 % of the cut) without English is left out; a larger part without English fails the whole cut.
 - The same words in the other Chinese script (same letter count, at least two fifths equal place for place) take the line-up's whole English.
 - The transcript paragraphs' own line-ups are tried before those made for earlier cuts of the same words.
 - The product can tell when a cut's English says more than the cut (a phrase of 12 or more letters the cut holds under half of, whose English is there) or less (a phrase of 4 or more letters the cut holds whole, whose English is missing).
@@ -502,11 +502,13 @@ View settings row "Translation problems". Logged: "Offline: the English on this 
 
 {{30-028}}
 
+The transcript's sentence cursor on the English line follows the same rule as an English text selection: an English sentence under the cursor stands for, and inserts, the original words it lines up with, since every word is timed and tied to its English. Only a sentence with no timing of its own inserts its whole paragraph.
+
 - Exact: yes
 
 ### When an insert comes from an English selection that lined up word for word the new cut keeps that English
 
-The English the editor selected travels with the new card and becomes the English that cut shows, so the card reads exactly what was chosen. When the English did not line up word for word, the cut takes the whole original sentence, marked approximate, and its English follows the usual rules for a cut's English (above).
+The English the editor selected travels with the new card and becomes the English that cut shows, so the card reads exactly what was chosen. When the English did not line up word for word, the selection falls back to Approximate (see Timeline Cards: footage in, ready to cut: Word links between the original and the English, "What a selection of English stands for"), the cut takes the original words it stands for, and its English follows the usual rules for a cut's English (above).
 
 ### Selecting English on a card, a shelf item or a search result shows the original words it stands for in a floating toolbar
 
@@ -516,7 +518,8 @@ The English the editor selected travels with the new card and becomes the Englis
   - when it cannot map: the reason;
   - when mapped: arrow, the original words, and "Approximate" (reason as tooltip) when it is;
   - Start earlier/later and End earlier/later buttons (one word each);
-  - for a card in the cut: Play, Delete words (tooltip "Cut exactly these original words out; the rest closes up"), Highlight, Split here, Copy original. Play plays those words on the lane (moves the lane head there and stops after their end). For a card on the shelf the same buttons without Play. Delete words, Highlight and Split here do what the lane's own word tools do, with their message; after a successful Delete or Split the toolbar closes;
+  - for a card in the cut: Play, Delete words (tooltip "Cut exactly these original words out; the rest closes up"), Highlight, Split here, Copy original. Play plays those words on the lane (moves the lane head there and stops after their end). Delete words, Highlight and Split here do what the lane's own word tools do, with their message; after a successful Delete or Split the toolbar closes;
+  - for a card on the shelf: only the Start and End buttons and Copy original, since the lane's word tools act only on a card in the cut;
   - for a search result: Open in the transcript (tooltip "Insert, put on the shelf or play these words from the transcript"; "The transcript panel is not available here." when it cannot) and Copy original;
   - Close (x).
 - Esc closes the toolbar; clicking elsewhere (losing the selection) closes it unless the pointer is over it; pressing its buttons does not lose the selection. A card removed from the cut list closes its toolbar. A newer selection withdraws the older one's ask.
@@ -536,9 +539,9 @@ Settings row "English to original alignment":
 - status line: "Not available on this server." / "Waiting for the server…" / the pause reason / "Lining up N paragraph(s) in the background." / "N lined up since the server started, F could not be.";
 - "<amount> spent today, B paragraphs a call": what lining up has cost today, out of the site's one daily budget for the assistant (see The whole product: The assistant).
 
-Lining up runs on its own until the site's daily budget for the assistant is spent; it then waits for the next day's budget, with nothing failed and nothing lost, and the row says it is waiting for tomorrow's budget and an English selection waiting on it falls back to the whole original sentence, marked approximate.
+Lining up runs on its own until the site's daily budget for the assistant is spent; it then waits for the next day's budget, with nothing failed and nothing lost, and the row says it is waiting for tomorrow's budget and an English selection waiting on it falls back to Approximate (see Timeline Cards: footage in, ready to cut: Word links between the original and the English, "What a selection of English stands for").
 
-- When the assistant is off: the row is not shown, and every English selection takes the whole original sentence, marked approximate.
+- When the assistant is off: the row is not shown, and every English selection falls back to Approximate (see Timeline Cards: footage in, ready to cut: Word links between the original and the English, "What a selection of English stands for").
 - Exact: yes
 
 ### Ten reading aids help an editor cut speech in a language they do not read, each switched Off, on for languages not read, or on for all
@@ -550,7 +553,7 @@ The aids show on transcript paragraphs, on cards (including shelf items) and in 
 | 1 | Playhead word in both languages | "The word being said, lit in the original and in its English" | the English that renders the word being spoken, tinted cyan, on the transcript paragraph holding the transcript playhead (original line only), on the playing card (the word under the lane head while the lane plays inside it), and in the lane, frame by frame |
 | 2 | Sentence ends and numbers | "Each sentence numbered, the same number on its English" | a small gold number at the start of each sentence of the original and of its English (only when the original has more than one sentence); the lines get extra spacing to hold them |
 | 3 | Verbs | "Verbs underlined in both languages" | a solid gold underline; an auxiliary, a copula, or a verb inside a compound noun is not marked |
-| 4 | Safe cut points | "Green: a cut here leaves a whole thought. Red: it strands a clause" | ticks between words of the original (see the lane's safe cut points); also turns on the nudge for picks and dragged edges |
+| 4 | Safe cut points | "Green: a cut here leaves a whole thought. Red: it strands a clause" | ticks between words of the original (see the lane's safe cut points); also turns on the nudge for picks, and pulls a dragged edge to the nearest safe cut point when it is within 9 px of it (16 px on a touch screen), holding Alt drags free; while aid 4 is off nothing snaps |
 | 5 | Not, if and but | "Negation, conditions and contrast words flagged" | negation in red with a solid underline; conditions and contrast in red with a dashed underline |
 | 6 | Join check | "After a splice or trim, Assistant reads the joined original again" | the join check, below |
 | 7 | Word-by-word gloss | "A literal English word under each original word" | a "Word by word" line under the original (transcript, cards and lane), each gloss lit as its spoken word plays |
@@ -561,6 +564,7 @@ The aids show on transcript paragraphs, on cards (including shelf items) and in 
 - Modes per aid: Off (never), Not read (on for languages not in "Languages I read"; the default for eight aids), All (on for every language; the default for aid 1). Aid 7 is Off by default.
 - Languages I read: toggles for English, Chinese, Russian and Ukrainian; default English and Chinese. Traditional Chinese counts as Chinese; a mixed Russian/Ukrainian clip counts as Russian.
 - So by default a Russian or Ukrainian clip shows every aid except the word-by-word gloss, and a Mandarin or English clip shows only aid 1.
+- These rows are the one place each aid is switched: the transcript, the cards and the lane (its language aids and its "Word by word" literal line, which is aid 7) all draw from them.
 - The settings are kept per device (this browser); unreadable settings fall back to the defaults; if the browser refuses to keep them, they last for the session.
 - No mark changes size or weight: every mark is an underline or a tint, so nothing reflows. Each kind has its own line style besides its colour, colour is never the only signal, and marks never cover a selection. The "Romanised" and "Word by word" lines cannot be selected as text.
 - Skipped: an English interview, a paragraph or card with no original line, or a line whose language cannot be told.
@@ -572,7 +576,7 @@ The safe cut points and the key that moves an edge to one are described in Timel
 - Setting: Playhead word in both languages. Does: lights the word being said in the original and in its English. Default: All. Who: anyone who can open the editor. Applies to: a computer. Search words: playhead word, lit word, both languages, reading aid.
 - Setting: Sentence ends and numbers. Does: numbers each sentence of the original and gives its English the same number. Default: Not read. Who: anyone who can open the editor. Applies to: a computer. Search words: sentence numbers, sentence ends, reading aid.
 - Setting: Verbs. Does: underlines the verbs in both languages. Default: Not read. Who: anyone who can open the editor. Applies to: a computer. Search words: verbs, grammar, underline, reading aid.
-- Setting: Safe cut points. Does: shows green and red ticks where a cut leaves a whole thought or strands a clause, and turns on the nudge for picks and dragged edges. Default: Not read. Who: anyone who can open the editor. Applies to: a computer. Search words: safe cut, cut points, ticks, clause, reading aid.
+- Setting: Safe cut points. Does: shows green and red ticks where a cut leaves a whole thought or strands a clause, turns on the nudge for picks, and pulls a dragged edge to the nearest safe cut point within 9 px (16 px on a touch screen), Alt dragging free; while it is off nothing snaps. Default: Not read. Who: anyone who can open the editor. Applies to: a computer. Search words: safe cut, cut points, ticks, clause, reading aid.
 - Setting: Not, if and but. Does: flags negation, condition and contrast words. Default: Not read. Who: anyone who can open the editor. Applies to: a computer. Search words: negation, condition, contrast, not if but, reading aid.
 - Setting: Join check. Does: has the assistant read the joined original again after a splice or trim. Default: Not read. Who: anyone who can open the editor. Applies to: a computer. Search words: join check, splice, meaning changed, grammar break.
 - Setting: Word-by-word gloss. Does: shows a literal English word under each original word. Default: Off. Who: anyone who can open the editor. Applies to: a computer. Search words: gloss, word by word, literal English, reading aid.

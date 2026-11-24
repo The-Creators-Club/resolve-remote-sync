@@ -82,7 +82,7 @@
 - 29-016 | left out: cut by the owner (2026-11-24, cards-editor-4-Q12)
 - 29-066 | The editor opens with no network once it has been opened on that device ; What works offline and what needs the server
 - 29-067 | What works offline and what needs the server
-- 29-068 | The panel says where things are kept and whether they will stay ; In the Windows and Android apps, kept cut lists are real files in a folder the person can open and move
+- 29-068 | The panel says where things are kept and whether they will stay ; In the editor window and the Android app, kept cut lists are real files in a folder the person can open and move
 - 29-069 | left out: for the builders only
 - 30-026 | Inserting still works when the server cannot be reached ; Any paragraph the transcript panel shows can be inserted offline, placed approximately and trimmed when it syncs
 - 31-056 | The English already seen stays on the device, so a reload offline still shows it
@@ -92,7 +92,7 @@
 - 32-032 | What works offline and what needs the server
 - 32-033 | A copy of the waiting edits can be saved to a file and restored from it
 - 32-034 | left out: cut by the owner (2026-11-24, cards-editor-4-Q7)
-- 32-036 | Timeline Cards has its own apps for Windows and Android that show the editor from the studio's server
+- 32-036 | Timeline Cards opens in the editor window on a computer and in its own app on Android, from the studio's server
 - 32-043 | Every editor window open on one cut list stays in step with the others
 - 33-038 | The note editor warns about changes from another device, a vanished gap, and a refused save
 - 33-046 | The On this device panel keeps a cut list on a device so it opens, edits and plays with no network
@@ -113,18 +113,18 @@
 - 40-042 | Each device comes back to where it was, and a device new to a cut list starts at the latest place
 - 40-060 | When the cut list moved on while edits waited, the editor asks once whether to keep them ; What works offline and what needs the server
 - 40-086 | The review stays current, and is the same in every window and on the phone
-- 33-052 | In the Windows and Android apps, kept cut lists are real files in a folder the person can open and move
+- 33-052 | In the editor window and the Android app, kept cut lists are real files in a folder the person can open and move
 - 33-056 | In the apps, cut lists that are opened are kept on the device by themselves
-- 33-088 | Timeline Cards has its own apps for Windows and Android that show the editor from the studio's server
+- 33-088 | Timeline Cards opens in the editor window on a computer and in its own app on Android, from the studio's server
 - 33-089 | The apps notice within seconds that the server is gone and work offline
 - 33-090 | The offline page explains that a page not yet opened online cannot open offline
 - 33-091 | The app's settings page works with no network and sets the server address
 - 33-092 | A person can choose to work offline even with the server up
 - 33-093 | The settings page shows the app's status
 - 33-094 | In the apps, cut lists that are opened are kept on the device by themselves
-- 33-095 | In the Windows and Android apps, kept cut lists are real files in a folder the person can open and move
-- 33-097 | The Windows app installs per person or runs portable, and runs once
-- 33-098 | The Windows app's window, links, permissions and downloads
+- 33-095 | In the editor window and the Android app, kept cut lists are real files in a folder the person can open and move
+- 33-097 | On a computer the editor window comes with the one app and updates with it
+- 33-098 | The editor window's links, permissions and downloads
 - 33-101 | left out: for the builders only
 - 33-102 | The Android app needs Android 10 or newer and asks for little
 - 33-104 | The Android Back gesture goes back in the page, then offers a small menu
@@ -363,8 +363,8 @@
 - The panel shows whether the open cut list is on this device, how big each part is, and how it will be kept | CE2-102, CE3-073
 - Keeping a cut list shows progress and says plainly how it ended | CE3-072
 - Bringing a kept copy up to date fetches only what changed and says what it found | CE2-110, CE2-113
-- In the Windows and Android apps, kept cut lists are real files in a folder the person can open and move | CE2-128: a folder per episode on a computer
-- Timeline Cards has its own apps for Windows and Android that show the editor from the studio's server | live editing inside the apps (cards-editor-4-Q8)
+- In the editor window and the Android app, kept cut lists are real files in a folder the person can open and move | CE2-128: a folder per episode on a computer
+- Timeline Cards opens in the editor window on a computer and in its own app on Android, from the studio's server | live editing inside the apps (cards-editor-4-Q8)
 - The editor opens with no network once it has been opened on that device | CE1-133, CE1-135, CE2-105: any address, only its own pages, nothing kept deleted by an update
 
 - While working offline by choice the pill says so | CE1-138: "Offline (your choice)" with its waiting and saved additions; the wording comes from words the studio already knows
@@ -408,13 +408,19 @@
 - 29-067 | waiting at most 5 seconds per request and refreshing at most about once a minute per item: arrangements (CE2-116)
 - 32-050 | "that cut list is not in the vault" written as "not in the episode"
 - 29-068 | the app accepting no writes from another web page, and the apps' "the app answered <status> for <what>" message: insides
+- 33-097 | the one-click per-person installer, the portable program, 64-bit Windows, running once and "another program is in its way": settled by the joins (2026-11-24, cards-editor-4 F1); the editor window comes with the one app
+- 33-098 | "Closing the last window quits": settled by the joins (2026-11-24, cards-editor-4 F1); closing the last editor window leaves the one app running
+- 33-088, 33-091 | the server address on a computer: settled by the joins (2026-11-24, cards-editor-4 F2); the editor window uses the one app's dashboard address
+- 31-046 | the seven house-style rules written out here: settled by the joins (2026-11-24, cards-board F6); they are written once with the board
+- 40-042 | closing an episode with its confirmation: settled by the joins (2026-11-24, cards-editor-5 F4); nothing is capped or locked by an open episode, so the list offers no Close
+- 14-036, 14-037 | "Opening or closing anything else needs the server" and the close buttons of the offline list: settled by the joins (2026-11-24, cards-editor-5 F4); only opening needs the server
 
 ## Joins with other capabilities
 
 - whole-product / The assistant | The chat offers three strengths of assistant, each its own conversation | each strength moves to the newest version by itself; the assistant switch
 - whole-product / The assistant | Which strength of assistant each feature of the editor uses, and what it costs | what each call records and costs
-- cards-board / The owner's editorial rules | An episode can carry its own description of what counts as fluff | the studio's shortening rubric and where an episode's style notes are written
-- cards-board / The owner's editorial rules | The chat follows a house style of seven editorial rules, which an episode can replace with its own | where the episode's chat style note is written
+- cards-board / The owner's editorial rules | An episode can carry its own description of what counts as fluff | the studio's shortening rubric and the setting Shortening rubric for an episode ("The shortening rubric, and an episode's own")
+- cards-board / The owner's editorial rules | The chat follows a house style of seven editorial rules, which an episode can replace with its own | the seven rules themselves and the setting House style for an episode, the same style the board's assistant follows ("The studio's house style, and an episode's own")
 - cards-footage-in / Montages | Describing a montage gets a cut list of it from the episode's montage sources, and a follow-up revises it | which clips are the episode's montage sources and their transcripts
 - cards-footage-in / Footage files and files made from them | Keeping a cut list shows progress and says plainly how it ended | the audio and preview video made for a clip when a keep asks for them
 - cards-editor / Sections and the overview | The assistant writes a one- or two-sentence summary of a section into the cut list, undoably | the overview's sparkle button and a folded section's summary
@@ -424,5 +430,33 @@
 - cards-editor / Opening episodes and keeping the editor running | Every signed-in person sees who is working in which episode | the episode list, the projects sheet and opening an episode
 - cards-to-resolve-and-exports / Bringing Resolve's changes back into the cut | Every suggestion from the assistant and every import arrives as a proposal the editor previews and accepts in whole or in part | changes brought back from Resolve arrive as proposals
 - accounts-privacy-legal / Passwords, sessions and failed sign-ins | Errors never blank the screen: they say what is kept and offer to sign in, retry or keep working | an expired sign-in and signing in again
-- dashboard / Projects | Every signed-in person sees who is working in which episode | the dashboard's list of episodes shows who is in each open episode and asks before closing one
+- dashboard / Projects | Every signed-in person sees who is working in which episode | the dashboard's list of episodes shows who is working in each episode (ruling CE2-130), and offers no Close
 - releases-and-updates / Installing an update on an editor's computer | The Android app needs Android 10 or newer and asks for little | the apps updating themselves
+- cards-editor / Opening episodes and keeping the editor running | On a computer the editor window comes with the one app and updates with it ; Timeline Cards opens in the editor window on a computer and in its own app on Android, from the studio's server | the editor window of the one app, its menu and how it updates ("The app on the editor's computer opens the editor in a window of its own")
+- cards-editor / Editing, undo and the cut list | Several people and devices edit one cut list live, and every edit is saved before it counts | the newest 200 revisions and then every tenth ("Every revision of a cut list is kept, thinned rather than lost")
+- cards-editor / Sections and the overview | The assistant writes a one- or two-sentence summary of a section into the cut list, undoably | this piece is the home of section summaries; part 1 points here
+
+## Joins settled
+
+- cards-board F5 | changed: An episode can carry its own description of what counts as fluff ; The chat follows a house style of seven editorial rules, which an episode can replace with its own | the board's setting names "Shortening rubric for an episode" and "House style for an episode"; the chat follows the same episode house style as the board's assistant
+- cards-board F6 | changed: The chat follows a house style of seven editorial rules, which an episode can replace with its own | the list of seven rules dropped, pointing to the board; what the chat does with the style kept
+- cards-editor-1 F6 | changed: The assistant writes a one- or two-sentence summary of a section into the cut list, undoably | renaming a section drops its summary on purpose; an orphan is never guessed onto another section
+- cards-editor-1 F7 | no change here: the span ("up to the next heading of any kind; note rows do not end a section") is already this piece's; cards-editor-1 changes
+- cards-editor-1 F8 | changed: The assistant writes a one- or two-sentence summary of a section into the cut list, undoably | "no marker at frame N" added to the refusals; this piece's sentences and gold "Out of date" chip are the ones used
+- cards-editor-2 F2 | changed: Several people and devices edit one cut list live, and every edit is saved before it counts | the history keeps the newest 200 revisions and then every tenth, pointing to cards-editor-2
+- cards-editor-2 F3 | no change here: the ruling keeps "who made it"; cards-editor-2 changes
+- cards-editor-2 F4 | no change here: cards-editor-2 drops its reload-and-refuse rule; this piece already says a changed cut list is worked out again, never laid over
+- cards-editor-4 F1 | changed: On a computer the editor window comes with the one app and updates with it ; The editor window's links, permissions and downloads ; Timeline Cards opens in the editor window on a computer and in its own app on Android, from the studio's server | installer, portable copy, run-once and "another program in the way" dropped; the window comes from the one app and updates with it; closing the last editor window leaves the app running
+- cards-editor-4 F2 | changed: The app's settings page works with no network and sets the server address ; Timeline Cards opens in the editor window on a computer and in its own app on Android, from the studio's server | the server address field and setting are the Android app's only; the editor window uses the one app's dashboard address
+- cards-editor-4 F3 | changed: On a computer the editor window comes with the one app and updates with it | "on a Mac the editor is used in a browser" dropped; a Mac is the same as Windows
+- cards-editor-4 F4 | no change here: cards-editor-5 changes
+- cards-editor-4 F5 | changed: Timeline Cards opens in the editor window on a computer and in its own app on Android, from the studio's server ; In the editor window and the Android app, kept cut lists are real files in a folder the person can open and move ; On a computer the editor window comes with the one app and updates with it ; The editor window's links, permissions and downloads ; The panel says where things are kept and whether they will stay | "the Windows app" renamed "the editor window" in headings, the storage label and the name and search words; "the Timeline Cards app" kept for Android
+- cards-editor-4 F6 | no change here: cards-editor-5 changes
+- cards-editor-4 F9 | changed: An editor opens the edit chat from the toolbar or, on a phone, from the header ; What remains of these features when the assistant is switched off | the C key added to the ways in, and "C opens nothing" with the assistant off
+- cards-editor-4 F10 | no change here: whole-product adds the two reasons and points here
+- cards-editor-5 F3 | changed: Every signed-in person sees who is working in which episode | presence kept in full ("<who> is in it now", "<who> was last in N min ago", "<who> opened it <how long ago>", occupied while unsent edits wait) because ruling CE2-130 outranks what the product shows (the lead, 2026-11-24); the list itself is pointed to in cards-editor-5
+- cards-editor-5 F4 | changed: Every signed-in person sees who is working in which episode ; The episode list shows which cut lists are kept on this device and opens them with no network ; What works offline and what needs the server | closing an episode and its confirmation dropped; the offline list says only that opening anything else needs the server, and mentions no close buttons
+- cards-footage-in F4 | no change here: cards-footage-in and cards-editor-2 change
+- cards-to-resolve-and-exports F9 | no change here: cards-to-resolve-and-exports changes; this piece already has every import arrive as a proposal
+- whole-product F4 | no change here: whole-product changes; this piece already has one daily budget
+- whole-product F7 | no change here: cards-editor-5 and whole-product change

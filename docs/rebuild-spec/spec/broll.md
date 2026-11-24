@@ -6,7 +6,7 @@ The b-roll archive is the studio's library of footage that is not an interview: 
 
 ### A site switches the b-roll archive on and off
 
-The b-roll archive is one part a site can switch on and off by itself. Switching it off hides it from everyone but an admin and stops its work everywhere: drops being taken in or described stop where they are and keep their place, no computer starts describing, transcribing or downloading what describing needs, and the app on each editor's computer drops every b-roll line, button, notification and setting. Client links answer with the page for a link that is not available. Nothing is deleted: the archive's files, every clip's description, transcript and category, every drop and every client folder with its link stay as they are, and switching the part back on carries on from there, with every client link working again unless it was revoked or has expired.
+The b-roll archive is one part a site can switch on and off by itself. Switching it off hides it from everyone but an admin and stops its work everywhere: drops being taken in or described stop where they are and keep their place, no computer starts describing, transcribing or downloading what describing needs, and the app on each editor's computer drops every b-roll line, button, notification and setting. Client links answer with the page for a link that is not available. Nothing is deleted: the archive's files, every clip's description, transcript and category, every drop and every client folder with its link stay as they are, and switching the part back on carries on from there, with every client link working again unless it was switched off or has run out.
 
 - Who: an admin.
 - Setting: B-roll archive. Does: shows or hides the b-roll archive and client folders for everyone and starts or stops all b-roll work. Default: off. Who: an admin. Applies to: the site. Search words: b-roll, archive, footage library, stock, part, switch.
@@ -225,34 +225,24 @@ A one-off download that describing needs and that is not yet on the computer is 
 
 ### Describing keeps the computer it runs on usable
 
-When the person dropping clips chooses "Only when idle", describing works only while nobody has been at that computer for the computer's quiet time (5 minutes unless changed) and Resolve is closed, as for all shared work (see Work shared out across the computers: When a computer counts as free and able). "Start now", from the page or from the app on that computer, makes a waiting drop work at once until it ends or is paused. The conditions are checked again between every step of every clip, so a person coming back loses at most the step in progress, and the graphics memory used for describing is given back the moment work stops. When the computer cannot tell whether the person is away it counts them as present; when it cannot tell whether Resolve is open it counts it as open.
+When the person dropping clips chooses "Only when idle", describing works only while nobody has been at that computer for the computer's quiet time (5 minutes unless changed) and Resolve is closed, as for all shared work (see Work shared out across the computers: When a computer counts as free and able). "Start now", from the page or from the app on that computer, makes a waiting drop work at once until it ends or is paused. While describing runs on a computer someone is working at, it uses no more than the share of that computer's capacity the site allows such work. Both the start now and the share, with its setting, are in Work shared out across the computers: When a computer counts as free and able, "A computer takes shared work only while nobody is using it". When the person comes back, the clip under way is finished and saved, and no further clip starts until the computer is free again; the graphics memory used for describing is given back the moment work stops. When the computer cannot tell whether the person is away it counts them as present; when it cannot tell whether Resolve is open it counts it as open.
 
-While describing runs on a computer someone is working at, it stays under the site's share of that computer's capacity. At most one describing holds a graphics card at a time: one is stopped before another starts. Making proxies on that computer waits while describing runs, and says so ("indexing b-roll first"). While a computer is describing, or downloading what describing needs, it is kept from sleeping, and a shutdown is met with a warning (see The app on each editor's computer: Settings, records and background work).
-
-- Setting: Share of a working computer that describing may use. Does: caps how much of a computer's capacity background describing takes while someone is working at it. Default: 60%. Who: an admin. Applies to: the site. Search words: capacity, background, usable, indexing load, share.
+At most one describing holds a graphics card at a time: one is stopped before another starts. Making proxies on that computer waits while describing runs, and says so ("indexing b-roll first"). While a computer is describing, or downloading what describing needs, it is kept from sleeping, and a shutdown is met with a warning (see The app on each editor's computer: Settings, records and background work).
 
 ### The computer doing the work shows what describing is doing, and the person at it can pause, resume, start now or cancel
 
-While a computer is describing a drop, the app on it shows one line, in clips:
+While a computer is describing a drop, the app on it shows one line in its menu, in clips, and the buttons that act on the drop are in its settings window while a drop exists: pause, resume, index now, show the progress and cancel. The line's wording and the buttons' labels are in The app on each editor's computer: Telling the editor what is wrong, "The menu carries a line for each piece of work under way".
 
-- a warning for the drop first, when there is one (for example the graphics card refusing for lack of memory);
-- "Downloading the b-roll indexing model… P %";
-- "Indexing b-roll… D of T (stops when you're back)" (without the tail when started with "Start now");
-- "B-roll indexing waits until you're away: N clips queued" (while the person is at the computer or Resolve is open);
-- "B-roll indexing paused: N clips left";
-- "Uploading indexed b-roll is paused: N left" or "Uploading indexed b-roll… N clips left";
-- "N b-roll clips could not be indexed: <first file name> (<reason>), and M more", with up to 20 failed clip names and their reasons in its status.
+What a drop is waiting for is said in words, the first that applies: b-roll indexing is switched off on this computer; "waiting: the sync drive is not connected"; "paused" (by the person, from the app or the page); "waiting: this computer's sync config needs fixing"; waiting for the one-off download describing needs; fetching that download (or the level does not fit, shown once as a warning); nothing to do; "waiting until you're away from the keyboard"; "waiting: DaVinci Resolve is open"; working.
 
-What a drop is waiting for is said in words, the first that applies: b-roll indexing is switched off on this computer; "waiting: the sync drive is not connected"; "paused" (by the person, from the app or the page); "waiting: this computer's sync config needs fixing"; waiting for the one-off download describing needs; "fetching the local indexing model" (or the level does not fit, shown once as a warning); nothing to do; "waiting until you're away from the keyboard"; "waiting: DaVinci Resolve is open"; working.
-
-Buttons while a drop exists: "RESUME B-ROLL INDEXING" when paused; otherwise "INDEX B-ROLL NOW (don't wait until I'm away)" (only while waiting) and "PAUSE B-ROLL INDEXING"; then "SHOW B-ROLL INDEXING PROGRESS" and "CANCEL THE B-ROLL BATCH…".
+What each button answers:
 
 - Index now: "Indexing the b-roll batch now. It keeps going while you work." (or "B-roll indexing is not set up on this computer.")
 - Pause: "B-roll indexing paused. Nothing already indexed is lost."
 - Resume: "B-roll indexing will carry on from where it stopped."
 - Cancel asks "STOP INDEXING THIS B-ROLL BATCH": "<done> of <total> clips are already in the archive and they stay there. The rest will not be indexed. The clips themselves are not deleted." with "STOP INDEXING", then "B-roll indexing stopped."
 
-The progress window "INDEXING B-ROLL" ("Your clips are indexed on this computer and uploaded to the archive. Closing this window does not stop it.") opens from the menu, or by itself when a drop starts or a download begins, shows up to 5 clips that failed with their reasons, and has Pause, Resume, Start now and Cancel (see The app on each editor's computer: Windows, dialogs and notifications). Signing out on the computer stops new work at once. Quitting the app keeps the drop, which carries on where it was at the next start.
+The progress window "INDEXING B-ROLL", whose second line tells the person that closing the window does not stop the work, shows up to 5 clips that failed with their reasons and has Pause, Resume, Start now and Cancel; when it opens by itself and how it is opened again are in The app on each editor's computer: Windows, dialogs and notifications, "Long background work has a progress window the editor can close and reopen". Signing out on the computer stops new work at once. Quitting the app keeps the drop, which carries on where it was at the next start.
 
 - Who: the person at the computer doing the work.
 - Ways in: the app on that computer, the drop on the b-roll page, and the dashboard (see "A person pauses, resumes, starts now or cancels their drop").
@@ -511,9 +501,7 @@ A drop holds at most 2,000 clips: "Only the first N clips were taken: a batch ho
 - it does not fit: a drop that would leave less than the computer's floor of free space (20 GB unless changed) where dropped clips are held is refused whole: "Not enough space where the clips would be staged (<folder>): X GB free, and this drop needs Y GB on top of the Z GB floor. Nothing was staged.", followed by whichever applies: "N GB of that drive is finished b-roll staging: open Settings from the tray icon and use CLEAR FINISHED STAGING"; "N GB of that drive is b-roll staging that was never indexed: open the b-roll page and index or re-drop it, and it is cleared automatically after 7 days"; "N GB more is b-roll staging kept on this computer because the archive does not have those files yet; it is released once they reach it"; "Free some space and it will continue";
 - the holding folder cannot be made: "CC Sync could not create its staging folder: <reason>".
 
-The same one rule (the drop, plus the floor) is used whenever the computer is asked, so a computer never says it can take a drop and then refuses it. A disk whose free space cannot be measured never refuses.
-
-- Setting: Keep this much space free. Does: the one floor of free space on this computer that nothing CC Sync writes there (dropped b-roll and music, proxies, downloads) ever eats into. Default: 20 GB. Who: an editor for their own computer, or an admin. Applies to: a computer. Search words: free space, floor, disk full, staging, reserve.
+The same one rule (the drop, plus the floor) is used whenever the computer is asked, so a computer never says it can take a drop and then refuses it. A disk whose free space cannot be measured never refuses. The floor is the computer's one floor of free space, set as "Keep this much free on the sync drive" (see Sync: Disk space, "Downloads pause when the sync drive is nearly full, uploads never").
 
 ### A drop is filed under a shoot name, suggested and made safe for every computer
 
@@ -566,7 +554,7 @@ A status line with "recheck" shows the state of the app on this computer:
 - "Your CC Sync app needs the update it offers before it can do this. Take the update, then reload this page.";
 - "not reachable: the CC Sync app is not running, or the browser blocked local connections (self-test: open <the app's local status address> in a tab; if that shows ok:true it is the browser, not the app)".
 
-A page that cannot reach the app never claims the app is not running: it names both possibilities and offers the one-click self-test. "The app did not answer", "the app needs updating" and a real refusal are told apart, each with its next step. It is shown in the "Add b-roll" panel.
+A page that cannot reach the app never claims the app is not running: it names both possibilities and offers the one-click self-test (the app's local status address, see The app on each editor's computer: Settings, records and background work, "The product's pages reach Resolve on the editor's computer through the app, and only the studio's pages may"). "The app did not answer", "the app needs updating" and a real refusal are told apart, each with its next step. It is shown in the "Add b-roll" panel.
 
 ### While a drop runs, the person sees its progress and can act on it
 
@@ -614,7 +602,7 @@ If a clip is live on its previews and then its original fails to arrive, the cli
 The files held on a computer for a drop are deleted 7 days after the drop ended, or, for files dropped but never run, once they and the newest of them are older than that. Never deleted: a drop not yet finished, and originals the archive does not have yet. "CLEAR FINISHED STAGING", in the app's settings on the computer, deletes every finished drop at once, never one running or held: "Cleared <N finished staging folders>, <X.X> GB."; when only drops never run are held: "The staging on this computer is <N drops> that were never indexed, so there is nothing FINISHED to clear. Those clear themselves once they are past the staging retention window, or as soon as the drop is run."; otherwise "There is no finished staging to clear on this computer.", and it says how many it kept back. A failure reads "CC Sync could not clear the staging folders. See the log." A folder that cannot be deleted yet (a file still open on Windows) is tried again shortly. The space held is shown on the computer (size, drops, the oldest), with a red line "Finished indexing staging is holding X.X GB on this computer" beside the button, and on the dashboard. An editor can also remove a drop they no longer want from the list of drops.
 
 - Who: the editor on that computer.
-- When the b-roll archive is off: the button and the line count music drops only.
+- When the b-roll archive is off: there is no staging button or line.
 
 ### Copies of a clip already in the archive are found and set aside, never deleted
 
@@ -643,7 +631,7 @@ In Resolve:
 - Refusals first: Resolve cannot be reached (see Resolve on the editor's computer: Connecting to Resolve's scripting: launch, stalls and death), "no project open in Resolve", "no timeline open - create one first".
 - The clip goes into the bin "B-Roll/Archive" in the media pool, made if missing. If Resolve will not make it: "Resolve wouldn't create the B-Roll/Archive bin: the project is locked (or open elsewhere in a collaboration). Unlock it and try again." A clip already in that bin for the same file is used again; otherwise it is imported ("failed to import media at <path>"). A newly imported clip is pointed at the path spelling every computer shares (if Resolve refuses, the local spelling is kept).
 - Append: the In to Out range is appended to video track 1 whatever the timeline's destination buttons say, and checked to have landed. Fact about Resolve: with the video destination button (V1/A1, left of the timeline) off, an append is silently dropped. Messages: "failed to append clip to timeline"; "Resolve reported no error but nothing landed on the timeline. Check the destination track buttons (V1/A1) at the left of the timeline; with the video destination off, an append is silently dropped."; "Inserted <clip name> (<N> frames)".
-- Place at Playhead: reads the playhead (drop-frame aware; the timeline start if it cannot be read), works out how long the clip will be on this timeline (24 fps if the clip's rate cannot be read), and picks the lowest track from V2 up whose video and audio are both free over that span, else one above the highest, adding video and stereo audio tracks as needed. The clip's sound lands on the audio track with the same number as its video track (V3 and A3, for example). Messages: "couldn't read the playhead position from Resolve"; "couldn't read the timeline's tracks"; "couldn't add a <video|audio> track for the overlay - is the timeline locked?"; "placement failed on V<n> at the playhead - something already occupies that span, or the track is locked" (anything that landed in the wrong place is removed); "Placed <clip name> on V<n> at the playhead" plus " (new track)".
+- Place at Playhead: reads the playhead (drop-frame aware; the timeline start if it cannot be read), works out how long the clip will be on this timeline (24 fps if the clip's rate cannot be read), and picks the lowest track from V2 up whose video and audio are both free over that span, else one above the highest, adding video and stereo audio tracks as needed. The clip's sound lands on the audio track with the same number as its video track (V3 and A3, for example). Messages: "couldn't read the playhead position from Resolve"; "couldn't read the timeline's tracks"; "couldn't add a <video|audio> track for the overlay - is the timeline locked?"; "placement failed on V<n> at the playhead - something already occupies that span, or the track is locked" (a clip that lands one frame out is read back and laid again once; only one still not where it belongs after that is removed, with this sentence); "Placed <clip name> on V<n> at the playhead" plus " (new track)".
 - Anything unexpected: "Resolve didn't answer. Make sure a project is open, then try again." A Resolve that does not answer within 90 seconds is given up on, so neither the page nor the app ever hangs on it.
 
 Success shows the app's own message, or "Sent to Resolve." Every outcome either places the clip in the open project or says in plain words why not and what to do.
@@ -661,13 +649,15 @@ When the clip's file is not on this computer, exactly that one file is downloade
 
 A computer downloads at most two clips at once for an editor who is waiting. A third reads "not sent yet: this computer is already downloading as much as it will at once. This one starts as soon as a slot is free": the page shows "Waiting for this computer's other downloads to finish." with the button reading "WAITING…", never as an error and never as success, asks again at the pace the app suggests (at least every second), and starts the moment a slot frees; after 15 minutes it gives up with "This computer has been busy with other downloads for a while. Try again when they have finished." A failure reads "couldn't sync the clip from the NAS: <reason>", and the next send starts again from the beginning. Quitting the app stops every such download ("cancelled - CC Sync shut down").
 
-A clip is fetched this way only on a computer that syncs remotely (a computer wired to the server already sees the NAS itself), and only when the archive is at its usual place on this computer; an editor who points the archive at a folder of their own is told "nothing was fetched: the archive on this computer is in a folder of your own, which CC Sync does not fill" with "file not found at <path> - is the share mounted?". Other refusals, each on the page:
+A clip is fetched this way only on a computer that syncs remotely (a computer wired to the server already sees the NAS itself), not on a computer set to sync nothing, and only when the archive is at its usual place on this computer; an editor who points the archive at a folder of their own is told "nothing was fetched: the archive on this computer is in a folder of your own, which CC Sync does not fill" with "file not found at <path> - is the share mounted?". A file still not there after the copy also reads "file not found at <path> - is the share mounted?". Other refusals, each on the page:
 
 - this computer's sync settings are incomplete (no server named, no folder on the server, or no folder on this computer), each in its own sentence naming which is missing;
 - "can't fetch the clip from the NAS - <detail>";
 - "that file is outside this computer's tree - nothing was downloaded";
 - "this computer's tree isn't mounted right now, so nothing can be downloaded into it - reconnect the drive and try again" (an unplugged external drive, an unmounted macOS volume; when this cannot be told, the download goes ahead);
 - "this computer could not start the download (<error>)".
+
+This one fetch, with its limit of two at once, its wait and its 15-minute give-up, and every refusal above, serves music tracks and downloaded YouTube originals too; each sentence names the item it is fetching (a clip, a track or a video), and each of those pages adds only its own progress lines.
 
 - Ways in: sending a b-roll clip; the same one-file fetch serves a music track sent to Resolve and a downloaded YouTube original brought to the editor's computer.
 
@@ -681,7 +671,7 @@ Both send buttons are disabled while a send is under way. Opening another clip m
 
 ### When the app on the editor's computer cannot be reached or refuses, the editor is told what to try
 
-Unreachable: "Couldn't reach the CC Sync app. It may not be running, or your browser blocked the connection (look for a “local network” permission prompt, or allow it in site settings). Self-test: open <the app's local status address> - if that shows ok:true, it's the browser, not the CC Sync app." followed by where to get the app. Any other refusal: the app's own message, or "The CC Sync app returned HTTP <n>". When the app must be updated first: "Your CC Sync app needs the update it offers before it can do this. Take the update, then reload this page." Resolve's own refusals, and "the Resolve worker failed" when Resolve could not do it, are passed on as they are.
+Unreachable: "Couldn't reach the CC Sync app. It may not be running, or your browser blocked the connection (look for a “local network” permission prompt, or allow it in site settings). Self-test: open <the app's local status address> - if that shows ok:true, it's the browser, not the CC Sync app." followed by where to get the app. The status address is the app's own (see The app on each editor's computer: Settings, records and background work, "The product's pages reach Resolve on the editor's computer through the app, and only the studio's pages may"). Any other refusal: the app's own message, or "The CC Sync app returned HTTP <n>". When the app must be updated first: "Your CC Sync app needs the update it offers before it can do this. Take the update, then reload this page." Resolve's own refusals, and "the Resolve worker failed" when Resolve could not do it, are passed on as they are.
 
 
 ### The dashboard shows whether each computer can take "Send to Resolve"
@@ -748,7 +738,7 @@ Every archive clip, downloaded or own shoot, carries the place and size of its o
 
 ### Editors gather archive clips into client folders, each with its own link
 
-A client folder is a titled, ordered set of archive clips with one link a client opens with no sign-in, seeing previews only. Folders belong to the studio: every signed-in editor can see, change, revoke and delete every folder; who made it is recorded and shown but grants nothing. Each folder is "live" (its tooltip gives the expiry), "revoked" or "expired"; revoked wins over expired.
+A client folder is a titled, ordered set of archive clips with one link a client opens with no sign-in, seeing previews only. Folders belong to the studio: every signed-in editor can see, change, switch off and delete every folder; who made it is recorded and shown but grants nothing. Each folder is "live" (its tooltip gives the expiry), "switched off" or "ran out"; switched off wins over ran out.
 
 - Who: anyone signed in.
 - Name and search words: Client folders. Search words: client folders, share link, client preview, licensing, share footage.
@@ -769,11 +759,11 @@ The link carries 22 random characters, as hard to guess as a 128-bit key. It is 
 
 ### An editor revokes a link, reactivates it, or issues a new one
 
-"Revoke link" (after "Revoke this link? ...") makes the link dead until "Reactivate link". "New link" (after "Issue a new link? The old one stops working immediately.") replaces the link: the old one is dead at once, and a revoked folder becomes live again. Messages: "Link revoked", "New link issued", "Link reactivated", "Failed: <message>". A link already open in a client's browser stops serving at its very next request, a video already playing included.
+"Switch off" (after a question asking the editor to confirm) makes the link dead until "Reactivate link". "New link" (after "Issue a new link? The old one stops working immediately.") replaces the link: the old one is dead at once, and a switched-off folder becomes live again. Messages: "Link switched off", "New link issued", "Link reactivated", "Failed: <message>". A link already open in a client's browser stops serving at its very next request, a video already playing included.
 
 ### An editor writes what the client reads, and sets when the link expires
 
-Title, "Description (shown to the client)", "Contact for licensing (email or a line of text)" and "Link expires": keep current, never, in 7 days, in 30 days or in 90 days, counted from the moment of saving. "Save details" answers "Saved" or "Not saved: <message>". The note under the link says that the link is revoked, or expired, or that it is reachable only inside the studio's private network until an admin sets the public link address, or "Opened N time(s), last <date>." / "Not opened yet.".
+Title, "Description (shown to the client)", "Contact for licensing (email or a line of text)" and "Link expires": keep current, never, in 7 days, in 30 days or in 90 days, counted from the moment of saving. "Save details" answers "Saved" or "Not saved: <message>". The note under the link says that the link is switched off, or ran out, or that it is reachable only inside the studio's private network until an admin sets the public link address, or "Opened N time(s), last <date>." / "Not opened yet.".
 
 ### An editor adds a clip to folders from its thumbnail or from the open clip
 
@@ -783,7 +773,7 @@ The "+" on a thumbnail, or "+ client folder" in the open clip, shows "Add to cli
 
 ### An editor manages the folder list and makes new folders
 
-The list explains that clients see previews only and need no sign-in. The same list also holds the folder links the Footage Sorter makes (see The Footage Sorter and camera cards: Downloading originals and sharing folders) and the delivery links, each marked as what it is. It offers "+ New folder" and "refresh". Each row shows the title, its state, "<n> clips · by <person> · opened Nx" or "never opened"; clicking opens it. Newest first. Empty: "No client folders yet. Make one, then add clips from the + on any thumbnail." Failure: "Could not load client folders: <message>". "+ New folder" asks "Name for the new client folder (the client sees this):"; a blank name warns "A folder needs a title"; otherwise "Created "<title>"" and the folder opens; failure "Could not create the folder: <message>". Escape does not close the list.
+The list explains that clients see previews only and need no sign-in. Besides client folders, the list holds the delivery links, each marked as what it is. The folder links the Footage Sorter makes are not in it: an admin sees them, together with every client folder link, each saying its kind, in the one list of links handed outside the studio, and can switch any of them off there (see The Footage Sorter and camera cards: Downloading originals and sharing folders, "An admin sees every folder link and can switch one off at once"). It offers "+ New folder" and "refresh". Each row shows the title, its state, "<n> clips · by <person> · opened Nx" or "never opened"; clicking opens it. Newest first. Empty: "No client folders yet. Make one, then add clips from the + on any thumbnail." Failure: "Could not load client folders: <message>". "+ New folder" asks "Name for the new client folder (the client sees this):"; a blank name warns "A folder needs a title"; otherwise "Created "<title>"" and the folder opens; failure "Could not create the folder: <message>". Escape does not close the list.
 
 ### An editor captions, orders and removes the clips in a folder
 
@@ -811,13 +801,13 @@ Every opening of a client link adds one to the folder's visit count and records 
 
 ### A client opens a link and sees only what is in that folder, with no sign-in
 
-Everything behind a client link answers on the link alone, read only, and is checked afresh on every request, each piece of media included, against the folder's curated clips. For each clip a client sees only its display name (the file name without its extension), caption, length, frame rate, picture size, codec, shoot date and its visual descriptions (time range, what is seen, setting, motion). A client never sees paths, collection names, transcripts, themes or quality flags, nor anything about clips outside the folder, nor any other page or file of the product: anything else asked for under a link answers as not found. The pages ask search engines not to list, follow or archive them, tell no other site where the visitor came from, and are not kept by the browser. A dead link (revoked, expired, never existed or mistyped) looks the same at every address.
+Everything behind a client link answers on the link alone, read only, and is checked afresh on every request, each piece of media included, against the folder's curated clips. For each clip a client sees only its display name (the file name without its extension), caption, length, frame rate, picture size, codec, shoot date and its visual descriptions (time range, what is seen, setting, motion). A client never sees paths, collection names, transcripts, themes or quality flags, nor anything about clips outside the folder, nor any other page or file of the product: anything else asked for under a link answers as not found. The pages ask search engines not to list, follow or archive them, tell no other site where the visitor came from, and are not kept by the browser. A dead link (switched off, ran out, never existed or mistyped) looks the same at every address.
 
 - Who: a client holding a link.
 
 ### A dead client link shows a page that says so and whom to ask
 
-"THIS LINK IS NOT AVAILABLE", "The footage preview you were sent has been closed, has expired, or the address is not quite right.", then, for an unknown link, "Please contact whoever sent it to you for a fresh link."; for a revoked or expired folder, "Please ask <maker> at <contact> for a fresh link.", "Please ask <maker> for a fresh link." or "Please contact <contact> for a fresh link.", as known. Nothing else about the folder is shown.
+"THIS LINK IS NOT AVAILABLE", "The footage preview you were sent has been closed, has expired, or the address is not quite right.", then, for an unknown link, "Please contact whoever sent it to you for a fresh link."; for a folder switched off or run out, "Please ask <maker> at <contact> for a fresh link.", "Please ask <maker> for a fresh link." or "Please contact <contact> for a fresh link.", as known. Nothing else about the folder is shown.
 
 ### A client sees the folder as a page of previews with the studio's contact for licensing
 
@@ -844,7 +834,7 @@ Besides the preview link, an editor can give a client a delivery link to chosen 
 
 ### Admins are warned before a client link expires
 
-Admins are warned "a client link is about to expire" when a client folder's link that has not been revoked expires within 7 days. Links already expired are not raised. Admins are also warned "a b-roll indexing job has stopped" when a drop waiting or being described has shown no sign of life for 24 hours.
+Admins are warned "a client link is about to expire" when a client folder's link that has not been switched off runs out within 7 days. Links that have already run out are not raised. Admins are also warned "a b-roll indexing job has stopped" when a drop waiting or being described has shown no sign of life for 24 hours.
 
 - Who: an admin.
 - When the b-roll archive is off: neither warning is raised.
@@ -865,7 +855,7 @@ Clips, descriptions, transcripts, categories, drops and client folders that peop
 
 ### Search never stops because of an update
 
-An update of the product never switches the archive's search off: search keeps answering from the data it has until the new data is complete and checked, and the switch to it happens in one step. When the archive cannot work (for example its search data cannot be read by this version of the product), the archive is shown as not working, with the reason, wherever the state of each part is shown, never as switched off or absent, and admins are told what to do first.
+An update of the product never switches the archive's search off: search keeps answering from the data it has until the new data is complete and checked, and the switch to it happens in one step. When the archive cannot work (for example its search data cannot be read by this version of the product), the archive is shown as not working, with the reason, wherever the state of each part is shown, never as switched off or absent, and admins are told what to do first. The same holds when the secret that guards adding clips to the archive is a weak one an admin supplied: the archive is shown as not working, saying that no usable secret is set, so adding to the index cannot be guarded, and the admin can let the server make one or switch the b-roll archive off (see The server: installing it and keeping it running: Settings and secrets, "Adding clips to the b-roll index is always guarded"). Client links keep working through it, as through any other failure (see "Client links keep working when something else fails").
 
 #### Lessons
 

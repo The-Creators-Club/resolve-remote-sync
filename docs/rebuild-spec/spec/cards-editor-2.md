@@ -41,6 +41,8 @@ An edit made by one editor while another editor's edit has changed the same thin
 
 {{39-041}}
 
+Except that an edit is never refused because the file changed on disk: there is no reload and no sentence asking the editor to redo the edit. A change found in the file is merged in as edits first and the edit is applied on top of it (see "The cut list file can be edited by hand, and the editor merges the change"), so nothing made in the editor meanwhile is lost.
+
 An edit the server has confirmed survives a second writer, an undo racing it, and a crash at any moment. When the same cut list is saved from two places at once, both changes are kept, or the second is refused and the conflict is shown to both people.
 
 - Exact: yes
@@ -69,7 +71,7 @@ Every edit can be undone and redone. Undo is refused when someone has since chan
 
 ### Every revision of a cut list is kept, thinned rather than lost
 
-Before each save the previous version of the cut list is kept in its history. The newest 200 revisions are all kept; older ones survive when their revision number is a multiple of 10, so a damaged or unwanted cut list can always be put back to an earlier revision.
+Before each save the previous version of the cut list is kept in its history. The newest 200 revisions are all kept; older ones survive when their revision number is a multiple of 10, so a damaged or unwanted cut list can always be put back to an earlier revision. Each revision keeps when it was made and who made it: a person's device, a hand edit of the file, or the editor's own automatic work. That is how Undo knows which edits are a person's own.
 
 ### After an edit, the head stays on the same moment of the same clip
 
@@ -167,6 +169,8 @@ Rules for every new cut, and for fixes made in the file by hand:
 
 {{28-074}}
 
+Except that a new gap is never put at the end of the cut: one that would land after the last item (the head in the last item's second half, or past the end of the cut) is refused, with a sentence saying a gap cannot go at the very end of the cut.
+
 {{29-021}}
 
 A gap's length, in the cut or in a saved sequence, is at least 1/24 s ("a gap shorter than a frame is no gap -- delete it instead").
@@ -209,7 +213,7 @@ A gap's length, in the cut or in a saved sequence, is at least 1/24 s ("a gap sh
 
 - Whenever an edit changes a cut's clip, in point or out point (in the cut or on the shelf), or adds a cut, the cut's words are taken again from its clip's word timings and its paragraph reference is found again, and every open device and the cut list file agree. This update is not an undo step of its own: undoing a trim moves the span back and the words follow again.
 - A word counts when its midpoint is inside the cut; a cut too short to hold any midpoint takes whatever words it touches. This one rule decides, everywhere a cut's words are shown, whether a word at its edge belongs to it. Pause markers "(...)" are removed and spaces collapsed. If no words lie there, the cut keeps the text it has.
-- The words are spelled as the transcript spells them, not as the speech-to-text heard them, wherever the transcript's paragraph lines up with the spoken words (letters compared, Simplified and Traditional alike, at least 40 % matching); filler the transcript left out is dropped. Elsewhere the speech-to-text's spelling stays.
+- The words are the transcript's own timed words for that span, in the transcript's own wording and characters. They are tied to their times directly and never found again by matching text (see Timeline Cards: footage in, ready to cut: The transcript and its English, "One file per interview holds the whole transcript").
 - A plain paragraph reference is found again as the paragraph the span overlaps most (at least 0.35 s or 30 % of the paragraph); a reference typed by hand that points somewhere else is never replaced.
 - Highlights still inside the new words are kept, fitted to the surviving words; one made meanwhile is not wiped.
 - On the page the lane's text for a trimmed cut changes at once, before the confirmed update arrives.
@@ -291,13 +295,13 @@ Within a moment of the last confirmed edit, and when the cut list is put away, t
 A change made to the file in a text editor is noticed within 2 seconds, when the cut list opens, and before every write. A file still reading the same as the last write is ignored.
 
 - A file that cannot be read is looked at twice more (the person may still be typing); then a copy is kept aside and every device is told: "the file has a line I cannot read: line N: <reason>. A copy is kept aside; the editor's version stands and is written back on the next edit".
-- A file that reads is compared with what the editor last wrote and turned into edits applied on top of the current cut list, then rewritten keeping the person's formatting where possible. Rows are matched by their ids; a row whose id line was deleted is matched back (cuts by clip and span: exact, one inside the other, then overlapping, ties to the nearest in order; headings, note rows, bench sections and gaps by kind and words, gaps by length). Only then is a row new.
+- A file that reads is compared with what the editor last wrote and turned into edits applied on top of the current cut list, then rewritten keeping the person's formatting where possible. Rows are matched by their ids; a row whose id line was deleted is matched back (cuts by clip and span: exact, one inside the other, then overlapping, ties to the nearest in order; headings, note rows and gaps by kind and words, gaps by length; bench sections, that is shelves, saved sequences and the alternates section, by kind and name). Only then is a row new.
 - What a hand edit can change: the title, clip facts, the timeline's name and the hand-over stamps; new cuts, headings, note rows and bench sections; a clip name, speaker or link fixed by hand; removed headings and sections; the order (merged so only what the file moved moves); each cut's edges, fades, gain, colour, note and highlights; each gap's length and note; each heading's summary.
-- A cut bullet removed from the cut goes to a shelf, never lost; one removed from the bench is really removed. A cut whose new span cannot be reached by moving its edges is replaced whole.
+- A cut bullet removed from the cut goes onto the shelf named after its section, exactly as a deleted cut does (see "Deleting stages cuts on the shelf under their section's name and takes gaps out"), never lost; one removed from the bench is really removed. A cut whose new span cannot be reached by moving its edges is replaced whole.
 - Ignored and written back as they were: a cut's words, its "(12.4s)" length and its transcript link text; the episode, root, board, rate, drop-frame, start and timing facts at the top ("the frontmatter's X was edited; no edit can change it, so it is kept as it was").
 - The person is told "merged an edit made to the file outside the editor (N change(s))"; or "the file was edited outside the editor, but nothing in the edit changes the cut (the words are written from the transcript), so it was written back as it was"; plus "K of the file's changes no longer apply and were skipped: <up to 5 reasons>" and up to 5 warnings. A merge that could not be saved is tried again at the next look; the same file after a crash gives the same edits, which can never apply twice.
 - An edit an editor made against the copy the hand edit replaced is refused with its sentence where it clashes with the hand edit, never merged silently.
-- Changes brought back from the editing program into a cut list follow these same rules: a cut removed there waits on a shelf, and only what changed moves (see Timeline Cards: the hand-over to Resolve, and exports: Bringing Resolve's changes back into the cut).
+- Changes brought back from the editing program into a cut list follow these same rules, as the one way a changed cut list becomes edits: a cut removed there waits on the shelf named after its section, and only what changed moves (see Timeline Cards: the hand-over to Resolve, and exports: Bringing Resolve's changes back into the cut).
 
 
 ### A cut list holds the cut, the bench and the timeline's facts
@@ -310,7 +314,7 @@ A cut list has the timeline's facts, an optional title, the cut's rows in order,
 - A heading is a section (default colour Blue), a note heading (default colour Green) or a plain heading (no colour); it has a title, a marker colour, and optionally a summary of its section written by the assistant, with a mark of the words it was written from, so a changed section can read "out of date".
 - A note row is a direction card or an "unmatched" line, one line of text (it may be empty).
 - The bench, always after the cut: shelves (each named by its category; the unnamed one is the plain shelf; holding cuts, note rows and gaps), saved sequences (a run kept whole with its gaps and note rows), and the alternates section, kept as it is. Each has a name, its title as read, and a colour.
-- Timeline facts: the edit count, when and by what it was written, the episode, the episode's root folder, the planning board it came from, the Resolve timeline's name, when it was handed over and when it was last updated from the timeline, the timeline rate (default 29.97), drop-frame (default on for a new list), the start timecode (default 01:00:00:00), whether the text was timed by words or by subtitle cues, and per clip its rate, start timecode and Resolve id (hints for exports only).
+- Timeline facts: the edit count, when and by what it was written, the episode, the episode's root folder, the planning board it came from, the Resolve timeline's name, when it was handed over and when it was last updated from the timeline, the timeline rate (default 29.97), drop-frame (default on for a new list), the start timecode (default 01:00:00:00), whether the text was timed by words or by subtitle cues, and per clip its rate, start timecode and Resolve id. The per-clip rate and start are used wherever Resolve's project does not know the clip (exports, and a clip a send brings into the project); a value a person sets there by hand is never overwritten by a later automatic pass.
 - Times are seconds, never frames; frames appear only in exports. Every edit rounds what it writes to 6 decimal places; a time beyond 1,000,000,000 seconds is refused ("X is past 1 000 000 000 seconds -- no clip is that long").
 - Limits: the shortest cut or gap an edit may leave is 1/24 s (a file may hold a shorter cut, such as one 29.97 frame); category and sequence names at most 60 characters; gap notes at most 2000 characters; summaries at most 4000.
 - A new cut list is empty, edit count 0, 29.97 drop-frame, starting 01:00:00:00, timed by words.
@@ -478,13 +482,13 @@ Every note lives in the cut list as an ordinary undoable edit that reaches every
 
 - Exact: yes
 
-### Notes on cards and gaps while a cut is worked on a live timeline
-
-Where a cut is being worked on a live timeline in the editing program (see Timeline Cards: the hand-over to Resolve, and exports: Edits sent live and staged edits), these rules hold for notes:
+### Notes on cards and gaps go with the cut when it is handed over
 
 {{40-018}}
 
-- When the help for the editing program is off: there is no live timeline; notes are only the cut list's own.
+Except that a cut is never worked on a live timeline in Resolve: a cut is edited only as a cut list, and every note is the cut list's own (above). So the refusals "no timeline is open" and "that cut is no longer on the timeline", notes on cards that exist only in a draft, and notes following a card re-identified on a timeline do not arise. What holds is the last rule: when a cut is handed to Resolve, each gap's note is taken fresh at that moment from what is saved (see Timeline Cards: the hand-over to Resolve, and exports: Undo, markers, titles, fades and properties, "A note on a gap arrives as on-screen text over the gap").
+
+- When the help for the editing program is off: nothing is handed over; notes are the cut list's own.
 - Exact: yes
 
 ### Phrases on a card or a shelf card can be highlighted, and must be the card's own words
@@ -638,6 +642,8 @@ A new empty category has a cleaned name (one line; leading spaces, colons, slash
 ### Everything set aside is listed beside the cut
 
 Every cut on the shelf, in a shelf category or among the alternates is listed and never dropped, with its clip, span, person, words, English, colour, length and category. Categories are listed in the order they appear in the cut list, empty ones included. Each saved sequence is listed whole: its cuts (with the black before each, fades and gain and English), how many, its total length, and its note lines.
+
+There is no swap: a card of the alternates section (such as an alternate take the board handed over) is put into the cut the way a staged card is, by unstaging it at a place (see "Moving, staging, unstaging and throwing away cuts follow fixed rules"), and the cut it is an alternative to stays until someone moves it.
 
 ### The Sequences tab lists every saved sequence with a preview of its cuts
 
@@ -888,7 +894,7 @@ The picture follows the editor's playhead and playback speed (including varispee
 
 ### Every clip is made ready to play without anyone asking
 
-Each clip's small playback copies (its light sound, its small picture and its waveform) are made by themselves when the clip arrives in the episode, and for any clip still without them when a cut list is opened, before anyone plays or downloads it. Every clip whose media exists plays and shows its waveform with no export step and nothing for a person to start. While copies are still being made, the editor shows progress clip by clip. Sound is always made ready before pictures. Playing a clip that is not ready yet moves its preparation to the front, rather than starting more work at once; making copies never runs so much at once that the disks are starved.
+Each clip's small playback copies are made by themselves when the clip arrives in the episode (which copies each clip gets, an interview's and a montage clip's, is said in Timeline Cards: footage in, ready to cut: Footage files and files made from them, "Every interview gets a small preview exactly as long as its sound"), and for any clip still without them when a cut list is opened, before anyone plays or downloads it. Every clip whose media exists plays and shows its waveform with no export step and nothing for a person to start. While copies are still being made, the editor shows progress clip by clip. Sound is always made ready before pictures. Playing a clip that is not ready yet moves its preparation to the front, rather than starting more work at once; making copies never runs so much at once that the disks are starved.
 
 ### The browser is given light copies, never the camera originals
 
@@ -899,7 +905,7 @@ Each clip's small playback copies (its light sound, its small picture and its wa
 
 ### The editor finds each clip's sound by itself and lists the clips it cannot play
 
-For each clip a cut list names, the editor plays, best first: the light copy of the interview's reference sound recording; the reference recording itself while that copy is not ready; the interviewee's multicam sound file; or the sound taken from the clip's own video (used for news montages). A clip named after a video file is found by its name without the file ending, and a clip name too long for the disk still finds its file. A clip whose transcript is an excerpt of another transcript plays the other's recording (following up to 3 such links). A clip whose only text is a subtitle file beside its media plays, shows those words on its cards, and opens a transcript built from the cues. Only files that exist are matched, and a clip name never reaches outside the episode.
+For each clip a cut list names, the editor plays, best first: the light copy of the interview's reference sound recording; the interviewee's multicam sound file; or the sound taken from the clip's own video (used for news montages). A clip whose light copy is not ready yet is never played from the full-size recording instead: it is shown as being made, dimmed and asked again (see "A clip whose sound is still being prepared is dimmed on the lane"). A clip named after a video file is found by its name without the file ending, and a clip name too long for the disk still finds its file. A clip whose transcript is an excerpt of another transcript plays the other's recording (following up to 3 such links). A clip whose only text is a subtitle file beside its media plays, shows those words on its cards, and opens a transcript built from the cues. Only files that exist are matched, and a clip name never reaches outside the episode.
 
 The editor can list the sound of every clip a cut list uses (in the cut and on the bench, in first-use order) and of every clip an episode has, each with its length, rate and channels; clips with no sound, or whose sound cannot be read, are listed as missing ("no audio track"). Sound plays from any point. Sound already made still plays when the original media can no longer be reached. A clip whose sound cannot be decoded gives up after 20 seconds, and making a whole sound copy gives up after 10 minutes; either says why.
 
@@ -907,7 +913,7 @@ The editor can list the sound of every clip a cut list uses (in the cut and on t
 
 ### A clip whose sound is still being prepared is dimmed on the lane
 
-While a clip's sound copy is being made, the clip is dimmed on the lane and the page asks again until it is ready. A clip's sound is in one of these states: ready, being made, failed (with the reason), or none (its media cannot be reached).
+While a clip's sound copy is being made, the clip is dimmed on the lane and the page asks again until it is ready. A clip's sound is in one of these states: ready, being made, failed (with the reason), or none (its media cannot be reached). A copy that neither the studio's computers nor the server could make reads "failed" with the reason on the clip, never "given up"; when the editor asks for that copy again later, as each copy below says, that is a new piece of work (see Work shared out across the computers: Choosing who runs what, "Media for Timeline Cards is made by the studio's computers first, and by the server when none can").
 
 
 ### Each clip's picture copy comes from its own media, and a failure is remembered until the media changes

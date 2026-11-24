@@ -13,7 +13,7 @@ Every clip of video, stills or image sequences gets a picture, and every video a
 - A picture is taken from, in order of preference: an image sequence's first image; a playable proxy; a playable original; a still preview file the camera wrote beside it; an original that is itself an image; the preview a raw still camera embeds in its file (nothing is developed); any other playable or image file.
 - A video's picture is the frame 1 second in, or the first frame of a clip shorter than that.
 - A filmstrip has one frame for every 10 seconds of the clip, at least 12 and at most 50, each 160 pixels wide, made ahead of time as one small image of tens of kilobytes. Each frame comes from a later point than the one before, spread evenly to the end of the clip. A filmstrip found to have been made wrongly (for example, frames bunched at the start) is made again.
-- Sound files, "other" files and project files get no picture: a sound clip shows an audio card, an "other" clip a placeholder for its kind. A Blackmagic RAW recording with no proxy beside it, never seen on a card, shows the placeholder for its kind until a proxy exists.
+- Sound files, "other" files and project files get no picture: a sound clip shows an audio card, an "other" clip a placeholder for its kind. A camera raw recording (Blackmagic RAW, RED or any other) with no proxy beside it, never seen on a card, shows the placeholder for its kind with words saying it has no proxy yet; its picture and filmstrip are made from the proxy as soon as one appears beside it, with no wait for a retry or the 6-hour fill-in below.
 - Names with spaces, accents or Chinese characters make no difference.
 - Any picture or filmstrip still missing is made on its own, at the latest within 6 hours, and after every look through the folders.
 - A picture that cannot be made counts as "no picture". It is tried again after an hour, or sooner if the file changes, and never again just because the server restarted.
@@ -76,7 +76,7 @@ The Footage Sorter is one of the dashboard's pages, reached from its menu and it
 
 ### What needs an admin and what needs only a sign-in
 
-Sorted originals move into their final folders on their own, with no one approving them (see Moving footage on the NAS). Only an admin may change a drive's details, read a drive or a folder into the record of every copy, or add, remove or change a watched folder; answer a question about where footage went; change the cloud backup schedule or start a cloud backup; back up the record of every copy; copy between drives or cancel such a copy; add or remove a source folder; change the Sorter's settings; make, see and switch off folder links. Anyone signed in may assign clips, edit planned folders, put a moved clip back or move it elsewhere, start looks through the folders and audits, copy cards and download originals. A person who is not an admin and tries one of the admin acts is told "<what> needs an admin of this dashboard".
+Sorted originals move into their final folders on their own, with no one approving them (see Moving footage on the NAS). Only an admin may change a drive's details, read a drive or a folder into the record of every copy, or add, remove or change a watched folder; answer a question about where footage went; change the cloud backup schedule or start a cloud backup; back up the record of every copy; copy between drives or cancel such a copy; add or remove a source folder; plan every episode's folders, and every interviewee's folder, at once (see Sorting into shoots, people and cameras); change the Sorter's settings; make, see and switch off folder links. Anyone signed in may assign clips, edit planned folders, put a moved clip back or move it elsewhere, start looks through the folders and audits, copy cards and download originals. A person who is not an admin and tries one of the admin acts is told "<what> needs an admin of this dashboard".
 
 - Who: as above.
 
@@ -84,8 +84,8 @@ Sorted originals move into their final folders on their own, with no one approvi
 
 For a short while after the server starts, the Sorter is getting its records ready. A page or action asked for meanwhile waits rather than failing, for up to 2 minutes, and is then answered "the footage sorter is still loading: try again in a moment".
 
-- If its records cannot be loaded, the Sorter leaves the menu, and the overview's state of the parts says "the footage sorter could not load its data (<error>)".
-- When the folder the studio's footage lives in is not mounted on the server, the Sorter does not come up, and the overview's state of the parts says the footage folder is not mounted.
+- If its records cannot be loaded, the Sorter keeps its place in the menu, and opening it shows a page saying it is not working right now, why, and that admins have been told; it is also on the list of problems the server found, and the overview's state of the parts says "the footage sorter could not load its data (<error>)".
+- When the folder the studio's footage lives in is not mounted on the server, the Sorter does not come up: opening it shows the same page, saying the footage folder is not mounted, and the overview's state of the parts says the footage folder is not mounted.
 
 ### The folders the Sorter works with
 
@@ -147,7 +147,7 @@ New footage in any source folder or the final tree is noticed within about 20 se
 - A deleted folder's clips go. A drive that is unplugged, or a share that is not mounted, changes nothing: its clips stay as they were.
 - The Sorter's status shows when the last check ran, how many folders it checked, how many had changed, and how many files are still arriving.
 - An open page stops asking while its tab is hidden, while a look through the folders runs, and while a folder is being named; it asks at once when it comes back.
-- Cards arriving in a reader, leaving it, and copying show in every open Sorter page as they happen; if the page loses its connection it is back within about 2 seconds. A card that the app on the editor's computer opens the Sorter for is shown straight away in that page, in the card's own view.
+- Cards arriving in a reader, leaving it, and copying show in every open Sorter page as Recognising cards and drives says (see "Every card put in a reader appears within seconds, with no click"), and a card the app on the editor's computer brings the Sorter up on is shown as "When a card goes in, the Footage Sorter comes up on it" says there.
 - On its own: when a clip has finished arriving (unchanged across two checks).
 - By hand: a person can have chosen folders read again at once (below).
 
@@ -161,9 +161,9 @@ From any folder in the source tree or the destination tree, a person asks for it
 
 A full look reads every source folder and the final tree and lists every clip. It never changes footage.
 
-- It runs when a person presses Rescan, after every move, after every card copy, every night at 03:30 site time, and once when the Sorter is first switched on.
+- It runs when a person presses Rescan, after every move, after every card copy, every night at 03:30 in the studio's time zone, and once when the Sorter is first switched on.
 - Only one runs at a time: asking again while one runs says so and shows the count it has reached.
-- While it runs the header shows "Scanning…" and the clip count found so far, and the page stays usable and keeps loading however long the look takes.
+- While it runs the header shows "Scanning…" and the clip count found so far, and the page follows the look until it ends, staying usable and loading however long the look takes.
 - A source folder that is missing is reported as unavailable, a file where a folder was expected as not a folder, and a folder that cannot be read as unreadable, with the reason. The look carries on with the rest, and up to 50 such warnings are shown.
 - If the look fails, the list from the last look stays and the error is shown.
 - Afterwards the status shows the clip count, total size, when it started and finished, any error, the warnings, and a one-line account of footage found moved or renamed outside the Sorter (see Moving footage on the NAS).
@@ -173,7 +173,7 @@ A full look reads every source folder and the final tree and lists every clip. I
 
 ### The Sorter's work through the day and night
 
-Without being asked, the Sorter: notices new footage within about 20 seconds; re-reads the final tree about every minute; re-reads the studio's calendar about every 15 minutes; makes missing pictures; stops showing a card no computer has reported for 30 minutes; makes a full look every night at 03:30; backs up the record of every copy every night at 04:00; and walks the whole footage share on the NAS every night at 04:30 to bring the record of every copy up to date (see The record of every copy). All times are the site's time.
+Without being asked, the Sorter: notices new footage within about 20 seconds; re-reads the final tree about every minute; re-reads the studio's calendar about every 15 minutes; makes missing pictures; stops showing a card no computer has reported for 30 minutes; makes a full look every night at 03:30; backs up the record of every copy every night at 04:00; and walks the whole footage share on the NAS every night at 04:30 to bring the record of every copy up to date (see The record of every copy). All times are in the studio's one time zone (see The server: installing it and keeping it running: NAS speed, load and clock, "Schedules run on the studio's own clock").
 
 - If any of these fails, it tries again at its next turn, and the Sorter's status shows which one failed, when, and why, beside when it last succeeded. A nightly job that fails two nights running is a problem the server found.
 
@@ -181,12 +181,12 @@ Without being asked, the Sorter: notices new footage within about 20 seconds; re
 
 The destination tree shows the folders of the final tree, never files, down to 8 levels, in the Sorter's name order. It leaves out hidden folders, names starting with "$", system folders, and folders called Proxy, Render in place or Renders in place (any letter case). Planned folders that do not exist yet are merged in and marked as planned. When time folders are on, the time folders the assignments would make are listed under each destination. An empty folder looks different from one holding footage.
 
-- It is re-read about every minute, and at once after a look through the folders, a move or a card copy.
+- It is re-read about every minute, and at once after a look through the folders, a move, a card copy, a change to assignments or an audit.
 - With no final tree set, it is empty.
 
 ### Folder names sort in one fixed order that handles Chinese
 
-Folder names, groups and planned folders sort in British English order: spaces before punctuation, then symbols, digits, Latin letters, other scripts, and then Chinese characters by radical and stroke count. Accents count before letter case, and lower case comes before upper. Characters outside this order come last, by character code. This order also decides which of two shoots at the same time is the one called "(2)".
+Folder names, groups and planned folders sort in British English order: spaces before punctuation, then symbols, digits, Latin letters, other scripts, and then Chinese characters by radical and stroke count. A run of digits in a name sorts by its value, so "Day 2" comes before "Day 10". Accents count before letter case, and lower case comes before upper. Characters outside this order come last, by character code. This order also decides which of two shoots at the same time is the one called "(2)".
 
 ### Opening the page asks where to look and loads little
 
@@ -212,15 +212,14 @@ The layout is chosen before the page is first drawn, so a phone never sees the d
 
 ### On a desk the sources, the clips and a panel sit side by side
 
-The desk layout shows three areas at once: the sources (computers, their folders and cards), the clip grid, and a panel holding the destination folders, the calendar events, the selected clip's details, the audio worklist, the missing-footage checks and the crew's card tracker. A header carries the totals and the main actions; a toolbar carries search, filters, sort and the actions on selected clips. A line of hints reminds the person of the mouse and key moves ("click · ctrl+click · shift+click · drag box", "drag onto a destination folder to assign", "[ ] suggestion  Ctrl F search  Ctrl + Ctrl − size") and reads SORT, or COPY while an open card shows a copy running.
+The desk layout shows three areas at once: the sources (computers, their folders and cards, and the drives list), the clip grid, and a panel holding the destination folders, the calendar events, the selected clip's details, the audio worklist, the missing-footage checks, the crew's card tracker and the activity panel (the drives list and the activity panel are described under The record of every copy). A header carries the totals and the main actions; a toolbar carries search, filters, sort and the actions on selected clips. A line of hints reminds the person of the mouse and key moves ("click · ctrl+click · shift+click · drag box", "drag onto a destination folder to assign", "[ ] suggestion  Ctrl F search  Ctrl + Ctrl − size") and reads SORT, or COPY while an open card shows a copy running.
 
 - The sources area and the panel can be resized by dragging the border between them (sources between 150 and 560 pixels wide, the panel between 200 and 640).
 - The sources area can be hidden, and the clips then fill its space; one control brings it back. Widths, whether the sources are hidden, and the last panel opened are remembered on that browser.
-- Managing the studio's known drives is in the Sorter's settings, not on the sorting screen.
 
 ### On a phone the Sorter shows one of three views at a time
 
-The phone layout shows one view at a time, switched from a bar that never moves: Source, Clips (its button carries the clip count) and Folders (the destination folders and every other panel). The phone opens on Clips.
+The phone layout shows one view at a time, switched from a bar that never moves: Source (the computers, their folders and cards, and the drives list), Clips (its button carries the clip count) and Folders (the destination folders and every other panel, the activity panel included). The phone opens on Clips.
 
 - Leaving Clips adds one step to the browser's history, so the phone's back gesture or button returns to Clips; moving between Source and Folders adds no more steps.
 - Pressing a folder row in either tree filters the clips and goes to Clips by itself.
@@ -419,16 +418,13 @@ Except for the first three, keys do nothing while typing in a box or with a dial
 
 ### The Sorter's settings
 
-Every setting of the Sorter is on the Sorter's settings, besides the folders above, and only an admin changes them, except card names. The studio's calendar is read again every 15 minutes, and the crew's list of cards every 15 minutes. A card copy does not start unless it leaves at least 256 MB free on the drive it copies to.
+Every setting of the Sorter is on the Sorter's settings, besides the folders above. Only an admin changes the settings that apply to the whole site, except card names. The settings that apply to one computer (watching for cards and drives, field backup and its folder, the places to copy cards to, resting field drives during long copies; see Recognising cards and drives and Copying a card) are also changed by the editor for their own computer. The studio's calendar is read again every 15 minutes. Every time the Sorter reads, shows or schedules follows the studio's one time zone (see The server: installing it and keeping it running: NAS speed, load and clock, "Schedules run on the studio's own clock"). Whether a card copy brings the camera's proxies is chosen for each copy (see Copying a card, "Camera proxies come off a card only when asked").
 
-- Setting: Studio time zone. Does: the time zone every recording time and calendar time is read in when footage is matched to the studio's calendar, as a fixed offset with no daylight saving. Default: the site's own time zone, set when the part is switched on. Who: an admin. Applies to: the site. Search words: time zone, offset, clock, calendar times.
+- Room kept spare on a place to copy to: the free space a card copy leaves untouched on each place it copies to (see Drives, speed and interruptions, "Room and path length are checked before anything moves").
 - Setting: Calendar events from. Does: the earliest date of the studio's calendar events that are read. Default: the day the part is switched on. Who: an admin. Applies to: the site. Search words: calendar start, events from, earliest event, date.
 - Setting: Calendars read. Does: which of the studio's calendars the Sorter reads events from. Default: the connected account's main calendar. Who: an admin. Applies to: the site. Search words: calendars, which calendar, events, account.
-- Setting: Time folders. Does: whether each assigned folder gets one folder per day and camera (see Sorting into shoots, people and cameras). Default: off. Who: an admin. Applies to: the site. Search words: time folders, per day, per camera, day folders.
+- Setting: Time folders. Does: whether each assigned folder gets one folder per day and camera (see Sorting into shoots, people and cameras). Default: off on a new site; this studio's own value is carried over. Who: an admin. Applies to: the site. Search words: time folders, per day, per camera, day folders.
 - Setting: Camera labels. Does: the label each kind of camera gets in time folder names (for example a label for each camera model the studio shoots on, one for drones, one for sound). Default: none until set; the studio's own labels are carried over. Who: an admin. Applies to: the site. Search words: camera labels, A-CAM, camera names, angle names.
-- Setting: Bring the camera's proxies with a card copy. Does: whether a card copy also copies the proxies the camera wrote, into a folder named "proxy" beside the footage. Default: on. Who: an admin. Applies to: the site. Search words: camera proxies, card copy, proxy folder, bring proxies.
-- Setting: Count an unverified card copy as done. Does: whether a card copy that could not be checked may still count as finished. Default: off. Who: an admin. Applies to: the site. Search words: unverified copy, verify, checked copy, done.
-- Setting: Same name, different file. Does: what a card copy does when a file of the card has the name of a different file already there: keep both (the incoming one is renamed) or skip the incoming file. Default: keep both. Who: an admin. Applies to: the site. Search words: name clash, same name, duplicate name, keep both.
 - Setting: Card names. Does: the label written on each card, given to its serial number (see Recognising cards and drives). Default: none. Who: anyone signed in. Applies to: the site. Search words: card names, card labels, serial number, SD card.
 - Name and search words: Footage Sorter settings. Search words: sorter settings, card copy settings, calendar, time folders.
 
@@ -531,7 +527,7 @@ Share folder… ("Make a link for a folder that anyone you send it to can downlo
 
 ### An admin sees every folder link and can switch one off at once
 
-Links lists every link ever made that hands footage to people outside the studio, newest first: the Sorter's folder links, and the b-roll archive's client folder links when that part is on, each saying which kind it is. For each: its name or folder, "<folder>  ·  by <who>  ·  opened <n> time(s)  ·  until <date>" (or "no end date"), and "switched off" or "ran out" when it is no longer active. It also shows when each was made, when it was last opened and when it was switched off. Active links have Show link and Switch off ("Link switched off"; "Could not switch it off: <reason>"); a link switched off stops opening at once. "Loading…", "No links yet.", "The links could not be loaded: <reason>".
+Links is the one list of every link ever made that hands footage to people outside the studio, newest first: the Sorter's folder links, and the b-roll archive's client folder links, each saying which kind it is. An admin reaches it while either the Footage Sorter or the b-roll archive is on, and it holds the links of whichever of the two is on. For each: its name or folder, "<folder>  ·  by <who>  ·  opened <n> time(s)  ·  until <date>" (or "no end date"), and "switched off" or "ran out" when it is no longer active. It also shows when each was made, when it was last opened and when it was switched off. Active links have Show link and Switch off ("Link switched off"; "Could not switch it off: <reason>"); a link switched off stops opening at once. "Loading…", "No links yet.", "The links could not be loaded: <reason>".
 
 - Who: an admin.
 - Name and search words: Folder links. Search words: shared links, share folder, footage links, switch off link.

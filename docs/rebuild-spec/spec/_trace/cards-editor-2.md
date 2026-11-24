@@ -98,7 +98,7 @@
 - 39-045 | A run of cuts is saved as a sequence, set aside whole, and brought back whole
 - 39-050 | A note on a card or a gap is kept in the cut list as an edit like any other
 - 39-051 | Phrases on a card or a shelf card can be highlighted, and must be the card's own words
-- 40-018 | Notes on cards and gaps while a cut is worked on a live timeline
+- 40-018 | Notes on cards and gaps go with the cut when it is handed over
 - 28-003 | Space plays and pauses with a tap, and plays at double speed while held
 - 28-004 | K pauses, L plays, J jumps two seconds back
 - 28-006 | Home, End and the edit-point keys jump the head
@@ -358,6 +358,11 @@
 
 ## Parts of items left out
 
+- 39-041 | the reload-and-refuse before a write and its sentence "the project file changed on disk -- reloaded, redo your edit": cut by the joins (2026-11-24, cards-editor-2 F4, page 25.5 A); written as an "Except that" sentence because the line is carried exactly
+- 40-018 | its refusals "no timeline is open" and "that cut is no longer on the timeline", notes on draft cards and notes following a re-identified card: cut by the joins (2026-11-24, cards-to-resolve-and-exports F4, page 29.2 B); written as an "Except that" sentence because the line is carried exactly
+- 30-031 | the letter comparison with the paragraph (40 %) and the speech-to-text's spelling elsewhere: cut by the joins (2026-11-24, cards-footage-in F3, owner's requirements section 6)
+- 34-013 | playing the full reference recording while its light copy is not ready: cut by the joins (2026-11-24, cards-editor-2 F5)
+
 - 29-060 | "It is not on phones": by the owner's answer to cards-editor-2-Q9 the Video tab is the one video panel, which floats on a phone
 - 32-037 | framed as the one video panel (cards-editor-2-Q9); its exact text is kept
 
@@ -395,15 +400,44 @@
 
 - Timeline Cards: the hand-over to Resolve, and exports / Sending a cut to Resolve | The gain dialog sets a cut's loudness on top of the automatic levelling | a cut's own gain is carried into Resolve (cards-editor-2-Q14)
 
-- Timeline Cards: the hand-over to Resolve, and exports / Edits sent live and staged edits | Notes on cards and gaps while a cut is worked on a live timeline | how notes travel with a live timeline and its draft cards
+- Timeline Cards: the hand-over to Resolve, and exports / Undo, markers, titles, fades and properties | Notes on cards and gaps go with the cut when it is handed over | a gap's note is taken fresh from what is saved at the send
 - Timeline Cards: the hand-over to Resolve, and exports / Bringing Resolve's changes back into the cut | The cut list file can be edited by hand, and the editor merges the change | Resolve's changes become edits (cards-editor-2-Q6)
 - Timeline Cards: the hand-over to Resolve, and exports / Sending a cut to Resolve | A cut list opens as cards with no editing program, and can be opened read-only | a read-only cut list can still be handed over
-- Timeline Cards: the hand-over to Resolve, and exports / Exports | A cut list holds the cut, the bench and the timeline's facts | frames appear only in exports; per-clip rate and start timecode are export hints
+- Timeline Cards: the hand-over to Resolve, and exports / Exports | A cut list holds the cut, the bench and the timeline's facts | frames appear only in exports; per-clip rate and start timecode are used where Resolve's project does not know the clip (exports, a clip a send brings in)
 - Timeline Cards: the hand-over to Resolve, and exports / Placing, deleting and linking clips in Resolve | Deleting stages cuts on the shelf under their section's name and takes gaps out | where a delete goes in Resolve (cards-editor-2-Q13)
 - Timeline Cards: footage in, ready to cut / The transcript and its English | A cut's words always follow its span, on every device | word timings, transcript spelling and paragraph references
-- Timeline Cards: footage in, ready to cut / Footage files and files made from them | Every clip is made ready to play without anyone asking | the light copies are made as clips arrive
-- Timeline Cards: footage in, ready to cut / Bringing the studio's existing transcripts in once | A note on a card or a gap is kept in the cut list as an edit like any other | side-file notes brought in once with the carry-over
+- Timeline Cards: footage in, ready to cut / Footage files and files made from them | Every clip is made ready to play without anyone asking | which copies each clip gets (an interview's, a montage clip's), made as clips arrive
+- Work shared out across the computers / Choosing who runs what | A clip whose sound is still being prepared is dimmed on the lane | a piece of work given up there; the clip here reads "failed" with the reason
+- the carry-over companion to this specification (owner's requirements, section 7) | A note on a card or a gap is kept in the cut list as an edit like any other | side-file notes brought in once with the carry-over
 - Timeline Cards: the board / What the board is | A cut list holds the cut, the bench and the timeline's facts | the planning board a cut list came from, and a board made into a cut bringing its groups
 - Work shared out across the computers / Choosing who runs what | Sound is always prepared before video, and progress is shown as a count | making copies on the studio's computers
 - Timeline Cards: the editor (part 1) / The lane: how clips look and read | Playback runs through gaps as silence, and joins never click | the lit word, the playhead mark and paging, written there
 - Timeline Cards: the editor (part 5) / Phone and game controller | Dragging the head, jogging or dragging a trim edge plays the sound under it | the phone scrub pad and the controller's jog
+
+## Joins settled
+
+- cards-board F2 | no change here: the board's hand-over gives one note row per line; the cut list format is kept as it is
+- cards-editor-1 F6 | no change here: cards-editor-1 points to cards-editor-4; the summary lines under an in-cut heading already stand here
+- cards-editor-2 F1 | changed: Inserting and resizing gaps | a new gap that would land after the last item is refused (an "Except that" sentence after the carried line)
+- cards-editor-2 F2 | no change here: cards-editor-4 changes; this piece already keeps the newest 200 and then every tenth
+- cards-editor-2 F3 | changed: Every revision of a cut list is kept, thinned rather than lost | each revision keeps its time and who made it
+- cards-editor-2 F4 | changed: Edits are applied in order, each one a numbered revision, and nothing is ever overwritten | no reload-and-refuse; a change on disk is merged first (an "Except that" sentence; the carried line still holds the old rule, reported to the lead)
+- cards-editor-2 F5 | changed: The editor finds each clip's sound by itself and lists the clips it cannot play | the full reference recording dropped from the order; a clip without its light copy shows as being made
+- cards-editor-2 F6 | no change here: cards-board names the keys itself and points to cards-editor-1
+- cards-editor-2 F7 | no change here: cards-board's row reads the plain shelf (shown as Uncategorised)
+- cards-editor-2 F8 | no change here: cards-board names its group "Interviewer questions" and sends chatter to Uncategorised
+- cards-editor-2 F9 | changed: Everything set aside is listed beside the cut | no swap; an alternates card is put into the cut by unstaging it. The shelf panel's tabs show no alternates section (only the listing does): reported to the lead
+- cards-editor-2 F10 | changed: The cut list file can be edited by hand, and the editor merges the change | bench sections matched by kind and name; Resolve's changes named as the one way a changed cut list becomes edits
+- cards-editor-2 F11 | changed: The cut list file can be edited by hand, and the editor merges the change | a removed cut goes onto the shelf named after its section, as a deleted cut does
+- cards-editor-2 F12 | changed: A clip whose sound is still being prepared is dimmed on the lane | the clip reads "failed" with the reason, never "given up"; a later request is new work; pointer to fleet-jobs
+- cards-footage-in F3 | changed: A cut's words always follow its span, on every device | words taken straight from the transcript's timed words, no letter comparison, no speech-to-text spelling
+- cards-footage-in F4 | changed: Every clip is made ready to play without anyone asking | points to footage-in for which copies each clip gets; playing order and progress kept
+- cards-footage-in F5 | no change here in the text: only this trace's join line now points to the carry-over companion, not footage-in
+- cards-footage-in F13 | no change here: footage-in and fleet-jobs change; this piece's picture-only copy, at most 480 lines and never enlarged, already agrees
+- cards-to-resolve-and-exports F3 | no change here: cards-to-resolve-and-exports drops its standing "not yet carried" sentence
+- cards-to-resolve-and-exports F4 | changed: Notes on cards and gaps go with the cut when it is handed over | renamed from "Notes on cards and gaps while a cut is worked on a live timeline"; live-timeline framing dropped; the refusals and draft-card notes cut by an "Except that" sentence (the carried line still holds them, reported to the lead); the gap-note-at-send rule points to the hand-over
+- cards-to-resolve-and-exports F5 | no change here: cards-to-resolve-and-exports points to this piece's merge
+- cards-to-resolve-and-exports F6 | no change here: cards-to-resolve-and-exports says a read-only send is not stamped; this piece already says the file is not changed
+- cards-to-resolve-and-exports F7 | changed: A cut list holds the cut, the bench and the timeline's facts | "(hints for exports only)" replaced: per-clip rate and start used where Resolve's project does not know the clip; a hand-set value never overwritten
+- cards-to-resolve-and-exports F8 | no change here: cards-to-resolve-and-exports moves the rate choice to the Send tab; the frontmatter rule here is unchanged
+- fleet-jobs F12 | no change here: fleet-jobs adds that playing a clip puts its waiting media first

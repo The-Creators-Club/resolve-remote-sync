@@ -1,12 +1,12 @@
 # Timeline Cards: the editor, part 4 of 5
 
-This part covers what the assistant does inside the editor (proposals, the join check, shortening a cut to a length, the edit chat, the montage builder and section summaries), and how the editor works with no connection, over a poor one, and on several devices at once, including the Timeline Cards apps for Windows and Android.
+This part covers what the assistant does inside the editor (proposals, the join check, shortening a cut to a length, the edit chat, the montage builder and section summaries), and how the editor works with no connection, over a poor one, and on several devices at once, including the editor window of the app on the editor's computer and the Timeline Cards app for Android.
 
 ## Shortening, the edit chat and the assistant
 
 ### What remains of these features when the assistant is switched off
 
-With the site's assistant switch off, none of the controls in this sub-topic that call the assistant is on any screen: there is no Shorten button, panel, Alt+H, Alt+B or Shift+B, no suggestion markers or score shading on the lane; no "Ask Assistant" button in the toolbar or the phone's header, and no chat panel; no "Montage" button, Alt+M or montage drawer; no sparkle button, "Summarise" button or "A new summary is ready" row. What stays:
+With the site's assistant switch off, none of the controls in this sub-topic that call the assistant is on any screen: there is no Shorten button, panel, Alt+H, Alt+B or Shift+B, no suggestion markers or score shading on the lane; no "Ask Assistant" button in the toolbar or the phone's header, and no chat panel, and C opens nothing; no "Montage" button, Alt+M or montage drawer; no sparkle button, "Summarise" button or "A new summary is ready" row. What stays:
 
 - Every edit these features would propose can still be made by hand in the editor.
 - Cards a past shortening put on the shelf stay on the shelf under their shortening's category, and summaries already written into a cut list stay in the file.
@@ -100,7 +100,7 @@ A keep, drop or free pin stays through every recalculation and every reload unti
 
 ### An episode can carry its own description of what counts as fluff
 
-Shortening judges what is fluff by the studio's rubric of what to keep and what to cut first (see Timeline Cards: the board, The owner's editorial rules). When the episode has its own shortening style note and it is not empty, the assistant judges fluff by that note instead; an empty or unreadable note falls back to the studio's rubric. The same note is used for planning, for cutting the words and for scoring.
+Shortening judges what is fluff by the studio's rubric of what to keep and what to cut first (see Timeline Cards: the board: The owner's editorial rules, "The shortening rubric, and an episode's own"). When the episode has its own Shortening rubric for an episode and it is not empty, the assistant judges fluff by that rubric instead; an empty or unreadable one falls back to the studio's rubric. The same rubric is used for planning, for cutting the words and for scoring.
 
 ### The Sections tab shows each section's before and after as a bar, with pins and a length box per section
 
@@ -209,10 +209,10 @@ The whole review is kept with the cut list's chat history, so a reload, a second
 
 Toolbar button "Ask Assistant" (speech-bubble icon, tooltip "Say what to change; Assistant suggests, and nothing changes until you apply one", shown pressed while open). On a phone (up to 700 px wide): an icon button in the editor's header row and another in the edit view's top bar, never floating over content. One panel per page. On desktop it sits over the inspector column (or, if that is hidden, in a 420 px column at the right between the header and the dock); on a phone a full-screen sheet with the composer above the keyboard, closed by the back gesture. Close: X button (hint Esc), Esc (when the text box is not focused; Esc in the box only leaves it), or the toolbar button. Focus returns to the opener. Touch targets 44 px; 16 px text in the box so an iPhone does not zoom on focus.
 
-- Ways in: the toolbar button on a desk, the header button and the edit view's top-bar button on a phone.
+- Ways in: the toolbar button on a desk, the C key on the lane and the cards, the header button and the edit view's top-bar button on a phone.
 - Name and search words: the edit chat: ask assistant, chat, change the cut in words, edit by talking.
 - Phone and desk: a panel over the inspector on a desk, a full-screen sheet on a phone.
-- When the assistant is off: no button anywhere, and no chat panel.
+- When the assistant is off: no button anywhere, C opens nothing, and there is no chat panel.
 - Exact: yes
 
 ### The chat offers three strengths of assistant, each its own conversation
@@ -275,7 +275,7 @@ The cards selected now, and those staged on the shelf, travel with the message i
 
 ### The chat follows a house style of seven editorial rules, which an episode can replace with its own
 
-The built-in house style has seven rules: no interviewer questions ever; withhold, then reveal; part of a sentence can be the whole card; end sections on a cliffhanger; space revelations out; never invent tension (the speakers' own words in their own order); cut it as one conversation across speakers, choosing each card as a reply to the one before it in cut order. An episode's own chat style note, when present and not empty, replaces these whole (where it is written is described under Timeline Cards: the board, The owner's editorial rules). When the editor's request conflicts with the style, the assistant does what was asked and says what the style would have done. When the transcripts or the house style change, the next message works from the new ones and says which of the two changed.
+The chat follows the studio's house style, the same one the board's assistant follows, whose rules are written out once with the board (see Timeline Cards: the board: The owner's editorial rules, "The studio's house style, and an episode's own"). Where the episode has its own House style for an episode and it is not empty, the chat follows that one instead, exactly as the board's assistant does; an empty or unreadable one falls back to the studio's. When the editor's request conflicts with the style, the assistant does what was asked and says what the style would have done. When the transcripts or the house style change, the next message works from the new ones and says which of the two changed.
 
 ### The chat proposes, and the editor decides
 
@@ -408,12 +408,13 @@ Before anything is inserted, the montage is shown in the drawer: its sections an
 
 
   - The sparkle button asks the assistant for a summary of the section's words (each cut as "<person>: <words>", up to the next heading of any kind; note rows do not end a section). Disabled with "Nothing in this section to summarise", "Section summaries are not available here", or "The summary needs Assistant on the server: <reason>".
-  - Refusals before sending: "Nothing transcribed between this marker and the next, so there is nothing to summarise."; "The summary did not start: <reason>".
+  - Refusals before sending: "Nothing transcribed between this marker and the next, so there is nothing to summarise."; "no marker at frame N" (the heading asked about is no longer at that frame); "The summary did not start: <reason>".
   - When this page's answer comes back it is written into the cut list as ONE undoable edit under the heading, together with a fingerprint of the words it was written from: "Summary of "<title>" written into the cut list. Ctrl+Z takes it out." Section gone: "The summary came back, but its section is no longer in this cut list." A failed run: "The summary did not come back: <reason>".
   - Under each heading: the stored summary, a gold "Out of date" chip when the words changed since, and a "Remove this summary" button ("Summary removed from the cut list. Ctrl+Z brings it back.").
   - An answer this page did not ask for (another device, a reload) that the cut list does not have: "A new summary is ready", the text, "Keep it" (or "Use this one" when a summary exists; it writes it: "Summary written into the cut list. Ctrl+Z takes it out.") and "Discard".
   - The panel checks for running summaries every 1.5 s, even while shut when this page is waiting for its own answer, for up to about 10 minutes. "Summaries could not be read: <reason>" on the status line when that fails.
   - A change of cut list forgets all summary state.
+  - A summary is stored under its heading, so it follows its section through trims and moves. Renaming a section drops its summary on purpose, and a summary whose heading is gone is never guessed onto another section.
   - The summary is ONE sentence, two at most, 35 words in all, plain English, no preamble. An empty answer is a failure ("Assistant returned nothing"). One summary per section runs at a time (asking again joins it); at most two run at once across the server ("other summaries are still being written; try again in a moment"). Limits: title 300 characters, section text 60 000 characters. A summary gives up after 5 minutes. Answers wait on the server for 30 minutes for a page to take them; the server writes nothing itself.
 
 - Ways in: the overview's sparkle button, a folded section's "Summarise" button, and the "A new summary is ready" row for an answer this page did not ask for.
@@ -446,7 +447,7 @@ Every page and file of the editor needs a sign-in to the dashboard; anyone not s
 
 Every device with a cut list open sees every edit anyone makes, its own included, as soon as it is saved: another device shows a change within seconds. An edit is confirmed to the device that made it only once it is safely stored, by the answer to that edit itself; an edit that does not apply is refused with its sentence and changes nothing. Sending the same edit twice is harmless: the first answer comes back. A device that joins gets the whole cut list; one coming back gets what it missed, or the whole cut list when its copy no longer matches. Warnings of the last 10 minutes (up to 20) are shown to anyone who joins in that time. Anything a device sends that cannot be read is ignored with the warning "a message I could not read was ignored".
 
-One cut list has one stored copy, which every device reads and writes, so two writers never erase each other's work: a write that finds the cut list changed underneath it is refused and worked out again, never laid over the other. The staged shelf, the notes and every saved plan are part of that one copy, so a phone and a desk never hold two drafts of the same cut list, and every device opens it in the same editor, the same way. Every edit, its time and who made it are kept in the cut list's history (see Editing, undo and the cut list): who is a person's device, a hand edit of the file, or the editor's own automatic work, decided by where the edit came from.
+One cut list has one stored copy, which every device reads and writes, so two writers never erase each other's work: a write that finds the cut list changed underneath it is refused and worked out again, never laid over the other. The staged shelf, the notes and every saved plan are part of that one copy, so a phone and a desk never hold two drafts of the same cut list, and every device opens it in the same editor, the same way. Each edit's revision, its time and who made it are kept in the cut list's history, the newest 200 revisions all and older ones every tenth (see Timeline Cards: the editor: Editing, undo and the cut list, "Every revision of a cut list is kept, thinned rather than lost"): who is a person's device, a hand edit of the file, or the editor's own automatic work, decided by where the edit came from.
 
 At most 64 devices may have one cut list open at once ("too many editors have this cut list open"), and at most 256 may be connected to the server ("too many editors are connected to this server"). An editor page too old for the server is told plainly to reload the editor. A device dropping its connection is ordinary and is never reported as a fault.
 
@@ -539,7 +540,7 @@ Every device on a cut list shares the one cut list, its staged shelf and its not
 
 ### Every signed-in person sees who is working in which episode
 
-The list of episodes opens without loading any of them, and two people can each open and edit a different episode, or the same one, at the same time. On the dashboard's list of episodes, every signed-in person sees who is working in which open episode: "<who> is in it now" (within the last minute), "<who> was last in N min ago", or "<who> opened it <how long ago>". A person counts as working in an episode while they really are, offline or on a phone that has gone to sleep included, and an episode stays occupied while any of its devices holds edits not yet sent. Closing an episode asks first, naming who was last in it and when: "Close <episode>? <who> was last in N min ago. Anything an offline browser has not sent yet stays in that browser until it reconnects."
+The list of episodes opens without loading any of them, and two people can each open and edit a different episode, or the same one, at the same time. On the dashboard's list of episodes (see Timeline Cards: the editor: Opening episodes and keeping the editor running, "The Timeline Cards page lists every episode in its folders, most recently opened first"), every signed-in person sees who is working in which episode: "<who> is in it now" (within the last minute), "<who> was last in N min ago", or "<who> opened it <how long ago>". A person counts as working in an episode while they really are, offline or on a phone that has gone to sleep included, and an episode stays shown as occupied while any of its devices holds edits not yet sent. Nothing is capped or locked by an open episode, so the list offers nothing to close.
 
 - Who: anyone signed in.
 - Ways in: the dashboard's list of episodes.
@@ -568,7 +569,7 @@ Offline, the editor still has the last cut list it saw, each clip's facts and it
 
 While the server can be reached, it is still asked first for the cut list, transcripts and other documents, and a good answer quietly refreshes the kept copy; sound and video of kept clips always come from the device. A cut list that is not kept gets none of this beyond the last copy seen.
 
-What needs the server: the assistant (the edit chat refuses offline and never keeps a message for later), sending a cut to Resolve or bringing changes back from it, work on the studio's other computers, opening or closing an episode, and sound or search for a cut list not kept on the device.
+What needs the server: the assistant (the edit chat refuses offline and never keeps a message for later), sending a cut to Resolve or bringing changes back from it, work on the studio's other computers, opening an episode, and sound or search for a cut list not kept on the device.
 
 No background download, check or save holds the page up for longer than one frame: typing, playback and scrolling stay smooth throughout.
 
@@ -629,7 +630,7 @@ The English and clip languages are kept on the device per cut list: the last 12 
 
 ### A person can choose to work offline even with the server up
 
-One switch, remembered on this device and surviving a restart. While on: nothing goes to the server and nothing comes from it, exactly as with no network; the editor shows itself offline and keeps every edit on the device; only what is kept on the device is served, and no background top-up runs. Inside the Windows and Android apps the app follows the same switch, and the next cut list opened starts offline. Turning it off reconnects, sends the waiting edits and, if needed, works out the download sizes again.
+One switch, remembered on this device and surviving a restart. While on: nothing goes to the server and nothing comes from it, exactly as with no network; the editor shows itself offline and keeps every edit on the device; only what is kept on the device is served, and no background top-up runs. Inside the editor window of the app on the editor's computer and inside the Android app, the window or app follows the same switch, and the next cut list opened starts offline. Turning it off reconnects, sends the waiting edits and, if needed, works out the download sizes again.
 
 - In the On this device panel: a "Work offline" switch, with its sentence: "Nothing goes to the server while this is on, even with a network. Edits wait on this device." / "On: nothing goes to the server. Edits wait here until you switch this off."
 - In the episode list: "work offline" (explanation: "Use the cut lists downloaded on this device even with the server up, as on a plane. Nothing goes to the server until you go back online.") and, while on, "go back online".
@@ -637,7 +638,7 @@ One switch, remembered on this device and surviving a restart. While on: nothing
 - A gold "Offline" badge sits beside the header crumb while it is on (tooltip "Working offline by choice: open the offline settings"); a click opens the On this device panel. On a phone the badge is icon-only, 44 px.
 
 - Who: anyone, for their own device.
-- Ways in: the On this device panel, the episode list, the app's settings page in the Windows and Android apps.
+- Ways in: the On this device panel, the episode list, the settings page of the editor window and of the Android app.
 - Setting: Work offline. Does: stops every exchange with the server on this device, as on a plane, keeping edits on the device until switched off. Default: off. Who: anyone, for their own device. Applies to: a computer. Search words: work offline, plane mode, no network, offline by choice.
 - Phone and desk: the header badge is icon-only on a phone.
 - Exact: yes
@@ -653,10 +654,10 @@ An "on this device" list at the top, newest first, reads "N cut list(s) open off
 
 Offline, the list shows an "offline" warning:
 
-- not by choice: "The server cannot be reached. This is the episode list as of <date/time or 'your last visit'>. Cut lists marked downloaded open from this device and sync when the server is back. Opening or closing anything else needs the server." with a "try the server again" link.
-- by choice: "You are working offline by choice. Cut lists marked downloaded open from this device, and their edits wait here until you go back online. Opening or closing anything else needs the server." with "go back online".
+- not by choice: "The server cannot be reached. This is the episode list as of <date/time or 'your last visit'>. Cut lists marked downloaded open from this device and sync when the server is back. Opening anything else needs the server." with a "try the server again" link.
+- by choice: "You are working offline by choice. Cut lists marked downloaded open from this device, and their edits wait here until you go back online. Opening anything else needs the server." with "go back online".
 
-Every open and close button is then unavailable, explained "Needs the server, which cannot be reached."
+Every open button is then unavailable, explained "Needs the server, which cannot be reached."
 
 ### The On this device panel keeps a cut list on a device so it opens, edits and plays with no network
 
@@ -725,7 +726,7 @@ About 20 seconds after the editor opens and then every 10 minutes, while the edi
 
 {{33-051}}
 
-What a device keeps lives in one of three places, chosen by itself: inside the Windows or Android app, real files in the app's project folder on disk (shown as "The Windows app's project folder" / "The Android app's projects folder"); otherwise in the browser's own storage, if it really works there (a private window that refuses falls through), shown as "This browser"; otherwise nowhere: "Nowhere (this browser keeps nothing)". Removing one kept cut list deletes only its own files, never another page's or another list's.
+What a device keeps lives in one of three places, chosen by itself: inside the editor window of the app on the editor's computer or inside the Android app, real files in the project folder on disk (shown as "The editor window's project folder" / "The Android app's projects folder"); otherwise in the browser's own storage, if it really works there (a private window that refuses falls through), shown as "This browser"; otherwise nowhere: "Nowhere (this browser keeps nothing)". Removing one kept cut list deletes only its own files, never another page's or another list's.
 
 - Exact: yes
 
@@ -743,18 +744,20 @@ While edits are waiting on a device, a copy of them saves itself to a file withi
 - Setting: Save waiting edits to a file. Does: keeps a copy of edits not yet on the server in one file in Downloads, overwritten as they change. Default: on, off on iPhone and iPad. Who: anyone, for their own device. Applies to: a computer. Search words: rescue copy, backup edits, unsent edits file, save copy.
 - Phone and desk: off by default on iPhone and iPad.
 
-### Timeline Cards has its own apps for Windows and Android that show the editor from the studio's server
+### Timeline Cards opens in the editor window on a computer and in its own app on Android, from the studio's server
 
 {{33-088}}
 
-Inside the apps, the editor keeps several devices in step exactly as it does in a browser, and opens from the dashboard's own address for the editor.
+Except that on a computer, Windows or macOS, there is no Timeline Cards app of its own: the editor opens in the editor window of the one app on the editor's computer (see Timeline Cards: the editor: Opening episodes and keeping the editor running, "The app on the editor's computer opens the editor in a window of its own"), which uses the dashboard address that app already holds and has no server address of its own. The server address, changed on the app's settings page, and opening on the settings page with no server set, belong to the Android app only.
 
-- Name and search words: the Timeline Cards app: Windows app, Android app, desktop app, phone app.
+Inside the editor window and the Android app, the editor keeps several devices in step exactly as it does in a browser, and opens from the dashboard's own address for the editor.
+
+- Name and search words: the Timeline Cards app: Android app, phone app, Cards app, app for Android.
 - Exact: yes
 
 ### The apps notice within seconds that the server is gone and work offline
 
-The app checks whether the server answers with a short check of about 3 seconds; while it does not, it checks again every 5 seconds. Once the server is found to be down, the editor sees itself as offline at once and works from what the device keeps; audio and video are still really asked for. Every page that opens with a connection is saved on the device as its newest copy (never data, media or the sign-in pages). While the server cannot be reached, a saved page opens marked as an offline copy, and a page never saved shows the offline page below.
+In the editor window of the app on the editor's computer and in the Android app, the window or app checks whether the server answers with a short check of about 3 seconds; while it does not, it checks again every 5 seconds. Once the server is found to be down, the editor sees itself as offline at once and works from what the device keeps; audio and video are still really asked for. Every page that opens with a connection is saved on the device as its newest copy (never data, media or the sign-in pages). While the server cannot be reached, a saved page opens marked as an offline copy, and a page never saved shows the offline page below.
 
 ### The offline page explains that a page not yet opened online cannot open offline
 
@@ -766,7 +769,9 @@ The app checks whether the server answers with a short check of about 3 seconds;
 
 {{33-091}}
 
-- Setting: Address of the Timeline Cards page. Does: sets which studio server the app shows; changing it keeps everything already kept on the device. Default: the studio's own Timeline Cards address. Who: anyone using the app, on that device. Applies to: a computer. Search words: server address, app settings, connect app, Timeline Cards address.
+Except that the **SERVER** section, with its address field, is on the Android app's settings page only: the editor window's settings page has no server address, since the window uses the dashboard address the one app on the editor's computer already holds.
+
+- Setting: Address of the Timeline Cards page. Does: sets which studio server the Android app shows; changing it keeps everything already kept on the phone. Default: the studio's own Timeline Cards address. Who: anyone using the Android app, on that phone. Applies to: a computer. Search words: server address, app settings, connect app, Timeline Cards address.
 - Name and search words: App settings and status: app settings, server address, app status, offline app.
 - Exact: yes
 
@@ -782,19 +787,21 @@ The app checks whether the server answers with a short check of about 3 seconds;
 
 When a background top-up runs, the cut list open at that moment is kept on the device even if it was never kept by hand, so every clip's audio of the open cut list is on the device and skipping between clips with no connection starts at once. In a browser, media is kept only for a cut list the person kept.
 
-- Setting: Keep cut lists I open on this device. Does: in the apps, keeps every cut list opened with the server up on the device, topping it up every ten minutes. Default: on. Who: anyone using the app, on that device. Applies to: a computer. Search words: keep automatically, auto download, offline copy, keep on device.
+- Setting: Keep cut lists I open on this device. Does: in the editor window and the Android app, keeps every cut list opened with the server up on the device, topping it up every ten minutes. Default: on. Who: anyone using the app, on that device. Applies to: a computer. Search words: keep automatically, auto download, offline copy, keep on device.
 - Exact: yes
 
-### In the Windows and Android apps, kept cut lists are real files in a folder the person can open and move
+### In the editor window and the Android app, kept cut lists are real files in a folder the person can open and move
 
 {{33-052}}
+
+Except that on a computer the panel's label reads "The editor window's project folder", and the default folder is the person's Documents under "Timeline Cards" on Windows and macOS alike.
 
 Inside the folder, each episode has a folder and each cut list a folder within it; folder names are made safe for Windows (forbidden characters become "_", trailing dots and spaces removed, at most 120 characters, reserved names such as CON get a leading "_"), two lists landing on one name get " (2)", " (3)", and anything that is not a cut list goes under "Other". Clip files are named after the clip. A kept file is never left half-written. An episode can be given a folder of its own on a computer, chosen there. Removing a kept list deletes its folder, and an episode folder left empty goes too.
 
 The same change of folder, with the same move-or-leave question, is also on the app's settings page, section **PROJECT FOLDER**: the folder and "N cut lists (size), <free> free"; **Open folder**; a "Move it to (the whole path)" field (placeholder `D:\Timeline Cards`, Enter submits) and **Use this folder**; the same folder changes nothing.
 
 - Ways in: the On this device panel, the app's settings page.
-- Setting: Project folder. Does: chooses the folder where the app keeps cut lists as files, moving those already kept or leaving them, as the person says. Default: Documents, "Timeline Cards" on Windows, the app's own "Timeline Cards" folder on Android. Who: anyone using the app, on that computer. Applies to: a computer. Search words: projects folder, where kept, move folder, offline files.
+- Setting: Project folder. Does: chooses the folder where the editor window or the Android app keeps cut lists as files, moving those already kept or leaving them, as the person says. Default: Documents, "Timeline Cards" on a computer, the app's own "Timeline Cards" folder on Android. Who: anyone using the editor window or the Android app, on that device. Applies to: a computer. Search words: projects folder, where kept, move folder, offline files.
 - Exact: yes
 
 ### On Android, Open folder opens the projects folder
@@ -803,15 +810,17 @@ On Android, **Open folder** opens the projects folder in the phone's file manage
 
 - Phone and desk: on Android only.
 
-### The Windows app installs per person or runs portable, and runs once
+### On a computer the editor window comes with the one app and updates with it
 
-The Windows app comes as a one-click installer for the signed-in person of the computer and as a portable program, for 64-bit Windows. Only one copy runs: a second launch brings the existing window forward and restores it. If it cannot start because another program on the computer is in its way, it says so, asks for that program to be closed, and quits.
+On an editor's computer there is no Timeline Cards program to install, run or update by itself: the editor window is opened from the one app on that computer, carries that app's version and updates with it, keeping its settings and everything kept on the computer (see Timeline Cards: the editor: Opening episodes and keeping the editor running, "The app on the editor's computer opens the editor in a window of its own"). The Android app is the only Timeline Cards app of its own.
 
-- Windows and macOS: there is a Windows app; on a Mac the editor is used in a browser.
+- Windows and macOS: the same on both: the editor opens in the one app's window, and can also be used in a browser.
 
-### The Windows app's window, links, permissions and downloads
+### The editor window's links, permissions and downloads
 
 {{33-098}}
+
+Except that closing the last editor window closes only the editor: the one app on the editor's computer goes on running. The window opens at the dashboard's own address for the editor, which the one app already holds, and on a Mac downloads go into the Mac's Downloads folder in the same way.
 
 - Exact: yes
 
@@ -833,4 +842,4 @@ The Android app runs on Android 10 or newer. It asks to use the internet, to vib
 
 #### Lessons
 
-- Met: CE1-133, CE1-135, CE2-101, CE2-102, CE2-105, CE2-106, CE2-107, CE2-108, CE1-136, CE1-137, CE1-138, CE2-110, CE2-111, CE2-118, CE2-124, CE2-128, CE2-129, CE2-130, CE2-132, CE3-066, CE3-067, CE3-068, CE3-078, CE1-139, CE1-140, CE1-141, CE1-142, CE1-143, CE1-144, CE2-112, CE2-113, CE2-114, CE2-115, CE2-116, CE2-117, CE2-119, CE2-120, CE2-121, CE2-122, CE2-123, CE2-125, CE2-126, CE2-127, CE2-131, CE3-069, CE3-070, CE3-071, CE3-072, CE3-073, CE3-075, CE3-076, CE3-077.
+- Met: CE1-133, CE1-135, CE2-101, CE2-102, CE2-105, CE2-106, CE2-107, CE2-108, CE1-136, CE1-137, CE1-138, CE2-110, CE2-111, CE2-118, CE2-124, CE2-128, CE2-129, CE2-132, CE3-066, CE3-067, CE3-068, CE3-078, CE1-139, CE1-140, CE1-141, CE1-142, CE1-143, CE1-144, CE2-112, CE2-113, CE2-114, CE2-115, CE2-116, CE2-117, CE2-119, CE2-120, CE2-121, CE2-122, CE2-123, CE2-125, CE2-126, CE2-127, CE3-069, CE3-070, CE3-071, CE3-072, CE3-073, CE3-075, CE3-076, CE3-077, CE2-130, CE2-131.

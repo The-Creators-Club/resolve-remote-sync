@@ -390,3 +390,25 @@
 ## Settled by the owner 2026-11-24
 
 - cards-editor-1-U3 | the faint strike through filler words stays as one of the reading aids, off until a person switches it on
+
+## Joins settled
+
+- cards-board F7 | no change here: cards-board and cards-footage-in change (the order colours are given in); this piece states no order
+- cards-board F8 | no change here: cards-board and cards-footage-in name the role; this piece's picker already offers "Every cut of <speaker>" to anyone who can open the editor
+- cards-editor-1 F1 | no change here: cards-board's pointer changes to name Editing, undo and the cut list
+- cards-editor-1 F2 | changed: Words chosen on another surface can be acted on by the lane, which says when it cannot | a sentence after the carried text: a shelf card offers no word tools, so the not-in-the-cut refusal is met only when a card leaves the cut between the press and the act
+- cards-editor-1 F4 | changed: Language aids mark verbs, names, numbers, negation, fillers, safe cut points and sentences ; Each clip shows its speaker, its length and its words, sized to what fits | the aids, their switches and defaults point to cards-editor-3's ten reading aids; the Literal line is aid 7, the "Word by word" gloss, switched in that one place (the fillers sentence kept as the owner settled it, U3)
+- cards-editor-1 F5 | changed: Safe cut points show whether a cut leaves a whole thought, and Alt+S moves an edge or a pick to the nearest one | the 2.5 s nearest-fitting-gap rule replaced by the one drag rule: within 9 px (16 px on touch), Alt drags free, nothing snaps while aid 4 is off
+- cards-editor-1 F6 | changed: The assistant writes a one-sentence summary of what each section says | the full description replaced by a pointer to cards-editor-4; "kept per timeline under the section's title (repeated titles numbered)" dropped; no longer marked Exact
+- cards-editor-1 F7 | changed: The assistant writes a one-sentence summary of what each section says | the span reads up to the next heading of any kind, a note row does not end it; the sparkle tooltip keeps its words
+- cards-editor-1 F8 | changed: The assistant writes a one-sentence summary of what each section says | the refusal list and "marked stale" dropped for the pointer to cards-editor-4 ("no marker at frame N" is for cards-editor-4 to take into its list)
+- cards-editor-1 F9 | changed: A shortcuts sheet lists every key, grouped by where it applies | ways in read "the controller's Menu held"; a sentence after the carried text says Menu held (600 ms) opens and closes it and a quick press does not
+- cards-editor-1 F10 | no change here: cards-footage-in drops its pointer; edges are placed inside the pause between words
+- cards-editor-1 F11 | no change here: cards-to-resolve-and-exports says a plain heading goes as a Red marker and a Red marker reads back as a plain heading; this piece's pointer stands
+- cards-editor-1 F12 | no change here: cards-board and cards-to-resolve-and-exports drop their palette; this piece's clip colours are the one set
+- cards-editor-1 F13 | changed: The keys for searching every transcript, the edit chat and Send to Resolve say so when their tool is not ready | the Send to Resolve key opens the Send tab with a fresh dry run, nothing sent until Send is pressed
+- cards-editor-2 F1 | no change here: cards-editor-2 refuses a gap at the very end, as this piece already says
+- cards-editor-2 F6 | no change here: cards-board names the keys and points to this piece
+- cards-editor-3 F1 | no change here: "unless it has its own timings" already gives the answer; cards-editor-3 adds the rule
+- cards-editor-4 F9 | no change here: cards-editor-4 adds the C key
+- cards-to-resolve-and-exports F2 | no change here: cards-to-resolve-and-exports changes; this piece already says any colour can make a section

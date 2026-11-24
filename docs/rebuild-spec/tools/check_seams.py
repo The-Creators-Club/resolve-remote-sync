@@ -92,10 +92,14 @@ def main():
                 n += 1
     print("   none" if not n else f"   {n} in all")
 
-    print("\n2. Lessons 'not yet met' in one piece and met in no piece of the capability:")
+    # A piece that meets another piece's lesson lists it "Met for another
+    # part", and it may belong to another capability (the hand-over to
+    # Resolve meets three of the editor's).
+    met_anywhere = set().union(*met.values()) if met else set()
+    print("\n2. Lessons 'not yet met' in one piece and met in no piece at all:")
     n = 0
     for cap in sorted(not_met):
-        left = sorted(not_met[cap] - met[cap])
+        left = sorted(not_met[cap] - met_anywhere)
         if left:
             n += len(left)
             print(f"   {cap}: {', '.join(left)}")

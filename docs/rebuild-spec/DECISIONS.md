@@ -61,7 +61,7 @@ does, for the specification:
 - A part that is switched off is visible to nobody except an admin, in
   settings, listed with its switch.
 
-## Page 2: where you ruled two ways at different times (asked 2026-11-13, not yet answered)
+## Page 2: where you ruled two ways at different times (asked 2026-11-13, ANSWERED 2026-11-24)
 
 These come from the knowledge base. In each, an earlier ruling of yours and
 a later one (or a later report) point different ways, and the dates alone
@@ -80,6 +80,28 @@ unless something argues against it.
 
 Reply with the numbers you disagree with; anything not mentioned is taken
 as the recommendation.
+
+**ANSWERED 2026-11-24** (asked one by one, he chose each):
+
+- 1: the recommendation. A music insert where music is already playing is
+  refused, with "place it on the track below" offered.
+- 2: **against the recommendation.** A project ticked "upload only" DOES
+  bring its empty folder structure down, so the editor sees where
+  originals go. Nothing else comes down.
+- 3: the recommendation. Quitting stops an upload and it carries on where
+  it left off; an update waits for the file in flight up to a limit.
+- 4: the recommendation. A sync drive that comes back under another name
+  carries on when it is provably the same drive.
+- 5: **against the recommendation.** The Footage Sorter moves originals
+  into their final folders on its own, with no approval, and a person can
+  overrule by hand afterwards.
+- 6: the recommendation. Montages may use the newsreaders' lines; only the
+  film's own interviews are out.
+- 7: the recommendation. Sections and gap notes become markers. (A noted
+  gap long enough also arrives as on-screen text, by his separate ruling.)
+
+Asked the same day: every Footage Sorter control is usable by touch, on a
+phone as at a desk. He confirmed ("Yes, all by touch").
 
 Not asked, because the rule holds either way: about 385 lessons marked
 still open, outcome not found, or fixed but never shipped (listed in

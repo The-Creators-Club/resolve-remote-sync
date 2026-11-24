@@ -174,5 +174,7 @@ own, now in `spec/OWNER_REQUIREMENTS.md`: the rebuild tests the real speed
 of every way of syncing, with the studio's remote editor and with computers
 in other countries.
 
+| 31 | [What came up while the answers were applied](decisions/page-31-after-the-answers.md): live editing of Resolve from the cards confirmed cut; no wait before the Sorter moves a clip; no fixed share of the assistant's budget for work that runs on its own; "Same loudness" levels to the clips in the cut | 4 | 0 | ANSWERED 2026-11-24 |
+
 Still to add: a page pruning settings
 nobody would feel (303 were written; some only tune machinery).

@@ -222,6 +222,7 @@ These were inside items that are otherwise carried; each is behind the glass or 
 - Changes for a person: with A, on a heavy day lining up and glosses pause until the next day while searches still run; with C a busy day of lining up could leave no budget for anything a person asks.
 - Text assumes: A
 - Items: 30-035, 30-039, 30-044
+- Answered by the owner 2026-11-24: no share; it may spend the whole day's budget, then waits
 
 ## Readers' questions and unsettled points
 
@@ -303,6 +304,6 @@ These were inside items that are otherwise carried; each is behind the glass or 
 ## Changes to exact text
 
 - 30-035 | "N used today, B paragraphs a call" is written "<amount> spent today, B paragraphs a call", and the "calls a day" box is removed: the owner's one limit is a daily budget in money (2026-11-24).
-- 30-039 | the "calls a day for glosses and join checks" box and "N used today" become "<amount> spent today, <amount> left" against the share of the daily budget for work running on its own (pending cards-editor-3-Q11).
-- 30-044 | "It counts against the aids' daily allowance" becomes the same share of the daily budget.
+- 30-039 | the "calls a day for glosses and join checks" box and "N used today" become "<amount> spent today, <amount> left" against the site's one daily budget, which this work may spend whole (cards-editor-3-Q11).
+- 30-044 | "It counts against the aids' daily allowance" becomes the site's one daily budget.
 - 30-037 | Play removed from shelf cards (cards-editor-3-Q5). 30-009 | read-only wording removed (cards-editor-3-Q6). 31-008, 31-010 | "<model>" written "<strength>". Every on-screen name of the assistant written "Assistant".

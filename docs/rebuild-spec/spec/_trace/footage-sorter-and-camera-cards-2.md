@@ -291,6 +291,7 @@
 - Changes for a person: with A footage lands in its folder minutes after it is sorted; with B it can sit in staging for up to a day.
 - Text assumes: A
 - Items: 35-038, 36-040, 38-029
+- Answered by the owner 2026-11-24: no wait; a clip moves without waiting for a second copy
 
 ## Readers' questions and unsettled points
 

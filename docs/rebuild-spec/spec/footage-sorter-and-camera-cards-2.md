@@ -566,7 +566,6 @@ The first failure stops that run and undoes nothing. The failed clip is held bac
 - On its own: where each file lands, from the clip's folder, its layout and its time folder.
 - By hand: a person sees every move and moves any clip somewhere else or puts it back (see "What was moved can be seen, moved elsewhere or put back"); a place set by hand is never changed by a later automatic pass.
 - Who: anyone signed in sees moves and held-back clips; the move itself needs nobody.
-- Pending: footage-sorter-and-camera-cards-2-Q12
 
 ### What was moved can be seen, moved elsewhere or put back
 

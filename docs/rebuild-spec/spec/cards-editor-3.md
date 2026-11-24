@@ -536,11 +536,10 @@ Settings row "English to original alignment":
 - status line: "Not available on this server." / "Waiting for the server…" / the pause reason / "Lining up N paragraph(s) in the background." / "N lined up since the server started, F could not be.";
 - "<amount> spent today, B paragraphs a call": what lining up has cost today, out of the site's one daily budget for the assistant (see The whole product: The assistant).
 
-Lining up runs on its own, so it stops when the work running on its own has spent its share of the day's budget (the share is shown in the language aids panel, below); it then stands still until the next day and an English selection waiting on it falls back to the whole original sentence, marked approximate.
+Lining up runs on its own until the site's daily budget for the assistant is spent; it then waits for the next day's budget, with nothing failed and nothing lost, and the row says it is waiting for tomorrow's budget and an English selection waiting on it falls back to the whole original sentence, marked approximate.
 
 - When the assistant is off: the row is not shown, and every English selection takes the whole original sentence, marked approximate.
 - Exact: yes
-- Pending: cards-editor-3-Q11
 
 ### Ten reading aids help an editor cut speech in a language they do not read, each switched Off, on for languages not read, or on for all
 
@@ -590,13 +589,12 @@ Settings panel "Language aids":
 - a status line: "The aids service is not on this server." / "Asking the server…" / "Asking the server about language analysis…" / "Language analysis: <what is available> (<languages>)." / "Language analysis is not available: <why>. Only the word lists and the romanisation show." (warning colour);
 - "Languages I read" toggle buttons (tooltip "I read <language>: its aids are off unless an aid is set to All");
 - one row per aid: number, label, hint, and Off / Not read / All buttons (tooltips "Off everywhere", "On for the languages I do not read", "On for every language");
-- "<amount> spent today, <amount> left": what the editor's work running on its own (lining the English up with the original, glosses, word links and join checks) has cost today, and what is left of its share of the site's one daily budget for the assistant. That share is a quarter of the daily budget and is shown beside the two amounts. The budget itself is set by an admin, in money, with the assistant's other settings (see The whole product: The assistant); there is no count of calls.
-- When that share is spent, lining up, glosses, word links and join checks by the assistant wait until the next day and the panel says so. Searches and other work a person starts are not held back by it: they show their expected cost before they run and count against the rest of the day's budget.
+- "<amount> spent today, <amount> left": what the editor's work running on its own (lining the English up with the original, glosses, word links and join checks) has cost today, and what is left of the site's one daily budget for the assistant. The budget itself is set by an admin, in money, with the assistant's other settings (see The whole product: The assistant); there is no count of calls.
+- This work may spend the whole day's budget. When the budget is spent, lining up, glosses, word links and join checks by the assistant wait for the next day's budget, like everything else that uses the assistant; nothing fails and nothing is lost, and the panel says it is waiting for tomorrow's budget. Searches and other work a person starts show their expected cost before they run and count against the same budget.
 
 - Name and search words: Language aids: reading aids, languages I read, gloss, verbs, safe cuts.
 - When the assistant is off: the amounts spent and left are not shown.
 - Exact: yes
-- Pending: cards-editor-3-Q11
 
 ### The aids read each line's grammar, words and names in Russian, Ukrainian, Chinese and English, and fall back to word lists when that analysis is missing
 
@@ -626,7 +624,7 @@ The system is the clip's language, but a word with a letter only the other langu
   - grammar: "The first piece ends mid-clause: ..." / "The second piece starts mid-clause: ..." (or "A side of the join strands a clause.").
   - Nothing found is not "ok"; only the assistant says that.
 - The assistant's check: the joined original is translated afresh and judged ok, meaning (a negation, condition or contrast lost, a reversed claim, the wrong subject) or grammar (a hanging clause, a missing verb or object, disagreement across the join), with a one-sentence note (at most 300 characters).
-- The assistant is asked only for joins an edit made or moved within the last 15 s, when aid 6 is on for that language, about a second after the edit settles; opening a cut list only shows checks already made. A check belongs to the joined words: moving the join makes the old answer stop applying. A check never blocks an edit. Switching cut list withdraws the previous list's waiting checks. It counts against the share of the site's daily budget for the editor's work running on its own.
+- The assistant is asked only for joins an edit made or moved within the last 15 s, when aid 6 is on for that language, about a second after the edit settles; opening a cut list only shows checks already made. A check belongs to the joined words: moving the join makes the old answer stop applying. A check never blocks an edit. Switching cut list withdraws the previous list's waiting checks. It counts against the site's one daily budget for the assistant, and when that is spent it waits for the next day's.
 - On the second card of a join: a button above the card: "Checking the join" (hollow dot), "Join reads well" (green), "Join: meaning changed" (red), "Join: grammar break" (gold), plus "quick check" when the answer is the quick one. Spoken label "Join check with the card before: <label>" ("the join reads well", "meaning changed: <note>", "grammar break: <note>", "checking the joined words"). Clicking it shows/hides a box with the note, the joined original, and "Now reads: <fresh translation>" (or "Assistant is reading the joined words again."). Pressing it never selects or drags the card. Touch targets are 44 px on touch screens.
 - In the lane: a dot on the seam with the same states and an open box ("Now reads: ..."); a quick answer's dot has a dashed ring.
 - "Checking" shows only after the assistant was asked for this join.

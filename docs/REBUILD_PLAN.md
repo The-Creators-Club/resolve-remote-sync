@@ -37,6 +37,33 @@ In his words, 2026-11-12:
   translation and word timing etc." See "Timeline Cards in the rebuild:
   footage in, ready to cut", below.
 
+## Added 2026-11-24: Rust, and measured sync speed (owner's requirements)
+
+Both are in `docs/rebuild-spec/spec/OWNER_REQUIREMENTS.md` and cross.
+
+- **Rust is a requirement** for the app on the editor's computer and the
+  server (decision page 30, question 14, accepted with every other
+  recommendation: "accept all the recommendations").
+- **How footage travels is chosen by measurement.** His words: "for the
+  rebuild agent, tell it to do full testing of speed of sync types, with
+  ruskin, and also machines in different countries." In the requirements
+  this names no person: "the studio's remote editor". What it needs from
+  the preparing sessions, none of which crosses:
+  - The clean room (step 6) must give the rebuild session a way to run
+    transfers against real computers without seeing the old build: the
+    remote editor's Windows PC, the Mac, and computers in other countries.
+    Which computers abroad is NOT settled: ask the owner (editors or
+    friends abroad, or rented machines in two or three regions).
+  - A test share on the NAS that holds no client footage, so a rebuild
+    under test can never touch the studio's tree.
+  - The remote editor's agreement to his computer and connection being
+    used, and a time of day for it.
+  - Decision page 5, question 2 (footage only ever over the studio's own
+    private network, never through an outside service) is HELD until the
+    measurements exist: a trial in September found a far-off editor's
+    downloads about three times faster through an outside service, and
+    that question's recommendation would forbid it.
+
 ## The guiding principle: elegance
 
 The owner, 2026-11-12: "For this rebuild - the keyword is elegance. We go for

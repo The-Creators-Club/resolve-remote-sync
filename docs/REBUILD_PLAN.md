@@ -1197,7 +1197,18 @@ see one capability, with a script that proves nothing was skipped.
      one does), and `check_seams.py` fails if a heading said to hold a
      promise is later renamed. What crosses now: **2,175 lessons; 223
      sealed notes in 59 files.**
-   - **The joins: read, ruled, being fixed (2026-11-24).** All 474 places
+   - **The joins: read, ruled and FIXED (2026-11-24).** All 27 pieces were
+     repaired, each by its own fixer, and a closing pass by the lead checked
+     every cross-reference, renamed five headings everywhere they are used
+     and corrected six carried passages at their source. Every check passes
+     (`check_extract`, `check_spec --build`, `check_seams`, `word_scan`,
+     `assemble_kb`). What the fixers left for each other, the knots between
+     rulings the lead untied, one ruling of the lead's that was wrong and
+     was corrected (he had let what the product shows today outrank a
+     ruling of the owner's), and what is STILL OPEN are all in
+     `spec/_trace/_joins/_rulings/_handoffs.md`; read its last section
+     before doing anything else to the pieces. Decision page 32 now has
+     eight questions. How it was done: all 474 places
      where one piece leans on another were checked, one reader per piece
      leaned ON (`tools/build_join_bundles.py`, brief
      `spec/_trace/JOINS_BRIEF.md`, answers in `spec/_trace/_joins/`). They
@@ -1317,7 +1328,16 @@ Paste this into a new Claude Code session opened in
 > writers" in "Step 3 as it is being done". Do NOT run
 > `build_spec_bundles.py` again, and do not regenerate a decision page that
 > holds answers. Every decision page (2 to 31) is answered and written
-> into the specification. Still open with me: decision page 5, question 2,
-> which waits on the speed measurements, and which computers in other
-> countries those measurements run against. Commit each finished piece;
+> into the specification. The joins between pieces are read, ruled and
+> fixed, every lesson has been checked against my answers, and the word
+> scan passes (`tools/word_scan.py`, after `check_spec.py --build`). Still
+> open with me: decision page 32 (eight questions from the joins; bring
+> them to me, then give the held findings a ruling in
+> `spec/_trace/_joins/_rulings/_lead.txt`, run `merge_join_rulings.py` and
+> `build_join_bundles.py --fixes`, and send a fixer to each piece they
+> name); decision page 5, question 2, which waits on the speed
+> measurements; and which computers in other countries those measurements
+> run against. Next after that: the open list at the end of
+> `spec/_trace/_joins/_rulings/_handoffs.md`, the blind reader piece by
+> piece, the inventory top-ups, then step 5. Commit each finished piece;
 > push nothing.

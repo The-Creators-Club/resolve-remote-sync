@@ -3,6 +3,7 @@
 
     python docs/rebuild-spec/tools/build_join_bundles.py           write the bundles
     python docs/rebuild-spec/tools/build_join_bundles.py --check   check the readers' answers
+    python docs/rebuild-spec/tools/build_join_bundles.py --fixes   per piece, the findings it must change for
 
 Every piece's trace ends with "Joins with other capabilities": one line per
 place where a behaviour of that piece leans on a sub-topic written by another
@@ -201,5 +202,111 @@ def check():
     sys.exit(0 if not bad else 1)
 
 
+RULINGS = os.path.join(ANSWERS, "RULINGS.txt")
+FIXES = os.path.join(ml.SPEC, "_raw", "join-fixes")
+VERDICTS = ("apply", "instead", "home", "owner", "code", "drop", "same")
+
+
+def findings():
+    """-> [finding] across every reader's answer: target, id, title and the
+    seven lines, plus which joins named it."""
+    out = []
+    if not os.path.isdir(ANSWERS):
+        return out
+    for f in sorted(os.listdir(ANSWERS)):
+        if not f.endswith(".md"):
+            continue
+        tp, part, cur = f[:-3], "", None
+        for l in cs.lines_of(os.path.join(ANSWERS, f)):
+            if l.startswith("## "):
+                part, cur = l[3:].strip().lower(), None
+            elif part == "findings":
+                m = re.match(r"^### (F\d+):\s*(.*)$", l)
+                if m:
+                    cur = {"target": tp, "id": m.group(1), "title": m.group(2).strip()}
+                    out.append(cur)
+                else:
+                    m = re.match(r"^- ([A-Z][A-Za-z ]+?):\s*(.*)$", l)
+                    if m and cur is not None:
+                        cur[m.group(1)] = m.group(2).strip()
+    return out
+
+
+def rulings():
+    """-> ({(target, F id): (verdict, note)}, problems). The lead's word on a
+    finding; a finding with no line is applied as its reader wrote it."""
+    out, problems = {}, []
+    if not os.path.exists(RULINGS):
+        return out, problems
+    for n, line in enumerate(open(RULINGS, encoding="utf-8"), 1):
+        line = line.rstrip("\r\n")
+        if not line.strip() or line.startswith("#"):
+            continue
+        cols = [c.strip() for c in line.split("|", 2)]
+        m = re.match(r"^(\S+)\s+(F\d+)$", cols[0])
+        if not m or len(cols) < 2 or cols[1].split()[0] not in VERDICTS:
+            problems.append(f"RULINGS L{n}: cannot read '{line[:70]}'")
+            continue
+        out[(m.group(1), m.group(2))] = (cols[1], cols[2] if len(cols) > 2 else "")
+    return out, problems
+
+
+def fixes():
+    """Write, per piece, the findings it may have to change for."""
+    pieces = cs.pieces()
+    rl, problems = rulings()
+    fs = findings()
+    known = {(f["target"], f["id"]) for f in fs}
+    for k in rl:
+        if k not in known:
+            problems.append(f"RULINGS: no finding {k[0]} {k[1]}")
+    for p in problems:
+        print("PROBLEM: " + p)
+    if problems:
+        sys.exit(1)
+    os.makedirs(FIXES, exist_ok=True)
+    per = collections.defaultdict(list)
+    held = collections.Counter()
+    for f in fs:
+        verdict, note = rl.get((f["target"], f["id"]), ("apply", ""))
+        word = verdict.split()[0]
+        if word in ("owner", "code", "drop", "same"):
+            held[word] += 1
+            continue
+        # every piece the finding names may be the one that changes
+        blob = " ".join([f.get("From", ""), f.get("Fix", ""), note, f["title"]])
+        named = {p for p in pieces if re.search(r"(?<![\w-])" + re.escape(p) + r"(?![\w-])", blob)}
+        named.add(f["target"])
+        for p in sorted(named):
+            per[p].append((f, verdict, note))
+    for p in pieces:
+        path = os.path.join(FIXES, p + ".md")
+        if not per.get(p):
+            if os.path.exists(path):
+                os.remove(path)
+            continue
+        out = [f"# Disagreements between pieces that name `{p}`", "",
+               f"{len(per[p])} findings. Each says which piece changes. Change `{p}` only where "
+               "a finding says this piece changes.", ""]
+        for f, verdict, note in per[p]:
+            out += [f"## {f['target']} {f['id']}: {f['title']}", ""]
+            out += [f"- {k}: {f.get(k, '')}" for k in
+                    ("Kind", "From", "Here", "From says", "Here says", "Settled by", "Fix")]
+            out.append(f"- (\"Here\" is the piece `{f['target']}`.)")
+            if verdict != "apply":
+                out.append(f"- THE LEAD'S RULING, which outranks the Fix line: {verdict}"
+                           + (f": {note}" if note else ""))
+            out.append("")
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(out))
+        print(f"{p}: {len(per[p])} findings")
+    print(f"{len(fs)} findings; held back: {dict(held)}")
+
+
 if __name__ == "__main__":
-    check() if "--check" in sys.argv else write()
+    if "--check" in sys.argv:
+        check()
+    elif "--fixes" in sys.argv:
+        fixes()
+    else:
+        write()

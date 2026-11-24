@@ -296,6 +296,14 @@ def fixes():
             if verdict != "apply":
                 out.append(f"- THE LEAD'S RULING, which outranks the Fix line: {verdict}"
                            + (f": {note}" if note else ""))
+            elif note:
+                # An `apply` with a note: the reader had left the choice open
+                # ("the owner must say", "if the owner says ...") and the
+                # settler found what decides it. Without this line a fixer
+                # reads the finding as still waiting for the owner.
+                out.append("- THE LEAD'S RULING: this is SETTLED, it does not wait for the owner. "
+                           "Apply the Fix; where the Fix gives a choice or a condition, this "
+                           f"decides it: {note}")
             out.append("")
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write("\n".join(out))

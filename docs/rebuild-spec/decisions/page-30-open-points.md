@@ -126,4 +126,9 @@ own as a suggestion, it is marked as mine.
 
 ## Your answers
 
-Not yet answered.
+ANSWERED 2026-11-24. After answering pages 2 and 3 and most of page 4 one
+by one, he said of everything still waiting: "accept all the
+recommendations." So every question on this page is answered with its
+recommendation. Where a figure was marked as my own suggestion (30 days for
+assistant records, one minute of empty timeline, pauses under one second
+between captions), it is now his.

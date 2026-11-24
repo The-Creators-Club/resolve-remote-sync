@@ -26,6 +26,38 @@ How it is applied:
   place a setting comes from, one way to publish a new version.
 - How it is built is the builder's to decide from this principle. Nothing in
   this specification says how, and nothing in it should be read as a hint.
+  The owner sets two things himself, below: the language, and that the way
+  footage travels is chosen by measurement.
+
+### The language
+
+The app on an editor's computer and the server are written in Rust: one
+native program on each, light, quick to start, with one version number.
+What a browser shows, the link to the editing program (which can only be
+driven in the languages that program itself speaks) and the analysis of
+footage use whatever serves them best.
+
+### How footage travels is chosen by measurement
+
+The owner asks for "full testing of speed of sync types", with the studio's
+remote editor "and also machines in different countries".
+
+- Before the way footage travels is settled, every candidate way of moving
+  it is measured for real, not assumed: camera originals going up, proxies
+  and originals coming down, and many small project files kept in step.
+- It is measured between the studio's server and real editors' computers:
+  a computer on the studio's own network, the studio's remote editor on a
+  home connection in the same country, and computers in other countries,
+  on Windows and on macOS.
+- Each run records what a person would feel: megabytes a second against
+  what that connection can carry, how long before the first byte moves,
+  how a cut-off transfer picks up again, and how the same transfer behaves
+  with several editors moving files at once.
+- The results are kept with the product and shown to the owner before the
+  choice is made. The choice is the one that is fastest for the far-off
+  computers without giving up any promise this specification makes about
+  footage. The same measurements are run again before each release, so a
+  release that makes syncing slower is caught before it ships.
 
 ## 2. One product, a small core, and parts that switch on and off
 
@@ -50,8 +82,15 @@ module."
 - **Always available**, each with a setting per computer: making proxies on
   editors' computers, and sharing heavy work across the studio's computers
   (the second also with a setting per kind of work).
+- **A new site starts with every one of the six off, except the help for
+  the editing program.** A studio that only wants syncing sees nothing
+  else until an admin switches a part on.
 - **One site-wide switch turns the assistant off.** Everything else still
   works, and no assistant control is left on any screen.
+- **On screen the assistant is called "Assistant"**, never by a maker's or
+  a model's name, because a site may connect more than one kind. Where a
+  person chooses how strong an assistant answers, each choice is described
+  by what it does (fastest, stronger, most capable) with its price.
 - Alerts by mail, the weekly report and the daily health report are settings
   of the always-on part, not parts of their own.
 - **A part that is switched off is seen by nobody except an admin, in
@@ -72,7 +111,8 @@ takes the timeline cards editor's look."
 
 - There is one look, on every surface: the dashboard's pages, the b-roll
   archive, music, YouTube downloads, the Footage Sorter, the app on an
-  editor's computer, and Timeline Cards.
+  editor's computer, Timeline Cards, and the page a client opens from a
+  link, which carries the studio's own name and mark.
 - The look is given in the look book: every colour, typeface, size, spacing,
   shape and motion as plain values, how each kind of control looks and
   behaves, and reference pictures of every Timeline Cards screen.

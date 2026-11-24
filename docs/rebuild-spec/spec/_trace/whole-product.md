@@ -75,6 +75,7 @@
 - Text assumes: left out
 - Items: 04-093, 07-014, 12-027, 34-011
 - Covers: 04-Q9, 07-Q7, 12-Q5
+- Answered by the owner 2026-11-24: A, the builders' tools go; nothing of them is in the text.
 
 ### whole-product-Q2: Should what the server notices when it starts be shown to admins on the list of problems?
 - Kind: other
@@ -85,6 +86,7 @@
 - Text assumes: A
 - Items: 17-007
 - Covers: 17-Q13
+- Answered by the owner 2026-11-24: A, what the server notices at start goes on the overview's list of problems.
 
 ### whole-product-Q3: Should every "are you sure" question be the same dialog, with the same buttons?
 - Kind: differs
@@ -95,6 +97,7 @@
 - Text assumes: A
 - Items: 13-005, 14-010, 25-047
 - Covers: 14-Q6
+- Answered by the owner 2026-11-24: A, one "Are you sure?" dialog everywhere, Cancel focused, "Yes, do it".
 
 ### whole-product-Q4: Should one computer be able to carry a different logo from the rest of the studio?
 - Kind: several ways in
@@ -102,9 +105,10 @@
 - Options: A: the studio's logo only. B: keep the per-computer logo as well.
 - Recommend: A, since one place a setting comes from is the owner's rule and nobody has needed a different logo on one machine.
 - Changes for a person: with A an admin sets the logo once and every computer shows it; nobody can give one computer its own.
-- Text assumes: B (written as it is, pending)
+- Text assumes: A
 - Items: 04-092
 - Covers: 04-Q10
+- Answered by the owner 2026-11-24: A, one logo for the whole studio; no per-computer logo.
 
 ### whole-product-Q5: Should the installed Timeline Cards app keep its own icon (rows with a red playhead), or carry the product's mark like every other window?
 - Kind: differs
@@ -114,6 +118,7 @@
 - Changes for a person: with A the Timeline Cards app on a phone or computer shows the same mark as the rest of the product (or the studio's logo).
 - Text assumes: A
 - Items: 33-112
+- Answered by the owner 2026-11-24: A, the installed Timeline Cards app carries the product's mark (or the studio's logo).
 
 ### whole-product-Q6: Should a site be able to connect several kinds of assistant, in an order with a pin, or just one?
 - Kind: either-or
@@ -124,6 +129,7 @@
 - Text assumes: A
 - Items: 13-085, 14-024, 14-025, 14-026, 14-027, 18-029
 - Covers: 14-Q2
+- Answered by the owner 2026-11-24: A, several kinds of assistant, in an order, with a pin.
 
 ### whole-product-Q7: Should a site be able to run the assistant through a personal subscription signed in on the server, or with a paid key only?
 - Kind: dormant
@@ -131,9 +137,10 @@
 - Options: A: cut it; every site connects the assistant with a paid key. B: keep it, off until an admin accepts the notice, in every site's build.
 - Recommend: A, since one build serves every studio and your ruling forbids it for customers, so keeping it would mean a second build or breaking the ruling; it also removes a wizard, a sign-in, an updater and three warnings.
 - Changes for a person: with A your own studio moves its assistant from your subscription to a paid key; nothing changes for a customer.
-- Text assumes: B (written in its place, pending cut)
+- Text assumes: B
 - Items: 13-080, 13-085, 14-026, 15-088, 17-052, 18-030, 18-032, 18-033, 18-034, 18-035
 - Covers: 13-Q11, 18-Q5
+- Answered by the owner 2026-11-24: B, the subscription way stays in the product for every site, in the one build, off by default on every new site until an admin turns it on; the paid key stays the default way. His own studio uses it.
 
 ### whole-product-Q8: Should naming gear from a photo for the studio's website follow the site's assistant choice and the switch that turns the assistant off?
 - Kind: differs
@@ -144,6 +151,7 @@
 - Text assumes: A
 - Items: 18-036
 - Covers: 18-Q4
+- Answered by the owner 2026-11-24: A, gear naming follows the site's assistant choice, its pin and its off switch.
 
 ### whole-product-Q9: Two limits on assistant spending stack: a spend per hour and a number of calls per day. Keep one, both, or neither?
 - Kind: either-or
@@ -153,6 +161,7 @@
 - Changes for a person: with A an admin sets one daily budget; with B two.
 - Text assumes: A
 - Items: 34-009, 34-012
+- Answered by the owner 2026-11-24: A, one daily budget in money, with the expected cost shown before each task.
 
 ### whole-product-Q10: If the subscription way stays, where is it switched on: the tick box under the list, the notice in the set-up, the site's settings, or all three?
 - Kind: several ways in
@@ -160,8 +169,9 @@
 - Options: A: only by accepting the notice in the set-up (and switched off from the same place). B: keep all three.
 - Recommend: A, since accepting the notice is the one act that should turn it on, and one place is the owner's rule.
 - Changes for a person: with A an admin always reads the notice before it is on.
-- Text assumes: B
+- Text assumes: A
 - Items: 14-024, 14-026
+- Answered by the owner 2026-11-24: A, switched on in one place only, by accepting the notice inside the set-up.
 
 ## Readers' questions and unsettled points
 
@@ -205,8 +215,9 @@
 
 - ALL-009 | 01-039 | the item says a part switched on or off reaches each computer within about 15 minutes; the lesson asks that within a minute none of a switched-off part's work is still running anywhere. Wrote: a part switched on or off takes effect everywhere within a minute; other site settings within about 15 minutes.
 - ALL-087 | 14-026 | the item says that where the publisher gives no checksum the install goes ahead and the received file's checksum is recorded; the lesson and 18-033 say no checksum means refusal. Wrote the refusal.
-- ALL-089 | 13-080, 13-085, 14-026, 18-030, 18-033, 18-034, 18-035, 17-052 | the items describe a subscription program signed in on the server, available where a site allows it; the ruling says a customer's build has no setting that enables subscription sign-in, and ALL-007 says every studio runs one build. Wrote the paid key as the way to connect; kept the subscription passage in its place, pending cut (whole-product-Q7).
-- ALL-025 | 33-112 | the item gives the installed Timeline Cards app an icon of its own; the ruling puts the maker's mark on every window and taskbar entry. Wrote the ruling, pending whole-product-Q5.
+- ALL-089 | 13-080, 13-085, 14-026, 18-030, 18-033, 18-034, 18-035, 17-052 | the ruling says a customer's build has no setting that enables subscription sign-in; the owner's answer of 2026-11-24 is later: the subscription way stays for every site, off by default, switched on by accepting the notice in the set-up (whole-product-Q7). Wrote his answer; the paid key stays the default way.
+- ALL-007 | 17-052 | the ruling says one build serves every studio; the owner's answer of 2026-11-24 is later and keeps that: one build, with the subscription way present for every site and switched off until an admin turns it on. No locked second build is written.
+- ALL-025 | 33-112 | the item gives the installed Timeline Cards app an icon of its own; the ruling puts the maker's mark on every window and taskbar entry. Wrote the ruling, confirmed by the owner 2026-11-24 (whole-product-Q5).
 - ALL-048 | 13-008 | the item reads a missing time as "never", which produced "since never"; wrote that a missing time reads as words that fit the sentence.
 - ALL-088 | 40-001 | the item shows prices only in the strength picker's notes; the ruling asks that every assistant task shows its expected cost before running. Wrote the ruling.
 
@@ -287,6 +298,9 @@
 - 40-005 | conversations kept in the episode folder, and held by the provider for one server only: where they are kept is behind the glass; the promise (survives reloads and restarts, a lost one is re-opened once and said so) is written.
 - 34-010 | conversations kept on the server and never in the episode's folders: where they are kept is behind the glass.
 
+- 04-092 | a logo of one computer's own, winning over the studio's: cut by the owner 2026-11-24 (whole-product-Q4)
+- 14-024 | the tick box under the list and the site settings form as places to allow subscription programs: cut by the owner 2026-11-24 (whole-product-Q10)
+
 ## Joins with other capabilities
 
 - The dashboard / Problems the server finds | An unexpected error says so plainly and the admin is told | the list of problems on the overview, one row per kind of error and page.
@@ -301,4 +315,4 @@
 - The server: installing it and keeping it running / Settings and secrets | Dates are the studio's dates | the studio's time zone.
 - Timeline Cards: the editor / Shortening, the edit chat and the assistant | A conversation with the assistant is kept per cut list | the edit chat and transcript search that hold conversations.
 - Timeline Cards: the editor / Search and the transcript panel | A person picks how strong an assistant answers, where offered | the strength picker on the search panel.
-- The dashboard / Settings and setup | A site may instead connect an assistant through a subscription signed in on the server | dashboard-2 writes the guided setup as notice, download, sign-in and test; both must change together if whole-product-Q7 cuts it.
+- The dashboard / Settings and setup | A site may instead connect an assistant through a subscription signed in on the server | dashboard-2 writes the guided setup as notice, download, sign-in and test; the owner kept it (2026-11-24), off by default and switched on only by accepting the notice in the set-up; dashboard-2 should match.

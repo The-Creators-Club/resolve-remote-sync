@@ -27,7 +27,6 @@ Each such problem clears the next time its check runs cleanly, and only then.
 Anything the server notices when it starts that will stop someone working, or that an admin should act on, is raised on the overview's list of problems with what to do, not only kept in a record nobody reads. For example: a person named as an admin who has no account, or details of the NAS missing so that editors cannot sign in and an admin cannot manage people ("The dashboard still runs").
 
 - Who: admins see these.
-- Pending: whole-product-Q2
 
 ### An unexpected error says so plainly and the admin is told
 
@@ -186,7 +185,6 @@ By default the maker's current mark, in the brand colour, is on every window, po
 
 The installed Timeline Cards app, on a computer or on an Android phone, carries the same mark (or the studio's own logo), with square and round versions for Android's launcher.
 
-- Pending: whole-product-Q5
 
 ### Every app reached from the dashboard leads back to it
 
@@ -318,7 +316,6 @@ Any action that stops syncing, deletes, withdraws access, signs anyone out, or a
 
 Screen readers hear the whole question. The questions on the editor's computer follow the same rules in its own windows.
 
-- Pending: whole-product-Q3
 
 ### Nothing removes footage on its own
 
@@ -354,11 +351,9 @@ Every save of settings, secrets or a computer's identity either completes whole 
 
 Every icon of the product comes from one mark: the tray or menu-bar icon, the icons of the installed programs and their windows, the dashboard's browser-tab icons, the phone home-screen icons (including ones a phone may crop to a circle or a rounded square), and the icons of the b-roll archive and the other parts. At small sizes the mark is drawn stronger so thin strokes stay visible. By default it is the maker's mark.
 
-A studio can give its own logo for every computer, without anyone reinstalling; one computer can also be given a logo of its own, which wins over the studio's. The logo must be white on a transparent background; a coloured logo comes out as a solid shape in the colour of the state it shows. The tray icon and every window's icon change together. On Windows, notifications are headed with the site's product name ("CC Sync" when none is set) and the mark.
+A studio can give its own logo, which every computer of the studio shows, without anyone reinstalling. There is one logo for the whole studio; no computer carries a different one. The logo must be white on a transparent background; a coloured logo comes out as a solid shape in the colour of the state it shows. The tray icon and every window's icon change together. On Windows, notifications are headed with the site's product name ("CC Sync" when none is set) and the mark.
 
-- Who: an admin for the studio. On one computer: the editor at that computer or an admin.
-- Ways in: the site's settings, for every computer; the settings of one computer, for that computer only.
-- Pending: whole-product-Q4
+- Who: an admin.
 
 ### Every browser tab carries the studio's name and the page's name
 
@@ -452,7 +447,7 @@ An admin can switch the assistant off for the whole site. With it off, nothing i
 
 ### A site connects the assistant with its own paid key
 
-The assistant is never shipped with the product. A site that wants it connects one by entering a key it has bought from the assistant's maker, paid per use. Every assistant call the site makes is charged to that key, so what the assistant costs is the site's own, and any spending limit on the maker's side is set there.
+The assistant is never shipped with the product. The usual way for a site to connect one is a key it has bought from the assistant's maker, paid per use; a site may instead switch on a subscription signed in on the server (see "A site may instead connect an assistant through a subscription signed in on the server"). Every assistant call the site makes is charged to the site's own key or subscription, so what the assistant costs is the site's own, and any spending limit on the maker's side is set there.
 
 An admin adds a key in three guided steps, "get a key", "paste it", "test":
 
@@ -469,7 +464,7 @@ A key given when the server was installed always wins over one entered here. It 
 
 ### A site may connect more than one kind of assistant and pin one
 
-A site may connect several kinds of assistant. They sit in a fixed order of preference, shown to the admin in that order. Unless an admin pins one, every feature uses the first in the order that is ready (a key entered and accepted), and the reason given names the ones it was chosen ahead of. An admin can pin one ("auto: first available in the order" or the pinned one). A pinned assistant that is not ready is a refusal, never a quiet fallback: "<name> is pinned but not available. Nothing else will be used in its place: clear the pin to fall back to the order." A pin that cannot be set puts the choice back and says "could not pin: <reason>".
+A site may connect several kinds of assistant. They sit in a fixed order of preference, shown to the admin in that order. Unless an admin pins one, every feature uses the first in the order that is ready (a key entered and accepted, or a subscription program installed and signed in), and the reason given names the ones it was chosen ahead of. An admin can pin one ("auto: first available in the order" or the pinned one). A pinned assistant that is not ready is a refusal, never a quiet fallback: "<name> is pinned but not available. Nothing else will be used in its place: clear the pin to fall back to the order." A pin that cannot be set puts the choice back and says "could not pin: <reason>".
 
 The assistant settings show:
 
@@ -484,7 +479,6 @@ With none connected: "No assistant is connected.", saying that the YouTube downl
 - Who: an admin.
 - Ways in: the assistant settings (see The dashboard: Settings and setup).
 - When the assistant is off: not shown.
-- Pending: whole-product-Q6
 
 ### An admin tests each assistant and sees its state
 
@@ -507,18 +501,16 @@ The set-up has four steps, starting at the first one not finished: allow, instal
 - **Sign in**: a choice of account type where the maker offers one (subscription or pay per use), a button that opens the maker's own sign-in page in a new tab, a short code to type there, and a box to paste back the code that page gives (refused when blank, "that code is blank", over 512 characters or holding control characters; never stored or shown). It shows "waiting for the sign-in to finish (<n>s left)" with a Cancel button, and gives up after 5 minutes ("the sign-in was not finished within 5 minutes and was stopped"). One sign-in runs at a time. Success is confirmed by asking the program, then shows "Signed in as <account>" with the e-mail masked to the first and last letter of the name and the domain, plus plan and organisation where known, and a Sign out button. A sign-in survives the server restarting; one that has expired and cannot renew itself says "Sign in again".
 - **Test and finish**: the version, whether it is signed in, Test, and its place in the order. Checking that such a program is signed in makes one tiny real request, charged to the subscription. Its test answers "answered (<version>)", "not installed: press Set up to install it from the maker, or give the full path of a copy you installed yourself", or "installed but not signed in: press Set up and finish the sign-in step".
 
-Afterwards each such program offers: Sign out (or "Finish setting up: sign in"), Update (only for a copy installed here), "Use my own copy" or "Change its path", and Remove (only for a copy installed here, refused while it is installing: "Remove <name> and its sign-in from this server? Features that use it will move to the next connected assistant, or stop if there is none."). Switching this way off for the site closes any set-up that is open.
+Afterwards each such program offers: Sign out (or "Finish setting up: sign in"), Update (only for a copy installed here), "Use my own copy" or "Change its path", and Remove (only for a copy installed here, refused while it is installing: "Remove <name> and its sign-in from this server? Features that use it will move to the next connected assistant, or stop if there is none."). The way is switched on in one place only, by accepting the notice in the set-up, and an admin switches it off again from the same set-up; switching it off closes any set-up that is open and stops every such program being run, deleting nothing.
 
 When the site allows it and an admin turns it on, the server keeps a copy it installed up to date by itself: about five minutes after starting, then at most once a day, it installs only a strictly newer version, with the same checks as an install by hand, never while another install runs, and never for a copy at a typed path. When such an update fails, admins see a warning naming the installed and newest versions and the reason: "Timeline Cards keeps working on the version it has, but a newer assistant may be refused until it is updated." The fix is to update it from the assistant settings.
 
 The program never sees the server's other secrets or keys.
 
 - Who: an admin.
-- Ways in: the tick box under the list of assistants, the notice in the set-up, and the site's settings.
-- Setting: Subscription assistants. Does: allows the site to connect an assistant through a personal subscription signed in on the server. Default: off. Who: an admin, by accepting the notice. Applies to: the site. Search words: subscription, sign in, assistant program, personal plan.
+- Setting: Subscription assistants. Does: allows the site to connect an assistant through a personal subscription signed in on the server. Default: off. Who: an admin, by accepting the notice in the set-up. Applies to: the site. Search words: subscription, sign in, assistant program, personal plan.
 - Setting: Keep subscription assistants up to date. Does: lets the server install a newer version of a program it installed, once a day. Default: off. Who: an admin. Applies to: the site. Search words: update assistant, automatic update, program version.
 - When the assistant is off: not shown.
-- Pending: whole-product-Q7, whole-product-Q10
 
 ### An admin is told when the site's assistant stops working
 
@@ -535,7 +527,6 @@ A site can also cap what the assistant spends in a day, in money. Once the day's
 
 - Setting: Assistant budget per day. Does: the most the site's assistant may spend in a day before new runs are refused. Default: no limit. Who: an admin. Applies to: the site. Search words: budget, spend limit, assistant cost, daily cap, AI cost.
 - When the assistant is off: not shown.
-- Pending: whole-product-Q9
 
 ### A run of the assistant is limited and always ends with a sentence
 
@@ -589,7 +580,6 @@ The studio's own public website can send the server a photo of a piece of gear (
 
 - Who: the studio's website, holding the gear code.
 - When the assistant is off: every request is refused, saying the assistant is off for this site.
-- Pending: whole-product-Q8
 
 #### Lessons
 

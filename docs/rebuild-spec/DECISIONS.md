@@ -110,7 +110,7 @@ must meet unless you say one is no longer wanted. Sixteen factual
 disagreements were settled from the code and the record
 (`knowledge-base/_owner/SETTLED_BY_EVIDENCE.md`).
 
-## Pages 3 to 30: the questions that came out of writing the specification (2026-11-24, not yet asked)
+## Pages 3 to 30: the questions that came out of writing the specification (written and ANSWERED 2026-11-24)
 
 354 questions on pages 3 to 29, gathered from the 27 writers of the
 specification by `python docs/rebuild-spec/tools/build_decisions.py` (it
@@ -135,34 +135,44 @@ Pending mark removed.
 
 | Page | About | Choices | Tidy-ups | State |
 |---|---|---|---|---|
-| 3 | [The whole product](decisions/page-03-whole-product.md) | 6 | 4 | not yet answered |
-| 4 | [Sync, part 1](decisions/page-04-sync-1.md) | 17 | 4 | not yet answered |
-| 5 | [Sync, part 2](decisions/page-05-sync-2.md) | 0 | 3 | not yet answered |
-| 6 | [The dashboard, part 1](decisions/page-06-dashboard-1.md) | 4 | 13 | not yet answered |
-| 7 | [The dashboard, part 2](decisions/page-07-dashboard-2.md) | 6 | 5 | not yet answered |
-| 8 | [The app on each editor's computer](decisions/page-08-editor-app.md) | 8 | 11 | not yet answered |
-| 9 | [Accounts, privacy and the legal paperwork](decisions/page-09-accounts-privacy-legal.md) | 9 | 9 | not yet answered |
-| 10 | [Releases and updates](decisions/page-10-releases-and-updates.md) | 4 | 9 | not yet answered |
-| 11 | [The server: installing it and keeping it running, part 1](decisions/page-11-server-install-and-running-1.md) | 8 | 13 | not yet answered |
-| 12 | [The server: installing it and keeping it running, part 2](decisions/page-12-server-install-and-running-2.md) | 4 | 2 | not yet answered |
-| 13 | [Work shared out across the computers](decisions/page-13-fleet-jobs.md) | 4 | 8 | not yet answered |
-| 14 | [Proxies and file moves](decisions/page-14-proxies-and-file-moves.md) | 2 | 1 | not yet answered |
-| 15 | [Resolve on the editor's computer](decisions/page-15-resolve-on-the-editors-computer.md) | 5 | 7 | not yet answered |
-| 16 | [The b-roll archive](decisions/page-16-broll.md) | 16 | 12 | not yet answered |
-| 17 | [Music](decisions/page-17-music.md) | 3 | 4 | not yet answered |
-| 18 | [YouTube downloads](decisions/page-18-youtube.md) | 9 | 12 | not yet answered |
-| 19 | [The Footage Sorter and camera cards, part 1](decisions/page-19-footage-sorter-and-camera-cards-1.md) | 15 | 11 | not yet answered |
-| 20 | [The Footage Sorter and camera cards, part 2](decisions/page-20-footage-sorter-and-camera-cards-2.md) | 7 | 4 | not yet answered |
-| 21 | [The Footage Sorter and camera cards, part 3](decisions/page-21-footage-sorter-and-camera-cards-3.md) | 5 | 1 | not yet answered |
-| 22 | [Timeline Cards: footage in, ready to cut](decisions/page-22-cards-footage-in.md) | 8 | 0 | not yet answered |
-| 23 | [Timeline Cards: the board](decisions/page-23-cards-board.md) | 7 | 1 | not yet answered |
-| 24 | [Timeline Cards: the editor, part 1](decisions/page-24-cards-editor-1.md) | 8 | 6 | not yet answered |
-| 25 | [Timeline Cards: the editor, part 2](decisions/page-25-cards-editor-2.md) | 8 | 6 | not yet answered |
-| 26 | [Timeline Cards: the editor, part 3](decisions/page-26-cards-editor-3.md) | 9 | 1 | not yet answered |
-| 27 | [Timeline Cards: the editor, part 4](decisions/page-27-cards-editor-4.md) | 4 | 9 | not yet answered |
-| 28 | [Timeline Cards: the editor, part 5](decisions/page-28-cards-editor-5.md) | 5 | 8 | not yet answered |
-| 29 | [Timeline Cards: the hand-over to Resolve, and exports](decisions/page-29-cards-to-resolve-and-exports.md) | 4 | 5 | not yet answered |
-| 30 | [What only he can answer](decisions/page-30-open-points.md): points neither the writers nor the code could settle, places where the code differs from what the specification assumed, the assistant's name on screen, the client page's look, Rust | 14 | 0 | not yet answered |
+| 3 | [The whole product](decisions/page-03-whole-product.md) | 6 | 4 | ANSWERED 2026-11-24 |
+| 4 | [Sync, part 1](decisions/page-04-sync-1.md) | 17 | 4 | ANSWERED 2026-11-24 |
+| 5 | [Sync, part 2](decisions/page-05-sync-2.md) | 0 | 3 | ANSWERED 2026-11-24 |
+| 6 | [The dashboard, part 1](decisions/page-06-dashboard-1.md) | 4 | 13 | ANSWERED 2026-11-24 |
+| 7 | [The dashboard, part 2](decisions/page-07-dashboard-2.md) | 6 | 5 | ANSWERED 2026-11-24 |
+| 8 | [The app on each editor's computer](decisions/page-08-editor-app.md) | 8 | 11 | ANSWERED 2026-11-24 |
+| 9 | [Accounts, privacy and the legal paperwork](decisions/page-09-accounts-privacy-legal.md) | 9 | 9 | ANSWERED 2026-11-24 |
+| 10 | [Releases and updates](decisions/page-10-releases-and-updates.md) | 4 | 9 | ANSWERED 2026-11-24 |
+| 11 | [The server: installing it and keeping it running, part 1](decisions/page-11-server-install-and-running-1.md) | 8 | 13 | ANSWERED 2026-11-24 |
+| 12 | [The server: installing it and keeping it running, part 2](decisions/page-12-server-install-and-running-2.md) | 4 | 2 | ANSWERED 2026-11-24 |
+| 13 | [Work shared out across the computers](decisions/page-13-fleet-jobs.md) | 4 | 8 | ANSWERED 2026-11-24 |
+| 14 | [Proxies and file moves](decisions/page-14-proxies-and-file-moves.md) | 2 | 1 | ANSWERED 2026-11-24 |
+| 15 | [Resolve on the editor's computer](decisions/page-15-resolve-on-the-editors-computer.md) | 5 | 7 | ANSWERED 2026-11-24 |
+| 16 | [The b-roll archive](decisions/page-16-broll.md) | 16 | 12 | ANSWERED 2026-11-24 |
+| 17 | [Music](decisions/page-17-music.md) | 3 | 4 | ANSWERED 2026-11-24 |
+| 18 | [YouTube downloads](decisions/page-18-youtube.md) | 9 | 12 | ANSWERED 2026-11-24 |
+| 19 | [The Footage Sorter and camera cards, part 1](decisions/page-19-footage-sorter-and-camera-cards-1.md) | 15 | 11 | ANSWERED 2026-11-24 |
+| 20 | [The Footage Sorter and camera cards, part 2](decisions/page-20-footage-sorter-and-camera-cards-2.md) | 7 | 4 | ANSWERED 2026-11-24 |
+| 21 | [The Footage Sorter and camera cards, part 3](decisions/page-21-footage-sorter-and-camera-cards-3.md) | 5 | 1 | ANSWERED 2026-11-24 |
+| 22 | [Timeline Cards: footage in, ready to cut](decisions/page-22-cards-footage-in.md) | 8 | 0 | ANSWERED 2026-11-24 |
+| 23 | [Timeline Cards: the board](decisions/page-23-cards-board.md) | 7 | 1 | ANSWERED 2026-11-24 |
+| 24 | [Timeline Cards: the editor, part 1](decisions/page-24-cards-editor-1.md) | 8 | 6 | ANSWERED 2026-11-24 |
+| 25 | [Timeline Cards: the editor, part 2](decisions/page-25-cards-editor-2.md) | 8 | 6 | ANSWERED 2026-11-24 |
+| 26 | [Timeline Cards: the editor, part 3](decisions/page-26-cards-editor-3.md) | 9 | 1 | ANSWERED 2026-11-24 |
+| 27 | [Timeline Cards: the editor, part 4](decisions/page-27-cards-editor-4.md) | 4 | 9 | ANSWERED 2026-11-24 |
+| 28 | [Timeline Cards: the editor, part 5](decisions/page-28-cards-editor-5.md) | 5 | 8 | ANSWERED 2026-11-24 |
+| 29 | [Timeline Cards: the hand-over to Resolve, and exports](decisions/page-29-cards-to-resolve-and-exports.md) | 4 | 5 | ANSWERED 2026-11-24 |
+| 30 | [What only he can answer](decisions/page-30-open-points.md): points neither the writers nor the code could settle, places where the code differs from what the specification assumed, the assistant's name on screen, the client page's look, Rust | 14 | 0 | ANSWERED 2026-11-24 |
 
-Still to add before the last pages are put to him: a page pruning settings
+**ANSWERED 2026-11-24.** Page 3 and most of page 4 he answered one by one;
+then, of everything still waiting: "accept all the recommendations." Each
+page records it. Against the recommendation: 3.9 (the subscription way of
+running the assistant stays, off by default) and 4.6 ("Resume downloads" is
+still offered after a low-disk pause). Held back by me and put to him
+again: 5.2 (see that page). The same message added a requirement of his
+own, now in `spec/OWNER_REQUIREMENTS.md`: the rebuild tests the real speed
+of every way of syncing, with the studio's remote editor and with computers
+in other countries.
+
+Still to add: a page pruning settings
 nobody would feel (303 were written; some only tune machinery).

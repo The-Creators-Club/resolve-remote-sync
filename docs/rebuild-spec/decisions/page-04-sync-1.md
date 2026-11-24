@@ -155,4 +155,10 @@ One thing that can be done from several places, the same job existing twice, thi
 
 ## Your answers
 
-Not yet answered.
+ANSWERED 2026-11-24. After answering pages 2 and 3 and most of page 4 one
+by one, he said of everything still waiting: "accept all the
+recommendations." So every question on this page is answered with its
+recommendation, with one exception he chose himself before that: 4.6, where
+"Resume downloads" IS still offered when downloads paused because the drive
+was nearly full (against the recommendation). 4.1 to 4.5 and 4.7 to 4.19 he
+answered one by one, each as recommended.

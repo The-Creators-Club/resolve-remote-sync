@@ -72,4 +72,7 @@ Stays behind: never shown to the session that rebuilds the product.
 
 ## Your answers
 
-Not yet answered.
+ANSWERED 2026-11-24. After answering pages 2 and 3 and most of page 4 one
+by one, he said of everything still waiting: "accept all the
+recommendations." So every question on this page is answered with its
+recommendation.

@@ -16,4 +16,13 @@ One thing that can be done from several places, the same job existing twice, thi
 
 ## Your answers
 
-Not yet answered.
+ANSWERED 2026-11-24. After answering pages 2 and 3 and most of page 4 one
+by one, he said of everything still waiting: "accept all the
+recommendations." So every question on this page is answered with its
+recommendation, with one held back by me: 5.2 (footage only ever over the
+studio's own private network, never through an outside service). In the
+same message he asked that the rebuild test the real speed of every way of
+syncing, with the studio's remote editor and with computers in other
+countries; the fastest way to a far-off computer may turn out to run
+through an outside service, which 5.2's recommendation would forbid. Put
+back to him before it is applied.

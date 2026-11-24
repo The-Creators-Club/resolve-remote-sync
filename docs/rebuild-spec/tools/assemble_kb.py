@@ -203,8 +203,34 @@ def main():
     # the file its line names. Nothing is renumbered and the count still
     # closes, because both are written to _trace/taken_out.tsv with every
     # reader's entry they were made of.
+    # 3b first: words changed after the merge (_cross/AMENDED.txt), where the
+    # owner's later answer changed PART of what a lesson says. The old words
+    # go to _trace/amended.tsv. Applied before the purge net looks at them.
+    amend, aprobs = ml.amended()
+    problems.extend(aprobs)
+    arows = ["finished id\tfield\told words\tnew words\treason"]
+    for i, fields in amend.items():
+        e = by_id.get(i)
+        if e is None:
+            problems.append(f"AMENDED: {i} is not a finished lesson")
+            continue
+        if i in drop_to:
+            problems.append(f"AMENDED: {i} was folded into {keeper(i)}; name that one")
+            continue
+        for fld, (new, why) in fields.items():
+            key = ml.AMEND_FIELDS[fld]
+            old = e["title"] if key is None else e["fields"].get(key, "")
+            if key is None:
+                e["title"] = new
+            else:
+                e["fields"][key] = new
+            arows.append("\t".join([i, fld, old, new, why]))
+
     taken, tprobs = ml.taken_out()
     problems.extend(tprobs)
+    for i in amend:
+        if i in taken:
+            problems.append(f"{i} is both amended and taken out; choose one")
     for i, r in taken.items():
         e = by_id.get(i)
         if e is None:
@@ -374,6 +400,7 @@ def main():
             f.get("What was going on", ""), f.get("What the product must do", ""),
             " ".join(ids), " ".join(pids), " ".join(sources(pids))]))
     files[os.path.join(TRACE, "taken_out.tsv")] = "\n".join(trows) + "\n"
+    files[os.path.join(TRACE, "amended.tsv")] = "\n".join(arows) + "\n"
     rrows = ["reader's entry\tbundle\treason\tregister ids"]
     for r in removed:
         for i in r["ids"]:

@@ -37,6 +37,12 @@ You may also open, when you need to settle which side is right:
 - `...\decisions\page-NN-<piece>.md`: questions put to the owner. A line
   starting `- Answered by the owner` or a page headed `ANSWERED` is his
   word, and the latest date wins.
+- `...\DECISIONS.md`: pages 1 and 2 are written out there in full with his
+  answers (page 2 is where he ruled two ways at different times; two of his
+  answers there go AGAINST an older ruling in the knowledge base: an
+  upload-only project DOES bring its empty folders down, and the Footage
+  Sorter moves originals on its own with no approval). His answer of
+  2026-11-24 outranks any lesson, ruling or not.
 
 Do not open anything outside `E:\Projects\Editing\ccsync\docs\rebuild-spec`.
 In particular do not read the product's code: the specification has to stand

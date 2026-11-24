@@ -129,7 +129,42 @@ def taken_out():
     return rows, problems
 
 
-_REG = r"[PLGHDMC]-[A-Za-z0-9_.\-]+"
+AMENDED = os.path.join(CROSS, "AMENDED.txt")
+AMEND_FIELDS = {"title": None, "why": "What was going on", "must": "What the product must do"}
+
+
+def amended():
+    """-> ({finished id: {field: (new text, reason)}}, problems). Lessons whose
+    words were changed after the merge because the owner's later answer
+    changed part of what they say (knowledge-base/_cross/AMENDED.txt). Lines:
+    `id | title, why or must | the new words | reason`."""
+    rows, problems = {}, []
+    if not os.path.exists(AMENDED):
+        return rows, problems
+    for n, line in enumerate(open(AMENDED, encoding="utf-8"), 1):
+        line = line.rstrip("\r\n")
+        if not line.strip() or line.startswith("#"):
+            continue
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) != 4:
+            problems.append(f"AMENDED L{n}: {len(cols)} fields, not 4")
+        elif not _FINISHED_ID.match(cols[0]):
+            problems.append(f"AMENDED L{n}: '{cols[0]}' is not a finished lesson id")
+        elif cols[1] not in AMEND_FIELDS:
+            problems.append(f"AMENDED L{n}: {cols[0]}: the field must be title, why or must")
+        elif cols[1] in rows.get(cols[0], {}):
+            problems.append(f"AMENDED L{n}: {cols[0]} {cols[1]} is amended twice")
+        elif len(cols[2]) < 8 or len(cols[3]) < 12:
+            problems.append(f"AMENDED L{n}: {cols[0]}: needs the new words and a reason")
+        elif len(cols[2].split()) > (15 if cols[1] == "title" else 34):
+            problems.append(f"AMENDED L{n}: {cols[0]} {cols[1]} is {len(cols[2].split())} words; "
+                            "a lesson stays terse")
+        else:
+            rows.setdefault(cols[0], {})[cols[1]] = (cols[2], cols[3])
+    return rows, problems
+
+
+_REG =r"[PLGHDMC]-[A-Za-z0-9_.\-]+"
 _RANGE = re.compile(r"^([PL])-(\d+)\.\.([PL])-(\d+)$")
 
 

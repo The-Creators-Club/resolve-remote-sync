@@ -207,7 +207,7 @@
 - editor-app / Signing in, the computer's identity and the licence | The admin sees how safely each computer reaches the dashboard | the app refuses plain http to a public address
 - accounts-privacy-legal / Passwords, sessions and failed sign-ins | The server knows a visitor's real address | the failed sign-in limit counts by visitor address
 - accounts-privacy-legal / How a computer proves who it belongs to | Each editor gets their own account on the NAS | approving a computer adds its key
-- accounts-privacy-legal / Suspending, disabling and removing a person | When an editor leaves their computers lose the NAS | removing or suspending a person
+- accounts-privacy-legal / Suspending and removing a person | When an editor leaves their computers lose the NAS | removing or suspending a person
 - accounts-privacy-legal / How secrets and keys are kept | The server holds a limited key for a TrueNAS and never its administrator password | the server's secret store
 - server-install-and-running / Snapshots, restoring and the server's disk | Schedules run on the studio's own clock | scheduled snapshots fire at studio time
 

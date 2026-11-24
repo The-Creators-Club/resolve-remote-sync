@@ -57,11 +57,11 @@ When single sign-on is chosen but not fully set up, both steps answer with the f
 
 ### An admin's emergency password door under single sign-on
 
-So that a broken sign-in service cannot lock the studio out, the sign-in page also carries "Single sign-on is configured for this dashboard. Admin sign-in if the identity provider is down." "Admin sign-in" shows the password form under an "admin sign-in" divider. Only the admins named in the admin list of the server's set-up may sign in there (see "The admins are named at install, and are never the NAS's own administrator"); their password is their own account's password. Anyone else is refused with the ordinary refusal, and it counts as a failed sign-in. When the service cannot be reached, its refusal adds "An admin can sign in at" with a link to this door. The account page tells an admin about this door.
+So that a broken sign-in service cannot lock the studio out, the sign-in page also carries "Single sign-on is configured for this dashboard. Admin sign-in if the identity provider is down." "Admin sign-in" shows the password form under an "admin sign-in" divider. Only the admins named in the admin list of the server's set-up may sign in there (see "The admins are named in set-up, and are never the NAS's own administrator"); their password is their own account's password. Anyone else is refused with the ordinary refusal, and it counts as a failed sign-in. When the service cannot be reached, its refusal adds "An admin can sign in at" with a link to this door. The account page tells an admin about this door.
 
 - Who: the admins named in the set-up's admin list only.
 
-### The admins are named at install, and are never the NAS's own administrator
+### The admins are named in set-up, and are never the NAS's own administrator
 
 An admin is anyone named in the admin list, and any account with the admin role. The admin list is not chosen when the server is installed: it is kept in the server's set-up in the browser, in its admin account task, and the first admin's name starts it (see The server: installing it and keeping it running: Installing on a NAS, "Set-up task: your admin account"). The set-up refuses a list that names no admin ("name an editor account, not the NAS administrator") and one that names the NAS's own administrator account, ignoring capitals ("use a separate account"). Names are comma-separated; spaces and blanks are dropped. A person's account page shows where their admin power comes from: the admin list, or their account's role.
 
@@ -91,7 +91,7 @@ The admin's list of every person, with each person's computers and actions, is t
 
 - Who: an admin. Anyone else is told "admins only".
 
-### A studio can keep editors to file transfers only on the NAS
+### Editors are kept to file transfers only on the NAS
 
 Editors' logins on the NAS may only transfer files, always: they never log in to the NAS itself, and reach only the project tree. This is not a choice a studio makes. Every editor's account is made that way, and the NAS is set so that editors may only transfer files; the admin is told whether that was set, was already right, or must be added by hand.
 
@@ -180,7 +180,7 @@ When the server's own signing secret is changed, every existing computer sign-in
 
 - Met: ACC-010, ACC-011, ACC-012, ACC-013, ACC-014, ACC-015, ACC-016, ACC-017.
 
-## Suspending, disabling and removing a person
+## Suspending and removing a person
 
 ### Stopping a person takes effect everywhere at once
 
@@ -373,7 +373,7 @@ An action reserved for admins refuses a signed-in non-admin with "admins only" a
 
 ### Who is an admin, and what an admin sees
 
-An admin is anyone in the admin list (see "The admins are named at install, and are never the NAS's own administrator"), and any account with the admin role. Nothing else makes anyone an admin. An admin sees the whole studio and can look at any page as one named editor sees it. A person may change an editor's settings if it is themselves or they are an admin.
+An admin is anyone in the admin list (see "The admins are named in set-up, and are never the NAS's own administrator"), and any account with the admin role. Nothing else makes anyone an admin. An admin sees the whole studio and can look at any page as one named editor sees it. A person may change an editor's settings if it is themselves or they are an admin.
 
 An admin can turn on a second step at sign-in for their own account, a six-digit code from an authenticator app on their phone, asked for after the password. Once on, their sign-in on any browser needs the code.
 

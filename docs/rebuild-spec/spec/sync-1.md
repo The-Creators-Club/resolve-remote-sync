@@ -658,7 +658,7 @@ Names are compared ignoring letter case, and a Mac's names (in the decomposed Un
 
 Updating the app never makes a computer bring down again files it already holds intact. If names must change, the copies on the computer are renamed in place.
 
-### The editor is told about files that will never upload because of a name clash or a wrong clock
+### The editor is told about files that will never upload because of a name clash, and about a wrong clock
 
 - "⚠ N files on the server have the same name but a different size, so your newer version will NOT upload (e.g. <name>: yours <size>, the server's <size>). Rename yours, or ask your admin to remove the server's copy". Each such file is listed with both sizes, up to 20, and the folder holding one can be opened.
 - Files dated in the future: the editor is told how many there are, the first one's name and date, that a camera clock is set wrong, that the files upload like any other and only their dates are wrong, that a date further ahead is best reset to now by whoever looks after their computers (a copy or re-import keeps the date), and that fixing the camera clock only helps future recordings.

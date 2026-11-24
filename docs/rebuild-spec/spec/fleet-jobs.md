@@ -378,7 +378,7 @@ When a computer doing a piece of work goes quiet (switched off, asleep, unplugge
 
 ### A computer whose access is refused says so and takes no work
 
-When the server refuses a computer's access (its person suspended or removed, see Accounts, privacy and the legal paperwork: Suspending, disabling and removing a person, "Stopping a person takes effect everywhere at once"), the computer stops the work it is running at once, takes no new work, and shows that it is not taking work, adding "This computer's fleet work is not being accepted right now: ask the studio to check this account." A piece it had already finished can still be handed in. The next time the server accepts it, the message clears by itself.
+When the server refuses a computer's access (its person suspended or removed, see Accounts, privacy and the legal paperwork: Suspending and removing a person, "Stopping a person takes effect everywhere at once"), the computer stops the work it is running at once, takes no new work, and shows that it is not taking work, adding "This computer's fleet work is not being accepted right now: ask the studio to check this account." A piece it had already finished can still be handed in. The next time the server accepts it, the message clears by itself.
 
 #### Lessons
 

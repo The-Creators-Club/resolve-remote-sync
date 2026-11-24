@@ -112,7 +112,7 @@
 - Kind: 3
 - From: L04-165
 
-## Suspending, disabling and removing a person
+## Suspending and removing a person
 
 ### ACC-018: Disabling or deleting a person left their browsers and computers working.
 - What was going on: Disabling changed one flag: open sessions kept working for days and the person's computers kept reporting, syncing and holding shares under credentials nobody could revoke.

@@ -70,7 +70,7 @@ def gather():
             if l.startswith("## "):
                 part = l[3:].strip().lower()
                 continue
-            if not (part.startswith("joins") and l.startswith("- ")):
+            if not (part.startswith("joins with") and l.startswith("- ")):
                 continue
             cols = [c.strip() for c in l[2:].split("|")]
             target = cols[0]

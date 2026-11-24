@@ -18,8 +18,8 @@
 - 20-010 | Only the people the admin has let in can open the product
 - 20-014 | left out: an arrangement (the promise is under A computer becomes a person's when they sign in on it)
 - 21-011 | An admin adds a person in one step
-- 21-012 | A studio can keep editors to file transfers only on the NAS
-- 21c-017 | The admins are named at install, and are never the NAS's own administrator
+- 21-012 | Editors are kept to file transfers only on the NAS
+- 21c-017 | The admins are named in set-up, and are never the NAS's own administrator
 - 09-072 | A computer becomes a person's when they sign in on it
 - 11-004 | A computer becomes a person's when they sign in on it ; A computer's sign-in reaches only that computer's own work, as its own person
 - 11-052 | left out: an arrangement (the promise is under A computer becomes a person's when they sign in on it)
@@ -100,7 +100,7 @@
 - 14-040 | Every person has one page about themselves
 - 16-044 | Each project is reachable only by its members
 - 17-017 | Everything needs a sign-in except a short list of open doors
-- 17-034 | Who is an admin, and what an admin sees ; The admins are named at install, and are never the NAS's own administrator
+- 17-034 | Who is an admin, and what an admin sees ; The admins are named in set-up, and are never the NAS's own administrator
 - 17-038 | Who is an admin, and what an admin sees
 - 19-025 | Every switchable part sits behind the same sign-in and knows who is asking
 - 19-027 | A sign-in name has one shape, and a name accepted anywhere works everywhere
@@ -524,7 +524,7 @@
 - The Footage Sorter and camera cards / Downloading originals and sharing folders | Everything needs a sign-in except a short list of open doors | shared folder links as their own credential
 - YouTube downloads / Rights and terms | A person downloads everything the product holds about them ; An admin erases a person's past history | YouTube records in the download, the erasure and the removal
 - Timeline Cards: the editor / Opening episodes and keeping the editor running | Signing out, and signing out everywhere | the saved episode list deleted on a real sign-out
-- The server: installing it and keeping it running / Installing on a NAS | The studio chooses how people sign in ; The admins are named at install, and are never the NAS's own administrator | the install-time choices
+- The server: installing it and keeping it running / Installing on a NAS | The studio chooses how people sign in ; The admins are named in set-up, and are never the NAS's own administrator | the install-time choices
 - The server: installing it and keeping it running / Settings and secrets | Changing the server's own secrets signs nobody out | changing and retiring the server's secrets
 - Releases and updates / Signing and trust | A credential never crosses the internet unencrypted | downloads checked against a signature
 - Releases and updates / Customer sites and the vendor's release feed | What a customer receives, and what never | the site's credential for downloading the product
@@ -532,7 +532,7 @@
 - The dashboard / Each computer's state | A person or an admin asks one of the person's computers to change its settings | every request to one computer waits for it and expires after 14 days
 - The app on each editor's computer / Signing in, the computer's identity and the licence | A refused computer is told why, and the admin sees it | the one warning for a refused sign-in, offering to sign in again
 - The Footage Sorter and camera cards / The record of every copy | What a computer tells the server ; Four kinds of reporting can be switched off, by a computer or for the whole studio | drive reporting and its per-computer switch
-- The server: installing it and keeping it running / Installing on a NAS | The admins are named at install, and are never the NAS's own administrator ; The server's set-up asks the admin to accept the licence | the admin list kept in the set-up's admin account task, and the licence task pointing here
+- The server: installing it and keeping it running / Installing on a NAS | The admins are named in set-up, and are never the NAS's own administrator ; The server's set-up asks the admin to accept the licence | the admin list kept in the set-up's admin account task, and the licence task pointing here
 - The server: installing it and keeping it running / Settings and secrets | Secrets the server is given are kept by the server | secrets an admin enters, never shown back
 
 ## Settled by the owner 2026-11-24
@@ -543,14 +543,14 @@
 
 ## Joins settled
 
-- accounts-privacy-legal F1 | no change here: the text already speaks only of suspending and removing; the `##` heading "Suspending, disabling and removing a person" is left for the lead to rename by hand
+- accounts-privacy-legal F1 | no change here: the text already speaks only of suspending and removing; the `##` heading "Suspending and removing a person" is left for the lead to rename by hand
 - accounts-privacy-legal F3 | changed: An admin manages the studio's people from one list | the page is dashboard-1's "People and computers"; this behaviour points there and to each action's own behaviour here
 - accounts-privacy-legal F4 | no change here: dashboard-1 and server-install-and-running-1 drop the site's choice; this text already has per-project access only
 - accounts-privacy-legal F5 | changed: Each project is reachable only by its members | the person who creates a new project is a member at once; creating one that exists grants nothing
 - accounts-privacy-legal F6 | no change here: editor-app drops the 16-computer limit (the join line here no longer names it)
 - accounts-privacy-legal F7 | no change here: editor-app takes this piece's sentences
 - accounts-privacy-legal F10 | changed: The server's set-up asks the admin to accept the licence | home of the task; adds that it is first on the set-up's list (server-install-and-running-1 points here)
-- accounts-privacy-legal F12 | changed: A studio can keep editors to file transfers only on the NAS | the setting, the conversion report and its refusal go; editors are always transfer-only (the `###` heading is kept as it stands)
+- accounts-privacy-legal F12 | changed: Editors are kept to file transfers only on the NAS | the setting, the conversion report and its refusal go; editors are always transfer-only (the `###` heading is kept as it stands)
 - accounts-privacy-legal F13 | no change here: the server-install pieces change; this text already keeps the NAS login's password in step
 - accounts-privacy-legal F14 | no change here: server-install-and-running-2 changes; this text already deletes the NAS login on removal
 - accounts-privacy-legal F15 | changed: Secrets the server is given are kept by the server (new) | points to server-install-and-running-1's "Secrets an admin enters are checked and never shown back"
@@ -574,7 +574,7 @@
 - fleet-jobs F17 | changed: A person or an admin asks one of the person's computers to change its settings | home of the ask: takes fleet-jobs' refusals, one ask at a time, its states and its notice to the editor; waiting and the 14-day expiry point to dashboard-1's rule
 - footage-sorter-and-camera-cards-1 F13 | no change here: footage-sorter-and-camera-cards-3 changes
 - releases-and-updates F1 | no change here: releases-and-updates changes
-- server-install-and-running-1 F1 | changed: The admins are named at install, and are never the NAS's own administrator ; An admin's emergency password door under single sign-on | the admin list is kept in the browser set-up's admin account task and refused there; the heading is kept as it stands (it still says "at install", left for the pointer pass)
+- server-install-and-running-1 F1 | changed: The admins are named in set-up, and are never the NAS's own administrator ; An admin's emergency password door under single sign-on | the admin list is kept in the browser set-up's admin account task and refused there; the heading is kept as it stands (it still says "at install", left for the pointer pass)
 - server-install-and-running-1 F2 | no change here: server-install-and-running-1 changes
 - server-install-and-running-1 F4 | changed: A sign-in name has one shape, and a name accepted anywhere works everywhere ; What a refused sign-in says | 1 to 32 characters, "(at most 32 characters)"
 - server-install-and-running-1 F5 | no change here: server-install-and-running-1 changes and points here

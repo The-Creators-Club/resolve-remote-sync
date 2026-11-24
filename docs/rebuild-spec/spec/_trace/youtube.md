@@ -24,7 +24,7 @@
 - 04-027 | The app judges the editor's YouTube sign-in from real downloads and warns once when it lapses
 - 04-031 | An editor signs in to YouTube with one click from the app
 - 04-032 | An editor can instead give the app a cookies file exported from their browser
-- 08-003 | A site decides whether signed-in YouTube sessions may be used on editors' computers
+- 08-003 | A site decides whether YouTube's extra measures against being blocked are used
 - 08-023 | The app judges the editor's YouTube sign-in from real downloads and warns once when it lapses
 - 08-034 | An editor can instead give the app a cookies file exported from their browser
 - 08-035 | An editor signs in to YouTube with one click from the app
@@ -94,7 +94,7 @@
 - 12-047 | The editor and the dashboard are told what the filing is doing ; Admins are warned when downloading on the server or a computer is not working
 - 26-041 | An editor can open a downloaded clip's folder, or fetch it from the NAS
 - 04-055 | An editor is warned when downloads on their computer may start failing
-- 06-048 | A site decides whether signed-in YouTube sessions may be used on editors' computers
+- 06-048 | A site decides whether YouTube's extra measures against being blocked are used
 - 08-025 | Downloading keeps working as YouTube changes, with nothing for an editor or admin to do
 - 08-030 | Downloading keeps working as YouTube changes, with nothing for an editor or admin to do
 - 08-031 | An editor is warned when downloads on their computer may start failing
@@ -491,7 +491,7 @@
 - whole-product F12 | changed: The assistant behind search is the one the site has set up, and every failure is explained | "no assistant has a working key", with where an admin connects one, replaces the old sentence; "Assistant is not enabled for this site" dropped
 - whole-product F13 | changed: The assistant behind search is the one the site has set up, and every failure is explained | the five-minute re-check costs no call to the assistant; only an admin's test and a real search do
 - whole-product F14 | no change here: whole-product adds the exception for programs that keep themselves current; this piece already says newest build, checked as genuine, never backwards
-- youtube F1 | changed: A site decides whether signed-in YouTube sessions may be used on editors' computers ; YouTube demands proof that a request comes from a real player before it serves a video ; An editor signs in to YouTube with one click from the app ; The app judges the editor's YouTube sign-in from real downloads and warns once when it lapses ; The YouTube controls on an editor's computer appear only where they can be used ; A health line on the page shows whether searching and downloading can work right now ; Admins are warned when downloading on the server or a computer is not working | one site switch, "YouTube's extra measures against being blocked", off on a new site, covering proof of a real player, in-page challenges and signed-in sessions on editors' computers; the real-player demand holds while it is on; the health line's "off" is this switch. The heading is kept word for word though it no longer fits (for the lead to rename with the pointers)
+- youtube F1 | changed: A site decides whether YouTube's extra measures against being blocked are used ; YouTube demands proof that a request comes from a real player before it serves a video ; An editor signs in to YouTube with one click from the app ; The app judges the editor's YouTube sign-in from real downloads and warns once when it lapses ; The YouTube controls on an editor's computer appear only where they can be used ; A health line on the page shows whether searching and downloading can work right now ; Admins are warned when downloading on the server or a computer is not working | one site switch, "YouTube's extra measures against being blocked", off on a new site, covering proof of a real player, in-page challenges and signed-in sessions on editors' computers; the real-player demand holds while it is on; the health line's "off" is this switch. The heading is kept word for word though it no longer fits (for the lead to rename with the pointers)
 - youtube F2 | no change here: dashboard-2 drops its copies and says each part's own site settings are in that part's piece; "The server's YouTube session" and "Periodic YouTube test" stay here as they are
 - youtube F3 | no change here: this piece's setting line and search words for YouTube downloads win; dashboard-2 points here
 - youtube F4 | no change here: releases-and-updates drops its refusal and points to "A server restart never loses a job", which stays as it is

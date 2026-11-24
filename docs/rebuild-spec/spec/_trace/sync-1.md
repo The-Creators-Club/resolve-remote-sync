@@ -4,7 +4,7 @@
 
 - 01-042 | left out: cut by the owner (2026-11-24, sync-1-Q9)
 - 01-043 | An editor asks for originals from inside Resolve
-- 02-001 | A full tick sends a project's camera originals up and brings its proxies and other files down ; The editor is told about files that will never upload because of a name clash or a wrong clock
+- 02-001 | A full tick sends a project's camera originals up and brings its proxies and other files down ; The editor is told about files that will never upload because of a name clash, and about a wrong clock
 - 02-003 | New footage starts going up about two minutes after it stops changing
 - 02-005 | A full tick sends a project's camera originals up and brings its proxies and other files down
 - 02-020 | An editor picks camera originals to come down to one computer
@@ -129,7 +129,7 @@
 - 02-014 | A ticked project whose description is incomplete or unsafe is skipped
 - 02-031 | Names cross exactly as written
 - 04-041 | The editor can open the folder of a file that will not upload
-- 04-047 | The editor is told about files that will never upload because of a name clash or a wrong clock
+- 04-047 | The editor is told about files that will never upload because of a name clash, and about a wrong clock
 - 01-024 | The product watches whether the sync drive is really there ; With the sync drive out nothing is written anywhere else
 - 01-025 | A drive the product cannot confirm on macOS is explained in three steps
 - 01-026 | A returning drive resumes syncing only if nothing else holds it
@@ -551,12 +551,12 @@
 - The Footage Sorter and camera cards / Sorting into shoots, people and cameras | The Footage Sorter includes a folder instead of copying a clip twice | the reviewed plan and "elsewhere" clips
 - Sync, part 2 / What is owed | The editor can see whether it is safe to close the laptop | what is owed and by which computer
 - Sync, part 2 / What is owed | A computer holding footage the server lacks stays marked so | the owed record
-- Sync, part 2 / What is owed | The editor is told about files that will never upload because of a name clash or a wrong clock | the reports of skipped files
-- Sync, part 2 / Clocks and file age | The editor is told about files that will never upload because of a name clash or a wrong clock | future-dated files
+- Sync, part 2 / What is owed | The editor is told about files that will never upload because of a name clash, and about a wrong clock | the reports of skipped files
+- Sync, part 2 / Clocks and file age | The editor is told about files that will never upload because of a name clash, and about a wrong clock | future-dated files
 - Sync, part 2 / Saying truthfully what the sync is doing | An editor picks camera originals to come down to one computer | progress of originals coming down
 - Sync, part 2 / Saying truthfully what the sync is doing | Files edited on two computers at once are both kept | how conflicts are shown
 - Sync, part 2 / Computers joining and changing | Each computer has its own sync plan | renames and a computer's identity
-- Accounts, privacy and the legal paperwork / Suspending, disabling and removing a person | Only computers holding a full tick for a project receive its files | a suspended editor's computers receive nothing
+- Accounts, privacy and the legal paperwork / Suspending and removing a person | Only computers holding a full tick for a project receive its files | a suspended editor's computers receive nothing
 - The dashboard / Ticking and unticking | A plan can be copied from one computer to another of the same person | undoing a tick change
 - The app on each editor's computer / Windows, dialogs and notifications | The app lists this computer's ticked projects and how each is doing | the one list of states
 - Sync, part 2 / Saying truthfully what the sync is doing | Syncing waits for a short list of reasons, each in its own words | the one list of reasons, their order and words
@@ -613,6 +613,6 @@
 - sync-1 F24 | changed: Sync now runs every transfer this computer has switched on at once | says what the round trip did when it ends
 - sync-2 F7 | no change here: sync-2 makes the folder layout for upload-only projects
 - sync-2 F9 | no change here: sync-2 adds the app as a way in; "The app shows one line" stands
-- sync-2 F10 | changed: The editor is told about files that will never upload because of a name clash or a wrong clock ; The editor is shown files that will never upload and included folders that do not work ; Removal is refused while anything here is missing from the server | future-dated files upload like any other; only their dates are wrong
+- sync-2 F10 | changed: The editor is told about files that will never upload because of a name clash, and about a wrong clock ; The editor is shown files that will never upload and included folders that do not work ; Removal is refused while anything here is missing from the server | future-dated files upload like any other; only their dates are wrong
 - sync-2 F11 | changed: Files edited on two computers at once are both kept | the count and up to 20 paths, marked as cut; points to sync-2's heading
 - youtube F8 | no change here: youtube rewrites its sentences; sync-1's exception is made under sync-1 F23

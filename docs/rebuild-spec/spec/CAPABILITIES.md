@@ -12,7 +12,7 @@ Sub-topics: Could not check, refusals and nothing silent; The rebuild itself; Th
 
 Who may sign in and what each person may see and do; passwords, sign-in keys and sessions; what is recorded about people and computers and their say over it; the licence and legal paperwork a person meets.
 
-Sub-topics: Who may sign in; How a computer proves who it belongs to; Suspending, disabling and removing a person; Passwords, sessions and failed sign-ins; What each person may see and reach; What the product records about a person; The licence a person accepts; Third-party licences and what customers receive; How secrets and keys are kept.
+Sub-topics: Who may sign in; How a computer proves who it belongs to; Suspending and removing a person; Passwords, sessions and failed sign-ins; What each person may see and reach; What the product records about a person; The licence a person accepts; Third-party licences and what customers receive; How secrets and keys are kept.
 
 ## `sync`: Sync
 

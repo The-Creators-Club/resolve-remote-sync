@@ -206,7 +206,7 @@ When the app on an editor's computer must be updated before it can analyse music
 
 ### Analysing music keeps the computer it runs on usable
 
-Music analysis uses a graphics card when the computer offers one. While someone is using the computer, analysis uses no more than the share of that computer's capacity it allows shared work (see Work shared out across the computers: When a computer counts as free and able, "A computer takes shared work only while nobody is using it"). The memory it takes is given back as soon as the work stops. It never holds back the making of proxies on that computer. While a computer is analysing music, or downloading what it needs, it is kept from sleeping, and a shutdown is met with a warning (see The app on each editor's computer: Starting, staying running and crashing, "A computer doing heavy work stays awake and warns before shutting down").
+Music analysis uses a graphics card when the computer offers one. While someone is using the computer, analysis uses no more than the share of a working computer's capacity the studio allows such work (see Work shared out across the computers: When a computer counts as free and able, "A computer takes shared work only while nobody is using it"). The memory it takes is given back as soon as the work stops. It never holds back the making of proxies on that computer. While a computer is analysing music, or downloading what it needs, it is kept from sleeping, and a shutdown is met with a warning (see The app on each editor's computer: Starting, staying running and crashing, "A computer doing heavy work stays awake and warns before shutting down").
 
 #### Lessons
 

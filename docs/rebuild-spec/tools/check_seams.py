@@ -70,7 +70,7 @@ def main():
         for l in cs.lines_of(os.path.join(cs.TRACE, p + ".md")):
             if l.startswith("## "):
                 part = l[3:].strip().lower()
-            elif part.startswith("joins") and l.startswith("- "):
+            elif part.startswith("joins with") and l.startswith("- "):
                 joins.append((p, l[2:].split("|")[0].strip()))
 
     print("\n1. Handed to another piece and not picked up there:")

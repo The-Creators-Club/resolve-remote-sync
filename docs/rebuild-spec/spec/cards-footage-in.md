@@ -681,7 +681,7 @@ The transcripts the studio already holds are brought in once, each into its inte
 Each existing transcript is tied to its recording, in this order:
 
 1. a pairing of that transcript to a recording written down by a person, or "skip this transcript", whose cards then show as skipped;
-2. the pointer an excerpt carries to the transcript it was taken from (see "A transcript taken from another episode");
+2. the pointer an excerpt carries to the transcript it was taken from (see "A transcript taken from another episode times and plays from its source");
 3. the recording with exactly the transcript's name within the episode (an online-call transcript only matches an online recording, and the other way round).
 
 A transcript tied by none of these is reported as "transcript not linked" and kept. The recording whose words hold the most of its paragraphs (at least 3, so one interviewee's different shoot days are not mixed up) is offered as the likely match, for a person to accept; a montage source folder holding exactly one transcript is offered as that clip's. Nothing is tied by a resemblance of names alone, and an ambiguous match is reported, never guessed. Each recording is classed as interview, montage or cannot tell, shown on the episode's footage.

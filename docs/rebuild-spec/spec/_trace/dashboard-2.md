@@ -327,7 +327,7 @@
 - sync / Safety stops | What a reply to the server check can carry out | resuming downloads that stopped themselves
 - sync / Studio-wide stops and the editor's pause | An admin stops syncing on every computer at once, with a reason ; An admin keeps the stop on for longer or starts syncing again | the stop held in full: reason limits, length, end, refusals, and what each computer does while it is on
 - editor-app / The tray or menu-bar icon and its menu | An admin stops syncing on every computer at once, with a reason | the reason shown in every editor's app
-- youtube / Keeping the downloader working ; Signing in to YouTube | Every setting of the site | the YouTube part's switch and its extra measures against being blocked, both held there
+- youtube / Signing in to YouTube | Every setting of the site | the YouTube part's switch and its extra measures against being blocked, both held there (the health of the downloader is under Keeping the downloader working)
 - broll / Client folders and links | Nothing is reachable without signing in except what must be | links handed to clients open with no sign-in, and their secret part is never stored in a problem
 - accounts-privacy-legal / What the product records about a person | Every change to the settings is recorded and the last one can be undone | the kinds of reporting from computers an undo or import would switch off
 - accounts-privacy-legal / Passwords, sessions and failed sign-ins | When a session ends the person is taken to sign in and back | sessions and the limits on failed sign-ins

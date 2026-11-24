@@ -461,7 +461,7 @@
 - editor-app / Telling the editor what is wrong | Diagnostics reach an admin on their own and when asked | what the diagnostics contain and the editor's button.
 - accounts-privacy-legal / What each person may see and reach | Anyone signed in can create a project | access per project on sites that control it.
 - accounts-privacy-legal / Who may sign in | An admin sees every person and computer in one place | how people sign in and their accounts.
-- accounts-privacy-legal / Suspending, disabling and removing a person | An admin forgets a computer | deleting a person all or nothing.
+- accounts-privacy-legal / Suspending and removing a person | An admin forgets a computer | deleting a person all or nothing.
 - accounts-privacy-legal / What the product records about a person | A computer withholds kinds of information by choice | the switches for withheld kinds, and how deleting a person changes the history.
 - accounts-privacy-legal / How a computer proves who it belongs to | A computer that cannot sign in is still shown, and admins are told | a computer's sign-in never expiring.
 - releases-and-updates / Offering an update to a computer | Builds on offer are listed in a fixed order | publishing and offering builds.

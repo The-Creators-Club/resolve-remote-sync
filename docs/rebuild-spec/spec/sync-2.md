@@ -240,7 +240,7 @@ An upload cut off part way (the computer shut, the network dropped) never leaves
 
 ### A newer local file that will never upload because the server has its name is reported
 
-Each project is checked for camera originals that exist both on the editor's computer and on the server with the same name but a different size. The first version of a camera original's name to reach the server is the one kept there (see Sync: Names, "The editor is told about files that will never upload because of a name clash or a wrong clock"), so the local one will never upload; every other file replaces the server's copy and is never reported here. It is reported with an example and the two ways out: rename the local file, or have an admin remove the server's copy. The app can list up to 20 such files with this computer's size. Projects no longer ticked, or whose folder is gone, drop out of the report.
+Each project is checked for camera originals that exist both on the editor's computer and on the server with the same name but a different size. The first version of a camera original's name to reach the server is the one kept there (see Sync: Names, "The editor is told about files that will never upload because of a name clash, and about a wrong clock"), so the local one will never upload; every other file replaces the server's copy and is never reported here. It is reported with an example and the two ways out: rename the local file, or have an admin remove the server's copy. The app can list up to 20 such files with this computer's size. Projects no longer ticked, or whose folder is gone, drop out of the report.
 
 #### Lessons
 

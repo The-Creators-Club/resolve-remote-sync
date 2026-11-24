@@ -232,3 +232,50 @@ last pass change the item's words in `spec/_extracts/<NN>.md` and take the
 - The lead's look-up, extended: the list of episodes shows no occupants at
   all, "is in it now" included (the editor's own code has no such words; they
   were the retired page's). SENT to the fixers of cards-editor-4 and -5.
+
+## The closing pass (the lead, 2026-11-24)
+
+Done:
+- No cross-reference points at any of the 14 headings renamed or removed by
+  the fixers; of 481 bracketed cross-references, three named a heading by a
+  shortened form and were given its full words.
+- Five headings renamed by hand everywhere they are used (pieces, traces,
+  the capability list, the bundle, the merged lessons): the accounts
+  sub-topic is now "Suspending and removing a person"; "The admins are named
+  in set-up, and are never the NAS's own administrator"; "Editors are kept
+  to file transfers only on the NAS"; "A site decides whether YouTube's
+  extra measures against being blocked are used"; "The editor is told about
+  files that will never upload because of a name clash, and about a wrong
+  clock".
+- Carried words changed at their source and the "Except that" sentences
+  taken out: 29-028, 39-041, 28-074, 40-018, 33-088, 33-098.
+- Three join targets in the traces of dashboard-2 and fleet-jobs named
+  properly; the join checks now read only the "Joins with other
+  capabilities" section (the fixers' "Joins settled" sections had been
+  counted as joins).
+- Music's sentence about the share of a working computer now says the
+  studio allows it (a site setting), as fleet-jobs holds it.
+
+Still open after the closing pass:
+- Four "Except that" sentences remain: cards-editor-4 (the SERVER section
+  is on the Android app's settings page only; the panel's label on a
+  computer, where no source gives the new label's words), cards-editor-5
+  (the Send button, waits for decision 32.8), cards-to-resolve-and-exports
+  (item 32-016: a cut not on the timeline goes to its section's shelf; an
+  unknown Red marker is a plain heading).
+- Carried items 32-014 and 32-007 say the timeline is "read from the project
+  library, never from a live Resolve": that names a way the present build
+  works. For the blind reader, or change at the source.
+- The carried editor-window menu (33-099) still has "Quit", "Open the
+  project folder" and "Toggle developer tools"; with the window part of the
+  one app, what Quit does is undecided.
+- cards-to-resolve-and-exports keeps a refusal ending "needs force: true",
+  which shows an inside of the present build.
+- server-install-and-running-1 and dashboard-2 both list the settings Tree
+  name, Drive letter, Dashboard address and Folders in every new project
+  under different names.
+- Where a person sees the board's alternates in the editor's shelf panel.
+- cards-board: which act deletes a note card, now that Delete sets a card
+  aside.
+- The eight findings held for the owner (decision page 32) and the render
+  test for youtube F6.

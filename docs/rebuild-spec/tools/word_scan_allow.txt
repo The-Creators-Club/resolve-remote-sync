@@ -655,3 +655,5 @@ gmail | a mail service a studio may use, named where its own rules differ; a giv
 hosted | ordinary word
 offsite | ordinary word
 resolve preference files | a fact about Resolve in one lesson: its own preference files
+apply in | ordinary words that happen to sit side by side ("apply, in the sentences")
+editor media | ordinary words side by side (a pointer: "the editor: Media the browser gets")

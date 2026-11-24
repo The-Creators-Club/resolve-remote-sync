@@ -322,8 +322,8 @@
 
 - Proxies and file moves / Making proxies on editors' computers | Work on one computer takes turns | proxy making is shared work, waits while describing runs and says "indexing b-roll first"
 - Proxies and file moves / Making proxies on editors' computers | The kinds of shared work and what each needs | what making a proxy needs, and its "Make proxies on this computer" switch as the kind's tick
-- YouTube downloads / Every clip lands as a single MP4 file with H.264 picture and AAC sound at a constant frame rate | The kinds of shared work and what each needs | converting a download is shared work
-- The Footage Sorter and camera cards / Every sound recording is listened to for names and introductions | The kinds of shared work and what each needs | listening to recordings, and transcription asked for on the Sorter's own folders
+- YouTube downloads / Files Resolve can decode | The kinds of shared work and what each needs | converting a download is shared work
+- The Footage Sorter and camera cards / Placing sound recordings | The kinds of shared work and what each needs | listening to recordings, and transcription asked for on the Sorter's own folders
 - Timeline Cards: footage in, ready to cut / Speech-to-text: facts and situations | Progress is shown as it goes, never as a made-up zero ; Choosing a computer is a pick from the studio's known computers | what a person watching a transcription sees, and who picks the computer for it
 - Timeline Cards: footage in, ready to cut / Footage files and files made from them | A small preview copy of a clip is made for Timeline Cards | the interview's preview, a different file from a clip's small picture
 - The b-roll archive / Describing and indexing clips | A computer takes shared work only while nobody is using it | the wording of a drop's start now, pause, resume and cancel
@@ -343,7 +343,7 @@
 - Sync / Studio-wide stops and the editor's pause | A studio-wide stop or the app closing puts running work back to waiting | the fleet-wide stop
 - The dashboard / Problems the server finds | Admins are warned when work waits and nobody can take it | where warnings are shown
 - The dashboard / Alerts by mail | Admins are warned when work was given up | warnings by mail
-- Accounts, privacy and the legal paperwork / Suspending, disabling and removing a person | A computer whose access is refused says so and takes no work | when access is withdrawn
+- Accounts, privacy and the legal paperwork / Suspending and removing a person | A computer whose access is refused says so and takes no work | when access is withdrawn
 - Releases and updates / Pushing updates and seeing who has what | The reasons a computer is passed over for a piece of work | an update waiting to apply, and why a computer was not updated
 
 ## Settled from the present product

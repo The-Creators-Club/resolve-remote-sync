@@ -152,7 +152,7 @@ The first task on the list, and a required one: an admin reads and accepts the l
 "Create your admin account" (required): "A local account for you. No NAS credential is involved."
 
 - A name and password form: "Makes the first admin account and signs you in with it." The task is done ("admin account: <names>") once any account exists, else "no admin account yet". The form is replaced by "an admin account already exists" or "could not check: <reason>" as the case is.
-- The task also carries the list of the accounts that are always admins (see Accounts, privacy and the legal paperwork: Who may sign in, "The admins are named at install, and are never the NAS's own administrator"), several names separated by commas; the first admin's name starts it. A list that names nobody is refused ("name an editor account, not the NAS administrator"), and so is one that names the NAS's own administrator account, ignoring capitals ("use a separate account").
+- The task also carries the list of the accounts that are always admins (see Accounts, privacy and the legal paperwork: Who may sign in, "The admins are named in set-up, and are never the NAS's own administrator"), several names separated by commas; the first admin's name starts it. A list that names nobody is refused ("name an editor account, not the NAS administrator"), and so is one that names the NAS's own administrator account, ignoring capitals ("use a separate account").
 - Every name, in the form and in the list, has the one shape of a sign-in name (see Accounts, privacy and the legal paperwork: Who may sign in, "A sign-in name has one shape, and a name accepted anywhere works everywhere").
 
 - Who: anyone before the first account exists; then an admin.

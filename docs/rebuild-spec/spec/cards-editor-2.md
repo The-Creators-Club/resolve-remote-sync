@@ -41,8 +41,6 @@ An edit made by one editor while another editor's edit has changed the same thin
 
 {{39-041}}
 
-Except that an edit is never refused because the file changed on disk: there is no reload and no sentence asking the editor to redo the edit. A change found in the file is merged in as edits first and the edit is applied on top of it (see "The cut list file can be edited by hand, and the editor merges the change"), so nothing made in the editor meanwhile is lost.
-
 An edit the server has confirmed survives a second writer, an undo racing it, and a crash at any moment. When the same cut list is saved from two places at once, both changes are kept, or the second is refused and the conflict is shown to both people.
 
 - Exact: yes
@@ -168,8 +166,6 @@ Rules for every new cut, and for fixes made in the file by hand:
 ### Inserting and resizing gaps
 
 {{28-074}}
-
-Except that a new gap is never put at the end of the cut: one that would land after the last item (the head in the last item's second half, or past the end of the cut) is refused, with a sentence saying a gap cannot go at the very end of the cut.
 
 {{29-021}}
 
@@ -345,7 +341,7 @@ A UTF-8 Markdown file at `<Episode>/Script Docs/Cuts/<name>.cut.md`, meant to be
 - In order: the frontmatter block; a comment preamble; an optional `# Title`; the cut's rows (headings, cut bullets, gap bullets, note bullets) in order; then the bench sections, each a `##` heading followed by its items.
 - Line endings `\r\n`, `\r` and `\n` are all read. The writer keeps the file's dominant ending.
 - Blank lines anywhere in the body are ignored on read. The canonical writer puts one blank line between blocks and ends the file with exactly one newline.
-- Reading never fails: a line that cannot be accepted is recorded as a **problem** (1-based line number and a sentence) and kept as an opaque line that is written back as it was. A never-opened file with a problem is refused; an outside edit with one is set aside (see "A cut list survives a crash" and "The cut list file can be edited by hand"). Non-fatal oddities are **warnings**. A strict reading that stops at the first problem is available to tools.
+- Reading never fails: a line that cannot be accepted is recorded as a **problem** (1-based line number and a sentence) and kept as an opaque line that is written back as it was. A never-opened file with a problem is refused; an outside edit with one is set aside (see "A cut list survives a crash, and damage costs only what came after it" and "The cut list file can be edited by hand, and the editor merges the change"). Non-fatal oddities are **warnings**. A strict reading that stops at the first problem is available to tools.
 - A cut list is named by its path relative to the episode root, forward slashes, ending `.cut.md`.
 
 {{39-059}}
@@ -486,7 +482,7 @@ Every note lives in the cut list as an ordinary undoable edit that reaches every
 
 {{40-018}}
 
-Except that a cut is never worked on a live timeline in Resolve: a cut is edited only as a cut list, and every note is the cut list's own (above). So the refusals "no timeline is open" and "that cut is no longer on the timeline", notes on cards that exist only in a draft, and notes following a card re-identified on a timeline do not arise. What holds is the last rule: when a cut is handed to Resolve, each gap's note is taken fresh at that moment from what is saved (see Timeline Cards: the hand-over to Resolve, and exports: Undo, markers, titles, fades and properties, "A note on a gap arrives as on-screen text over the gap").
+What a gap's note becomes when the cut is handed over is in Timeline Cards: the hand-over to Resolve, and exports: Undo, markers, titles, fades and properties, "A note on a gap arrives as on-screen text over the gap".
 
 - When the help for the editing program is off: nothing is handed over; notes are the cut list's own.
 - Exact: yes

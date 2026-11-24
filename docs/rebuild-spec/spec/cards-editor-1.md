@@ -521,8 +521,6 @@ The sheet's keyboard rows are grouped: "Anywhere" first, then "Lane (the clips h
 
 {{29-028}}
 
-Except that the controller opens and closes it with Menu held (600 ms); a quick press of Menu does not open it (see Timeline Cards: the editor: Phone and game controller, "The help sheet lists every controller button for each place").
-
 - Name and search words: the shortcuts sheet: shortcuts, keys, help, keyboard, controller.
 - Ways in: "?", the Shortcuts buttons, the H key, the controller's Menu held.
 - Exact: yes

@@ -14,14 +14,14 @@ ACC-014	accounts-privacy-legal	How a computer proves who it belongs to	3	ACC-014
 ACC-015	accounts-privacy-legal	How a computer proves who it belongs to	3	ACC-015	L03-087 H04-012 H06-057 H07-041 L02-063	L-0267 H-bh2026-08-21-112 H-bh2026-09-03-010 H-bh2026-09-24-014 H-bh2026-09-24-017 H-rs-2026-08-28-012 H-rs-2026-08-28-016 H-fr-wave2-webapps-ops-002 H-urs-2026-09-03-004 H-urs-2026-09-03-006 L-0169
 ACC-016	accounts-privacy-legal	How a computer proves who it belongs to	3	ACC-016	L04-149	L-0339
 ACC-017	accounts-privacy-legal	How a computer proves who it belongs to	3	ACC-017	L04-165	L-0347
-ACC-018	accounts-privacy-legal	Suspending, disabling and removing a person	3	ACC-018	H04-010 H03-022 C02-071 L04-162 H07-040 L01-026	H-bh2026-08-21-106 H-bh2026-08-21-107 H-bh2026-08-21-108 H-bh2026-08-21-045 C-cc-c5de7c77a C-cc-b2d3557e0 L-0347 H-urs-2026-09-03-003 H-plr-2026-10-06-002 H-plr-2026-10-06-004 L-0026 L-0077
-ACC-019	accounts-privacy-legal	Suspending, disabling and removing a person	3	ACC-019	L11-018	L-1230
-ACC-020	accounts-privacy-legal	Suspending, disabling and removing a person	3	ACC-020	H03-030	H-bh2026-08-21-055
-ACC-021	accounts-privacy-legal	Suspending, disabling and removing a person	3	ACC-021	L04-163	L-0347
-ACC-022	accounts-privacy-legal	Suspending, disabling and removing a person	3	ACC-022	L06-029 H05-061 L08-006 L07-026	L-0467 L-0476 H-bh2026-09-11-018 H-bh2026-09-11-021 H-bh2026-09-11b-014 L-0734 L-0744 L-0629 L-0692 L-0695
-ACC-023	accounts-privacy-legal	Suspending, disabling and removing a person	3	ACC-023	L06-042	L-0485 L-0493
-ACC-024	accounts-privacy-legal	Suspending, disabling and removing a person	3	ACC-024	L11-028	L-1231 L-1230
-ACC-025	accounts-privacy-legal	Suspending, disabling and removing a person	2	ACC-025	L10-057 H07-109	L-1200 H-fr-wave2-dashboard-002
+ACC-018	accounts-privacy-legal	Suspending and removing a person	3	ACC-018	H04-010 H03-022 C02-071 L04-162 H07-040 L01-026	H-bh2026-08-21-106 H-bh2026-08-21-107 H-bh2026-08-21-108 H-bh2026-08-21-045 C-cc-c5de7c77a C-cc-b2d3557e0 L-0347 H-urs-2026-09-03-003 H-plr-2026-10-06-002 H-plr-2026-10-06-004 L-0026 L-0077
+ACC-019	accounts-privacy-legal	Suspending and removing a person	3	ACC-019	L11-018	L-1230
+ACC-020	accounts-privacy-legal	Suspending and removing a person	3	ACC-020	H03-030	H-bh2026-08-21-055
+ACC-021	accounts-privacy-legal	Suspending and removing a person	3	ACC-021	L04-163	L-0347
+ACC-022	accounts-privacy-legal	Suspending and removing a person	3	ACC-022	L06-029 H05-061 L08-006 L07-026	L-0467 L-0476 H-bh2026-09-11-018 H-bh2026-09-11-021 H-bh2026-09-11b-014 L-0734 L-0744 L-0629 L-0692 L-0695
+ACC-023	accounts-privacy-legal	Suspending and removing a person	3	ACC-023	L06-042	L-0485 L-0493
+ACC-024	accounts-privacy-legal	Suspending and removing a person	3	ACC-024	L11-028	L-1231 L-1230
+ACC-025	accounts-privacy-legal	Suspending and removing a person	2	ACC-025	L10-057 H07-109	L-1200 H-fr-wave2-dashboard-002
 ACC-026	accounts-privacy-legal	Passwords, sessions and failed sign-ins	2	ACC-026	P12-030	P-02824 P-02830 P-02836
 ACC-027	accounts-privacy-legal	Passwords, sessions and failed sign-ins	3	ACC-027	C04-050 H06-058 H07-108	C-cc-acdcfbab4 H-bh2026-09-24-014 H-fr-wave2-dashboard-002
 ACC-028	accounts-privacy-legal	Passwords, sessions and failed sign-ins	3	ACC-028	L04-056	L-0311

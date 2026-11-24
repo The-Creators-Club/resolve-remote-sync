@@ -171,7 +171,7 @@ A session file holding no actual sign-in counts as no session. In every case the
 
 Facts about YouTube, each of which a download must meet:
 
-- Without proof that the request comes from a real player, YouTube refuses the media or serves only slow streams. While the site's switch for YouTube's extra measures against being blocked is on (see "A site decides whether signed-in YouTube sessions may be used on editors' computers"), every computer that downloads, and the server, meet this demand. When one cannot, an admin is warned (see "Admins are warned when downloading on the server or a computer is not working"), and every failure keeps YouTube's own error text so it can be read.
+- Without proof that the request comes from a real player, YouTube refuses the media or serves only slow streams. While the site's switch for YouTube's extra measures against being blocked is on (see "A site decides whether YouTube's extra measures against being blocked are used"), every computer that downloads, and the server, meet this demand. When one cannot, an admin is warned (see "Admins are warned when downloading on the server or a computer is not working"), and every failure keeps YouTube's own error text so it can be read.
 - YouTube holds a single connection for a long video to a few MB/s. A long video still downloads at well over 10 MB/s on a fast line.
 - YouTube refuses some older uploads in their direct form while serving them as streamed segments. A download refused that way is tried as streamed segments before it is reported failed.
 - YouTube can list a clip's formats and then refuse its bytes, so nothing reports downloading as working until a real download has succeeded the way real jobs fetch.
@@ -206,7 +206,7 @@ One clip's failure or time limit fails that clip only: the job carries on with t
 
 ## Signing in to YouTube
 
-### A site decides whether signed-in YouTube sessions may be used on editors' computers
+### A site decides whether YouTube's extra measures against being blocked are used
 
 YouTube's extra measures against being blocked are one site switch of their own, separate from switching YouTube downloads on, and off on a new site until an admin turns it on, because those measures touch YouTube's terms, which is a choice the studio makes knowingly. The switch covers every extra step the server and editors' computers take to get past YouTube's blocks:
 

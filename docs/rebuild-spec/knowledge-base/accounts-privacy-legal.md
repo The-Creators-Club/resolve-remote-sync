@@ -81,7 +81,7 @@
 - Must: Only an active, unsuspended account with an editing role can sign a computer in; other accounts are refused.
 - Kind: situation
 
-## Suspending, disabling and removing a person
+## Suspending and removing a person
 
 ### ACC-025: Deleting a person or forgetting a computer left their traces behind.
 - Why: Erasing history meant hand-editing live records; a deleted person's name stayed in logs, alerts and records; a forgotten computer's diagnostics stayed stored.

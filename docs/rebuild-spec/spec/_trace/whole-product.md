@@ -344,4 +344,4 @@
 - whole-product F12 | no change here: this piece already holds "no assistant has a working key" with where an admin connects one; youtube changes
 - whole-product F13 | no change here: this piece already says finding out a state costs no call; youtube changes
 - whole-product F14 | changed: Nothing runs on a computer that its person or the vendor did not put there | YouTube's downloader and a kept-up-to-date subscription assistant program take the newest checksum-verified build, never older, without a button
-- youtube F1 | changed: An admin switches each part on and off for the whole site | the switch is named "YouTube's extra measures against being blocked" and points to youtube's "A site decides whether signed-in YouTube sessions may be used on editors' computers"
+- youtube F1 | changed: An admin switches each part on and off for the whole site | the switch is named "YouTube's extra measures against being blocked" and points to youtube's "A site decides whether YouTube's extra measures against being blocked are used"

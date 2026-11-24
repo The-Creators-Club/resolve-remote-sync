@@ -748,7 +748,7 @@ While edits are waiting on a device, a copy of them saves itself to a file withi
 
 {{33-088}}
 
-Except that on a computer, Windows or macOS, there is no Timeline Cards app of its own: the editor opens in the editor window of the one app on the editor's computer (see Timeline Cards: the editor: Opening episodes and keeping the editor running, "The app on the editor's computer opens the editor in a window of its own"), which uses the dashboard address that app already holds and has no server address of its own. The server address, changed on the app's settings page, and opening on the settings page with no server set, belong to the Android app only.
+The editor window is described in Timeline Cards: the editor: Opening episodes and keeping the editor running, "The app on the editor's computer opens the editor in a window of its own".
 
 Inside the editor window and the Android app, the editor keeps several devices in step exactly as it does in a browser, and opens from the dashboard's own address for the editor.
 
@@ -794,7 +794,7 @@ When a background top-up runs, the cut list open at that moment is kept on the d
 
 {{33-052}}
 
-Except that on a computer the panel's label reads "The editor window's project folder", and the default folder is the person's Documents under "Timeline Cards" on Windows and macOS alike.
+Except that on a computer the kept files belong to the editor window of the one app, and the panel's label says so in place of naming a Windows app; the default folder is the person's Documents under "Timeline Cards" on Windows and macOS alike.
 
 Inside the folder, each episode has a folder and each cut list a folder within it; folder names are made safe for Windows (forbidden characters become "_", trailing dots and spaces removed, at most 120 characters, reserved names such as CON get a leading "_"), two lists landing on one name get " (2)", " (3)", and anything that is not a cut list goes under "Other". Clip files are named after the clip. A kept file is never left half-written. An episode can be given a folder of its own on a computer, chosen there. Removing a kept list deletes its folder, and an episode folder left empty goes too.
 
@@ -819,8 +819,6 @@ On an editor's computer there is no Timeline Cards program to install, run or up
 ### The editor window's links, permissions and downloads
 
 {{33-098}}
-
-Except that closing the last editor window closes only the editor: the one app on the editor's computer goes on running. The window opens at the dashboard's own address for the editor, which the one app already holds, and on a Mac downloads go into the Mac's Downloads folder in the same way.
 
 - Exact: yes
 

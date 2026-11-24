@@ -70,7 +70,10 @@ cameras and recorders and their cards, the kinds of NAS, YouTube.
 ## How to write a behaviour
 
 Keep the bundle's sub-topics as your `##` headings, with the same names, in
-the same order. Under each, write the behaviours as `###` headings.
+the same order. Under each, write the behaviours as `###` headings. (An
+item's "Filed under" line may name a heading the bundle folded into one of
+its sub-topics; write the item under the sub-topic the bundle put it in, or
+under another of your sub-topics where it plainly fits better.)
 
 A `###` heading is a plain sentence or phrase saying what a person can do or
 what happens for them ("An editor ticks a project for a computer"). Each
@@ -124,12 +127,92 @@ styles. The owner's requirements give the dashboard's new shape; file a
 behaviour under the page it belongs to there only where that is obvious
 (the overview, projects, transfers, the per-computer view, settings).
 
+## Describe the job, not the arrangement
+
+This is the hardest part of the work and the reason it exists. The items no
+longer name the present build's tools, but they still carry its SHAPE: which
+computer does which piece of work, what is handed from one to another, what
+an admin must push from one place to another by hand. A fresh session that
+reads the shape will build the shape again. The owner: "if you had told the
+new session that the product originally used 3 sync engines, surely it
+would bias it to use 3 sync engines again."
+
+For every behaviour ask: **is this the job a person wants done, or is it how
+the present build arranges getting it done?** Write the job, with everything
+a person is promised about it. Leave the arrangement behind.
+
+Arrangements, which do not cross:
+
+- **Which computer does a piece of work**, and work being passed between
+  computers. Heavy work (analysing, transcribing, converting, making proxies
+  and previews) is "done on a computer of the studio's that is able and
+  free": that is one capability of the product (Work shared out across the
+  computers), which says who does what. Your piece says what the work
+  needs (a graphics card, a one-off download of about 280 MB on the computer
+  that does it), what the person is shown while it runs, and what choice
+  they have ("now, or while I am away"). Never "the indexing computer", "the
+  studio's main computer", "the wired computer", "analysed on the editor's
+  computer and then uploaded", "uploaded to the server and analysed later".
+- **Batches, claims, holds, releases, take-overs, staging, queues between
+  parts**: how the present build keeps one piece of work from being done
+  twice or lost. What crosses is the promise: a drop survives the page
+  closing, the computer restarting and the network dropping; nothing is
+  done twice; nothing is lost; the person can see it, pause it, cancel it.
+- **Data being published, pushed, merged, drained or swapped from one place
+  to another**, by an admin or on its own, with its holding places, checks,
+  previous copies and rollbacks. These exist because the present build
+  keeps things in several places. What crosses is the promise (what a
+  person adds is never lost by an update; a change shows within a minute).
+  An admin's hand-run step that exists only to move data between the
+  build's own parts is left out.
+- **One part of the build being older or newer than another**, and
+  everything said to a person because of it ("the app is too old for this",
+  "a different model version"). What crosses: an editor is told plainly when
+  their computer must update before something will work.
+- **Limits that are only the size of one of the build's own pipes** (so many
+  files or bytes per request, so many at a time). A limit a person is told
+  about and plans around crosses ("at most 500 tracks in one drop"); if you
+  cannot tell which it is, keep it and say so in the trace.
+- **How long the present build happens to take.** A wait a person is
+  promised or told about crosses ("gives up after 2 minutes and says so").
+  A measured running time of the present build ("a full re-order takes
+  about nine hours") does not: it would be read as acceptable.
+- **The shape of the assistant tooling the present build happens to run
+  on**: how many questions it can ask at once, phrases that invoke it,
+  which strength of assistant does which step.
+
+Three tests when you are unsure:
+
+1. Would a person using a product that did the same job in the simplest
+   possible way ever meet this? If not, it is an arrangement.
+2. Does something the studio HAS force it (YouTube refuses the studio's
+   address, so a download may have to run on the editor's own connection;
+   Resolve can only be driven on the computer it runs on)? Then it is a
+   fact about the world and crosses, stated as that fact.
+3. Does the person choose it or need to supply something for it (a drive,
+   a sign-in, a graphics card, leaving their laptop out of heavy work)?
+   Then their choice crosses.
+
+An item that is only arrangement is covered in the trace as `left out: an
+arrangement (the promise is under <heading>)`, naming the heading where
+you wrote what a person is promised. If you are leaving out something an
+admin or editor does by hand today, say in "New in this text" what happens
+instead for that person (usually: nothing to do, it happens on its own).
+
+**Wording outside the Timeline Cards editor** is kept where it is plain
+("Drop audio to add it to the library"), and reworded where it names the
+build's insides or an arrangement ("Your own computer analyses it and
+uploads it"). Only `Exact` text is untouchable.
+
 ## When items disagree, and what wins
 
 In this order:
 
-1. **The owner's requirements** and any lesson of kind `ruling`. Never ask
-   him again about something he has ruled on; write it as decided.
+1. **The owner's requirements**, then any lesson of kind `ruling`. Never ask
+   him again about something he has ruled on; write it as decided. Where a
+   requirement for the new build and an older `ruling` lesson pull apart,
+   write the requirement (it is his later word, and about this build), mark
+   it `- Pending:` and ask him to confirm in one question.
 2. **A lesson** (the knowledge base). A lesson is a rule the product must
    meet, learned from real use, and some lessons were learned after the
    present product was last changed. Where an item says the product does
@@ -141,12 +224,18 @@ In this order:
    safer one), mark it `- Pending: <question id>`, and put the question in
    the trace with both options.
 
+**What the text assumes while a question is open:** your recommendation,
+with one exception. Something you recommend CUTTING is still written, in
+its place, marked `- Pending:`, so the passage exists if he keeps it and is
+simply deleted if he does not.
+
 ## The flags on items
 
 - `several ways in`: write the behaviour once and list every way in under
   `- Ways in:`. The owner has asked to be asked about every overlap, so
-  raise ONE question for it in the trace (which ways in stay?) with your
-  recommendation, and mark the line `- Pending:`. **Not in the Timeline
+  raise one question in the trace for each THING that can be done several
+  ways (which ways in stay?) with your recommendation, and mark the line
+  `- Pending:`. Do not fold different things into one question. **Not in the Timeline
   Cards editor**: there, every key, button and gesture for one action is
   kept and is not a question.
 - `built twice`: write it once. No question, unless a person could notice
@@ -207,9 +296,22 @@ formats. The owner keeps these as they are. For them:
 - Mark every heading that holds exact text `- Exact: yes`.
 - Where on-screen text names the assistant by a product or model name,
   write `[the assistant]` in its place, and where it names a tool the
-  present build chose, write the tool's role in square brackets
-  (`[speech-to-text]`). Whether the assistant's name shows on screen is
-  already on the owner's list; do not raise it again.
+  present build chose or one of its insides, write the role in square
+  brackets (`[speech-to-text]`, `[the episode's media]`). Keep ordinary
+  words an editor sees even where the build also uses them. Whether the
+  assistant's name shows on screen is already on the owner's list; do not
+  raise it again.
+- A message that only reports one of the build's insides failing (naming a
+  store, a scan, a part of the server) is not something to keep exactly:
+  say what the person is told in plain words, outside the exact text.
+- "Describe the job, not the arrangement" still governs your own framing
+  sentences, but it does not delete what is on the editor's screen: a
+  control or state the editor shows crosses even where it reflects how the
+  work is arranged. Where such a control only exists because of an
+  arrangement (a hand-run way to start work that footage-in now does on its
+  own), write it, mark it `- Pending:` and ask whether it stays.
+- A lesson of kind `ruling` outranks exact text, as it outranks any item:
+  write what the ruling requires and log the conflict.
 - Cut by the owner, and so never carried even when an item has them: the
   translate button and draft translations in the editor; anything shaped by
   the notes program (its links, embeds, canvases, folders); Story Deck.
@@ -231,9 +333,22 @@ End every `##` sub-topic with:
 - Not yet met by any behaviour above: MUS-007 (what is missing, in a few words).
 ```
 
-Every lesson id of the sub-topic appears in one of the two lines. Use
+Every lesson id of the sub-topic appears in one of these lines. Use
 "Not yet met" only when you truly could not write a behaviour that meets
 it; say why in a few words. Leave the second line out when it is empty.
+
+Some lessons are themselves about an arrangement: their rule only makes
+sense if the product is built the way the present one is ("a batch whose
+computer goes quiet returns to waiting after five minutes"). Do not build
+the arrangement into your text to satisfy them. Write the promise behind
+the lesson, and list the lesson on a third line:
+
+```
+- Tied to an arrangement: MUS-021, MUS-022 (the promise is in "<heading>").
+```
+
+Those lessons will be taken out of what crosses, so be sure the promise
+really is in your text.
 
 ## Leaning on other capabilities
 
@@ -309,11 +424,15 @@ what this part covers.>
 
 ## Conflicts between an item and a lesson
 
-- <lesson id> | <item ids> | <what the item says, what the lesson requires, which you wrote>
+- <lesson id, or "owner's requirements"> | <item ids> | <what the item says, what the lesson or requirement asks, which you wrote>
 
 ## New in this text
 
 - <heading> | <an override or behaviour the items did not show, written because a lesson or the owner's requirements demand it>
+
+## Parts of items left out
+
+- <item id> | <the part of a covered item you did not carry, and why (an arrangement, an inside, cut by the owner)>
 
 ## Joins with other capabilities
 
@@ -341,7 +460,7 @@ Rules for the trace:
 ## Before you finish
 
 Run `python E:\Projects\Editing\ccsync\docs\rebuild-spec\tools\check_spec.py <piece>`.
-It reports item ids, lessons and questions not accounted for, headings the
+(Do not pass `--build`: it writes a third file.) It reports item ids, lessons and questions not accounted for, headings the
 trace names that the text does not have, and, in the specification piece,
 giveaway words, words that give away a past ("currently", "legacy"), long
 dashes and stray ids. Fix what it reports and run it again until it prints

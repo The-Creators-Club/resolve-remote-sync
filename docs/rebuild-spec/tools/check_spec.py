@@ -144,8 +144,8 @@ def read_text(piece: str):
             problems.append(f"text L{n + 1}: a reader's id ({m2.group(0)}) in the text")
         if "—" in line or "–" in line:
             problems.append(f"text L{n + 1}: a long dash")
-        if cur in exact or line.startswith("#### Lessons") or line.startswith("- Met:") \
-                or line.startswith("- Not yet met"):
+        if cur in exact or line.startswith(("#### Lessons", "- Met:", "- Not yet met",
+                                            "- Tied to an arrangement")):
             continue
         hits = sorted({h.group(0).lower() for h in RX.finditer(line)})
         if hits:
@@ -245,8 +245,11 @@ def check(piece: str, build=False):
     if missing:
         problems.append(f"{len(missing)} of {len(lessons)} lessons are in no Lessons line: "
                         + ", ".join(missing[:25]))
-    not_met = len(re.findall(r"[A-Z]{3}-\d{3}", " ".join(
+    not_met = len(re.findall(r"[A-Z][A-Z0-9]{2}-\d{3}", " ".join(
         l for l in built if l.startswith("- Not yet met"))))
+    tied = len(re.findall(r"[A-Z][A-Z0-9]{2}-\d{3}", " ".join(
+        l for l in built if l.startswith("- Tied to an arrangement"))))
+    arranged = sum(1 for w in cover.values() if w.lower().startswith("left out: an arrangement"))
 
     # Every reader's question and unsettled point.
     asked = ids_in(os.path.join(RAW, piece + ".questions"))
@@ -284,6 +287,7 @@ def check(piece: str, build=False):
         with open(os.path.join(BUILT, piece + ".md"), "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(built))
     counts.update(items=len(want), left_out=left_out, lessons=len(lessons), not_met=not_met,
+                  tied=tied, arranged=arranged,
                   questions=len(questions), unsettled=len(unsettled),
                   kb=len(whole.encode("utf-8")) // 1024)
     return problems, counts
@@ -314,9 +318,11 @@ def main():
             tot[k] += counts[k]
         if args:
             print(f"{name}: {counts['items']} items ({counts['left_out']} left out, "
+                  f"{counts['arranged']} of those as arrangements; "
                   f"{counts['included']} carried exactly), {counts['behaviours']} behaviours, "
                   f"{counts['settings']} settings, {counts['lessons']} lessons "
-                  f"({counts['not_met']} not yet met), {counts['questions']} questions, "
+                  f"({counts['not_met']} not yet met, {counts['tied']} tied to an arrangement), "
+                  f"{counts['questions']} questions, "
                   f"{counts['pending']} pending marks, {counts['unsettled']} still unsettled, "
                   f"{counts['kb']} KB")
     if not args:

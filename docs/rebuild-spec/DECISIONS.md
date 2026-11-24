@@ -175,6 +175,7 @@ of every way of syncing, with the studio's remote editor and with computers
 in other countries.
 
 | 31 | [What came up while the answers were applied](decisions/page-31-after-the-answers.md): live editing of Resolve from the cards confirmed cut; no wait before the Sorter moves a clip; no fixed share of the assistant's budget for work that runs on its own; "Same loudness" levels to the clips in the cut | 4 | 0 | ANSWERED 2026-11-24 |
+| 32 | [What the pieces disagreed about](decisions/page-32-the-joins.md): does a new computer wait for approval; a question your notes name playing in the cut; the fillers reading aid; sorted interviews reaching Timeline Cards by themselves; who makes a full-quality download link; whether a file move ever lapses; the shortening review | 7 | 7 | written 2026-11-24, NOT YET ASKED |
 
 Still to add: a page pruning settings
 nobody would feel (303 were written; some only tune machinery).

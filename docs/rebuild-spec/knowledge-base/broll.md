@@ -159,7 +159,7 @@ See also, filed under another capability:
 
 ### BRO-032: B-roll is described on the studio's own graphics card, Good or Best.
 - Why: The owner chose local describing (about 10-16 s a clip against 69 s hosted, cheaper, and judged better), with a smaller and a larger model chosen by graphics memory.
-- Must: A new install describes b-roll locally by default, offering "Good" and "Best" whose tooltips state the video memory each needs, and the customer picks.
+- Must: B-roll is described only on the studio's own graphics cards, offering "Good" and "Best" whose tooltips state the video memory each needs, and the customer picks.
 - Kind: ruling
 
 ### BRO-033: Describing beats proxy making, runs now or when idle, and checks graphics memory.
@@ -169,7 +169,7 @@ See also, filed under another capability:
 
 ### BRO-034: Indexing used up the assistant allowance and needed a cap and a stop time.
 - Why: Indexing reached 27% of the weekly allowance in an hour; the owner asked for a limit and to "let ongoing videos complete after 4pm before stopping".
-- Must: Indexing shows the allowance spent; at the owner's limit or stop time it starts nothing new but lets every clip already started finish and be saved.
+- Must: At the owner's stop time indexing starts nothing new but lets every clip already started finish and be saved.
 - Kind: ruling
 
 ### BRO-035: Background indexing must leave the computer usable while it runs.
@@ -291,17 +291,17 @@ See also, filed under another capability:
 
 ### BRO-057: Chinese and Japanese queries returned nothing in meaning-based search.
 - Why: A guard meant for mixed-language queries discarded every meaning-based hit for any mostly non-Latin query.
-- Must: A Chinese, Japanese or other non-Latin query returns matching clips in every search mode where an equivalent English query does.
+- Must: A Chinese, Japanese or other non-Latin query returns matching clips, by words and by related meaning, wherever an equivalent English query does.
 - Kind: situation
 
 ### BRO-058: Searches for names absent from the archive returned 15 to 17 unrelated videos.
 - Why: Meaning-based scores cannot tell absent from present; an absent Chinese name scored 0.88, above every genuine cross-language match (best 0.74).
-- Must: A query with no word match returns at most a few clips labelled related, none for a Chinese query, and an empty result stays possible.
+- Must: A query with no word match returns at most five clips labelled related, none for a Chinese query, and an empty result stays possible.
 - Kind: situation
 
 ### BRO-059: Meaning-based search could return nothing for ever without saying why.
 - Why: When the model behind meaning-based search was missing or mismatched, every query returned nothing with no sign anywhere.
-- Must: A search mode the server cannot run is disabled with its reason; the default mixed mode is never disabled and says what it lost.
+- Must: When the server cannot match by meaning, search still answers by words and says what it lost and why.
 - Kind: situation
 
 ### BRO-060: A common-word search sent about 1 MB for 24 results and felt slow remotely.
@@ -415,14 +415,14 @@ See also, filed under another capability:
 
 ## Bringing new footage in
 
-### BRO-082: B-roll is dropped on the dashboard and described on the dropper's computer.
-- Why: The owner specified: drop clips or folders on the dashboard, preview them, pick settings, run; that computer converts and describes; results reach the shared archive on their own.
-- Must: Dropped clips and folders are previewed and described on the dropper's computer, with progress there and on the dashboard; admins see every describing computer; results publish automatically.
+### BRO-082: B-roll is dropped on the dashboard and described on an able, free studio computer.
+- Why: The owner specified: drop clips or folders on the dashboard, preview them, pick settings, run; an able, free computer, the dropper's first, converts and describes; results publish themselves.
+- Must: Dropped clips are previewed and described on an able, free computer, the dropper's own first, with progress there and on the dashboard; admins see every describing computer; results publish automatically.
 - Kind: ruling
 
 ### BRO-083: A 200 GB card drop filled the editor's drive mid-batch.
 - Why: Camera originals reach 40 GB; the drop capped clip count, not size, checked space after accepting bytes, and a cut-off file could be used as the whole clip.
-- Must: A drop larger than free space minus 20 GB is refused whole; over 50 GB asks first with size and hours; skipped non-video files are counted; only complete files are used.
+- Must: A drop larger than free space minus the computer's floor is refused whole; over 50 GB asks first with size and hours; skipped non-video files counted; only complete files used.
 - Kind: situation
 
 ### BRO-084: Rescanning a share, or dropping in one song, re-read gigabytes over the network.

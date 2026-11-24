@@ -333,7 +333,7 @@ See also, filed under another capability:
 
 ### ALL-063: The owner: opening a tool never starts its work.
 - Why: The owner: tools "should not auto run on launch, they should all be adjusted so that they just launch and then there is a run button".
-- Must: Opening any tool that changes a project or files shows it idle; nothing is processed until the person presses its run button.
+- Must: Opening any tool that changes a project or files shows it idle; opening never starts work, and only newly arriving footage or tracks are processed without a run button.
 - Kind: ruling
 
 ### ALL-064: One click stopped syncing, signed people out or stopped the fleet.
@@ -469,10 +469,10 @@ See also, filed under another capability:
 
 ### ALL-088: The owner: assistant work must cost cents, not dollars, per run.
 - Why: The owner: one sort "cost 60 cents to run haha, not reasonable"; archive indexing "absolutely hammers my usage" and pay-per-call would be "insanely expensive".
-- Must: Each assistant task shows its expected cost before running, and routine runs over a project or archive stay within a cost the owner sets.
+- Must: Each assistant task shows its expected cost before running, and all assistant spending, routine runs included, stays within one daily budget in money the owner sets.
 - Kind: ruling
 
-### ALL-089: Customer builds use only the studio's own paid assistant key.
+### ALL-089: Every studio's assistant uses its own paid key by default.
 - Why: Customers have no personal subscription sign-in, consumer terms forbid reselling one, and the owner ruled nothing of the assistant is bundled.
-- Must: In a customer build every assistant call uses the site's own paid key, no setting enables subscription sign-in, nothing is bundled, and keys never show in full.
+- Must: Assistant calls use the site's own paid key unless subscription sign-in, off by default, is switched on by accepting the set-up notice; nothing is bundled; keys never show in full.
 - Kind: ruling

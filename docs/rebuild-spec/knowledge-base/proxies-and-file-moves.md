@@ -6,12 +6,12 @@
 
 ### PRX-030: Missing proxies are made only while the computer is idle.
 - Why: Clips without proxies never reach remote editors; the owner wants gaps reported and filled on editors' own computers without getting in their way.
-- Must: Proxy making starts after 5 minutes without input, treats unknown idleness as busy, stops within seconds of input and discards its partial file.
+- Must: Proxy making starts after the computer's quiet time without input (5 minutes unless changed), treats unknown idleness as busy, stops within seconds of input and discards its partial file.
 - Kind: ruling
 
 ### PRX-031: Proxy making uses the whole computer while idle, but backs off for Resolve.
 - Why: The owner: idle proxy making "can absolutely max out compute", "unless yeah the computer is doing a render or something else".
-- Must: An idle computer encodes several proxies in parallel, dropping to one whenever Resolve is open or rendering, even on a forced run; each computer can override.
+- Must: An idle computer encodes several proxies in parallel; while Resolve is open or rendering it starts none, even on a forced run, unless the computer's Resolve hold-back is off.
 - Kind: ruling
 
 ### PRX-033: A person can see which proxies were made, live progress and time left.
@@ -31,7 +31,7 @@
 
 ### PRX-032: Proxy making could fill the disk or encode a file still being copied.
 - Why: No free-space floor, one modified-time look judged a copy finished though copiers stamp it at start and end, and proxies of proxies were made.
-- Must: Proxy making keeps at least 20 GB or 5 percent free, waits for two equal size-and-time samples, and never encodes proxy-folder, partial or its own files.
+- Must: Proxy making keeps the computer's one free-space floor clear beyond what it writes, waits for two equal size-and-time samples, and never encodes proxy-folder, partial or its own files.
 - Kind: situation
 
 ### PRX-034: A machine made zero proxies overnight while showing a full queue.
@@ -492,8 +492,8 @@ See also, filed under another capability:
 - Kind: ruling
 
 ### PRX-098: A new project gets the studio's folder template without disturbing what exists.
-- Why: The owner wanted the standard folders laid down at project start, including on folders already holding interviewee footage.
-- Must: Creating or adopting a project adds missing template folders and never moves, renames or overwrites a folder or file already there.
+- Why: The owner wanted the standard folders laid down at project start; an existing folder holding interviewee footage, made a project, is left exactly as it is.
+- Must: Creating a project lays down the studio's template folders; using an existing folder adds none; neither ever moves, renames or overwrites a folder or file already there.
 - Kind: ruling
 
 ### PRX-089: Fixing a project would duplicate 100 GB that was already in the tree.

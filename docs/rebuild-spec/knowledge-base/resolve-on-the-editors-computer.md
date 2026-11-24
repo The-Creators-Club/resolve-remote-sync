@@ -1,6 +1,6 @@
 # Resolve on the editor's computer: what real use taught
 
-150 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+148 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## Multicams, frame rates and timelines
 
@@ -452,11 +452,6 @@ See also, filed under another capability:
 - Must: Every Resolve project library is backed up nightly, checked readable, kept 30 days, in a form Resolve's Project Manager can restore.
 - Kind: given
 
-### RSV-048: Resolve can be open while refusing scripting, and its last save stays readable.
-- Why: With scripting refusing, the timeline and transcripts as of Resolve's last save were still in the project library, so work could continue.
-- Must: With Resolve closed or refusing scripting, the editor still shows the timeline as of Resolve's last save and says plainly it is not live.
-- Kind: given
-
 ### RSV-049: Resolve project tiles showed the Resolve logo instead of a picture.
 - Why: Resolve samples five frames from the current timeline on close; gaps, black or undecodable media leave the shown slot empty.
 - Must: Projects the product creates or closes are left on a timeline with picture, so their tile shows a frame.
@@ -705,11 +700,6 @@ See also, filed under another capability:
 - Why: Fix-all hung then closed; another copy sat at "35/69" with no clue which file; the owner wanted file name, per-file and overall bars, skip, and cancel all.
 - Must: A copy shows the current file name, per-file and overall progress, and offers skip this file and cancel all; only a person's click stops it.
 - Kind: ruling
-
-### RSV-135: A rehearsal of fixing media reported files copied, failed or uploading.
-- Why: In rehearsal mode nothing is copied, yet results said "69 copied" or 69 failed, the bar showed 800 GB in two seconds or froze at 0%, and an upload could start.
-- Must: The mode is visible before the click; a rehearsal says "Checking", moves by clips checked, says nothing was copied, starts nothing; a real run states how many it copied.
-- Kind: situation
 
 ### RSV-136: Fixing many clips gave no size or space check and could die mid-copy.
 - Why: Fix-all copied until the system drive was full, quitting killed a multi-GB copy unasked, and one button closed the window while copying continued.

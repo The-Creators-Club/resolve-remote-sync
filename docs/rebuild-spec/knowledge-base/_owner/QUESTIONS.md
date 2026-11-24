@@ -27,12 +27,12 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 ### Fixed, never shipped
 
-- **ACC-011** One credential shared by every computer could not be revoked for one. Must: Each computer holds its own credential bound to one person, revocable alone; a site-wide shared credential is off unless the admin turns it on.
-- **ACC-018** Disabling or deleting a person left their browsers and computers working. Must: Disabling, deleting or suspending a person ends their sessions, shares and every computer's access at the next request, all or nothing, and the confirm states this.
+- **ACC-011** One credential shared by every computer could not be revoked for one. Must: Each computer holds its own credential bound to one person, revocable alone; there is no site-wide shared credential.
+- **ACC-018** Disabling or deleting a person left their browsers and computers working. Must: Deleting or suspending a person ends their sessions, shares and every computer's access at the next request, all or nothing, and the confirm states this.
 - **ACC-019** A deleted person came back when their computer reported. Must: No report or registration ever re-creates a deleted person.
 - **ACC-024** A new account reusing a deleted person's name inherited their access. Must: A new account with a deleted person's name starts with none of their projects or rights, and keeps rights given to it directly.
 - **ACC-044** Any editor could reach and delete any project on the NAS. Must: Each project folder is limited to its members, admins manage members from the project, and re-creating an existing project grants nothing.
-- **ACC-045** The server held NAS-admin power by default. Must: By default the server holds no NAS-admin-equivalent credential, verifies the NAS it talks to, and editors delete only projects granted to them.
+- **ACC-045** The server held NAS-admin power by default. Must: The server never holds the NAS administrator's password nor, by default, any equal credential, verifies the NAS it talks to, and editors delete only projects granted to them.
 - **ACC-051** The privacy policy said "no phone-home" while the server checked for releases. Must: The privacy policy lists every automatic outbound request and outside service, what it carries, and how to turn it off.
 
 ## Music
@@ -103,7 +103,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **REL-049** A computer reinstalled the crashing build it had just rolled back from. Must: A build undone on a computer or server is never installed there again automatically, only a newer one, and an admin's push of it is refused in words.
 - **REL-055** A computer refusing every update looked like one that had not reported. Must: A refusing computer shows the refusal and reason until it runs that build or the offer is withdrawn; a withheld offer is told apart from no update.
 - **REL-066** A server update that could not serve pages was never undone. Must: An update that started but does not pass its health check within ten minutes is reverted with its real reason shown; a refusal names its cause instead.
-- **REL-072** Customers get one exact build after it ran on the studio first. Must: A customer site updates only to the exact build named for it, refused until that same build ran 24 hours on the studio.
+- **REL-072** Customers get one exact build after it ran on the studio first. Must: A customer site updates only to the exact build named for it, refused until that same build ran 24 hours on the studio and a second person approved it.
 - **REL-073** A customer on a fixed server build was given update steps that changed nothing. Must: Every update notice for a server fixed to one build names the exact new build and the steps that actually change it.
 
 ## Resolve on the editor's computer
@@ -149,14 +149,14 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 - **SYN-058** Quitting or updating the app left its old transfer running beside a new one. Must: Once quit, sign-out or update begins nothing new starts, and no file is ever sent by an old and a new transfer at once.
   - **Question:** Should quitting or updating the app stop an in-flight upload, losing its progress, or leave it running to finish?
-- **SYN-073** With the sync drive unplugged, downloads would have filled the internal disk. Must: With the drive absent or mounted under another name, all syncing pauses, nothing is written elsewhere, free space is never measured on another disk, and the app says the drive is disconnected.
+- **SYN-073** With the sync drive unplugged, downloads would have filled the internal disk. Must: With the drive absent, or renamed and not provably the same, all syncing pauses, nothing is written to or measured on another disk, and the app says the drive is disconnected.
   - **Question:** One early ruling had the same drive resume under any mount name; later rules pause a numbered remount with instructions. Which does the owner want?
 
 ### Still open
 
 - **SYN-004** An urgent project could not be moved to the front of a computer's queue. Must: An editor or admin can move a project to the front of one computer's sync queue from the screen.
 - **SYN-027** A wired computer re-read the whole NAS tree every five minutes. Must: A wired computer never re-reads the whole NAS tree on a short cycle.
-- **SYN-039** An editor's undo window is 14 days while the NAS keeps versions a year. Must: The owner sets both recovery windows together, and each is stated where a person goes looking for a lost file.
+- **SYN-039** An editor's undo window is 14 days while the NAS keeps versions a year. Must: An admin sets both recovery windows together for the site, and each is stated where a person goes looking for a lost file.
 - **SYN-062** Macs leave hidden "._" files and folder settings files on shared drives. Must: macOS system companion files never sync in either direction, are never counted, and any already on the NAS are found and cleared.
 - **SYN-094** An offline laptop spent each pass on failing transfers and blamed a broken sync. Must: When the NAS is unreachable the app shows "cannot reach the server" as its own state, stops trying, and resumes promptly when the network returns.
 - **SYN-105** An upload status flipped between error and idle while nothing was missing. Must: An error names its files and reason in the log and on screen, and a pass is never shown red when every file is on the NAS.
@@ -178,7 +178,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 ### Fixed, never shipped
 
-- **SYN-028** An editor with footage backed up locally wants to upload it, downloading nothing. Must: A project can be ticked upload-only per computer: every file except system clutter and temporary files goes up, nothing comes down, and it never reads as out of sync.
+- **SYN-028** An editor with footage backed up locally wants to upload it, downloading no files. Must: A project can be ticked upload-only per computer: all but system clutter and temporary files go up, only empty folders come down, and it never reads as out of sync.
 - **SYN-033** "Remove from this computer" deleted footage the NAS had never received. Must: Removal is refused while any local file, of any age or date, is not on the NAS at the same size and content; it lists and keeps each one.
 - **SYN-050** Suspending one editor froze every untick across the studio. Must: Removals caused by a recorded admin act apply at once, an admin can approve a held batch, the limit scales with studio size, and unexplained mass removals stay refused.
 - **SYN-113** After a re-tick or a mode change, new files could be skipped for hours. Must: After a project is re-ticked or its mode changes, the next pass examines every file in it.
@@ -188,7 +188,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 
 ### Question only
 
-- **SRT-131** Sorting never loses an original, and every move is previewed first. Must: Every move offers a dry run, can run on one clip, needs approval before it runs, and never deletes or overwrites an original.
+- **SRT-131** Sorting never loses an original, and every move is checked first. Must: Every move is checked just before and after it runs, can run on one clip, and never deletes or overwrites an original.
   - **Question:** Now that filing runs on its own with a manual override, must a move out of staging still wait for an admin's approval?
 
 ### Still open
@@ -258,7 +258,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **SRT-107** The record of where copies live must survive losing the NAS. Must: The copy record and sorter state are copied nightly in a consistent, integrity-checked form, seven kept, and carried in the cloud backup.
 - **SRT-148** Loose waveform matching split one take's two channels across two shoots. Must: A single-clip audio match is accepted only when it clearly beats the next candidate, and both channels of a take stay together.
 - **SRT-149** The same speech in Simplified and Traditional Chinese never matched. Must: Chinese text is compared in one script, so identical speech matches whichever engine wrote either side.
-- **SRT-150** Paid transcription credit ran out partway through thousands of files. Must: Running out of paid transcription keeps every finished transcript, resumes skipping finished files, and finishes the rest with local transcription unattended.
+- **SRT-150** A long transcription run stopped partway through thousands of files. Must: An interrupted transcription run keeps every finished transcript and resumes unattended, skipping finished files.
 - **SRT-180** A resumed download continues only its own unfinished files. Must: Full-size files are skipped, only files the download itself marked in progress are continued, and a same-name file without that mark is left alone and reported.
 - **SRT-181** A download never delivers the wrong file after a rescan. Must: Every requested file is checked by name before it is sent, a mismatch asks to start again, and a resume answered with the whole file restarts that file.
 - **SRT-182** Any footage folder can be shared by an expiring link. Must: An admin links one folder, lasting 14 days by default and 365 at most, with an off switch; a whole root is refused; holders download files or a zip.
@@ -422,7 +422,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **ALL-024** Fonts ship with the product; Chinese names use a Chinese-capable face. Must: No page loads fonts or other assets from the internet, and Chinese folder and clip names always render in a Chinese-capable face.
 - **ALL-046** "Contact support" never said who or where support is. Must: Every "contact support" line, mail, help page and setup finish names a real support contact, which a reseller or site can replace.
 - **ALL-053** An optional feature a site lacks showed broken parts or a permanent "not checked". Must: When a feature is not enabled or present, its controls, chips, banners and checks are hidden and the rest of the page is unchanged.
-- **ALL-089** Customer builds use only the studio's own paid assistant key. Must: In a customer build every assistant call uses the site's own paid key, no setting enables subscription sign-in, nothing is bundled, and keys never show in full.
+- **ALL-089** Every studio's assistant uses its own paid key by default. Must: Assistant calls use the site's own paid key unless subscription sign-in, off by default, is switched on by accepting the set-up notice; nothing is bundled; keys never show in full.
 
 ## Timeline Cards: footage in, ready to cut
 
@@ -457,7 +457,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 ### Still open
 
 - **BRD-001** Planning is a hand-worked board of theme columns holding transcript paragraphs. Must: A person drags transcript paragraphs onto the board as cards, makes, names and reorders theme columns, and the board saves as a self-contained Markdown file.
-- **BRD-002** The board is the first step of Timeline Cards, offered pre-sorted or empty. Must: The order is clips in, board, cut, Resolve; processing offers a first sort, a person can start empty, and nothing goes from board straight to Resolve.
+- **BRD-002** The board is the first step of Timeline Cards, offered pre-sorted or empty. Must: The order is clips in, board, cut, hand-over; processing ends with a first sort, a person can start empty, and nothing goes from board straight to an editing program.
 - **BRD-003** The board has a notes area, and the assistant reworks the board from it. Must: A person writes notes on the board and calls the assistant, which reworks themes and card placement from those notes as proposals.
 
 ### Outcome not found
@@ -467,7 +467,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **BRD-013** Re-paragraphing a transcript left cards on other boards pointing at nothing. Must: When a transcript's paragraphs are split or merged, every card citing them on any board points to the paragraph now holding its text.
 - **BRD-015** A card's full text could not be read during review. Must: A card's full text is readable wherever a decision is made about it, scrolling if it is long.
 - **BRD-016** Dragging a card opens a gap and the others shuffle; each drag can be undone. Must: A dropped card opens a gap so no card covers another, columns reorder, each drag is one undo step back to the exact prior board, and Escape cancels a drag.
-- **BRD-017** Setting cards aside takes one key and works on several at once. Must: One or many selected cards are set aside with one key, and set-aside cards count as handled.
+- **BRD-017** Setting cards aside takes one key and works on several at once. Must: One or many selected cards are set aside with the key and gesture the editor uses to move a cut to the shelf, and set-aside cards count as handled.
 - **BRD-020** The board said 35 cards remained but showed none of them. Must: Every card counted as remaining can be shown and acted on from the count itself.
 - **BRD-021** Reopening the board on a later day showed an empty board. Must: Reopening an episode's board resumes its latest saved state, whatever the date.
 - **BRD-031** The accept and decline offer did not match the card on screen. Must: Accept and decline always act on the proposal shown, and the card shown always belongs to that proposal.
@@ -549,8 +549,8 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **CRX-093** The studio's default render is QuickTime H.264 at 3840x2160, proxies off. Must: Before a queue starts, each job differing from the studio defaults is listed per project with a yes or no to switch it.
 - **CRX-094** Before rendering, clips hidden inside compound clips must be checked online. Must: Before a render is queued, every clip inside every compound clip on the timeline is checked, and offline ones are named.
 - **CRX-096** Compound clips should carry the name and colour of what they hold. Must: A compound clip the product creates is named after the clip it wraps and takes the clip colour of the related interviewee's multicam.
-- **CRX-097** Name titles sat half off screen and could cover the speaker. Must: A name title's visible edge sits 50 px in from the side and bottom, on the side away from where the speaker appears.
-- **CRX-098** When one interviewee cuts straight to another, name titles hand over. Must: On a direct cut between two speakers, the first speaker's title plays its exit and the second speaker's title plays its entrance.
+- **CRX-097** Name titles sat half off screen and could cover the speaker. Must: A name title the editor places in Resolve, visible edge 50 px in from side and bottom, away from the speaker, is never moved, shortened or lost by the product.
+- **CRX-098** When one interviewee cuts straight to another, name titles hand over. Must: On a direct cut between two speakers, the editor's titles, the first playing its exit and the second its entrance, are left as they are by every hand-over.
 - **CRX-109** A person's name was spelled differently across subtitles and name straps. Must: Each person's name is spelled one way per language across every subtitle file and name-strap list of an episode.
 
 ### Fixed, never shipped

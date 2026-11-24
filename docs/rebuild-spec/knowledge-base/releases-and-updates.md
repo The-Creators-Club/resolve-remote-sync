@@ -11,7 +11,7 @@
 
 ### APP-068: A new build that died on start was never rolled back.
 - Why: Deaths before the app finished starting were not counted as failed starts, so sync stopped until someone restored the old build by hand on each machine.
-- Must: After two failed starts of a new build, the app restores the previous build by itself and syncing resumes with no one touching the machine.
+- Must: A second failed start or crash within ten minutes of a new build's first start restores the previous build by itself, and syncing resumes with no one touching the machine.
 - Kind: situation
 
 ### APP-069: An update interrupted mid-swap left the computer with no app at all.
@@ -31,7 +31,7 @@
 
 ### REL-048: An update that crashed minutes after starting left the editor with no app.
 - Why: The previous build was deleted a minute after updating, and a macOS login item never restarts a crashed app.
-- Must: The previous build is kept until the new one proves healthy, and three crashing starts within 10 minutes restore it, never below the signed minimum, and tell the editor.
+- Must: The previous build stays until the new one proves healthy; a second failed start or crash within 10 minutes restores it, never below the signed minimum, telling the editor.
 - Kind: situation
 
 ### REL-049: A computer reinstalled the crashing build it had just rolled back from.
@@ -174,7 +174,7 @@
 
 ### REL-020: A release should be one short command.
 - Why: The owner, facing several manual steps: "there used to be one command which did all of this ... rebuild, pushed it to dashboard, pushed to tray utility".
-- Must: One command builds, publishes and offers a release to every computer, refusing before anything moves if a check fails.
+- Must: One command builds and publishes a release, refusing before anything moves if a check fails.
 - Kind: ruling
 
 ### REL-021: A release failed twenty minutes in, or halfway, for something known at the start.
@@ -298,7 +298,7 @@
 
 ### REL-044: Pressing update did nothing, and other computers never got the offer.
 - Why: A click gave no response for minutes, and other signed-in computers were never offered a newly published update.
-- Must: Pressing update responds visibly at once, and every signed-in computer is offered a newly published update within minutes.
+- Must: Pressing update responds visibly at once, and every signed-in computer is offered a newly current update within minutes.
 - Kind: situation
 
 ### REL-045: A laptop on an early build could never receive a pushed update.
@@ -400,7 +400,7 @@ See also, filed under another capability:
 
 ### REL-072: Customers get one exact build after it ran on the studio first.
 - Why: Customers followed a moving label, so whatever was published last reached them untested; the owner ruled "customers pinned by digest, with vendor soak".
-- Must: A customer site updates only to the exact build named for it, refused until that same build ran 24 hours on the studio.
+- Must: A customer site updates only to the exact build named for it, refused until that same build ran 24 hours on the studio and a second person approved it.
 - Kind: ruling
 
 ### REL-073: A customer on a fixed server build was given update steps that changed nothing.

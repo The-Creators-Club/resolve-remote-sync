@@ -66,7 +66,7 @@
 
 ### APP-013: Setup showed a green DONE on computers that could not work.
 - Why: Setup finished with no way to report to the server, with the project drive letter taken by something else, or with an aborted step hidden by a minor warning.
-- Must: Setup says done only after the computer has reported in, its project drive answers and Resolve is reachable; otherwise it names the failed step.
+- Must: Setup says done only after the computer has reported in, its project drive answers and, while Resolve's help is on, Resolve is reachable; otherwise it names the failed step.
 - Kind: situation
 
 ### APP-014: A failed or closed install left the computer with no app and no drive.
@@ -372,7 +372,7 @@ See also, filed under another capability:
 - Kind: ruling
 
 ### APP-079: The tray menu had grown to forty lines; the owner set a short one.
-- Why: He approved: identity, one conditional prompt, "Sync:" with files and speed, "Resolve: connected", sync now, pause, "Open my sync drive", open dashboard, settings, quit.
+- Why: He approved: identity, one conditional prompt, "Sync:" with files and speed, "Resolve: connected" while Resolve's help is on, sync now, pause, "Open my sync drive", open dashboard, settings, quit.
 - Must: The right-click menu holds only those everyday items, about ten; this computer's role and every other control live in a settings window the menu opens.
 - Kind: ruling
 
@@ -521,7 +521,7 @@ See also, filed under another capability:
 
 ### APP-112: Problems the app found on a computer reached nobody.
 - Why: Background crashes, a shared library not working, a folder moved after a rename and failing tool installs went only to a log or crash file while the tray stayed green.
-- Must: Every problem the app detects shows in its tray and settings window and is counted in its report, even with nothing ticked or the feature off, until cleared.
+- Must: Every problem the app detects shows once in the app, beside what it concerns, and is counted in its report, even with nothing ticked or the feature off, until cleared.
 - Kind: situation
 
 ### APP-113: Crash reports overwrote each other and were kept where nobody read them.
@@ -572,7 +572,6 @@ See also, filed under another capability:
 See also, filed under another capability:
 
 - BRO-009 (The b-roll archive): The page said the local app was not running when Chrome had blocked it.
-- RSV-135 (Resolve on the editor's computer): A rehearsal of fixing media reported files copied, failed or uploading.
 
 ## Signing in, the computer's identity and the licence
 
@@ -588,12 +587,12 @@ See also, filed under another capability:
 
 ### APP-125: The server stopped accepting a computer's reports and nobody found out.
 - Why: A revoked credential or wrong address left sync running and the tray green while the computer vanished from the dashboard; the only button offered was sign out.
-- Must: A rejected credential tells the editor once, reads differently from "server unreachable" everywhere, offers signing in again first, and when a report was last accepted survives restarts.
+- Must: A rejected credential tells the editor, reminding hourly, reads differently from "server unreachable" everywhere, offers signing in again first, and when a report was last accepted survives restarts.
 - Kind: situation
 
 ### APP-127: Pause then resume started syncing on a computer nobody had signed in to.
 - Why: Start and sign-in refused to sync while signed out, but resuming from pause did not check, even after a sign-in had lapsed.
-- Must: No path, resume from pause included, starts syncing on a computer that is not signed in when sign-in is required.
+- Must: No path, resume from pause included, starts syncing on a computer that is not signed in.
 - Kind: situation
 
 ### APP-128: An unreadable identity file turned a computer into a new one.

@@ -1,6 +1,6 @@
 # Timeline Cards: the editor: what real use taught
 
-411 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+410 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## The lane: how clips look and read
 
@@ -147,7 +147,7 @@
 
 ### CE2-001: The lane must handle like Resolve's own timeline.
 - Why: The owner asked for Alt plus wheel to zoom "to match resolve", centred waveforms, the playhead following a ripple trim, and no momentum when panning.
-- Must: The lane uses the editor's own Resolve keyboard preset (Resolve's defaults otherwise), Alt+wheel zooms, ripple trims carry the playhead, waveforms sit centred, and panning stops with the mouse.
+- Must: The lane uses the person's Resolve keyboard preset (Resolve's defaults otherwise), Alt+wheel zooms, trims keep the playhead's spoken moment, waveforms share a baseline underneath, panning stops with the mouse.
 - Kind: ruling
 
 ### CE2-002: The lane plays the whole cut and edits exactly like the cards.
@@ -242,7 +242,7 @@
 
 ### CE1-099: Lane keys stopped working, or did other things, with no Resolve connected.
 - Why: The trim keys came only from the editor's Resolve key layout, which was forgotten at each server restart, so with no Resolve the keys fell through.
-- Must: Lane keys follow the editor's Resolve preset by command when known and documented defaults otherwise, work the same without Resolve, and a learned layout survives restarts.
+- Must: Lane keys follow the editor's Resolve preset by command where known and the editing-program help is on, else documented defaults, work the same without Resolve, a learned layout survives restarts.
 - Kind: situation
 
 ### CE2-004: Clicking a long clip while zoomed in made the lane jump away.
@@ -461,7 +461,7 @@
 
 ### CE3-023: Undo steps back through saved versions of the cut.
 - Why: The owner chose saved revisions of the project file, capped and thinned, over a log of operations that must be replayed to know the state.
-- Must: Undo restores the previous saved version, and older versions are kept, thinned rather than lost all at once.
+- Must: Undo takes back the person's own last edit by restoring the version from before it, and older versions are kept, thinned rather than lost all at once.
 - Kind: ruling
 
 ### CE3-031: A run of cuts can be saved aside as a sequence with exact timing.
@@ -496,7 +496,7 @@
 
 ### CE1-065: The cut list changed on disk while the editor had it open.
 - Why: Another program can edit the cut list while it is open, and an edit applied to the stale copy would overwrite that change.
-- Must: An outside change to the open cut list shows within 2 s, and an edit made against the old copy is refused with a message, never merged silently.
+- Must: An outside change to the open cut list shows within 2 s and is merged in as edits, told to every device; nothing made in the editor meanwhile is lost.
 - Kind: situation
 
 ### CE1-066: One cut list saved from two places at once can lose one side's change.
@@ -728,9 +728,9 @@
 - Must: A touch in the 96 x 96 px scrub pad drives the head at the rate its offset sets, finer with the finger higher, reverses past the start, and parks on release.
 - Kind: ruling
 
-### CE2-058: "Same level" must bring every interviewee to the episode's middle loudness.
+### CE2-058: "Same level" brings every interviewee to the middle loudness of the cut's clips.
 - Why: A fixed target never turned the loudest speaker down; one episode spanned about 20 dB; owner: "it's supposed to make all audio the same output level".
-- Must: Every interviewee is brought to the episode's median gated speech loudness, down as well as up, without clipping, and a separate trim sets overall loudness.
+- Must: Every interviewee is brought to the median gated speech loudness of the clips in this cut, down as well as up, without clipping, and a separate trim sets overall loudness.
 - Kind: ruling
 
 ### CE2-059: Automatic levelling stays, and any cut can carry its own gain.
@@ -1362,7 +1362,7 @@ See also, filed under another capability:
 
 ### CE2-132: Phone and laptop share one draft, each keeping its own view.
 - Why: Owner: "the timeline keeps appearing on the phone while the laptop is open"; he wants to "look at different sections on my phone and laptop".
-- Must: Every device agrees on one draft and its staged edits, while scroll, cursor, selection, playhead and view stay per device; a first visit starts at the latest place.
+- Must: Every device agrees on one cut list, while scroll, cursor, selection, playhead and view stay per device; a first visit starts at the latest place.
 - Kind: ruling
 
 ### CE3-066: Whether the editor is live or on its offline copy must be obvious.
@@ -1378,11 +1378,6 @@ See also, filed under another capability:
 ### CE3-068: Keeping a cut list on the device offers to keep its video too.
 - Why: The offline keep saved audio and words only; the owner asked for the preview video too, as a choice.
 - Must: Keeping a cut list on a device offers an "include video" choice, and with it on the video plays offline with seeking.
-- Kind: ruling
-
-### CE3-074: A phone and a desktop with staged edits diverged, and the last writer won.
-- Why: Each browser kept its own copy of staged edits; the owner agreed one shared draft per timeline was a hard requirement.
-- Must: Staged edits are one draft per timeline: an edit on one device shows on the others within seconds, and a stale write is refused and replayed.
 - Kind: ruling
 
 ### CE3-078: The editor works over the internet on a computer without the project files.
@@ -1997,9 +1992,9 @@ See also, filed under another capability:
 
 ## Opening episodes and keeping the editor running
 
-### CE1-125: The project is the episode; cut lists and timelines are members inside it.
+### CE1-125: The project is the episode; cut lists are members inside it.
 - Why: The owner: a cut's name "is not a project name"; "'Project' should be the name of the episode root".
-- Must: The header reads "episode · open cut" with recent episodes; switching opens the last cut or a picker of that episode's cuts and its own Resolve timelines only.
+- Must: The header reads "episode · open cut" with recent episodes; switching opens the last cut or a picker of that episode's own cut lists only.
 - Kind: ruling
 
 ### CE1-128: Two people can work in two different projects at once.
@@ -2012,9 +2007,9 @@ See also, filed under another capability:
 - Must: Episodes show in their folders in the person's last-opened order, filter by year, sort by last opened, size, date and name, search by keyboard, and remember open folders.
 - Kind: ruling
 
-### CE3-106: A trial or read-only editor must never write to the real projects.
+### CE3-106: A cut list opened read-only must never write to the real project.
 - Why: The owner: "let me test it on a live [project], don't replace the current [editor]"; a read-only copy nearly wrote an empty word file over the real one on close.
-- Must: A trial or read-only editor reads the real projects but writes nothing to them unless switched, and two versions never drop each other's data.
+- Must: A cut list opened read-only is read from the real project but nothing is written to it, and two versions never drop each other's data.
 - Kind: ruling
 
 ### CE1-126: After switching episode, lists still showed the previous one.

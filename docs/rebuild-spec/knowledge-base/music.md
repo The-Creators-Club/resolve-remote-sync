@@ -28,7 +28,7 @@
 
 ### MUS-005: Interview and field recordings swamped the music scan.
 - Why: Of 2,384 audio files on the NAS, 397 were music; the rest were recorder and multitrack takes, wireless-mic files, voiceover, stings under 30 s and files over 15 minutes.
-- Must: Music ingest excludes recorder takes, voiceover, stings under 30 s and recordings over 15 minutes, and keeps stems apart from tagging.
+- Must: Scanning a folder of mixed audio excludes recorder takes, voiceover, stings under 30 s and recordings over 15 minutes, keeping stems apart from tagging; a hand-dropped track is always taken.
 - Kind: situation
 
 ### MUS-006: Tracks named only by a library number were merged as duplicates.
@@ -112,7 +112,7 @@
 
 ### MUS-025: After a page reload, staged or retried music could not be sent by any button.
 - Why: Only the page remembered the batch, so after a reload send, cancel, retry and take-over were refused, and the fallback advice started a different import.
-- Must: After a page reload, staged work can still be sent, cancelled, retried or taken over from the page, and no fallback advice starts a different import.
+- Must: After a page reload, staged work can still be sent, cancelled or retried from the page, and no fallback advice starts a different import.
 - Kind: situation
 
 ### MUS-027: An open music tab kept starting work on the editor's computer.
@@ -139,7 +139,7 @@
 
 ### MUS-033: A newly published library was not what search answered from.
 - Why: Search kept answering from the previous library after a publish or new tracks, until someone restarted the dashboard.
-- Must: After a library is published or tracks are added, browse and search answer from the new data within a minute, without a restart.
+- Must: After tracks are added or the library changes, browse and search answer from the new data within a minute, without a restart.
 - Kind: situation
 
 ### MUS-034: A 200-track album drop re-scored the whole library 200 times.
@@ -159,7 +159,7 @@
 
 ### MUS-037: A renamed track stayed in search and failed only at send to Resolve.
 - Why: Renaming a library file added a new entry but never removed the old; about a third of the library has numeric names, so renaming is routine.
-- Must: A track whose file was renamed or deleted on the NAS leaves search at the next indexing, so every result can be sent to Resolve.
+- Must: A track whose file was renamed or deleted on the NAS leaves search on its own, a large removal once an admin confirms, so every result can be sent to Resolve.
 - Kind: situation
 
 ### MUS-038: A track's preview played a deleted track's audio.

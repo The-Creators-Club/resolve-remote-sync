@@ -11,7 +11,7 @@
 
 ### BRD-002: The board is the first step of Timeline Cards, offered pre-sorted or empty.
 - Why: The owner: "the board should be integrated as part of timeline cards, as a step 1", answering "yes both" to an automatic first sort and an empty board.
-- Must: The order is clips in, board, cut, Resolve; processing offers a first sort, a person can start empty, and nothing goes from board straight to Resolve.
+- Must: The order is clips in, board, cut, hand-over; processing ends with a first sort, a person can start empty, and nothing goes from board straight to an editing program.
 - Kind: ruling
 
 ### BRD-003: The board has a notes area, and the assistant reworks the board from it.
@@ -89,8 +89,8 @@
 - Kind: ruling
 
 ### BRD-017: Setting cards aside takes one key and works on several at once.
-- Why: The owner: "Pressing 0 should stage cards. Also I can't multi select cards right now ... there's no way to easily stage things".
-- Must: One or many selected cards are set aside with one key, and set-aside cards count as handled.
+- Why: The owner: "I can't multi select cards right now ... there's no way to easily stage things"; the board uses the editor's keys wherever the act is the same.
+- Must: One or many selected cards are set aside with the key and gesture the editor uses to move a cut to the shelf, and set-aside cards count as handled.
 - Kind: ruling
 
 ### BRD-018: Set-aside cards are grouped under the theme they would have belonged to.

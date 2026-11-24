@@ -658,7 +658,6 @@ CE3-070	cards-editor	Working offline, connections and several devices	3	CE3-070	
 CE3-071	cards-editor	Working offline, connections and several devices	3	CE3-071	D04-046	D-tc-offline-plan-008
 CE3-072	cards-editor	Working offline, connections and several devices	3	CE3-072	D04-049	D-tc-offline-plan-011 D-tc-offline-plan-005
 CE3-073	cards-editor	Working offline, connections and several devices	3	CE3-073	D04-038	D-tc-offline-plan-005 D-tc-native-apps-006
-CE3-074	cards-editor	Working offline, connections and several devices	2	CE3-074	D06-024	D-tc-truenas-app-plan-006 D-tc-truenas-app-plan-002
 CE3-075	cards-editor	Working offline, connections and several devices	3	CE3-075	D06-025	D-tc-truenas-app-plan-005
 CE3-076	cards-editor	Working offline, connections and several devices	3	CE3-076	C04-075	C-ed-7c3a35d5b C-ed-f8bcb6b99
 CE3-077	cards-editor	Working offline, connections and several devices	3	CE3-077	C06-063 D04-034	C-ed-fa4a90c14 D-tc-offline-plan-003
@@ -1764,7 +1763,7 @@ RSV-044	resolve-on-the-editors-computer	Project libraries and projects	1a	RSV-04
 RSV-045	resolve-on-the-editors-computer	Project libraries and projects	1a	RSV-045	H07-065 H06-040	H-fr-wave2-companion-006 H-bh2026-09-24-014
 RSV-046	resolve-on-the-editors-computer	Project libraries and projects	1a	RSV-046	P03-042 M05-028	P-00682 M-home-resolve-cloud-backup M-home-canvas-timeline-tool
 RSV-047	resolve-on-the-editors-computer	Project libraries and projects	1a	RSV-047	D07-104	D-fs-cloud-backup-plan-2026-002 D-fs-cloud-backup-plan-2026-004 D-fs-cloud-backup-plan-2026-005
-RSV-048	resolve-on-the-editors-computer	Project libraries and projects	1a	RSV-048	D06-019	D-tc-transcript-audit-007 D-tc-truenas-app-plan-001
+RSV-048	sealed	resolve-project-library-direct	1a	RSV-048	D06-019	D-tc-transcript-audit-007 D-tc-truenas-app-plan-001
 RSV-049	resolve-on-the-editors-computer	Project libraries and projects	1a	RSV-049	M05-056	M-home-resolve-project-thumbnails
 RSV-050	resolve-on-the-editors-computer	Project libraries and projects	1a	RSV-050	H01-056	H-bh2026-08-14-030
 RSV-051	resolve-on-the-editors-computer	Project libraries and projects	1a	RSV-051	P04-075	P-00818
@@ -1849,7 +1848,6 @@ RSV-131	resolve-on-the-editors-computer	Colour look-up tables (LUTs)	2	RSV-131	P
 RSV-132	resolve-on-the-editors-computer	Fixing media: copying in, rehearsals and undo	1a	RSV-132	L01-039	L-0030 L-0072
 RSV-133	resolve-on-the-editors-computer	Fixing media: copying in, rehearsals and undo	1a	RSV-133	L05-094 H05-043 P02-021 L04-114	L-0438 H-bh2026-09-11-015 P-00389 L-0332
 RSV-134	resolve-on-the-editors-computer	Fixing media: copying in, rehearsals and undo	2	RSV-134	P02-015	P-00296 P-00297 P-00385 P-00387 P-00388 P-00407 P-00408 C-cc-464c31b7b
-RSV-135	resolve-on-the-editors-computer	Fixing media: copying in, rehearsals and undo	3	RSV-135 APP-120	H05-044 L05-075 L07-005 L08-085 L06-007 L04-158 H06-098	H-bh2026-09-11-015 H-bh2026-09-11b-014 L-0403 L-0406 L-0439 L-0581 L-0837 L-0446 L-0447 L-0563 L-0342 H-bh2026-09-18-007 H-bh2026-09-18b-005
 RSV-136	resolve-on-the-editors-computer	Fixing media: copying in, rehearsals and undo	3	RSV-136	H07-069 L04-052	H-urs-2026-09-03-003 H-urs-2026-09-03-004 H-urs-2026-09-03-006 L-0310
 RSV-137	resolve-on-the-editors-computer	Fixing media: copying in, rehearsals and undo	3	RSV-137	L04-105	L-0329
 RSV-138	resolve-on-the-editors-computer	Fixing media: copying in, rehearsals and undo	3	RSV-138	H06-043 H07-067	H-bh2026-09-24-015 H-bh2026-09-24-017 H-fr-wave2-companion-006

@@ -98,3 +98,8 @@ CFI-047 | seal | resolve-own-transcription | Resolve's own transcription, starte
 # unrelated one: the behaviour is in the specification), SRT-080 (what a look
 # over the footage costs across the network: a measured fact about the
 # studio's NAS). Their pieces list them as met.
+
+# --- Found by the check of every capability's lessons against his answers (2026-11-24) ---
+CE3-074 | withdraw | | | overruled 2026-11-24: the shared staged draft of edits waiting to be applied to a timeline went with live editing of Resolve, so nothing of the lesson is left. (page 29, 29.2) | |
+RSV-135 | withdraw | | | overruled 2026-11-24: FIX ALL's rehearsal mode is cut, so everything the lesson is about is gone; its one remaining clause (a real run states how many it copied) is already (page 15, question 15.8) | |
+RSV-048 | seal | resolve-project-library-direct | Reading Resolve's project library directly, from outside Resolve | overruled 2026-11-24 as a rule (the cards no longer show Resolve's timeline, page 29, 29.2); the fact about Resolve's last save is kept for a design that reads the library | |

@@ -1,6 +1,6 @@
 # Sealed notes: resolve-project-library-direct
 
-SEALED. Not part of the pack. Released to the rebuild only after its own committed design names this tool. 19 notes.
+SEALED. Not part of the pack. Released to the rebuild only after its own committed design names this tool. 20 notes.
 
 ### CFI-S25: Resolve stores each clip's transcription as a compressed list of timed words.
 - Why: Each media-pool item holds its words with start and end seconds, pause markers, paragraph breaks and a language, offset by start timecode as nominal seconds (01:00:00:00 is 3600).
@@ -73,6 +73,12 @@ SEALED. Not part of the pack. Released to the rebuild only after its own committ
 - Must: Use the proven index table and verify the rest; clear a colour with the scripted clear call (setting empty does not clear); count each change as an undo step.
 - Tool: reading Resolve's project library directly (item colour record)
 - Where it bit: Timeline Cards: the hand-over to Resolve, and exports
+
+### RSV-048: Resolve can be open while refusing scripting, and its last save stays readable.
+- Why: With scripting refusing, the timeline and transcripts as of Resolve's last save were still in the project library, so work could continue.
+- Must: With Resolve closed or refusing scripting, the editor still shows the timeline as of Resolve's last save and says plainly it is not live.
+- Tool: Reading Resolve's project library directly, from outside Resolve
+- Where it bit: Resolve on the editor's computer
 
 ### RSV-S01: Read directly, Resolve's project library answers in milliseconds and shows multicam angles.
 - Why: The media pool lists in 31 ms against 20 s by scripting, media ids equal scripting's unique ids, angles show; but link columns are empty, subtitle tracks must be skipped, frames are text.

@@ -154,9 +154,9 @@ See also, filed under another capability:
 - Must: Replacing an interview's sound keeps its length to the frame and every cut span intact, reuses its word timing, levels the new sound, and leaves correct angles untouched.
 - Kind: ruling
 
-### CFI-038: Each interviewee's multicam wears that interviewee's colour from the plan.
+### CFI-038: Each interviewee's multicam wears that interviewee's one colour.
 - Why: The owner colours each interviewee's cards in the plan and wants their multicam clips in Resolve to carry the same colour from the start.
-- Must: Every interviewee's multicam clip shows that interviewee's plan colour in Resolve from the moment it is made.
+- Must: Every interviewee's multicam clip shows that interviewee's one colour, the same everywhere, in Resolve from the moment it is made there.
 - Kind: ruling
 
 ### CFI-027: A folder can hold someone else's interview, and one recording two interviews.
@@ -373,9 +373,9 @@ See also, filed under another capability:
 - Must: Each paragraph carries the question it answers, its verbatim original, its full natural English, and a reference that survives edits and renames.
 - Kind: ruling
 
-### CFI-075: A card holds at least two sentences, never a single word or sentence.
+### CFI-075: An answer card holds at least two sentences, never a single word or sentence.
 - Why: The owner had a speaker's transcript re-paragraphed so that no card held a single sentence or word.
-- Must: Transcripts split into cards of at least two sentences, merging shorter fragments into a neighbour and keeping the first one's reference.
+- Must: Answer paragraphs split into cards of at least two sentences, merging shorter fragments into a neighbour and keeping the first one's reference; a question and chatter stay their own paragraphs.
 - Kind: ruling
 
 ### CFI-076: Bilingual transcripts show the English line above the Chinese.
@@ -385,7 +385,7 @@ See also, filed under another capability:
 
 ### CFI-077: Every interview yields a complete original text and a complete English text.
 - Why: The owner asked for "a full ZH subtitle and a full EN subtitle", with likely mishearings flagged using a list of names and terms he supplies.
-- Must: Every interview has a complete original and English text, and likely mishearings are flagged against the owner's list of names and terms.
+- Must: Every interview has a complete original text and, with the assistant on, a complete English text, and likely mishearings are flagged against the owner's list of names and terms.
 - Kind: ruling
 
 ### CFI-078: Adding the English must never correct the transcribed words.
@@ -395,7 +395,7 @@ See also, filed under another capability:
 
 ### CFI-079: Speech in any language other than English gets English.
 - Why: Italian, French and German cards got no English, and Vietnamese and Indonesian read as English, because only Chinese counted as foreign; the owner: "add translating from any detected language".
-- Must: Any non-English language is detected and translated, and real English is never sent for translation and shows its words once.
+- Must: Any non-English language is detected and, with the assistant on, translated; real English is never sent for translation and shows its words once.
 - Kind: ruling
 
 ### CFI-081: Staged cards must show English like cut cards do.
@@ -449,7 +449,7 @@ See also, filed under another capability:
 
 ### CFI-089: Everything from clips to word links runs on its own.
 - Why: The owner: "make the word link pass part of the multicam pipeline ... so that all of this gets done automatically at the end".
-- Must: Once clips are in, grouping, sync, multicam, transcript, English and word links all complete with no step started by hand.
+- Must: Once clips are in, grouping, sync, multicam, transcript, English and word links complete with no step started by hand; without the assistant, English and word links await a person.
 - Kind: ruling
 
 ### CFI-090: Every automatic guess in footage processing can be corrected by hand.

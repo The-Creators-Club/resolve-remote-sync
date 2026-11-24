@@ -340,7 +340,7 @@
 
 ### YTD-067: A wired editor could choose no project as a download destination.
 - Why: Destinations were the person's ticked projects, and a wired computer never ticks one; the page knew the person, not which of their computers was asking.
-- Must: Destinations depend on the computer that will download: the server or a wired computer may target any active project, a remote computer only projects it syncs.
+- Must: Destinations are every active project, whoever asks and wherever the download runs; a computer never takes a job for a project it does not hold.
 - Kind: situation
 
 ### YTD-068: The project picker offered projects the next step refused.
@@ -417,7 +417,7 @@
 
 ### YTD-083: Cancel did nothing while a download ran on an editor's computer.
 - Why: Cancel, and "download on the server instead", took effect only after the editor's computer finished, so every clip landed under a "cancelling" message.
-- Must: Cancel stops a download on an editor's computer after the clip in flight, and a hand-back button appears only when it will take effect.
+- Must: Cancel stops a download on an editor's computer within about two seconds, leaving the clip in flight for retry; a hand-back button appears only when it takes effect.
 - Kind: situation
 
 ## Progress
@@ -441,7 +441,7 @@
 
 ### YTD-087: A clip downloaded on the server never reached the editor who asked.
 - Why: Originals only travel up to the NAS, so every server fallback left the clip where the requesting editor could not get it.
-- Must: Any clip in a person's download history that is missing from their computer can be fetched from the NAS in one click.
+- Must: A job's clips reach the asking editor's computer by themselves when it syncs the project; any other history clip missing there can be fetched from the NAS in one click.
 - Kind: situation
 
 ### YTD-088: An editor imported 540p previews because the originals never reached him.
@@ -457,7 +457,7 @@
 See also, filed under another capability:
 
 - ALL-075 (The whole product): Explorer ignores its select switch when the switch arrives inside quotes.
-- SYN-009 (Sync): YouTube originals go up from the computer that downloaded them, never down to others.
+- SYN-009 (Sync): YouTube originals go up, and come down only to the editor who asked.
 
 ## Keeping the downloader working
 

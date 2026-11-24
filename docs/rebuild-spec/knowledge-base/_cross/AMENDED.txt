@@ -1,0 +1,114 @@
+# Lessons whose words were changed AFTER the merge, because a later answer of
+# the owner's changed part of what they say. Stays behind. Read by
+# tools/assemble_kb.py, which applies each line and keeps the old words in
+# knowledge-base/_trace/amended.tsv.
+#
+#   id | title, why or must | the whole field as it now reads | the reason
+#
+# Where these came from: one reader per capability compared every lesson with
+# his answers (knowledge-base/_cross/ANSWERS_BRIEF.md; their reports, with his
+# words quoted beside each lesson, are in _cross/_answers/). The lead read every
+# proposal and left out the doubtful ones, which stand as they were:
+# SRT-132, DSH-136, YTD-068, BRO-031, BRO-042, APP-062, SRV-014, SRV-015,
+# SRV-079, CE1-129, CE2-128, CFI-028, BRD-010, REL-036, REL-038, REL-065,
+# CRX-063, CRX-105, MUS-007, ALL-087. Waiting for the owner (decision page 32):
+# PRX-063 (does a file move ever lapse) and CE1-028 with ten more (does the
+# shortening review stay). To undo an amendment, delete its line and run
+# assemble_kb.py.
+
+ACC-011 | must | Each computer holds its own credential bound to one person, revocable alone; there is no site-wide shared credential. | the owner's answer, page 9, question 9.10
+ACC-018 | must | Deleting or suspending a person ends their sessions, shares and every computer's access at the next request, all or nothing, and the confirm states this. | the owner's answer, page 9, question 9.4
+ACC-020 | must | Suspending or deleting your own account, or the last active admin, is refused with a message. | the owner's answer, page 9, question 9.4
+ACC-045 | must | The server never holds the NAS administrator's password nor, by default, any equal credential, verifies the NAS it talks to, and editors delete only projects granted to them. | the owner's answer, page 9, question 9.6
+BRO-082 | title | B-roll is dropped on the dashboard and described on an able, free studio computer. | the owner's answer, page 16, question 16.1
+BRO-082 | why | The owner specified: drop clips or folders on the dashboard, preview them, pick settings, run; an able, free computer, the dropper's first, converts and describes; results publish themselves. | the owner's answer, page 16, question 16.1
+BRO-082 | must | Dropped clips are previewed and described on an able, free computer, the dropper's own first, with progress there and on the dashboard; admins see every describing computer; results publish automatically. | the owner's answer, page 16, question 16.1
+BRO-032 | must | B-roll is described only on the studio's own graphics cards, offering "Good" and "Best" whose tooltips state the video memory each needs, and the customer picks. | the owner's answer, page 16, question 16.2
+BRO-034 | must | At the owner's stop time indexing starts nothing new but lets every clip already started finish and be saved. | the owner's answer, page 16, question 16.2
+BRO-083 | must | A drop larger than free space minus the computer's floor is refused whole; over 50 GB asks first with size and hours; skipped non-video files counted; only complete files used. | the owner's answer, page 16, question 16.6
+BRO-057 | must | A Chinese, Japanese or other non-Latin query returns matching clips, by words and by related meaning, wherever an equivalent English query does. | the owner's answer, page 16, question 16.8
+BRO-058 | must | A query with no word match returns at most five clips labelled related, none for a Chinese query, and an empty result stays possible. | the owner's answer, page 16, question 16.8
+BRO-059 | must | When the server cannot match by meaning, search still answers by words and says what it lost and why. | the owner's answer, page 16, question 16.8
+BRD-002 | must | The order is clips in, board, cut, hand-over; processing ends with a first sort, a person can start empty, and nothing goes from board straight to an editing program. | the owner's answer, page 23, question 23.1
+BRD-017 | must | One or many selected cards are set aside with the key and gesture the editor uses to move a cut to the shelf, and set-aside cards count as handled. | the owner's answer, page 30, question 30.6
+BRD-017 | why | The owner: "I can't multi select cards right now ... there's no way to easily stage things"; the board uses the editor's keys wherever the act is the same. | the owner's answer, page 30, question 30.6, as above.
+CE2-132 | must | Every device agrees on one cut list, while scroll, cursor, selection, playhead and view stay per device; a first visit starts at the latest place. | the owner's answer, page 31, 31.1
+CE2-001 | must | The lane uses the person's Resolve keyboard preset (Resolve's defaults otherwise), Alt+wheel zooms, trims keep the playhead's spoken moment, waveforms share a baseline underneath, panning stops with the mouse. | the owner's answer, page 24, 24.6
+CE1-099 | must | Lane keys follow the editor's Resolve preset by command where known and the editing-program help is on, else documented defaults, work the same without Resolve, a learned layout survives restarts. | the owner's answer, page 24, 24.5
+CE2-058 | must | Every interviewee is brought to the median gated speech loudness of the clips in this cut, down as well as up, without clipping, and a separate trim sets overall loudness. | the owner's answer, page 31, 31.4
+CE2-058 | title | "Same level" brings every interviewee to the middle loudness of the cut's clips. | the owner's answer, page 31, 31.4
+CE3-023 | must | Undo takes back the person's own last edit by restoring the version from before it, and older versions are kept, thinned rather than lost all at once. | the owner's answer, page 25, 25.2
+CE1-065 | must | An outside change to the open cut list shows within 2 s and is merged in as edits, told to every device; nothing made in the editor meanwhile is lost. | the owner's answer, page 25, 25.5
+CE1-125 | must | The header reads "episode · open cut" with recent episodes; switching opens the last cut or a picker of that episode's own cut lists only. | the owner's answer, page 29, 29.2
+CE1-125 | title | The project is the episode; cut lists are members inside it. | the owner's answer, page 29, 29.2
+CE3-106 | must | A cut list opened read-only is read from the real project but nothing is written to it, and two versions never drop each other's data. | the owner's answer, page 28, 28.6
+CE3-106 | title | A cut list opened read-only must never write to the real project. | the owner's answer, as above, page 28, 28.6 and page 25, 25.6
+CFI-075 | must | Answer paragraphs split into cards of at least two sentences, merging shorter fragments into a neighbour and keeping the first one's reference; a question and chatter stay their own paragraphs. | the owner's answer, page 22, question 22.5
+CFI-075 | title | An answer card holds at least two sentences, never a single word or sentence. | the owner's answer, page 22, question 22.5
+CFI-079 | must | Any non-English language is detected and, with the assistant on, translated; real English is never sent for translation and shows its words once. | the owner's answer, page 22, question 22.3
+CFI-077 | must | Every interview has a complete original text and, with the assistant on, a complete English text, and likely mishearings are flagged against the owner's list of names and terms. | the owner's answer, page 22, question 22.3
+CFI-089 | must | Once clips are in, grouping, sync, multicam, transcript, English and word links complete with no step started by hand; without the assistant, English and word links await a person. | the owner's answer, page 22, question 22.3
+CFI-038 | must | Every interviewee's multicam clip shows that interviewee's one colour, the same everywhere, in Resolve from the moment it is made there. | the owner's answer, page 23, question 23.2
+CFI-038 | title | Each interviewee's multicam wears that interviewee's one colour. | the owner's answer, page 23, question 23.2
+CRX-014 | must | Sending a cut list identical to the timeline writes nothing, and untouched cuts keep their exact frames. | the owner's answer, page 29, 29.2
+CRX-020 | must | Before every write the new timeline is confirmed as the current one; otherwise the send stops, the new timeline is removed and the person is told. | the owner's answer, page 29, 29.2
+CRX-023 | must | Gaps appear in timelines built whole, never failing silently. | the owner's answer, page 29, 29.2
+CRX-035 | must | A send costs a known small number of undo steps, and nothing the product does ever undoes the editor's own work in Resolve. | the owner's answer, page 29, 29.2
+CRX-048 | must | Reading a Resolve timeline of up to 500 cuts finishes within a second and never stalls the editor's own clicks in Resolve. | the owner's answer, page 29, 29.2
+CRX-052 | must | Nothing is ever written into a Resolve project from outside Resolve; every change to a timeline goes through Resolve running with the project open. | the owner's answer, page 29, 29.1
+CRX-053 | must | Within seconds of Resolve reopening a timeline, even an unchanged one, the editor shows it open again, with nothing restarted. | the owner's answer, page 29, 29.2
+CRX-095 | must | A timeline's real end is found at the first empty stretch of one minute or more, shown and settable each time, and renders and exports stop there. | the owner's answer, page 30, 30.10
+CRX-097 | must | A name title the editor places in Resolve, visible edge 50 px in from side and bottom, away from the speaker, is never moved, shortened or lost by the product. | the owner's answer, page 30, 30.9
+CRX-098 | must | On a direct cut between two speakers, the editor's titles, the first playing its exit and the second its entrance, are left as they are by every hand-over. | the owner's answer, page 30, 30.9
+DSH-141 | must | The help viewer serves only published documents, the same for every reader, refuses any path outside its folder, and keeps links between documents working. | the owner's answer, page 6, question 6.16
+DSH-044 | must | Per project and person: files present, missing, offline in Resolve while the help for it is on, and every running transfer with speed, files remaining and time left. | the owner's answer, DECISIONS page 1, question 4, accepted 2026-11-13
+DSH-068 | must | A computer unseen 7 days is listed as lost with the projects it holds; a computer is forgotten only by an admin, never automatically. | the owner's answer, page 6, question 6.1
+DSH-077 | must | Deactivating over a quarter of projects or dropping over 90% of a project's files is refused, keeping old data, shown on the home page until resolved or an admin overrides. | the owner's answer, page 6, question 6.14
+APP-127 | must | No path, resume from pause included, starts syncing on a computer that is not signed in. | the owner's answer, page-08-editor-app.md, 8.6
+APP-125 | must | A rejected credential tells the editor, reminding hourly, reads differently from "server unreachable" everywhere, offers signing in again first, and when a report was last accepted survives restarts. | the owner's answer, page-08-editor-app.md, 8.10
+APP-112 | must | Every problem the app detects shows once in the app, beside what it concerns, and is counted in its report, even with nothing ticked or the feature off, until cleared. | the owner's answer, page-08-editor-app.md, 8.17
+APP-013 | must | Setup says done only after the computer has reported in, its project drive answers and, while Resolve's help is on, Resolve is reachable; otherwise it names the failed step. | the owner's answer, DECISIONS.md page 1, question 4
+APP-079 | why | He approved: identity, one conditional prompt, "Sync:" with files and speed, "Resolve: connected" while Resolve's help is on, sync now, pause, "Open my sync drive", open dashboard, settings, quit. | the owner's answer, DECISIONS.md page 1, question 4
+SRT-131 | must | Every move is checked just before and after it runs, can run on one clip, and never deletes or overwrites an original. | the owner's answer, DECISIONS.md page 2, question 5
+SRT-131 | title | Sorting never loses an original, and every move is checked first. | the owner's answer, DECISIONS.md page 2, question 5
+SRT-045 | must | An existing file is skipped only when proven the same recording, its shorter copy is resumed, any other file stays and the card's file lands beside it, never overwriting. | the owner's answer, page 19, 19.15
+MUS-005 | must | Scanning a folder of mixed audio excludes recorder takes, voiceover, stings under 30 s and recordings over 15 minutes, keeping stems apart from tagging; a hand-dropped track is always taken. | the owner's answer, page 30, question 30.5
+MUS-037 | must | A track whose file was renamed or deleted on the NAS leaves search on its own, a large removal once an admin confirms, so every result can be sent to Resolve. | the owner's answer, page 17, question 17.2
+MUS-033 | must | After tracks are added or the library changes, browse and search answer from the new data within a minute, without a restart. | the owner's answer, page 17, question 17.2
+MUS-025 | must | After a page reload, staged work can still be sent, cancelled or retried from the page, and no fallback advice starts a different import. | the owner's answer, page 16, question 16.1
+PRX-030 | must | Proxy making starts after the computer's quiet time without input (5 minutes unless changed), treats unknown idleness as busy, stops within seconds of input and discards its partial file. | the owner's answer, page 16, question 16.7
+PRX-031 | must | An idle computer encodes several proxies in parallel; while Resolve is open or rendering it starts none, even on a forced run, unless the computer's Resolve hold-back is off. | the owner's answer, page 16, question 16.7
+PRX-032 | must | Proxy making keeps the computer's one free-space floor clear beyond what it writes, waits for two equal size-and-time samples, and never encodes proxy-folder, partial or its own files. | the owner's answer, page 4, question 4.14
+PRX-098 | must | Creating a project lays down the studio's template folders; using an existing folder adds none; neither ever moves, renames or overwrites a folder or file already there. | the owner's answer, page 6, question 6.10
+PRX-098 | why | The owner wanted the standard folders laid down at project start; an existing folder holding interviewee footage, made a project, is left exactly as it is. | the owner's answer, page 6, question 6.10, as above.
+APP-068 | must | A second failed start or crash within ten minutes of a new build's first start restores the previous build by itself, and syncing resumes with no one touching the machine. | the owner's answer, page 10, 10.2
+REL-048 | must | The previous build stays until the new one proves healthy; a second failed start or crash within 10 minutes restores it, never below the signed minimum, telling the editor. | the owner's answer, page 10, 10.2
+REL-020 | must | One command builds and publishes a release, refusing before anything moves if a check fails. | the owner's answer, page 10, 10.3
+REL-072 | must | A customer site updates only to the exact build named for it, refused until that same build ran 24 hours on the studio and a second person approved it. | the owner's answer, page 10, 10.3
+REL-044 | must | Pressing update responds visibly at once, and every signed-in computer is offered a newly current update within minutes. | the owner's answer, page 10, 10.9
+SYN-028 | must | A project can be ticked upload-only per computer: all but system clutter and temporary files go up, only empty folders come down, and it never reads as out of sync. | the owner's answer, DECISIONS.md page 2, question 2
+SYN-028 | title | An editor with footage backed up locally wants to upload it, downloading no files. | the owner's answer, DECISIONS.md page 2, question 2
+SYN-011 | why | A borrowed folder counted as covered whenever its owning project was ticked in any mode, but upload-only brings no files down, and the editor was told to ask an admin. | the owner's answer, DECISIONS.md page 2, question 2
+SYN-012 | why | The shared LUT library and gallery stills had to reach everyone; deciding sharing from project ticks alone would have unshared them from every computer. | the owner's answer, page-04-sync-1.md, 4.9
+SYN-012 | must | The studio's LUT library and shared gallery stills sync to every editor's computer automatically, with no project ticked, and never appear as projects. | the owner's answer, page-04-sync-1.md, 4.9
+SYN-037 | why | When the server already holds a same-named camera original of a different size, the editor's copy never goes up, and the warning gave only a count. | the owner's answer, page-04-sync-1.md, 4.4
+SYN-039 | must | An admin sets both recovery windows together for the site, and each is stated where a person goes looking for a lost file. | the owner's answer, page-04-sync-1.md, 4.3
+SYN-073 | must | With the drive absent, or renamed and not provably the same, all syncing pauses, nothing is written to or measured on another disk, and the app says the drive is disconnected. | the owner's answer, DECISIONS.md page 2, question 4
+SYN-076 | must | The missing-drive message says which it is, unplugged or present under another letter and not provably the same drive, and gives the matching fix. | the owner's answer, DECISIONS.md page 2, question 4
+SYN-096 | why | An editor shut down with three files part-sent on a 53 Mbit/s uplink, and idle sleep interrupts uploads the same way overnight. | the owner's answer, page-04-sync-1.md, 4.1
+SYN-096 | must | While a transfer is really moving, shutdown names it, says it will resume, and offers "shut down anyway"; idle sleep is held off; a stalled transfer never keeps it awake. | the owner's answer, page-04-sync-1.md, 4.1
+SYN-079 | why | The owner asked for a warning when the drive goes with work owed, then "every half an hour the notification should recur". | the owner's answer, page-04-sync-1.md, 4.1
+ALL-089 | title | Every studio's assistant uses its own paid key by default. | the owner's answer, page 3, question 3.9
+ALL-089 | must | Assistant calls use the site's own paid key unless subscription sign-in, off by default, is switched on by accepting the set-up notice; nothing is bundled; keys never show in full. | the owner's answer, page 3, questions 3.9 and 3.10, as above; and `spec/_trace/A
+ALL-088 | must | Each assistant task shows its expected cost before running, and all assistant spending, routine runs included, stays within one daily budget in money the owner sets. | the owner's answer, page 3, question 3.6, recommendation accepted
+ALL-063 | must | Opening any tool that changes a project or files shows it idle; opening never starts work, and only newly arriving footage or tracks are processed without a run button. | the owner's answer, `spec/OWNER_REQUIREMENTS.md` section 6, "Footage in, ready to cut": "Drop clips in and they process themselves. A person drops an interview's clips into the product and does nothing more." and "Every step runs on its own. No step waits for a person to start it." Also page 2, question 5
+YTD-083 | must | Cancel stops a download on an editor's computer within about two seconds, leaving the clip in flight for retry; a hand-back button appears only when it takes effect. | the owner's answer, page 18, 18.2
+YTD-067 | must | Destinations are every active project, whoever asks and wherever the download runs; a computer never takes a job for a project it does not hold. | the owner's answer, page 18, 18.3
+YTD-087 | must | A job's clips reach the asking editor's computer by themselves when it syncs the project; any other history clip missing there can be fetched from the NAS in one click. | the owner's answer, page 18, 18.4
+SYN-009 | title | YouTube originals go up, and come down only to the editor who asked. | the owner's answer, page 18, 18.4
+SYN-009 | must | A YouTube original goes up to the NAS and comes down by itself only to the requester's computer syncing the project; others get its proxy and may fetch it. | the owner's answer, page 18, 18.4, as above.
+# The lead's own: a lesson a reader would have withdrawn whose rule still holds
+# once the paid service is out of it (answer 20.6).
+SRT-150 | title | A long transcription run stopped partway through thousands of files. | the owner's answer, page 20, 20.6: only the product's own transcription; the rule about resuming is kept
+SRT-150 | why | A 6,246-file run (about 173 hours) stopped partway, and nothing already transcribed may be lost or done again. | the owner's answer, page 20, 20.6
+SRT-150 | must | An interrupted transcription run keeps every finished transcript and resumes unattended, skipping finished files. | the owner's answer, page 20, 20.6

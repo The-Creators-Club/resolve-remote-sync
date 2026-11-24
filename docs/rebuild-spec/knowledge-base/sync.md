@@ -44,9 +44,9 @@
 - Must: An editor can pick clips or timelines whose originals sync to their computer, sees the plan before it runs, and sees whether each file arrived.
 - Kind: ruling
 
-### SYN-009: YouTube originals go up from the computer that downloaded them, never down to others.
+### SYN-009: YouTube originals go up, and come down only to the editor who asked.
 - Why: A remote editor's computer started pulling 58 GB of colleagues' YouTube originals; the owner: that is a "waste of bandwith".
-- Must: A YouTube original goes up to the NAS only; other computers get its proxy, and a requester gets their own clip by downloading it themselves.
+- Must: A YouTube original goes up to the NAS and comes down by itself only to the requester's computer syncing the project; others get its proxy and may fetch it.
 - Kind: ruling
 
 ### SYN-010: Footage filed in one project but needed in another never reached the editor.
@@ -65,13 +65,13 @@
 - Kind: situation
 
 ### SYN-011: A borrowed folder never came down when its owning project was ticked upload-only.
-- Why: A borrowed folder counted as covered whenever its owning project was ticked in any mode, but upload-only brings nothing down, and the editor was told to ask an admin.
+- Why: A borrowed folder counted as covered whenever its owning project was ticked in any mode, but upload-only brings no files down, and the editor was told to ask an admin.
 - Must: A computer syncing a project fully gets every folder it borrows, whatever mode the owning project is ticked in.
 - Kind: situation
 
 ### SYN-012: Studio-wide libraries must reach every computer, even one with nothing ticked.
-- Why: The shared LUT, b-roll and music libraries had to reach everyone; deciding sharing from project ticks alone would have unshared them from every computer.
-- Must: Studio-wide library folders sync to every editor's computer automatically, with no project ticked, and never appear as projects.
+- Why: The shared LUT library and gallery stills had to reach everyone; deciding sharing from project ticks alone would have unshared them from every computer.
+- Must: The studio's LUT library and shared gallery stills sync to every editor's computer automatically, with no project ticked, and never appear as projects.
 - Kind: situation
 
 ### SYN-013: A shared library that failed on one computer left no trace anywhere.
@@ -107,8 +107,8 @@
 - Kind: given
 
 ### SYN-096: Switching off mid-upload threw away 19.3 GB of half-sent camera originals.
-- Why: An interrupted upload restarts from zero; an editor shut down with three files part-sent on a 53 Mbit/s uplink, and idle sleep does the same overnight.
-- Must: While a transfer is really moving, shutdown warns and names it with "shut down anyway", idle sleep is held off, and a stalled transfer never keeps it awake.
+- Why: An editor shut down with three files part-sent on a 53 Mbit/s uplink, and idle sleep interrupts uploads the same way overnight.
+- Must: While a transfer is really moving, shutdown names it, says it will resume, and offers "shut down anyway"; idle sleep is held off; a stalled transfer never keeps it awake.
 - Kind: situation
 
 ### SYN-098: A laptop opened after sleep did not sync for many minutes.
@@ -177,9 +177,9 @@
 
 ## Upload only
 
-### SYN-028: An editor with footage backed up locally wants to upload it, downloading nothing.
+### SYN-028: An editor with footage backed up locally wants to upload it, downloading no files.
 - Why: The owner asked for "an upload only tick for editors who have backed up footage locally"; he later ruled that such a project carries every file, not only video.
-- Must: A project can be ticked upload-only per computer: every file except system clutter and temporary files goes up, nothing comes down, and it never reads as out of sync.
+- Must: A project can be ticked upload-only per computer: all but system clutter and temporary files go up, only empty folders come down, and it never reads as out of sync.
 - Kind: ruling
 
 ## Deletions and removing a project
@@ -220,7 +220,7 @@
 - Kind: situation
 
 ### SYN-037: An editor's newer copy of a file silently never uploaded.
-- Why: When the server already holds a same-named file of a different size, the editor's copy never goes up, and the warning gave only a count.
+- Why: When the server already holds a same-named camera original of a different size, the editor's copy never goes up, and the warning gave only a count.
 - Must: The warning names each file with both sizes, gives the two fixes (rename yours, or have the admin remove the server's copy) and opens the folder.
 - Kind: situation
 
@@ -231,7 +231,7 @@
 
 ### SYN-039: An editor's undo window is 14 days while the NAS keeps versions a year.
 - Why: Deleted files stay recoverable on an editor's computer for 14 days or 50 GB, while the server keeps versions 365 days; the two were never chosen together.
-- Must: The owner sets both recovery windows together, and each is stated where a person goes looking for a lost file.
+- Must: An admin sets both recovery windows together for the site, and each is stated where a person goes looking for a lost file.
 - Kind: situation
 
 ## Safety stops
@@ -419,13 +419,13 @@ See also, filed under another capability:
 - Kind: given
 
 ### SYN-079: A sync drive pulled mid-upload got the same calm note as a finished day.
-- Why: The owner asked for a warning when the drive goes with work owed, then "every half an hour the notification should recur"; interrupted uploads restart from zero.
+- Why: The owner asked for a warning when the drive goes with work owed, then "every half an hour the notification should recur".
 - Must: Unplugging with uploads owed, or of unknown direction, names what is owed and reminds every 30 minutes, across restarts, until it returns; any narrowing needs the owner's agreement.
 - Kind: ruling
 
 ### SYN-073: With the sync drive unplugged, downloads would have filled the internal disk.
 - Why: A missing sync folder would be recreated on the boot disk and filled, and the app called it "project deleted locally".
-- Must: With the drive absent or mounted under another name, all syncing pauses, nothing is written elsewhere, free space is never measured on another disk, and the app says the drive is disconnected.
+- Must: With the drive absent, or renamed and not provably the same, all syncing pauses, nothing is written to or measured on another disk, and the app says the drive is disconnected.
 - Kind: situation
 
 ### SYN-075: Editors were told to check the cable of a drive that was plugged in.
@@ -435,7 +435,7 @@ See also, filed under another capability:
 
 ### SYN-076: "Eject it and plug it back in" fitted only one kind of missing drive.
 - Why: A sync drive can be gone because it was unplugged or because it came back under another drive letter; one sentence covered both.
-- Must: The missing-drive message says which it is, unplugged or present under another letter, and gives the matching fix.
+- Must: The missing-drive message says which it is, unplugged or present under another letter and not provably the same drive, and gives the matching fix.
 - Kind: situation
 
 ### SYN-077: A scan overlapping a drive being unplugged reported the computer as holding nothing.

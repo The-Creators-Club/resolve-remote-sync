@@ -291,7 +291,7 @@
 
 ### SRT-045: A card copy never overwrites, except to finish its own partial copy.
 - Why: A destination checked up front can gain a file before the copy lands, and a half-copied clip skipped as "same size" was never resumed.
-- Must: An existing file is skipped only when proven the same recording, a shorter copy of it is resumed, any other file is kept and reported, and nothing is overwritten.
+- Must: An existing file is skipped only when proven the same recording, its shorter copy is resumed, any other file stays and the card's file lands beside it, never overwriting.
 - Kind: situation
 
 ### SRT-046: A different card swapped into the reader mid-copy got a false "copied".
@@ -676,9 +676,9 @@
 
 ## Moving footage on the NAS
 
-### SRT-131: Sorting never loses an original, and every move is previewed first.
+### SRT-131: Sorting never loses an original, and every move is checked first.
 - Why: The owner required a test run "to make sure no original footage gets lost or accidentally deleted", then a single clip, then everything.
-- Must: Every move offers a dry run, can run on one clip, needs approval before it runs, and never deletes or overwrites an original.
+- Must: Every move is checked just before and after it runs, can run on one clip, and never deletes or overwrites an original.
 - Kind: ruling
 
 ### SRT-132: A move must be a rename and say "Move"; it never quietly becomes a copy.
@@ -773,9 +773,9 @@
 - Must: Chinese text is compared in one script, so identical speech matches whichever engine wrote either side.
 - Kind: situation
 
-### SRT-150: Paid transcription credit ran out partway through thousands of files.
-- Why: A 6,246-file run (about 173 hours) ran out of paid credit; the owner ruled that local transcription should then finish "the remaining clips".
-- Must: Running out of paid transcription keeps every finished transcript, resumes skipping finished files, and finishes the rest with local transcription unattended.
+### SRT-150: A long transcription run stopped partway through thousands of files.
+- Why: A 6,246-file run (about 173 hours) stopped partway, and nothing already transcribed may be lost or done again.
+- Must: An interrupted transcription run keeps every finished transcript and resumes unattended, skipping finished files.
 - Kind: situation
 
 ## Thumbnails and hover filmstrips

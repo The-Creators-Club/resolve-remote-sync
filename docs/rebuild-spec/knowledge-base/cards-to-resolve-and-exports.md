@@ -56,7 +56,7 @@
 
 ### CRX-014: Untouched cuts drifted 1-2 frames when a cut was sent again.
 - Why: 316 of 490 unchanged cuts moved because source points were recomputed through Resolve's off-by-one and a rounded rate.
-- Must: Sending a cut list identical to the timeline writes nothing, and untouched cuts keep their exact frames and their grades.
+- Must: Sending a cut list identical to the timeline writes nothing, and untouched cuts keep their exact frames.
 - Kind: situation
 
 ### CRX-015: A cut built in Resolve came out at the wrong total length.
@@ -89,12 +89,12 @@ See also, filed under another capability:
 
 ### CRX-020: Resolve's scripted delete hits the named timeline, but append lands on the current one.
 - Why: Switching timeline tabs mid-edit deleted a tail from one timeline and appended it to another, which looked exactly like lost clips.
-- Must: Before every write the open timeline is confirmed as the one being edited and unchanged; otherwise the edit stops, is rolled back and is reported.
+- Must: Before every write the new timeline is confirmed as the current one; otherwise the send stops, the new timeline is removed and the person is told.
 - Kind: given
 
 ### CRX-023: Nothing in Resolve's scripting or shortcuts can insert empty time.
 - Why: Scripting cannot set an item's position or insert empty time, and the Edit page has no insert-gap command.
-- Must: Gaps appear in timelines built whole; an in-place edit containing a gap is refused with that reason, never failing silently.
+- Must: Gaps appear in timelines built whole, never failing silently.
 - Kind: given
 
 ### CRX-024: Resolve's scripting cannot build a timeline from a transcript.
@@ -141,7 +141,7 @@ See also, filed under another capability:
 
 ### CRX-035: Resolve's undo history is project-wide and counts every scripted change.
 - Why: Every scripted append, delete, link, mark and marker change is its own step in one shared history; one undo too many undid the editor's own timeline duplication.
-- Must: An edit the product makes costs a known small number of undo steps, and undoing it checks the timeline state, never undoing the editor's own work.
+- Must: A send costs a known small number of undo steps, and nothing the product does ever undoes the editor's own work in Resolve.
 - Kind: given
 
 ### CRX-037: Resolve keeps one marker per frame and silently refuses the rest.
@@ -203,7 +203,7 @@ See also, filed under another capability:
 
 ### CRX-048: Reading a 266-cut Resolve timeline takes about 150 ms.
 - Why: Listing a 266-item track took about 90 ms, their source frames about 60 ms, the playhead 0.1 ms; appending in one batch cost about 11 ms per cut.
-- Must: Following a Resolve timeline of up to 500 cuts updates the cards within a second and never stalls the editor's own clicks in Resolve.
+- Must: Reading a Resolve timeline of up to 500 cuts finishes within a second and never stalls the editor's own clicks in Resolve.
 - Kind: given
 
 ### CRX-049: A card click took up to 7 seconds to move Resolve's playhead.
@@ -223,12 +223,12 @@ See also, filed under another capability:
 
 ### CRX-052: Resolve never re-reads an open timeline whose stored data changes.
 - Why: Changes written to the library for an open timeline are not seen until the project is closed and reopened.
-- Must: Any change made to a timeline outside Resolve closes it first and reopens it after, with the editor's work saved beforehand.
+- Must: Nothing is ever written into a Resolve project from outside Resolve; every change to a timeline goes through Resolve running with the project open.
 - Kind: given
 
 ### CRX-053: After Resolve restarted, the page kept saying no timeline was open.
 - Why: When Resolve came back on the same timeline, the page saw no change and kept its error banner and empty list until its own server restarted.
-- Must: Within seconds of Resolve reopening a timeline, even an unchanged one, the cards show it again, with nothing restarted.
+- Must: Within seconds of Resolve reopening a timeline, even an unchanged one, the editor shows it open again, with nothing restarted.
 - Kind: situation
 
 ### CRX-054: A send to an unreachable Resolve failed eight minutes later.
@@ -418,7 +418,7 @@ See also, filed under another capability:
 
 ### CRX-095: A 61-minute timeline held a 25-minute cut plus parked clips.
 - Why: Editors park unused clips after the cut: one timeline was 24:41 of cut, a 14-minute gap, then 96 unused clips.
-- Must: A timeline's real end is found at the first gap of minutes, and renders and exports stop there.
+- Must: A timeline's real end is found at the first empty stretch of one minute or more, shown and settable each time, and renders and exports stop there.
 - Kind: situation
 
 ## Titles and compound clips
@@ -430,12 +430,12 @@ See also, filed under another capability:
 
 ### CRX-097: Name titles sat half off screen and could cover the speaker.
 - Why: Left titles were placed by their far edge and right ones ran off frame; the owner wants the visible edge 50 px in, opposite the speaker.
-- Must: A name title's visible edge sits 50 px in from the side and bottom, on the side away from where the speaker appears.
+- Must: A name title the editor places in Resolve, visible edge 50 px in from side and bottom, away from the speaker, is never moved, shortened or lost by the product.
 - Kind: ruling
 
 ### CRX-098: When one interviewee cuts straight to another, name titles hand over.
 - Why: The owner: with no b-roll between, "the outro for the previous third plays and the new third for the new interviewee comes in. Obviously."
-- Must: On a direct cut between two speakers, the first speaker's title plays its exit and the second speaker's title plays its entrance.
+- Must: On a direct cut between two speakers, the editor's titles, the first playing its exit and the second its entrance, are left as they are by every hand-over.
 - Kind: ruling
 
 ## Subtitles and delivery

@@ -226,7 +226,7 @@ See also, filed under another capability:
 
 ### DSH-044: For each project and person, show what is held, missing and moving.
 - Why: The owner wanted files held and missing, offline in Resolve, proxy-only as normal for remote editors, and above all live speeds and times left.
-- Must: Per project and person: files present, missing, offline in Resolve, and every running transfer with speed, files remaining and time left.
+- Must: Per project and person: files present, missing, offline in Resolve while the help for it is on, and every running transfer with speed, files remaining and time left.
 - Kind: ruling
 
 ### DSH-045: Project lists nest by folder and start collapsed.
@@ -349,7 +349,7 @@ See also, filed under another capability:
 
 ### DSH-068: A dead or departed computer vanished while still holding projects.
 - Why: Its status expired after 30 days, or a computer limit deleted the oldest record, while its plan and shares stayed active.
-- Must: A computer unseen 7 days is listed as lost with the projects it holds; one holding ticks or shares is forgotten only by an admin, never automatically.
+- Must: A computer unseen 7 days is listed as lost with the projects it holds; a computer is forgotten only by an admin, never automatically.
 - Kind: situation
 
 ### DSH-069: A retired laptop mailed the owner the same alarm every day.
@@ -391,7 +391,7 @@ See also, filed under another capability:
 
 ### DSH-077: A momentary empty listing made the server treat projects as deleted.
 - Why: The NAS sync service restarted empty or a volume was not mounted yet, so projects were deactivated and their inventory wiped; the later refusal never reached the owner.
-- Must: A pass that would deactivate over a quarter of projects or drop over 90% of a project's files is refused, keeps the old data, and stays on the home page until resolved.
+- Must: Deactivating over a quarter of projects or dropping over 90% of a project's files is refused, keeping old data, shown on the home page until resolved or an admin overrides.
 - Kind: situation
 
 ### DSH-078: Facts the system relied on broke silently and were found by accident.
@@ -719,7 +719,7 @@ See also, filed under another capability:
 
 ### DSH-141: The help viewer served every internal document to anyone signed in.
 - Why: Every document in the source tree, the bug ledger included, was browsable by customers.
-- Must: The help viewer serves only documents published for that reader's audience, refuses any path outside its folder, and keeps links between documents working.
+- Must: The help viewer serves only published documents, the same for every reader, refuses any path outside its folder, and keeps links between documents working.
 - Kind: situation
 
 ### DSH-142: An error page showed data store host, user and server paths to any user.

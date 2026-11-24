@@ -440,7 +440,7 @@ Projects the product creates or closes are left on a timeline with picture, so t
 
 #### Lessons
 
-- Met: RSV-042, RSV-043, RSV-044, RSV-045, RSV-046, RSV-047, RSV-048, RSV-049, RSV-050, RSV-051.
+- Met: RSV-042, RSV-043, RSV-044, RSV-045, RSV-046, RSV-047, RSV-049, RSV-050, RSV-051.
 
 ## Knowing which project is open
 
@@ -773,7 +773,7 @@ A request still waiting after 7 days is given up and reported as failed "(this c
 
 #### Lessons
 
-- Met: RSV-132, RSV-133, RSV-134, RSV-135, RSV-136, RSV-137, RSV-138, RSV-139, RSV-140, RSV-141, RSV-142, RSV-143, RSV-144, RSV-145.
+- Met: RSV-132, RSV-133, RSV-134, RSV-136, RSV-137, RSV-138, RSV-139, RSV-140, RSV-141, RSV-142, RSV-143, RSV-144, RSV-145.
 
 ## Grading from the server's originals
 

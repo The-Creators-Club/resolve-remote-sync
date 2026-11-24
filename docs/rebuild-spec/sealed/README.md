@@ -52,7 +52,7 @@ Written by `tools/assemble_kb.py`; do not edit by hand.
 | `resolve-keystrokes.md` | 5 |
 | `resolve-own-transcription.md` | 3 |
 | `resolve-preference-files.md` | 3 |
-| `resolve-project-library-direct.md` | 19 |
+| `resolve-project-library-direct.md` | 20 |
 | `resolve-scripting-api.md` | 1 |
 | `restic.md` | 1 |
 | `soniox.md` | 2 |

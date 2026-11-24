@@ -48,7 +48,7 @@
 
 ### ACC-011: One credential shared by every computer could not be revoked for one.
 - Why: Every computer used one shared secret, so a leaked or stolen copy opened the whole fleet and cutting off one machine cut off all.
-- Must: Each computer holds its own credential bound to one person, revocable alone; a site-wide shared credential is off unless the admin turns it on.
+- Must: Each computer holds its own credential bound to one person, revocable alone; there is no site-wide shared credential.
 - Kind: situation
 
 ### ACC-012: Per-person credentials silently switched features off.
@@ -90,7 +90,7 @@
 
 ### ACC-018: Disabling or deleting a person left their browsers and computers working.
 - Why: Disabling changed one flag: open sessions kept working for days and the person's computers kept reporting, syncing and holding shares under credentials nobody could revoke.
-- Must: Disabling, deleting or suspending a person ends their sessions, shares and every computer's access at the next request, all or nothing, and the confirm states this.
+- Must: Deleting or suspending a person ends their sessions, shares and every computer's access at the next request, all or nothing, and the confirm states this.
 - Kind: situation
 
 ### ACC-019: A deleted person came back when their computer reported.
@@ -100,7 +100,7 @@
 
 ### ACC-020: An admin could disable the last admin and lock everyone out.
 - Why: Delete refused removing yourself or the last admin, but disable had no such guard, leaving no account able to administer.
-- Must: Disabling or deleting your own account, or the last enabled admin, is refused with a message.
+- Must: Suspending or deleting your own account, or the last active admin, is refused with a message.
 - Kind: situation
 
 ### ACC-021: The only way to stop a person was to delete them.
@@ -213,7 +213,7 @@ See also, filed under another capability:
 
 ### ACC-045: The server held NAS-admin power by default.
 - Why: The server kept a root-equivalent NAS credential, the dashboard admin was the NAS admin, NAS identities went unverified, and any editor could delete any project.
-- Must: By default the server holds no NAS-admin-equivalent credential, verifies the NAS it talks to, and editors delete only projects granted to them.
+- Must: The server never holds the NAS administrator's password nor, by default, any equal credential, verifies the NAS it talks to, and editors delete only projects granted to them.
 - Kind: situation
 
 See also, filed under another capability:
@@ -329,7 +329,7 @@ See also, filed under another capability:
 
 See also, filed under another capability:
 
-- ALL-089 (The whole product): Customer builds use only the studio's own paid assistant key.
+- ALL-089 (The whole product): Every studio's assistant uses its own paid key by default.
 
 ## How secrets and keys are kept
 

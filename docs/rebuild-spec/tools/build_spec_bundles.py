@@ -9,7 +9,11 @@ Reads spec/_extracts/*.md and knowledge-base/<capability>.md and writes,
 under the gitignored _raw/spec/:
 
     <capability>[-N].md       the items to write up, sub-topic by sub-topic,
-                              each sub-topic followed by its lessons
+                              each sub-topic followed by its lessons; then the
+                              readers' questions about those items and the
+                              points the inventory left unsettled
+    <capability>[-N].questions  the ids of those questions and unsettled
+                              points (for the count)
     <capability>[-N].ids      the item ids in the piece (for the count)
     <capability>[-N].lessons  the lesson ids in the piece (for the count)
 
@@ -17,6 +21,12 @@ An item filed under a heading the knowledge base does not have is placed
 with the knowledge-base sub-topic it reads most like, so related things
 reach the same writer; where nothing is alike it stays under its own
 heading at the end. That placing only decides which writer sees it.
+
+A reader's question goes to every piece that holds one of the items it
+names, and says which other pieces also have it, so one writer answers for
+it and the others point at it. A question naming no item, and every
+unsettled line, goes to the piece it reads most like, among the pieces
+holding items of the same inventory section.
 Do not run again once a writer has started.
 """
 from __future__ import annotations
@@ -74,10 +84,13 @@ def render(it) -> str:
 
 
 def main():
-    items = []
+    items, questions, unsettled = [], [], []
     for nn in cx.sections():
         if os.path.exists(os.path.join(cx.EXTRACTS, nn + ".md")):
-            items.extend(cx.parse(nn)[0])
+            its, qs, _old, uns, _cover = cx.parse(nn)
+            items.extend(its)
+            questions.extend((nn, q) for q in qs)
+            unsettled.extend((nn, f"U-{nn}-{k}", u) for k, u in enumerate(uns, 1))
     by_cap = collections.defaultdict(list)
     for it in items:
         where = it["fields"].get("Where", "")
@@ -87,7 +100,7 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     for f in glob.glob(os.path.join(OUT, "*")):
         os.remove(f)
-    report = []
+    report, held, strays_report = [], [], {}
     for cap in sorted(by_cap):
         topics = kb(cap)
         names = [t[0] for t in topics]
@@ -142,7 +155,51 @@ def main():
         if cur:
             pieces.append(cur)
         for k, piece in enumerate(pieces, 1):
-            name = cap if len(pieces) == 1 else f"{cap}-{k}"
+            held.append((cap if len(pieces) == 1 else f"{cap}-{k}", cap, k, pieces, piece))
+        strays_report[cap] = (len(strays), placed)
+
+    # Route the readers' questions and the unsettled lines to the pieces.
+    home = {}                                   # item id -> piece name
+    bag_of = {}                                 # piece name -> its words
+    sections_in = collections.defaultdict(set)  # piece name -> inventory sections
+    for name, cap, k, pieces, piece in held:
+        words = []
+        for n, its, ls in piece:
+            words.append(n)
+            for it in its:
+                home[it["id"]] = name
+                sections_in[name].add(it["id"].split("-")[0])
+                words.append(it["title"] + " " + it["fields"].get("What", ""))
+        bag_of[name] = collections.Counter(toks(" ".join(words)))
+    dfp = collections.Counter()
+    for b in bag_of.values():
+        dfp.update(set(b))
+    NP = max(len(bag_of), 1)
+
+    def pvec(counter):
+        v = {w: (1 + math.log(c)) * math.log(1 + NP / dfp[w]) for w, c in counter.items() if dfp[w]}
+        norm = math.sqrt(sum(x * x for x in v.values())) or 1.0
+        return {w: x / norm for w, x in v.items()}
+    pv = {n: pvec(b) for n, b in bag_of.items()}
+
+    def most_like(nn, text):
+        v = pvec(collections.Counter(toks(text)))
+        among = [n for n in pv if nn in sections_in[n]] or list(pv)
+        return max(among, key=lambda n: sum(x * pv[n].get(w, 0.0) for w, x in v.items()))
+
+    q_of = collections.defaultdict(list)        # piece name -> [(question id, line, other pieces)]
+    u_of = collections.defaultdict(list)
+    for nn, q in questions:
+        cols = [c.strip() for c in q.split("|")]
+        ids = re.findall(r"\b\d\d[a-d]?-\d{3}\b", " ".join(cols[3:]))
+        where = sorted({home[i] for i in ids if i in home}) or [most_like(nn, " ".join(cols[2:]))]
+        for name in where:
+            q_of[name].append((cols[0], q, [w for w in where if w != name]))
+    for nn, uid, u in unsettled:
+        u_of[most_like(nn, u)].append((uid, u))
+
+    for name, cap, k, pieces, piece in held:
+        if True:
             n_items = sum(len(its) for _, its, _ in piece)
             n_less = sum(len(ls) for _, _, ls in piece)
             with open(os.path.join(OUT, name + ".md"), "w", encoding="utf-8", newline="\n") as f:
@@ -164,15 +221,30 @@ def main():
                         f.write(f"- {l['id']} [{l.get('kind', '')}]: {l['title']} "
                                 f"Must: {l.get('must', '')}\n")
                     f.write("\n")
+                f.write("## Questions the readers raised about these items "
+                        f"({len(q_of[name])})\n\n")
+                for _qid, line, others in q_of[name]:
+                    f.write(f"- {line}"
+                            + (f" | ALSO WITH: {', '.join(others)}" if others else "") + "\n")
+                f.write(f"\n## Left unsettled by the inventory ({len(u_of[name])})\n\n")
+                for uid, u in u_of[name]:
+                    f.write(f"- {uid} | {u}\n")
+            with open(os.path.join(OUT, name + ".questions"), "w", encoding="utf-8",
+                      newline="\n") as f:
+                f.write("\n".join([qid for qid, _, _ in q_of[name]]
+                                  + [uid for uid, _ in u_of[name]]) + "\n")
             with open(os.path.join(OUT, name + ".ids"), "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(i["id"] for _, its, _ in piece for i in its) + "\n")
             with open(os.path.join(OUT, name + ".lessons"), "w", encoding="utf-8",
                       newline="\n") as f:
                 f.write("\n".join(l["id"] for _, _, ls in piece for l in ls) + "\n")
             kb_bytes = os.path.getsize(os.path.join(OUT, name + ".md")) // 1024
-            report.append(f"{name}: {n_items} items, {n_less} lessons, {kb_bytes} KB")
-        report.append(f"   ({cap}: {len(strays)} items under headings of their own, "
+            report.append(f"{name}: {n_items} items, {n_less} lessons, {len(q_of[name])} questions, "
+                          f"{len(u_of[name])} unsettled, {kb_bytes} KB")
+    for cap, (n_strays, placed) in sorted(strays_report.items()):
+        report.append(f"   ({cap}: {n_strays} items under headings of their own, "
                       f"{placed} placed with a knowledge-base sub-topic)")
+    report.append(f"{len(questions)} questions and {len(unsettled)} unsettled lines routed")
     print(f"{len(items)} items in {len(by_cap)} capabilities")
     print("\n".join(report))
 

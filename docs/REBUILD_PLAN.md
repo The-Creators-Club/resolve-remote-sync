@@ -73,10 +73,12 @@ Both are in `docs/rebuild-spec/spec/OWNER_REQUIREMENTS.md` and cross.
     - A job runs six hours at most, the machine is thrown away afterwards,
       and macOS minutes are costed at ten times Linux ones on a private
       repository.
-    - For "different countries" in the plural, add machines rented by the
-      hour in Europe and in Asia (the studio already rents from a provider
-      with data centres in Germany, Finland and Singapore). Not yet agreed
-      with the owner.
+    - **DECIDED by the owner 2026-11-25: "just ruskin and the US for speed
+      testing is fine."** So the measurements run against the remote
+      editor's PC (the home connection) and GitHub's runners in the United
+      States (the far-off path), and nothing is rented in Europe or Asia.
+      Written into the requirements as "the studio's remote editor and
+      computers in the United States".
   - A test share on the NAS that holds no client footage, so a rebuild
     under test can never touch the studio's tree.
   - The remote editor's agreement to his computer and connection being
@@ -1342,8 +1344,8 @@ Paste this into a new Claude Code session opened in
 > scan passes (`tools/word_scan.py`, after `check_spec.py --build`).
 > Decision page 32 (eight questions from the joins) is answered and
 > applied. Still open with me: decision page 5, question 2, which waits on
-> the speed measurements; and which computers in other countries those
-> measurements run against. Next: the open list at the end of
+> the speed measurements (they run against the remote editor's PC and
+> GitHub's runners in the United States, which I have agreed). Next: the open list at the end of
 > `spec/_trace/_joins/_rulings/_handoffs.md`, the blind reader piece by
 > piece, the inventory top-ups, then step 5. Commit each finished piece;
 > push nothing.

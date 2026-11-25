@@ -40,14 +40,16 @@ footage use whatever serves them best.
 ### How footage travels is chosen by measurement
 
 The owner asks for "full testing of speed of sync types", with the studio's
-remote editor "and also machines in different countries".
+remote editor "and also machines in different countries". For the far-off
+computers he has settled on one other country: the studio's remote editor
+and computers in the United States are enough.
 
 - Before the way footage travels is settled, every candidate way of moving
   it is measured for real, not assumed: camera originals going up, proxies
   and originals coming down, and many small project files kept in step.
 - It is measured between the studio's server and real editors' computers:
   a computer on the studio's own network, the studio's remote editor on a
-  home connection in the same country, and computers in other countries,
+  home connection in the same country, and computers in the United States,
   on Windows and on macOS.
 - Each run records what a person would feel: megabytes a second against
   what that connection can carry, how long before the first byte moves,

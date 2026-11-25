@@ -288,9 +288,9 @@ See also, filed under another capability:
 - Must: Each send puts its new timeline in a root bin named Timelines, created if missing, and follows it by unique id, never by name.
 - Kind: ruling
 
-### CRX-065: Sending is an action on the cut, with no top-bar button.
-- Why: The only send control was a switch, so the owner's clicks "did nothing", and he does not want a send button in the top bar.
-- Must: A cut offers one action that sends it to a new Resolve timeline: name it, see dry-run counts, confirm; the top bar holds no such button.
+### CRX-065: Sending opens a dry run first, from a button that visibly does something.
+- Why: The only send control was a switch, so the owner's clicks "did nothing".
+- Must: Send to Resolve, in the editor's header, by its key and in the command palette, sends a cut to a new timeline: name it, see dry-run counts, confirm.
 - Kind: ruling
 
 ### CRX-066: A person may drive Resolve only on computers signed in to their own account.

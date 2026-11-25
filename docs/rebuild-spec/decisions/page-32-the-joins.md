@@ -11,8 +11,32 @@ to the first five questions below. Questions 6 and 7 came out of checking
 every lesson against your answers, and question 8 out of repairing the
 pieces.
 
-Each has a recommendation. Nothing in the pieces that turns on these has
-been changed yet.
+Each has a recommendation. His answers are just below; they are written
+into the pieces and the lessons the same night.
+
+## Your answers
+
+ANSWERED 2026-11-24 (late evening), asked one by one.
+
+- **32.1** Signing in is enough (the recommendation). A new computer is the
+  signed-in person's and syncs with no approval by an admin.
+- **32.2** **Against the recommendation: a named question plays.** A
+  question your notes name for a place is handed to the cut there and
+  plays, shown as exempt in the editor too. Every other question still goes
+  to the shelf.
+- **32.3** **Against the recommendation: the Fillers aid is kept, off by
+  default.** It does nothing until a person switches it on.
+- **32.4** **Against the recommendation: no.** The Footage Sorter files the
+  clips; an interview starts processing when a person drops its clips onto
+  the episode in Timeline Cards.
+- **32.5** An admin makes the link, for any folder of the studio's tree,
+  whatever parts are switched on (the recommendation).
+- **32.6** A file move never lapses (the recommendation). It is the one
+  request to a computer that waits for as long as the computer is away.
+- **32.7** Only the slider (the recommendation). The review of suggestions
+  one by one goes, with the lessons about it; 27.1 and 27.6 give way.
+- **32.8** The red Send to Resolve button stays in the header, exactly as
+  the editor has it (the recommendation). The August ruling is retired.
 
 ## 32.1 When an editor signs in on a new computer, does it start syncing straight away, or wait until an admin approves it?
 

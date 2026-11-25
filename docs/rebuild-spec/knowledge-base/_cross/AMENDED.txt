@@ -117,3 +117,26 @@ SRT-150 | must | An interrupted transcription run keeps every finished transcrip
 # so nobody "closes" one; the rest of the lesson stands.
 CE2-131 | must | Presence follows a person actually working, offline or on a sleeping phone, and unsent work keeps an episode shown as occupied. | nothing is closed or capped by an open episode in the specification (CE3-105 withdrawn, joins cards-editor-5 F4), so the clause about a closer has nothing to test
 CE2-131 | title | An editor working offline looked gone from their episode. | as above: nobody is thrown out of an episode, because none is closed
+
+# --- The owner's answers of 2026-11-24 to decision page 32 ---
+# 32.1: signing in on a computer is enough; no admin approves a computer.
+DSH-078 | must | Every cycle compares plans with actual sharing both ways and names each broken fact with its consequence and fix; it never repairs. | the owner's answer, page 32, 32.1: no computer waits for approval, so none can wait 24 hours
+APP-012 | must | An install on a fresh or used computer ends with the app visibly running and, once the editor has signed in, syncing without hand edits. | the owner's answer, page 32, 32.1
+APP-150 | must | Uninstall treats the computer's identity the same on every platform and states once, truthfully, what a reinstall will need. | the owner's answer, page 32, 32.1
+APP-150 | why | The platforms disagreed about what a reinstall needed, and the closing text contradicted itself. | the owner's answer, page 32, 32.1
+APP-150 | title | The Mac uninstaller always destroyed the computer's identity; Windows always kept it. | the owner's answer, page 32, 32.1
+SRV-123 | title | Adding a person's second computer locked their first out of the NAS. | the owner's answer, page 32, 32.1
+SRV-123 | why | Giving the second computer its access replaced what the account already held instead of adding to it. | the owner's answer, page 32, 32.1
+SRV-123 | must | Adding a person's second computer keeps every access their other computers already have on the NAS, and one that could not be given is tried again. | the owner's answer, page 32, 32.1
+SYN-107 | must | Each cause gets its own sentence, a deliberate stop is not shown as a problem, and the editor is sent to the admin only for what only an admin can fix. | the owner's answer, page 32, 32.1
+SYN-125 | must | When a known computer comes back as if new, signing in on it is enough: the dashboard says so and its transfers resume within a minute. | the owner's answer, page 32, 32.1
+# 32.2: a question his notes name for a place plays in the cut there.
+CE1-021 | title | Interviewer questions are never in the film, except one the owner's notes place. | the owner's answer, page 32, 32.2
+CE1-021 | must | Any edit that would put an interviewer's question in the cut is refused with a reason before anything changes, unless the owner's notes name that question for that place. | the owner's answer, page 32, 32.2
+# 32.3: the Fillers reading aid is kept, off until a person switches it on.
+CE3-008 | why | Declined: words at spoken time, snapping trims, a read-the-joins mode, zoom-adaptive gist text, drawn pauses, search hits in the strip, a pacing ruler, stacked takes. | the owner's answer, page 32, 32.3: filler marks are kept as a reading aid; page 24.2 kept the drag snap, which is why "snapping trims" stays declined only as a mode
+CE3-008 | must | None of these is built or proposed again; hesitation and filler marks exist only as a reading aid that is off until a person switches it on. | the owner's answer, page 32, 32.3
+# 32.8: the Send to Resolve button stays in the editor's header.
+CRX-065 | title | Sending opens a dry run first, from a button that visibly does something. | the owner's answer, page 32, 32.8
+CRX-065 | why | The only send control was a switch, so the owner's clicks "did nothing". | the owner's answer, page 32, 32.8
+CRX-065 | must | Send to Resolve, in the editor's header, by its key and in the command palette, sends a cut to a new timeline: name it, see dry-run counts, confirm. | the owner's answer, page 32, 32.8

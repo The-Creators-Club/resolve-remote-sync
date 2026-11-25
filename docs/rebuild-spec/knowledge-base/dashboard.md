@@ -1,6 +1,6 @@
 # The dashboard: what real use taught
 
-138 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+137 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## Overview, menus and finding things
 
@@ -337,11 +337,6 @@ See also, filed under another capability:
 - Must: Only real people appear in any list of people; the product's own accounts never do, and get their access without joining the editors' group.
 - Kind: situation
 
-### DSH-066: Approving a second computer seemed to ask for a new username.
-- Why: Typing the computer's name into the approval box created an editor with no plan, which unshared that computer from every project.
-- Must: Approving a computer means choosing its existing owner, prefilled from what it reported; a new person only by explicit choice; one person may own many computers.
-- Kind: situation
-
 ### DSH-067: A departed editor's computer kept receiving projects.
 - Why: Nothing could delete a person or a computer, and removing someone by hand left their device on every project share.
 - Must: Deleting a person removes accounts, devices, shares and sessions, all or nothing; removing one computer says plainly it is not a revocation while the person remains.
@@ -396,7 +391,7 @@ See also, filed under another capability:
 
 ### DSH-078: Facts the system relied on broke silently and were found by accident.
 - Why: A tick never shared to its computer, a project folder renamed on the NAS, a cloned disk and an impossible update floor were each checked only when written.
-- Must: Every cycle compares plans with actual sharing both ways and names each broken fact, and any device awaiting approval over 24 hours, with consequence and fix; it never repairs.
+- Must: Every cycle compares plans with actual sharing both ways and names each broken fact with its consequence and fix; it never repairs.
 - Kind: situation
 
 ## Problems the server finds

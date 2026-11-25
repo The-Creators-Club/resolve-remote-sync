@@ -616,9 +616,9 @@ See also, filed under another capability:
 - Must: Every setup step that changes the NAS stops on the first failure and reads its result back before reporting success.
 - Kind: situation
 
-### SRV-123: Approving a person's second computer locked their first out of the NAS.
-- Why: Writing an approved key replaced the account's key list instead of adding to it.
-- Must: Approving a key keeps every key already on the NAS, so each computer keeps its access, and a key that could not be written stays offered.
+### SRV-123: Adding a person's second computer locked their first out of the NAS.
+- Why: Giving the second computer its access replaced what the account already held instead of adding to it.
+- Must: Adding a person's second computer keeps every access their other computers already have on the NAS, and one that could not be given is tried again.
 - Kind: situation
 
 ### SRV-124: A helper's admin page on the server was open to the network with no login.

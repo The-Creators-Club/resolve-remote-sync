@@ -294,9 +294,7 @@ CE1-024	cards-editor	Shortening, the edit chat and the assistant	2	CE1-024	D01-0
 CE1-025	cards-editor	Shortening, the edit chat and the assistant	2	CE1-025	C05-064 D03-043 P10-045 D01-023 L05-067	C-ed-11db9c4d7 C-ed-906c11541 C-ed-3fd13e1b2 D-tc-layout-019 P-02410 L-0400 D-tc-chat-edit-001 D-tc-chat-edit-004 L-0397
 CE1-026	cards-editor	Shortening, the edit chat and the assistant	2	CE1-026	D03-041 D01-026 P10-042 M01-030	D-tc-layout-017 D-tc-chat-edit-008 P-02383 P-02385 P-02386 P-02429 L-0397 M-cc-cards-edit-chat-2026-09-10 M-cc-cards-selection-context-2026-09-11
 CE1-027	cards-editor	Shortening, the edit chat and the assistant	3	CE1-027	L05-066 M01-031	L-0396 M-cc-cards-edit-chat-2026-09-10
-CE1-028	cards-editor	Shortening, the edit chat and the assistant	2	CE1-028	P10-051 C05-067 D03-049 M02-097 D01-015	P-02436 P-02437 P-02448 P-02488 P-02493 C-ed-94fa3938f C-ed-fab3211fb C-ed-d66e7b98b C-ed-197572995 D-tc-layout-020 D-tc-layout-021 M-cc-paused-2026-09-11-fix-pass-b-and-playground D-tc-auto-shorten-plan-011
 CE1-029	cards-editor	Shortening, the edit chat and the assistant	2	CE1-029	D01-018 D03-053 C05-068	D-tc-auto-shorten-plan-008 D-tc-layout-020 C-ed-197572995
-CE1-030	cards-editor	Shortening, the edit chat and the assistant	3	CE1-030	D03-051	D-tc-layout-020 D-tc-layout-021
 CE1-031	cards-editor	Shortening, the edit chat and the assistant	3	CE1-031	P10-056 C05-071 P11-003 P11-002	P-02495 P-02496 C-ed-a5ddc1879 C-ed-e0bfb8adb C-ed-8aa62fcee C-ed-835bb8c7e C-ed-0d4c58073 P-02507 P-02504
 CE1-032	cards-editor	Shortening, the edit chat and the assistant	3	CE1-032	M01-052 P10-054	M-cc-cards-shopen-filter-unfixed-lane-2026-09-12 P-02489 C-ed-9be08518c
 CE1-033	cards-editor	Selecting, deleting, inserting and keys	3	CE1-033	M04-054 D05-021 P07-070	M-ed-timeline-cards-draft-modes D-tc-reorder-plan-014 P-01729
@@ -506,7 +504,6 @@ CE2-095	cards-editor	Shortening, the edit chat and the assistant	3	CE2-095	L07-0
 CE2-096	cards-editor	Shortening, the edit chat and the assistant	3	CE2-096	H08-075	H-aud-2026-11-10-016
 CE2-097	cards-editor	Shortening, the edit chat and the assistant	2	CE2-097	C05-070 P11-001 D01-022 P11-015	C-ed-9edf2a745 C-ed-fab3211fb C-ed-ab57f6038 C-ed-9be08518c P-02505 D-tc-auto-shorten-plan-011 P-02523
 CE2-098	cards-editor	Shortening, the edit chat and the assistant	3	CE2-098	D01-016 D03-050 C05-069	D-tc-auto-shorten-plan-004 D-tc-auto-shorten-plan-008 D-tc-layout-020 D-tc-layout-021 C-ed-d66e7b98b C-ed-0d4c58073 C-ed-197572995
-CE2-099	cards-editor	Shortening, the edit chat and the assistant	3	CE2-099	D01-020 P10-053	D-tc-auto-shorten-plan-011 P-02481 P-02482 P-02483 P-02486 C-ed-ecf4732c2
 CE2-101	cards-editor	Working offline, connections and several devices	1a	CE2-101	L05-033 M01-038 P10-011 D04-028 C05-050	L-0360 M-cc-cards-fixes-2026-09-05 P-02290 D-tc-offline-plan-003 D-tc-native-apps-003 C-ed-8cac87fb9
 CE2-102	cards-editor	Working offline, connections and several devices	1a	CE2-102	D04-037	D-tc-offline-plan-003 D-tc-native-apps-002
 CE2-103	sealed	browser-features	1a	CE2-103	M04-120 D04-026	M-pr-timeline-cards-native-apps D-tc-native-apps-002 D-tc-native-apps-010
@@ -644,7 +641,6 @@ CE3-056	cards-editor	Shortening, the edit chat and the assistant	2	CE3-056	P14-0
 CE3-057	cards-editor	Shortening, the edit chat and the assistant	2	CE3-057	D01-017	D-tc-auto-shorten-plan-011
 CE3-058	cards-editor	Shortening, the edit chat and the assistant	2	CE3-058	D03-052	D-tc-layout-021
 CE3-059	cards-editor	Shortening, the edit chat and the assistant	3	CE3-059	P10-057	P-02498 C-ed-8aa62fcee
-CE3-060	cards-editor	Shortening, the edit chat and the assistant	3	CE3-060	D03-056	D-tc-layout-021
 CE3-061	cards-editor	Shortening, the edit chat and the assistant	3	CE3-061	D03-042	D-tc-layout-017
 CE3-062	cards-editor	Shortening, the edit chat and the assistant	3	CE3-062	D01-032	D-tc-chat-edit-008 D-tc-chat-edit-010
 CE3-063	cards-editor	Shortening, the edit chat and the assistant	3	CE3-063	D01-024	D-tc-chat-edit-006 D-tc-chat-edit-007
@@ -1000,7 +996,6 @@ DSH-062	dashboard	Transfers and the queue	3	DSH-062	P02-034 C01-032	P-00467 P-00
 DSH-063	dashboard	Transfers and the queue	3	DSH-063	P12-007 L10-030	P-02773 P-02885 L-1151
 DSH-064	dashboard	Transfers and the queue	3	DSH-064	P12-010 L10-031	P-02776 L-1154
 DSH-065	dashboard	People and computers	3	DSH-065	C01-108 P06-008	C-cc-9aa67ef17 P-01295
-DSH-066	dashboard	People and computers	3	DSH-066	C03-009 L03-027 P08-005	C-cc-c245f50d8 L-0219 P-01794
 DSH-067	dashboard	People and computers	3	DSH-067	L03-050	L-0236
 DSH-068	dashboard	People and computers	3	DSH-068	L02-024 L04-166	L-0122 L-0347
 DSH-069	dashboard	People and computers	3	DSH-069	H07-143 L04-064	H-urs-2026-09-03-004 H-urs-2026-09-03-006 L-0317 L-0319

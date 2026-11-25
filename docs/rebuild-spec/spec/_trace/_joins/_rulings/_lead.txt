@@ -20,4 +20,16 @@ editor-app F10 | home accounts-privacy-legal | Asking a computer to change a set
 # Held for the owner by the lead: it removes something an editor can do today
 # in one piece, and leaves a studio with the Footage Sorter off unable to hand
 # a client full-quality files. Question L1 on decision page 32.
-broll F6 | owner | L1. Whatever he answers there is ONE kind of link for downloading full-quality folders (the Footage Sorter's folder link, footage-sorter-and-camera-cards-3) and broll points to it instead of describing a "delivery link" of its own (page 21.5 A: two kinds of link, a folder to download and a client folder to preview; BRO-127 is met by the one link). What waits for him is who may make it and whether it exists while the Footage Sorter is off.
+
+
+# The owner's answers to decision page 32 (2026-11-24). What each piece changes
+# is written out per piece in _after-page-32.md beside this file.
+accounts-privacy-legal F2 | instead | page 32, 32.1: signing in on a computer is all it takes; no admin approves a computer and nothing waits on a list. dashboard-1, sync-2, editor-app and server-install-and-running-1 drop approval; accounts-privacy-legal drops "approves the person's computer".
+editor-app F1 | same accounts-privacy-legal F2 |
+sync-2 F3 | same accounts-privacy-legal F2 |
+dashboard-1 F24 | same accounts-privacy-legal F2 |
+cards-board F1 | instead | page 32, 32.2 (against the recommendation): a question the owner's notes name for a place is handed to the cut there and plays, shown as exempt in the editor too; every other question goes to the shelf. cards-board, cards-editor-2 and cards-editor-4 say so; lesson CE1-021 amended.
+cards-editor-1 F3 | instead | page 32, 32.3 (against the recommendation): the Fillers reading aid is kept, off until a person switches it on. cards-editor-3 (the home of the aids) states that default; cards-editor-1 points to it. Lesson CE3-008 amended.
+footage-sorter-and-camera-cards-2 F1 | instead | page 32, 32.4 (against the recommendation): the Footage Sorter hands nothing to Timeline Cards; an interview starts processing when a person drops its clips onto the episode. cards-footage-in drops the claim that card footage reaches the episode on its own.
+broll F6 | instead | page 32, 32.5: one link lets a client download full-quality folders; an admin makes it for any folder of the studio's tree, whatever parts are switched on. dashboard-2 is its home and the home of the one list of links handed outside; footage-sorter-and-camera-cards-3 and broll point there, and broll's "delivery link" goes.
+cards-editor-5 F5 | instead | page 32, 32.8: the red Send to Resolve button stays in the editor's header exactly as the editor has it; the ruling CRX-065 is amended. cards-editor-5 restores the header (and takes out the place a fixer had invented for Send); cards-to-resolve-and-exports drops "not a button in the top bar".

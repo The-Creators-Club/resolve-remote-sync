@@ -61,7 +61,7 @@
 
 ### APP-012: After installing, the app was not running, and a fresh laptop came up broken.
 - Why: Installs finished with no tray icon; on a never-installed laptop the installer died where no old drive mapping existed and no machine awaited approval.
-- Must: An install on a fresh or used computer ends with the app visibly running, syncing without hand edits, and the computer awaiting the admin's approval.
+- Must: An install on a fresh or used computer ends with the app visibly running and, once the editor has signed in, syncing without hand edits.
 - Kind: situation
 
 ### APP-013: Setup showed a green DONE on computers that could not work.
@@ -699,9 +699,9 @@ See also, filed under another capability:
 - Must: Uninstall says complete only when verified, names every leftover with its path and how to retry, never suggests removing the retry path, and a dry run changes nothing.
 - Kind: situation
 
-### APP-150: The Mac uninstaller always destroyed the computer's sync identity; Windows always kept it.
-- Why: The platforms disagreed, so a Mac reinstall needed fresh approval while Windows promised none was needed, and the closing text contradicted itself.
-- Must: Uninstall treats the sync identity the same on every platform and states once, truthfully, whether re-approval will be needed.
+### APP-150: The Mac uninstaller always destroyed the computer's identity; Windows always kept it.
+- Why: The platforms disagreed about what a reinstall needed, and the closing text contradicted itself.
+- Must: Uninstall treats the computer's identity the same on every platform and states once, truthfully, what a reinstall will need.
 - Kind: situation
 
 ### APP-151: Uninstalling left the computer able to reach the studio's server.

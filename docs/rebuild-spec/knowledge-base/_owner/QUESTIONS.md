@@ -173,7 +173,7 @@ Stays behind (not part of the pack). Written by `tools/assemble_kb.py`; do not e
 - **SYN-079** A sync drive pulled mid-upload got the same calm note as a finished day. Must: Unplugging with uploads owed, or of unknown direction, names what is owed and reminds every 30 minutes, across restarts, until it returns; any narrowing needs the owner's agreement.
 - **SYN-098** A laptop opened after sleep did not sync for many minutes. Must: A computer that wakes from sleep syncs at once, not at its next timer slot.
 - **SYN-119** Several remote editors syncing at once share the studio's upload. Must: Transfers to several editors run together and together fill the server's uplink, none waiting for another to finish.
-- **SYN-125** Transfers sat at 0% forever after an editor's computer was reinstalled. Must: When a known computer appears with a new sync identity, the dashboard says so and lets an admin approve it, after which transfers resume within a minute.
+- **SYN-125** Transfers sat at 0% forever after an editor's computer was reinstalled. Must: When a known computer comes back as if new, signing in on it is enough: the dashboard says so and its transfers resume within a minute.
 - **SYN-135** Power loss can leave a full-size file of zeros that a size check calls good. Must: A zero-filled file left by a power cut is never sent over a good copy on the server or another computer.
 
 ### Fixed, never shipped

@@ -566,7 +566,7 @@ See also, filed under another capability:
 
 ### SYN-107: "Ask your admin" appeared when the computer's own sync was not answering.
 - Why: One message covered three cases: not yet offered by the server, the local sync not answering, and a deliberate stop holding it.
-- Must: Each cause gets its own sentence, a deliberate stop is not shown as a problem, and only a truly missing approval sends the editor to the admin.
+- Must: Each cause gets its own sentence, a deliberate stop is not shown as a problem, and the editor is sent to the admin only for what only an admin can fix.
 - Kind: situation
 
 ### SYN-108: One project of five never synced while the computer showed green.
@@ -666,7 +666,7 @@ See also, filed under another capability:
 
 ### SYN-125: Transfers sat at 0% forever after an editor's computer was reinstalled.
 - Why: The computer came back with a new sync identity and the server kept sharing to the old dead one, so 387 items, 48.5 GB, never moved and nothing said why.
-- Must: When a known computer appears with a new sync identity, the dashboard says so and lets an admin approve it, after which transfers resume within a minute.
+- Must: When a known computer comes back as if new, signing in on it is enough: the dashboard says so and its transfers resume within a minute.
 - Kind: situation
 
 ### SYN-126: One failure stopped the rest of a sharing change and was reported wrongly.

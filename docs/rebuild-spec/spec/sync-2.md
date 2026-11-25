@@ -295,7 +295,7 @@ A remote editor's downloads take the fastest of the studio's connections that re
 
 ### The way footage travels is chosen by measuring real transfers
 
-The way footage and project files travel between the NAS and an editor's computer, near or far, is chosen by measuring real transfers, as the owner's requirements describe ("How footage travels is chosen by measurement"); no route is ruled in or out before those measurements. A computer finds the NAS by itself once its editor has signed in on it.
+The way footage and project files travel between the NAS and an editor's computer, near or far, is chosen by measuring real transfers, as the owner's requirements describe ("How footage travels is chosen by measurement"); no route is ruled in or out before those measurements, and a route through a service outside the studio's own network is allowed where it proves the faster way (the owner's own answer). A computer finds the NAS by itself once its editor has signed in on it.
 
 #### Lessons
 

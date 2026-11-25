@@ -287,3 +287,7 @@
 - sync-2 F10 | no change here: sync-1 changes its future-dated wording
 - sync-2 F11 | changed: A file changed in two places at once keeps both versions | count and up to 20 files with their paths, marked as cut with how many more
 - page 32, 32.1 | changed: An admin approves a new computer and ties it to an editor (removed) ; A computer belongs to a person only once it is tied to a known editor ; The way footage travels is chosen by measuring real transfers ; Each computer says in one sentence why it is not syncing, and since when | no approval of computers: the approval behaviour, its name and search words, and the 24-hour waiting warning removed; the tie is the sign-in, with a pointer to Accounts; projects arrive within about a minute of signing in; a reinstalled computer needs only a new sign-in; "applied N of M" kept for sharing several projects; a computer finds the NAS once its editor has signed in; "an admin's approval" dropped from the reasons' opening (the reasons table had no approval row)
+
+## Settled by the owner 2026-11-25
+
+- sync-2-Q2 (decision 5.2) | against the recommendation: footage MAY travel through a service outside the studio's own network ("yes it may"). The text under "The way footage travels is chosen by measuring real transfers" says so. Which route is used still waits for the measurements.

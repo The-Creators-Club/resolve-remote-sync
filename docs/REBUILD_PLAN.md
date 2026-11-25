@@ -84,8 +84,11 @@ Both are in `docs/rebuild-spec/spec/OWNER_REQUIREMENTS.md` and cross.
   - The remote editor's agreement to his computer and connection being
     used, and a time of day for it.
   - Decision page 5, question 2 (footage only ever over the studio's own
-    private network, never through an outside service) is HELD until the
-    measurements exist: a trial in September found a far-off editor's
+    private network, never through an outside service) was held for the
+    measurements and then **ANSWERED by the owner 2026-11-25, against the
+    recommendation: "yes it may"** travel through an outside service. It
+    is in the requirements and in sync-2. Which route is used still waits
+    for the measurements. Why it was held: a trial in September found a far-off editor's
     downloads about three times faster through an outside service, and
     that question's recommendation would forbid it.
 
@@ -1343,9 +1346,10 @@ Paste this into a new Claude Code session opened in
 > fixed, every lesson has been checked against my answers, and the word
 > scan passes (`tools/word_scan.py`, after `check_spec.py --build`).
 > Decision page 32 (eight questions from the joins) is answered and
-> applied. Still open with me: decision page 5, question 2, which waits on
-> the speed measurements (they run against the remote editor's PC and
-> GitHub's runners in the United States, which I have agreed). Next: the open list at the end of
+> applied, and so is page 5, question 2 (footage MAY travel through an
+> outside service). No decision page is waiting for me. The speed
+> measurements run against the remote editor's PC and GitHub's runners in
+> the United States. Next: the open list at the end of
 > `spec/_trace/_joins/_rulings/_handoffs.md`, the blind reader piece by
 > piece, the inventory top-ups, then step 5. Commit each finished piece;
 > push nothing.

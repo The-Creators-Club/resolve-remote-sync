@@ -169,7 +169,9 @@ then, of everything still waiting: "accept all the recommendations." Each
 page records it. Against the recommendation: 3.9 (the subscription way of
 running the assistant stays, off by default) and 4.6 ("Resume downloads" is
 still offered after a low-disk pause). Held back by me and put to him
-again: 5.2 (see that page). The same message added a requirement of his
+again: 5.2 (see that page), which he answered on 2026-11-25, against the
+recommendation: footage may travel through a service outside the studio's
+own network. The same message added a requirement of his
 own, now in `spec/OWNER_REQUIREMENTS.md`: the rebuild tests the real speed
 of every way of syncing, with the studio's remote editor and with computers
 in other countries.

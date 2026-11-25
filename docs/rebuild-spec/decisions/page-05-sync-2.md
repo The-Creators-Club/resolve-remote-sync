@@ -26,3 +26,11 @@ syncing, with the studio's remote editor and with computers in other
 countries; the fastest way to a far-off computer may turn out to run
 through an outside service, which 5.2's recommendation would forbid. Put
 back to him before it is applied.
+
+**5.2 ANSWERED 2026-11-25, against the recommendation.** Asked whether
+footage may ever travel through a service outside the studio's own
+network, he said: "yes it may". So there is no fixed rule that footage
+stays on the private network: the way it travels is the one the
+measurements show to be fastest, and a route through an outside service
+is allowed. (His ruling that the DASHBOARD is reached only over the
+private network is a different matter and stands.)

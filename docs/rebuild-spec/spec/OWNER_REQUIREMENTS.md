@@ -58,7 +58,9 @@ and computers in the United States are enough.
 - The results are kept with the product and shown to the owner before the
   choice is made. The choice is the one that is fastest for the far-off
   computers without giving up any promise this specification makes about
-  footage. The same measurements are run again before each release, so a
+  footage. Footage may travel through a service outside the studio's own
+  network where that proves the faster way: the owner was asked, and said
+  "yes it may". The same measurements are run again before each release, so a
   release that makes syncing slower is caught before it ships.
 
 ## 2. One product, a small core, and parts that switch on and off

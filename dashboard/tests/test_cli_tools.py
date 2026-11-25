@@ -27,9 +27,12 @@ import hashlib
 import io
 import json
 import os
+import shutil
+import subprocess
 import tarfile
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -431,6 +434,184 @@ def test_remove_takes_the_home_directory_with_it(settings):
     # next install without anybody signing in again.
     assert not cli_tools.token_path(settings, name).exists()
     assert cli_tools.read_token(settings, name) == ""
+
+
+# ------------------------------------------------ the stable launcher (CR-386)
+# 2026-11-25: the Timeline Cards editor child was handed the VERSIONED path
+# once, lived for days, and failed every Claude call with ENOENT for ~31 hours
+# after the unattended updater pruned that version. Long-lived holders now get
+# `<tool root>/bin/<binary>`, a sh launcher that reads `current` on each exec.
+
+@pytest.fixture
+def launcher_host(monkeypatch):
+    """Let the writer run on the Windows dev box too (it is a no-op there in
+    production, because nothing could exec it)."""
+    monkeypatch.setattr(cli_tools, "LAUNCHER_SUPPORTED", True)
+
+
+def fake_version(settings, version, name=cli_tools.CLAUDE_CODE):
+    """A tiny shell "binary" that says which version it is."""
+    rel = cli_tools.spec(name).rel_binary
+    target = cli_tools.tool_root(settings, name) / version / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f'#!/bin/sh\necho "{version} $*"\n', encoding="utf-8", newline="\n")
+    target.chmod(0o755)
+    return rel
+
+
+def install_fake(settings, version, name=cli_tools.CLAUDE_CODE):
+    rel = fake_version(settings, version, name)
+    cli_tools._finish_install(settings, name, version=version, rel=rel,
+                              sha="c" * 64, size=1, url="https://x",
+                              checksum_source="publisher_manifest")
+
+
+def run_launcher(path, *args):
+    """Exec the launcher the way the editor's Node child does. On the Windows
+    dev box that needs Git's `sh`; without one the test is skipped."""
+    if os.name == "posix":
+        argv = [str(path), *args]
+    else:
+        sh = shutil.which("sh")
+        if not sh:
+            pytest.skip("no POSIX sh on this host to run the launcher with")
+        argv = [sh, Path(path).as_posix(), *args]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=30)
+
+
+def test_an_install_writes_the_launcher_and_stable_binary_names_it(settings, launcher_host):
+    name = cli_tools.CLAUDE_CODE
+    assert cli_tools.stable_binary(settings, name) == ""          # nothing installed
+    install_fake(settings, "2.1.330")
+    launcher = cli_tools.tool_root(settings, name) / "bin" / "claude"
+    assert launcher.is_file()
+    assert launcher.read_bytes() == cli_tools.launcher_script(name).encode("utf-8")
+    assert b"\r" not in launcher.read_bytes()                     # sh must read it
+    if os.name == "posix":
+        assert launcher.stat().st_mode & 0o777 == 0o755
+    assert cli_tools.stable_binary(settings, name) == str(launcher)
+    # The versioned path is still what a per-call lookup gets.
+    assert "2.1.330" in cli_tools.installed_binary(settings, name)
+
+
+def test_an_install_from_before_the_launcher_gets_one_when_asked(settings, launcher_host):
+    name = cli_tools.CLAUDE_CODE
+    rel = fake_version(settings, "2.1.330")
+    pointer = cli_tools.pointer_path(settings, name)
+    pointer.write_text(f"2.1.330/{rel}", encoding="utf-8")       # the pre-CR-386 tree
+    launcher = cli_tools.launcher_path(settings, name)
+    assert not launcher.exists()
+    assert cli_tools.stable_binary(settings, name) == str(launcher)
+    assert launcher.is_file()
+    # Idempotent: a second ask leaves the right bytes where they are ...
+    before = launcher.stat().st_mtime_ns
+    time.sleep(0.02)
+    assert cli_tools.stable_binary(settings, name) == str(launcher)
+    assert launcher.stat().st_mtime_ns == before
+    # ... and a launcher that is not ours any more is put back.
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    cli_tools.stable_binary(settings, name)
+    assert launcher.read_text(encoding="utf-8") == cli_tools.launcher_script(name)
+    assert not [p for p in launcher.parent.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_without_a_launcher_host_the_versioned_path_is_kept(settings, monkeypatch):
+    monkeypatch.setattr(cli_tools, "LAUNCHER_SUPPORTED", False)
+    name = cli_tools.CLAUDE_CODE
+    install_fake(settings, "2.1.330")
+    assert cli_tools.stable_binary(settings, name) == cli_tools.installed_binary(settings, name)
+    assert not (cli_tools.tool_root(settings, name) / "bin").exists()
+
+
+def test_the_launcher_follows_the_pointer_across_an_update_and_the_prune(settings,
+                                                                          launcher_host):
+    name = cli_tools.CLAUDE_CODE
+    install_fake(settings, "2.1.330")
+    held = cli_tools.stable_binary(settings, name)     # what the editor child keeps
+    first = run_launcher(held, "hello", "world")
+    assert first.returncode == 0, first.stderr
+    assert first.stdout.strip() == "2.1.330 hello world"
+
+    install_fake(settings, "2.1.331")                  # the unattended update
+    assert cli_tools.stable_binary(settings, name) == held
+    removed = cli_tools.sweep_superseded(
+        settings, name, now=time.time() + cli_tools.PRUNE_GRACE_SECONDS + 60)
+    assert removed == "2.1.330"
+    assert not (cli_tools.tool_root(settings, name) / "2.1.330").exists()
+
+    second = run_launcher(held, "hello")
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.strip() == "2.1.331 hello"
+
+
+@pytest.mark.parametrize("pointer_text", [None, "", "  \n"])
+def test_a_missing_or_empty_pointer_fails_loudly(settings, launcher_host, pointer_text):
+    name = cli_tools.CLAUDE_CODE
+    install_fake(settings, "2.1.330")
+    launcher = cli_tools.launcher_path(settings, name)
+    pointer = cli_tools.pointer_path(settings, name)
+    if pointer_text is None:
+        pointer.unlink()
+    else:
+        pointer.write_text(pointer_text, encoding="utf-8")
+    done = run_launcher(launcher, "hello")
+    assert done.returncode != 0
+    assert done.stdout == ""
+    assert "Claude Code is not installed" in done.stderr
+    assert "missing or empty" in done.stderr
+
+
+def test_a_pointer_to_a_missing_binary_fails_loudly(settings, launcher_host):
+    name = cli_tools.CLAUDE_CODE
+    install_fake(settings, "2.1.330")
+    cli_tools.pointer_path(settings, name).write_text("9.9.9/claude", encoding="utf-8")
+    done = run_launcher(cli_tools.launcher_path(settings, name))
+    assert done.returncode != 0
+    assert "9.9.9/claude" in done.stderr and "not an executable file" in done.stderr
+
+
+def test_the_prune_and_the_sweep_spare_the_launcher_dir(settings, launcher_host):
+    name = cli_tools.CLAUDE_CODE
+    root = cli_tools.tool_root(settings, name)
+    install_fake(settings, "2.1.330")
+    install_fake(settings, "2.1.331")
+    install_fake(settings, "2.1.332")
+    # Everything not kept or spared, by the prune's own rule ...
+    cli_tools._prune_old_versions(settings, name, keep="2.1.332")
+    cli_tools.sweep_superseded(settings, name,
+                               now=time.time() + cli_tools.PRUNE_GRACE_SECONDS + 60)
+    assert sorted(p.name for p in root.iterdir() if p.is_dir()) == ["2.1.332", "bin", "home"]
+    assert cli_tools.launcher_path(settings, name).is_file()
+    # ... and `bin` can never become a version a prune or a URL would use.
+    assert not cli_tools._VERSION_RE.match(cli_tools.LAUNCHER_DIR)
+    with pytest.raises(cli_tools.ToolError):
+        cli_tools.validate_version(cli_tools.LAUNCHER_DIR)
+
+
+def test_codex_gets_its_launcher_beside_its_own_bin_layout(settings, launcher_host):
+    """Codex keeps the publisher's `<version>/bin/codex`; its launcher is the
+    tool root's `bin/codex`, one level up, so the two never meet."""
+    name = cli_tools.CODEX
+    install_fake(settings, "0.147.0", name)
+    install_fake(settings, "0.148.0", name)
+    cli_tools.sweep_superseded(settings, name,
+                               now=time.time() + cli_tools.PRUNE_GRACE_SECONDS + 60)
+    root = cli_tools.tool_root(settings, name)
+    assert cli_tools.stable_binary(settings, name) == str(root / "bin" / "codex")
+    assert (root / "0.148.0" / "bin" / "codex").is_file()
+    assert not (root / "0.147.0").exists()
+    done = run_launcher(root / "bin" / "codex", "x")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "0.148.0 x"
+
+
+def test_remove_takes_the_launcher_with_it(settings, launcher_host):
+    name = cli_tools.CLAUDE_CODE
+    install_fake(settings, "2.1.330")
+    assert cli_tools.launcher_path(settings, name).is_file()
+    cli_tools.remove_install(settings, name)
+    assert not cli_tools.launcher_path(settings, name).exists()
+    assert cli_tools.stable_binary(settings, name) == ""
 
 
 # --------------------------------------------------- the install-status machine

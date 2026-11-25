@@ -428,6 +428,54 @@ def test_a_cross_site_socket_is_refused(live):
             pass
 
 
+# ------------------------------------- the Claude path the child holds (CR-386)
+
+def test_the_child_is_handed_the_stable_claude_path_not_a_version(tmp_path, monkeypatch):
+    """2026-11-25: the child was handed `<data>/tools/claude-code/2.1.330/claude`
+    once, lived for days, and every Claude call failed ENOENT for ~31 hours
+    after the unattended updater pruned 2.1.330. It now holds the launcher,
+    which reads `current` on every exec."""
+    from ccsync_dashboard import cli_tools
+
+    monkeypatch.setattr(cli_tools, "LAUNCHER_SUPPORTED", True)
+    src = checkout(tmp_path)
+    vdir, _ = vault(tmp_path)
+    editor = cards_edit.Editor(settings_for(tmp_path, src, vdir))
+    # Nothing installed: no path at all, as before.
+    assert "TC_CLAUDE_BIN" not in editor.child_env(4321)
+
+    version = cli_tools.tool_root(editor.settings, cli_tools.CLAUDE_CODE) / "2.1.330"
+    version.mkdir(parents=True)
+    (version / "claude").write_text("#!/bin/sh\necho 2.1.330\n", encoding="utf-8",
+                                    newline="\n")
+    (version / "claude").chmod(0o755)
+    cli_tools._finish_install(editor.settings, cli_tools.CLAUDE_CODE, version="2.1.330",
+                              rel="claude", sha="d" * 64, size=1, url="https://x",
+                              checksum_source="publisher_manifest")
+    env = editor.child_env(4321)
+    launcher = cli_tools.launcher_path(editor.settings, cli_tools.CLAUDE_CODE)
+    assert env["TC_CLAUDE_BIN"] == str(launcher)
+    assert "2.1.330" not in env["TC_CLAUDE_BIN"]
+    assert launcher.is_file()
+
+
+def test_without_a_launcher_host_the_child_keeps_the_versioned_path(tmp_path, monkeypatch):
+    """The Windows dev host has no sh to run a launcher with: same as before."""
+    from ccsync_dashboard import cli_tools
+
+    monkeypatch.setattr(cli_tools, "LAUNCHER_SUPPORTED", False)
+    src = checkout(tmp_path)
+    vdir, _ = vault(tmp_path)
+    editor = cards_edit.Editor(settings_for(tmp_path, src, vdir))
+    version = cli_tools.tool_root(editor.settings, cli_tools.CLAUDE_CODE) / "2.1.330"
+    version.mkdir(parents=True)
+    (version / "claude").write_text("x", encoding="utf-8")
+    cli_tools._finish_install(editor.settings, cli_tools.CLAUDE_CODE, version="2.1.330",
+                              rel="claude", sha="d" * 64, size=1, url="https://x",
+                              checksum_source="publisher_manifest")
+    assert editor.child_env(4321)["TC_CLAUDE_BIN"] == str(version / "claude")
+
+
 # ------------------------------------------------------ the supervisor
 
 def test_a_crash_loop_restarts_with_a_backoff_and_says_so(tmp_path):

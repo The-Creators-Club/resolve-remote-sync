@@ -248,7 +248,16 @@ class Editor:
 
         try:
             env = cli_tools.cli_env(self.settings, cli_tools.CLAUDE_CODE)
-            claude = cli_tools.installed_binary(self.settings, cli_tools.CLAUDE_CODE)
+            # CR-386 (2026-11-25): the STABLE path, not the versioned one.
+            # This child lives for days and is handed the path once; the
+            # unattended updater (CR-309) installs about daily and prunes the
+            # replaced version an hour later, so a versioned path here went
+            # stale after two updates and every editor Claude call failed
+            # `spawn .../2.1.330/claude ENOENT` for ~31 hours until a manual
+            # restart. `stable_binary` is `<data>/tools/claude-code/bin/claude`,
+            # a launcher that reads `current` on every exec. On a non-POSIX
+            # (Windows dev) host it is the versioned path, as before.
+            claude = cli_tools.stable_binary(self.settings, cli_tools.CLAUDE_CODE)
         except Exception:  # noqa: BLE001 - a CLI lookup never stops the editor
             env = {k: v for k, v in os.environ.items()
                    if k in ("PATH", "HOME", "LANG", "TZ", "TMPDIR", "SYSTEMROOT",

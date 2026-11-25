@@ -30296,6 +30296,63 @@ change. After deploy nothing updates until the site turns the flag on.
   Code up to date" box, or `[features] ai_cli_auto_update = true` pasted
   into the site.toml import).
 
+## CR-386 - the Timeline Cards editor held a versioned Claude Code path for days, and the updater pruned it: ~31 hours of ENOENT - FIXED in repo, unshipped (dashboard 0.7.81: cli_tools.py, cards_edit.py)
+
+A follow-up to CR-309, found on the live NAS 2026-11-25. `cards_edit.Editor.child_env`
+set `TC_CLAUDE_BIN = cli_tools.installed_binary(...)`, the VERSIONED path
+`<data>/tools/claude-code/2.1.330/claude`, once, when it spawned the long-lived
+editor child (`node host.mjs --write`). CR-309's unattended updater installs a new
+CLI about daily and removes the replaced version `PRUNE_GRACE_SECONDS` (1 h) after
+the flip. That grace was sized for a CALL in flight (900 s at most), not for a
+process that keeps the path for days: two updates after the editor started, the
+path named a deleted file and every Claude call from the editor failed
+`spawn /data/tools/claude-code/2.1.330/claude ENOENT` for ~31 hours (~465 failed
+jobs) until the editor was restarted by hand.
+
+### Fix
+- **A stable path that follows `current`.** `<tool root>/bin/<binary>`
+  (`<data>/tools/claude-code/bin/claude`) is a small POSIX `sh` launcher
+  (`cli_tools.write_launcher`). On every exec it finds its tool root from its own
+  `$0`, reads the `current` pointer and `exec`s the target with `"$@"`. A missing
+  or empty pointer, or a target that is not an executable file, is a sentence on
+  stderr and exit 127, never a silent no-op. It is written atomically (tmp +
+  `os.replace`, 0755) by `_finish_install` after the flip, and idempotently by
+  `cli_tools.stable_binary(settings, name)`, so an install from before this change
+  gets one without reinstalling.
+- **`stable_binary`** answers the launcher path when a version is installed, else
+  "". Generic over `TOOLS`: Codex's launcher is `codex/bin/codex`, one level above
+  the publisher's own `codex/<version>/bin/codex`, so the two never meet. `bin`
+  is not a version string, so `_prune_old_versions` (it removes only
+  `_VERSION_RE` directories) and `sweep_superseded` never touch it; REMOVE still
+  takes it with the rest of the tree.
+- **`cards_edit.child_env` hands the child the stable path.** On a non-POSIX host
+  (the Windows dev box, no `sh`), or if the launcher cannot be written, it falls
+  back to the versioned path, i.e. the old behaviour.
+- **Left alone, on purpose:** every per-call lookup (`ai_providers.cli_path` in
+  `cards_ai.Runner._cli`, `triage`, the probe and the wizard) reads the pointer
+  fresh each time. `gear_ai.HotClaude` keeps one `claude` process for up to an hour
+  idle, but its argv is rebuilt from the pointer at every spawn, and a launcher
+  would not help a process that is already running (the `exec` replaces the
+  shell, so the CLI's own `process.execPath` is the versioned path either way:
+  CR-309's grace is what covers that). The ytdl app holds no CLI path any more.
+
+### Verification
+- `dashboard/tests/test_cli_tools.py` (CR-386 block): the launcher is written at
+  install with LF endings and 0755, `stable_binary` names it, an older install gets
+  one on demand, a second ask rewrites nothing and a tampered one is put back; no
+  launcher host keeps the versioned path; fake `sh` "binaries" prove the launcher
+  runs v1, then v2 after an update plus the sweep of v1; a missing, empty or
+  blank pointer and a pointer to a missing binary exit non-zero with a message;
+  the prune and the sweep spare `bin/`; Codex's layout; REMOVE takes it. The
+  runs use Git's `sh` on Windows and skip if there is none.
+- `dashboard/tests/test_cards_edit.py`: `child_env` hands the launcher, not a
+  versioned path, and keeps the versioned path where there is no launcher host.
+
+### Deploy order
+Dashboard only (0.7.81). No schema, wire or companion change. The running editor
+child keeps whatever path it was given until it restarts, which a dashboard
+deploy does.
+
 ## CR-310 - every fresh tick raised a red "not sending that project" notice for up to two minutes - FIXED in repo, unshipped (dashboard/src/ccsync_dashboard/collector.py)
 
 Seen 2026-09-24: the owner ticked `2026-ff5-film-1-2` for

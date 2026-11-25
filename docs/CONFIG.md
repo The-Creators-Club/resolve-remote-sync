@@ -424,6 +424,7 @@ the four steps from the page: **notice → install → sign in → test**.
 |---|---|
 | The binary | `<DASH_DB_PATH's parent>/tools/claude-code/<version>/claude` (Codex keeps the publisher's package layout: `…/codex/<version>/bin/codex`), dir `0700`, file `0755` |
 | Which one is live | `…/tools/<tool>/current` — a **pointer file** holding a relative path, deliberately not a symlink (a DSM volume may refuse one, and a dangling symlink reads as "never installed") |
+| The stable path | `…/tools/<tool>/bin/<binary>` (`…/claude-code/bin/claude`, `…/codex/bin/codex`), `0755`: a `sh` launcher that reads `current` on every exec and runs what it names, so a long-lived holder (the Timeline Cards editor child's `TC_CLAUDE_BIN`) survives an update and the prune of the old version (CR-386). Written at install and on demand; exits 127 with a sentence on stderr if `current` is missing or names no executable. Linux only; never pruned (`bin` is not a version) |
 | The record | `…/tools/<tool>/state.json`: `installed_version`, `sha256`, `installed_at`, `source_url`, `checksum_source` |
 | `$HOME` for every run of it | `…/tools/<tool>/home`, `0700`. Never the container's own HOME, which is inside the image on some deployments: a sign-in there would evaporate at the next `compose up` |
 | The `setup-token` fallback's token | `<data>/secrets/ai/claude_code_oauth_token`, `0600`, passed back as `CLAUDE_CODE_OAUTH_TOKEN` |

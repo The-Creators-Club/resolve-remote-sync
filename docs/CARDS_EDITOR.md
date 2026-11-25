@@ -51,7 +51,10 @@ pipelines (`docs/CARDS_DEPLOY.md` says why):
   `<data>/cards-edit/`), `TC_STATIC` (`<cards-src>/editor/dist` when present),
   `TC_PYTHON` (the container's own interpreter) with `PYTHONPATH=<cards-src>`
   for the Python workers, and `TC_CLAUDE_BIN` when the SET UP wizard installed
-  a Claude Code CLI. The port is a free loopback port chosen at each start
+  a Claude Code CLI. That is the STABLE launcher
+  `<data>/tools/claude-code/bin/claude` (`cli_tools.stable_binary`), never a
+  versioned path: the child lives for days and the CLI updates itself about
+  daily (CR-386, `KNOWN_BUGS.md`). The port is a free loopback port chosen at each start
   unless `DASH_CARDS_EDITOR_PORT` fixes it.
 * **Proxies it, behind the login.** `/cards/edit` -> 308 `/cards/edit/`;
   `/cards/edit/{path}` for every method goes through `login_gate` like all of

@@ -33,6 +33,9 @@ volume the customer already backs up and which survives an image update:
     <data>/tools/claude-code/state.json      installed_version, sha256, when
     <data>/tools/claude-code/current         a POINTER FILE (see below)
     <data>/tools/claude-code/2.1.234/claude  the binary itself, 0755
+    <data>/tools/claude-code/bin/claude      a sh LAUNCHER that execs whatever
+                                             `current` names, for long-lived
+                                             holders of the path (CR-386)
     <data>/tools/claude-code/home/           $HOME for every run of it, 0700
     <data>/tools/claude-code/auto_update.json   the unattended updater's last
                                              look and its outcome (CR-309)
@@ -306,6 +309,113 @@ def installed_binary(settings: Any, name: str) -> str:
         return ""
     target = tool_root(settings, name) / rel
     return str(target) if target.is_file() else ""
+
+
+# ------------------------------------------------- the stable launcher (CR-386)
+# 2026-11-25, CR-386. `installed_binary` answers a VERSIONED path
+# (`<data>/tools/claude-code/2.1.330/claude`), which is right for a call that
+# looks it up, runs once and is done, and wrong for anything that looks it up
+# ONCE and keeps it: the Timeline Cards editor child (`cards_edit.child_env`,
+# TC_CLAUDE_BIN) is spawned once and lives for days, and the unattended
+# updater (CR-309) installs roughly daily and prunes the replaced version an
+# hour later (PRUNE_GRACE_SECONDS covers a call in flight, not a process that
+# holds the path). On the live NAS, two updates after the editor started, its
+# path named a deleted file and every Claude call from the editor failed
+# `spawn /data/tools/claude-code/2.1.330/claude ENOENT` for ~31 hours (~465
+# jobs) until somebody restarted it by hand. So a long-lived holder gets
+# `<tool root>/bin/<binary>` instead: a tiny sh script that reads `current`
+# on EVERY exec and execs whatever it names, so the path it holds never goes
+# stale. `bin` is not a version string (`_VERSION_RE`), so neither the prune
+# nor the sweep ever touches it, and it cannot collide with Codex's own
+# `<version>/bin/codex`, which lives one level down. POSIX only: the
+# dashboard's Windows dev host has no `sh` to run it, so there `stable_binary`
+# answers the versioned path exactly as before.
+LAUNCHER_DIR = "bin"
+# Whether this host can run the launcher at all. A module constant rather than
+# an inline test so the tests can exercise the writer on the Windows dev box.
+LAUNCHER_SUPPORTED = os.name == "posix"
+
+_LAUNCHER_TEMPLATE = """#!/bin/sh
+# Written by the CC Sync dashboard (cli_tools.write_launcher, CR-386).
+# The dashboard puts it back if it changes; do not edit. Runs whichever version of
+# {label} the `current` pointer names NOW, so a process that holds this
+# path keeps working across an update and the prune of the old version.
+root=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P) || {{
+    echo "ccsync launcher: cannot find the {label} install from $0" >&2
+    exit 127
+}}
+pointer="$root/current"
+rel=""
+if [ -f "$pointer" ]; then
+    rel=$(tr -d ' \\t\\r\\n' < "$pointer")
+fi
+if [ -z "$rel" ]; then
+    echo "ccsync launcher: {label} is not installed: $pointer is missing or empty (install it from Settings -> AI providers)" >&2
+    exit 127
+fi
+target="$root/$rel"
+if [ ! -f "$target" ] || [ ! -x "$target" ]; then
+    echo "ccsync launcher: {label}: $pointer names $rel, but $target is not an executable file (reinstall it from Settings -> AI providers)" >&2
+    exit 127
+fi
+exec "$target" "$@"
+"""
+
+
+def launcher_path(settings: Any, name: str) -> Path:
+    """`<tool root>/bin/<binary>`: the path that follows `current` (CR-386)."""
+    return tool_root(settings, name) / LAUNCHER_DIR / spec(name).binary
+
+
+def launcher_script(name: str) -> str:
+    return _LAUNCHER_TEMPLATE.format(label=spec(name).label)
+
+
+def write_launcher(settings: Any, name: str) -> Path | None:
+    """Create or refresh the launcher; -> its path, or None where there is
+    none (not POSIX, or it could not be written). Idempotent: an existing
+    launcher with the right bytes and its exec bits is left alone, so a
+    consumer may ask on every start. Atomic (tmp + os.replace), 0755. Never
+    raises: a launcher we could not write must not be the reason an install
+    or an editor start fails."""
+    if not LAUNCHER_SUPPORTED:
+        return None
+    path = launcher_path(settings, name)
+    script = launcher_script(name)
+    try:
+        if (path.is_file() and path.read_text(encoding="utf-8") == script
+                and os.access(path, os.X_OK)):
+            return path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_text(script, encoding="utf-8", newline="\n")
+            tmp.chmod(0o755)
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except OSError:
+        log.warning("could not write the %s launcher at %s", name, path, exc_info=True)
+        return None
+    return path
+
+
+def stable_binary(settings: Any, name: str) -> str:
+    """The path a LONG-LIVED consumer should hold, or "" when nothing is
+    installed (CR-386). On POSIX that is the launcher, written or refreshed
+    here so an install from before CR-386 gets one without reinstalling. On a
+    non-POSIX host, or if the launcher cannot be written, it is the versioned
+    path `installed_binary` gives - the pre-CR-386 behaviour, which works
+    until the version it names is pruned. A per-call lookup should keep using
+    `installed_binary` / `ai_providers.cli_path`: it reads the pointer fresh
+    every time already."""
+    if name not in TOOLS or settings is None:
+        return ""
+    binary = installed_binary(settings, name)
+    if not binary:
+        return ""
+    launcher = write_launcher(settings, name)
+    return str(launcher) if launcher is not None else binary
 
 
 def read_state(settings: Any, name: str) -> dict:
@@ -1266,6 +1376,9 @@ def _finish_install(settings: Any, name: str, *, version: str, rel: str, sha: st
     tmp = pointer.with_name("current.tmp")
     tmp.write_text(f"{version}/{rel}", encoding="utf-8")
     os.replace(tmp, pointer)
+    # CR-386: the stable path long-lived holders run (`stable_binary`). After
+    # the flip, so the first exec through a fresh launcher finds a pointer.
+    write_launcher(settings, name)
     _prune_old_versions(settings, name, keep=version,
                         spare=[e["version"] for e in carried])
     home_dir(settings, name).mkdir(parents=True, exist_ok=True)
@@ -1353,6 +1466,10 @@ def _prune_old_versions(settings: Any, name: str, *, keep: str,
     is left where it is and swept by `sweep_superseded` once nothing started
     before the flip can still be running. Every call started after the flip
     reads the new pointer.
+
+    Only VERSION-named directories are ever removed: `home/`, `.staging`'s
+    own sweep and the launcher's `bin/` (CR-386) are not version strings, so
+    the `_VERSION_RE` test below spares them whatever `spare` says.
     """
     root = tool_root(settings, name)
     children = list(root.iterdir()) if root.is_dir() else []

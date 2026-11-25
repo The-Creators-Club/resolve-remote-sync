@@ -72,7 +72,7 @@ The Footage Sorter is one of the dashboard's pages, reached from its menu and it
 
 - Who: anyone signed in.
 - Name and search words: Footage Sorter. Search words: sort footage, camera cards, clips, offload, ingest.
-- When camera cards with the Footage Sorter is off: nobody but an admin sees the Sorter, and an admin sees it only in settings, listed with its switch. Folder links it made stop opening (they show "This link is not available") until it is switched on again. Nothing it holds is deleted.
+- When camera cards with the Footage Sorter is off: nobody but an admin sees the Sorter, and an admin sees it only in settings, listed with its switch. Nothing it holds is deleted. Folder links keep opening, since they belong to the dashboard, not to the Sorter (see The dashboard: Settings and setup, "An admin makes a link that lets anyone holding it download a folder of the studio's tree").
 
 ### What needs an admin and what needs only a sign-in
 
@@ -515,22 +515,18 @@ Download… ("Download the selected clips into a folder on this computer") is av
 
 ### An admin makes a link that hands a folder of footage to anyone holding it
 
-Share folder… ("Make a link for a folder that anyone you send it to can download from") shares the last-clicked destination folder, or else the source folder picked; long-pressing or right-clicking a destination folder opens it for that folder directly. With no folder picked: "To make a link, click a folder in the Source or Destinations tree first, then press Share folder. Right-clicking a destination folder works too."
+From the Sorter's page an admin can make a folder link for the folder being looked at. The link itself, its dialog, its refusals, how long it lasts and what it shows once made are the dashboard's, the same from wherever it is made, and it exists whatever parts are switched on (see The dashboard: Settings and setup, "An admin makes a link that lets anyone holding it download a folder of the studio's tree").
 
-- The dialog: "A link for <folder>", "Anyone who has the link can download everything in this folder, without an account, until it runs out or you switch it off.", a name ("Name shown to the person (optional)", at most 120 characters; the folder's name when left empty), how long it lasts (7, 14, 30 or 90 days, or No end date; 14 at first), and Make the link. Failure: "The link could not be made: <reason>".
-- Refusals: a whole source folder, the whole final tree or a card: "choose a folder inside it: a link for a whole root would hand out everything"; "that folder is not inside one of the sorter's folders"; "that is not a folder a link can be made for"; "that folder is not on the server yet (a planned folder has nothing in it to share)"; "a link lasts between 1 and 365 days, or has no end date".
-- A link made shows "For anyone" (the studio's public address, when one is set up) and "On the team network" (or just "Link", with a note that it only opens for people on the team network because no public address has been set up), each with Copy ("Link copied").
-- The link cannot be guessed.
+- Share folder… ("Make a link for a folder that anyone you send it to can download from") opens that dialog for the last-clicked destination folder, or else the source folder picked; long-pressing or right-clicking a destination folder opens it for that folder directly. With no folder picked: "To make a link, click a folder in the Source or Destinations tree first, then press Share folder. Right-clicking a destination folder works too."
+- From the Sorter, a card or a whole source folder is refused as a whole root is: "choose a folder inside it: a link for a whole root would hand out everything"; and a planned folder: "that folder is not on the server yet (a planned folder has nothing in it to share)".
 - Who: an admin. Anyone else is told "<what> needs an admin of this dashboard".
 - Phone and desk: Share folder… is reachable on a phone.
-- When camera cards with the Footage Sorter is off: its links do not open.
 
 ### An admin sees every folder link and can switch one off at once
 
-Links is the one list of every link ever made that hands footage to people outside the studio, newest first: the Sorter's folder links, and the b-roll archive's client folder links, each saying which kind it is. An admin reaches it while either the Footage Sorter or the b-roll archive is on, and it holds the links of whichever of the two is on. For each: its name or folder, "<folder>  ·  by <who>  ·  opened <n> time(s)  ·  until <date>" (or "no end date"), and "switched off" or "ran out" when it is no longer active. It also shows when each was made, when it was last opened and when it was switched off. Active links have Show link and Switch off ("Link switched off"; "Could not switch it off: <reason>"); a link switched off stops opening at once. "Loading…", "No links yet.", "The links could not be loaded: <reason>".
+From the Sorter's page an admin opens Links, the dashboard's one list of every link handed outside the studio, folder links among them, where any of them is switched off at once (see The dashboard: Settings and setup, "An admin sees every link handed outside the studio and can switch one off at once").
 
 - Who: an admin.
-- Name and search words: Folder links. Search words: shared links, share folder, footage links, switch off link.
 
 ### Someone holding a folder link sees its files and picks which to take
 

@@ -6,7 +6,7 @@ This part covers what a person is told about the sync and what is still owed, ho
 
 ### Each computer says in one sentence why it is not syncing, and since when
 
-Every computer that is not syncing carries a sentence saying why, with the time the cause began (or was first seen). The same sentence, in the same words, is shown in the app on the editor's computer, on the overview, on the per-computer view, on the editor's own view of their computers and in diagnostics, and it is there within one report of the computer. Each cause has its own sentence. A deliberate stop or pause is shown as what it is, never as a fault, and only a cause that truly needs an admin's approval sends the editor to their admin. When no reason applies there is no sentence: the computer's state line says what it is doing instead, and no sentence is ever shown just to say "all good".
+Every computer that is not syncing carries a sentence saying why, with the time the cause began (or was first seen). The same sentence, in the same words, is shown in the app on the editor's computer, on the overview, on the per-computer view, on the editor's own view of their computers and in diagnostics, and it is there within one report of the computer. Each cause has its own sentence. A deliberate stop or pause is shown as what it is, never as a fault, and only a cause that truly needs an admin sends the editor to their admin. When no reason applies there is no sentence: the computer's state line says what it is doing instead, and no sentence is ever shown just to say "all good".
 
 The reasons, highest first:
 
@@ -295,7 +295,7 @@ A remote editor's downloads take the fastest of the studio's connections that re
 
 ### The way footage travels is chosen by measuring real transfers
 
-The way footage and project files travel between the NAS and an editor's computer, near or far, is chosen by measuring real transfers, as the owner's requirements describe ("How footage travels is chosen by measurement"); no route is ruled in or out before those measurements. A newly approved computer finds the NAS by itself.
+The way footage and project files travel between the NAS and an editor's computer, near or far, is chosen by measuring real transfers, as the owner's requirements describe ("How footage travels is chosen by measurement"); no route is ruled in or out before those measurements. A computer finds the NAS by itself once its editor has signed in on it.
 
 #### Lessons
 
@@ -332,25 +332,9 @@ A serious alert, "a computer's clock is wrong", is raised when a computer's cloc
 
 ## Computers joining and changing
 
-### An admin approves a new computer and ties it to an editor
-
-A new editor's computer asks to join the studio, and waits, listed among the computers waiting for approval. An admin approves it and ties it to an editor by choosing that editor; the computer is named after the editor so that it is matched to them, and receives that editor's ticked projects within about a minute of approval. Until then nothing is shared with it, and its row says it is waiting for approval.
-
-- Approving without choosing a known editor leaves the computer belonging to nobody, and the admin is told that the dashboard will then not manage what it receives.
-- A computer already approved is not added again; choosing a different name renames it (a rename that fails is a warning).
-- When approving shares several projects, each succeeds or fails on its own, the rest still run, and the admin is told "applied N of M" with the reason for each refusal.
-- It ends by saying that the next step is ticking the editor's projects. Doing it again changes nothing.
-- A known computer that comes back as if new (reinstalled, for example) is shown as such, waiting for approval, and once approved its transfers resume within a minute.
-- When the list of computers waiting cannot be read, it is shown as unknown, never as "nobody waiting".
-
-A warning is raised for each computer that has waited 24 hours or more to be approved (or whose waiting time is unknown), naming it when known: "approve it from the list of computers waiting for approval". It cannot be approved by replying to a mail.
-
-- Who: an admin.
-- Name and search words: Computers waiting for approval. Search words: approve, new computer, join, waiting, accept.
-
 ### A computer belongs to a person only once it is tied to a known editor
 
-A computer is linked to a person only when it has been tied to an editor the admin has let in; while the studio has no editors yet, no computer belongs to anyone. A computer that belongs to nobody is listed as belonging to nobody, and the product never adds or removes anything it receives on its own. For every computer that has ever connected, the dashboard knows its name, whose it is (or nobody's), whether it is the server itself, when it was first and last seen, whether it is connected now, its last address and when it last connected; whether it is connected is refreshed about every minute. Whose a computer is is worked out afresh each time, never remembered from before.
+A computer belongs to the person who signed in on it, and only someone the admin has let in can sign one in: the tie is the sign-in, and no admin approves a computer (see Accounts, privacy and the legal paperwork: How a computer proves who it belongs to, "A computer becomes a person's when they sign in on it"). The computer receives that person's ticked projects within about a minute of signing in; until someone has signed in on it, nothing is shared with it. When several projects are shared with it at once, each succeeds or fails on its own, the rest still run, and the dashboard states "applied N of M" with the reason for each refusal. A known computer that comes back as if new (reinstalled, for example) needs only its editor to sign in again: the dashboard says so, and once they have, its transfers resume within a minute. While the studio has no editors yet, no computer belongs to anyone. A computer that belongs to nobody is listed as belonging to nobody, and the product never adds or removes anything it receives on its own. For every computer that has ever connected, the dashboard knows its name, whose it is (or nobody's), whether it is the server itself, when it was first and last seen, whether it is connected now, its last address and when it last connected; whether it is connected is refreshed about every minute. Whose a computer is is worked out afresh each time, never remembered from before.
 
 ### A renamed computer keeps its plan and everything waiting for it
 

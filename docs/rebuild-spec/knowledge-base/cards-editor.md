@@ -1,6 +1,6 @@
 # Timeline Cards: the editor: what real use taught
 
-406 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
+410 lessons. Each is one rule the product can be tested against: what a person saw (the heading), why it happened, and what the product must do. Kinds: *given* is a fact about something the studio has whatever is built; *ruling* is the owner's decision; *situation* is something the product must survive.
 
 ## The lane: how clips look and read
 
@@ -1133,6 +1133,11 @@ See also, filed under another capability:
 - Must: Each request carries the playhead, selection and open transcript; the playhead's card is found from its time; inserts are real spans from any interview; an empty selection is refused in words.
 - Kind: ruling
 
+### CE1-028: Shortening only suggests; nothing changes until the editor accepts each one.
+- Why: The owner: the shorten pass "must NEVER delete or stage anything by itself. It produces SUGGESTIONS ... the editor ... accepts or dismisses it individually".
+- Must: Shortening to a target, editable per section, lists removals with reasons wherever the cut shows; each is accepted, undone or dismissed alone, and dismissed ones can return.
+- Kind: ruling
+
 ### CE1-029: Shortening only removes, keeps sentences whole and protects the story.
 - Why: The owner wanted a target length keeping structure and the most emotional content; story rules held only by asking the assistant will eventually break.
 - Must: Each suggestion is checked to only remove, never a noted card or a section's last card unless the section goes whole with its heading kept, cutting at sentence ends unless justified.
@@ -1198,6 +1203,11 @@ See also, filed under another capability:
 - Must: The model a person or feature picks answers on every route, and each call records which model answered.
 - Kind: situation
 
+### CE1-030: Accepting one suggestion broke the next one on the same card.
+- Why: Accepting a suggestion splits or renames the card the next suggestion is about, and the editor may hand-edit between clicks.
+- Must: Each suggestion still applies correctly after others on the same paragraph were accepted or hand edits made, and undoing an accept returns it to pending.
+- Kind: situation
+
 ### CE1-031: A shortened or failed section could not be cut again after a reload.
 - Why: Section answers arriving together overwrote each other, rerun buttons and progress lived only in the open page, and a call hung forever across a server restart.
 - Must: Every section's answer is kept with the file; any section can be cut again after reload; progress counts real running work; a call fails visibly within about eleven minutes.
@@ -1238,9 +1248,19 @@ See also, filed under another capability:
 - Must: The length shown counts only accepted removals, the offered length sits beside it, and a missed target is labelled, e.g. "lands at 3:06, asked for 3:00".
 - Kind: situation
 
+### CE2-099: After the first shortening step the owner could not find the next.
+- Why: Next-step buttons sat in a hidden panel; the review used unlabelled dots and needed sideways scrolling: "I don't get how to use it."
+- Must: A multi-step task's next step appears where the person asked; a finished shortening opens its review, every marker is labelled, and nothing scrolls sideways.
+- Kind: situation
+
 ### CE3-059: Shortening gave no suggestions for one section and many for another.
 - Why: Sections answered in parallel wrote to the same record without coordination, so some answers erased others.
 - Must: When sections are processed in parallel, every section's result is kept.
+- Kind: situation
+
+### CE3-060: "Accept all" looped for ever when an item did not change.
+- Why: Batch accept took the first pending item, acted and asked again; an answer that left it pending repeated it endlessly.
+- Must: A batch action checks each item actually changed and stops with a message when one did not.
 - Kind: situation
 
 ### CE3-061: A chat turn can take a minute, and an idle-looking box gets pressed again.

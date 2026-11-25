@@ -261,7 +261,7 @@
 
 - CRX-037 | 33-042, 40-048, 42-012, 39-013 | the items drop a marker whose frame is taken (or a gap note with no free frame); the lesson asks that it move to the next free frame and none be lost; wrote the lesson
 - CRX-059 | 32-004 | the item refuses a send whose timeline name is taken; the lesson asks for a suffixed name; wrote the suffix
-- CRX-065 | 32-002, 32-003 | the items put a red "Send to Resolve" in the header and a toolbar button; the ruling makes sending an action on the cut with no top-bar button; wrote the ruling
+- CRX-065 | 32-002, 32-003 | the items put a red "Send to Resolve" in the header and a toolbar button; the ruling made sending an action on the cut with no top-bar button; the owner's answer of 2026-11-24 (page 32, 32.8) amended the ruling: the red header button stays, so the text now names it as the way in, with its More sheet row, key and command palette entry
 - CRX-087 | 32-009 | the Final Cut Pro XML tile promises Premiere reads it; the ruling asks that Premiere be verified before it is promised; wrote the tile without Premiere until verified
 - CRX-064 | 39-022 | the item files the timeline in a chosen bin or the current one; the ruling puts every sent timeline in a root bin named Timelines; wrote the ruling, CRX-058's choosing a bin listed as not yet met
 - CRX-010 | 39-022 | the item uses the project's default rate when none is pinned; the ruling offers a rate defaulting to 29.97 drop-frame and keeps a rate the file states; wrote the ruling with the project's rate as a choice
@@ -306,7 +306,7 @@
 - 40-047 | the temporary working timeline and the message naming it (an inside)
 - 40-048 | the count of notes that "could not be placed at all" (CRX-037: a marker moves to the next free frame) and the message naming the library route (an arrangement)
 - 33-042 | a gap under 5 s getting a title when Resolve honours the in and out marks (a shorter gap gets the Green marker, one rule), notes always as markers when written into a saved project (an arrangement), and a 1-frame gap note dropped when its frame is taken (CRX-037)
-- 32-002 | the toolbar "Send to Resolve" button and the header's red button (ruling CRX-065)
+- 32-002 | the look of the header's red "Send to Resolve" button and how it shrinks on narrow screens, held by cards-editor-5 "The header shows the brand, where you are, search, undo, redo and Send to Resolve" and pointed to (page 32, 32.8)
 - 32-003 | the lead "through the existing conform", the footer "This server can only show the plan.", "via <how>", and writing "into the project library" (an arrangement)
 - 32-004 | the refusals and notes about a project library not set up, not writable or not readable, and the refusal for a taken name (an arrangement, CRX-059)
 - 32-005 | writing into the saved project, the backup before each write, the refusal while open, and at most two sends at once across the server (an arrangement and a pipe's size)
@@ -359,7 +359,8 @@
 - Timeline Cards: the editor / Sections and the overview | Sections, notes and gap notes arrive as markers | section kinds and colours, gap notes
 - Timeline Cards: the editor / Colours | Clip colours on a sent timeline | the one set of colours, Resolve's clip colours, unique per interviewee in an episode
 - Timeline Cards: the editor / Resolve is optional | The Resolve and exports dialog | what the editor shows with the help for the editing program off
-- Timeline Cards: the editor / Selecting, deleting, inserting and keys | Where the dialog and the script downloads are reached | the cut's own actions and the command palette
+- Timeline Cards: the editor / Selecting, deleting, inserting and keys | Where the dialog and the script downloads are reached | the Send to Resolve key and the command palette
+- Timeline Cards: the editor / The page: panels, header, warnings and redrawing | Where the dialog and the script downloads are reached | the red Send to Resolve button in the header and its row in the phone's More sheet (page 32, 32.8)
 - Timeline Cards: the board / What the board is | The dry run counts everything and shows the plan cut by cut | the board hands only to the cut
 - Resolve on the editor's computer / Connecting to Resolve's scripting: launch, stalls and death | Timeline Cards never connects to Resolve while Resolve is still starting | the rule and the facts, held in "The product never harms a Resolve session" and "Facts about Resolve's scripting connection"
 - Timeline Cards: footage in, ready to cut / Frame rates | Which frame rate a clip is taken to have | the site setting "Frame rate when nothing states one"
@@ -402,3 +403,4 @@
 - cards-to-resolve-and-exports F15 | no change here: the lead's ruling puts the codec check in resolve-on-the-editors-computer; youtube points there
 - dashboard-1 F3 | changed: Each computer shows whether its Resolve is taking part and if not why | the home of the state words now says the one case that stays stopped until the app is restarted
 - dashboard-2 F4 | no change here: dashboard-2 changes
+- page 32, 32.8 | changed: Where the dialog and the script downloads are reached ; The Send tab shows a dry run and sends on one press ; A sent cut arrives as a new timeline that matches it frame for frame | "an action on the cut, not a button in the top bar" goes; Send to Resolve is the red header button (pointing to cards-editor-5's header heading), its More sheet row, its key and its palette entry, each opening the Send tab with a fresh dry run; every "the cut's own actions" way in replaced; CRX-065 stays met as amended

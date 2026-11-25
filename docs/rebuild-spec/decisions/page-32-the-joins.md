@@ -33,8 +33,13 @@ ANSWERED 2026-11-24 (late evening), asked one by one.
   whatever parts are switched on (the recommendation).
 - **32.6** A file move never lapses (the recommendation). It is the one
   request to a computer that waits for as long as the computer is away.
-- **32.7** Only the slider (the recommendation). The review of suggestions
-  one by one goes, with the lessons about it; 27.1 and 27.6 give way.
+- **32.7** **Asked twice. Final answer: keep both, as today.** He first
+  chose "only the slider", but the question had described the slider
+  wrongly (as something that shortens the cut; it only previews which
+  whole cards would go, and the review is what cuts). Asked again with the
+  facts right (2026-11-25), he chose to keep the review and the slider
+  both, exactly as the editor has them. His answer to 24.4 ("keep only
+  the slider") is taken back; 27.1 and 27.6 stand.
 - **32.8** The red Send to Resolve button stays in the header, exactly as
   the editor has it (the recommendation). The August ruling is retired.
 

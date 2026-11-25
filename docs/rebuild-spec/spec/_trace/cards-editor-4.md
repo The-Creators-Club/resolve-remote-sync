@@ -460,3 +460,5 @@
 - cards-to-resolve-and-exports F9 | no change here: cards-to-resolve-and-exports changes; this piece already has every import arrive as a proposal
 - whole-product F4 | no change here: whole-product changes; this piece already has one daily budget
 - whole-product F7 | no change here: cards-editor-5 and whole-product change
+- page 32, 32.2 | changed: A proposal can move, delete, stage, trim, split, gap, colour, note, highlight, section and insert, each with a plain result line or a reason it cannot | the chat's insert refusal of a question names the one exemption, a question the owner's notes name for a place, handed over by the board as exempt (pointing to cards-editor-2); no other assistant way of changing the cut refuses a question, so nothing else changed
+- page 32, 32.7 | no change here: the owner keeps both the review and the slider, as today

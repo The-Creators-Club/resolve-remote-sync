@@ -773,7 +773,7 @@ The "+" on a thumbnail, or "+ client folder" in the open clip, shows "Add to cli
 
 ### An editor manages the folder list and makes new folders
 
-The list explains that clients see previews only and need no sign-in. Besides client folders, the list holds the delivery links, each marked as what it is. The folder links the Footage Sorter makes are not in it: an admin sees them, together with every client folder link, each saying its kind, in the one list of links handed outside the studio, and can switch any of them off there (see The Footage Sorter and camera cards: Downloading originals and sharing folders, "An admin sees every folder link and can switch one off at once"). It offers "+ New folder" and "refresh". Each row shows the title, its state, "<n> clips · by <person> · opened Nx" or "never opened"; clicking opens it. Newest first. Empty: "No client folders yet. Make one, then add clips from the + on any thumbnail." Failure: "Could not load client folders: <message>". "+ New folder" asks "Name for the new client folder (the client sees this):"; a blank name warns "A folder needs a title"; otherwise "Created "<title>"" and the folder opens; failure "Could not create the folder: <message>". Escape does not close the list.
+The list explains that clients see previews only and need no sign-in. It holds client folders only. An admin sees every client folder link, together with every link to download a folder, each saying its kind, in the one list of links handed outside the studio, and can switch any of them off there (see The dashboard: Settings and setup, "An admin sees every link handed outside the studio and can switch one off at once"). It offers "+ New folder" and "refresh". Each row shows the title, its state, "<n> clips · by <person> · opened Nx" or "never opened"; clicking opens it. Newest first. Empty: "No client folders yet. Make one, then add clips from the + on any thumbnail." Failure: "Could not load client folders: <message>". "+ New folder" asks "Name for the new client folder (the client sees this):"; a blank name warns "A folder needs a title"; otherwise "Created "<title>"" and the folder opens; failure "Could not create the folder: <message>". Escape does not close the list.
 
 ### An editor captions, orders and removes the clips in a folder
 
@@ -825,12 +825,11 @@ Clicking a clip opens "← back to the folder", "← prev" / "N / total" / "next
 
 - Phone and desk: the key help is hidden on touch screens.
 
-### A delivery link lets a client download full-quality files
+### A client who needs full-quality files is given a folder link
 
-Besides the preview link, an editor can give a client a delivery link to chosen folders of the archive, so a distant client can download full-quality files, possibly terabytes, without joining the studio's private network and without any software of their own. A delivery link is read only, downloads straight from the NAS at close to the studio's connection speed, resumes after an interruption, and allows several connections at once. It is revoked, reactivated, renewed and expires exactly as a preview link does. Every download request is recorded lastingly with the visitor's address, the file and the bytes sent, never with the link itself.
+A client folder's link shows previews only. A client who needs full-quality files is given a folder link instead, which an admin makes for any folder of the studio's tree, whatever parts are switched on (see The dashboard: Settings and setup, "An admin makes a link that lets anyone holding it download a folder of the studio's tree"). An editor does not make, revoke or renew one.
 
-- Who: anyone signed in makes one; a client holding the link uses it.
-- See also The Footage Sorter and camera cards: Downloading originals and sharing folders.
+- Who: an admin makes one; a client holding the link uses it.
 
 ### Admins are warned before a client link expires
 

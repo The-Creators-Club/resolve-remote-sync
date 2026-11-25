@@ -585,8 +585,7 @@ A person drops an interview's clips (camera files and sound recordings, any numb
 Each piece starts as soon as what it needs is ready, and none waits for a person to start, order or repeat it. The heavy work (lining up, transcribing, previews) is done on a computer of the studio's that is able and free (see Work shared out across the computers). What is dropped survives the page closing, the computer restarting and the network dropping; nothing is done twice and nothing is lost. When the interview is ready, it is ready to cut.
 
 - Who: anyone signed in who can open Timeline Cards.
-- Ways in: dropping clips onto the episode in Timeline Cards; footage brought in from camera and recorder cards reaches the same place on its own (see The Footage Sorter and camera cards: Sorting into shoots, people and cameras).
-- When the Footage Sorter and camera cards is off: clips are only dropped in by hand.
+- Ways in: dropping clips onto the episode in Timeline Cards, from wherever they are, the folders the Footage Sorter files card footage into included; this is the only way in, and footage the Sorter files does not reach the episode until a person drops it there (see The Footage Sorter and camera cards: Sorting into shoots, people and cameras).
 - When the assistant is off: everything that does not need the assistant is still made (grouping, lining up, the multicam, the sound, the transcript with word times, paragraphs at pauses, the preview); questions, chatter, English, word links and the first sort are left for a person, and each interview says which.
 
 ### Every decision is shown and can be set by hand

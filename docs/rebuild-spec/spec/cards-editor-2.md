@@ -22,7 +22,7 @@ Every edit names the cuts, gaps and headings it changes by their permanent ids (
 
 - every id unique;
 - every cut with a clip name, its in before its out, fades within the cut and gain within plus or minus 30 dB;
-- no interviewer question in the cut;
+- no interviewer question in the cut, with one exemption: a question the owner's notes name for a place, handed over by the board as exempt, sits in the cut at that place (see "A cut list holds the cut, the bench and the timeline's facts");
 - every gap longer than 0;
 - every section and note heading with a colour;
 - no two shelves with the same category and no two saved sequences with the same name.
@@ -144,13 +144,13 @@ Nothing is lost by a delete: each cut goes onto the shelf named after the last s
 ### Moving, staging, unstaging and throwing away cuts follow fixed rules
 
 - Stage: cuts leave the cut for a chosen place on the shelf; named gaps are removed.
-- Unstage: cuts from any shelf, saved sequence or the alternates section go back into the cut at a place. Refusals: "that cut is already in the cut"; "that staged cut is no longer in the file"; "that is an interviewer question -- questions never go in the cut".
+- Unstage: cuts from any shelf, saved sequence or the alternates section go back into the cut at a place. Refusals: "that cut is already in the cut"; "that staged cut is no longer in the file"; "that is an interviewer question -- questions never go in the cut". This holds for every question on the bench, including an exempt question that was taken out of the cut: once on the bench it is a question like any other, and only undo puts it back.
 - Move on the bench: within or between shelves. "that cut is in the cut -- stage it first"; "a staged cut moves next to another staged cut". With an anchor, the anchor's shelf decides; with a category, cuts already in it stay put and the rest go to its end.
 - Throw away: the only true delete, for cuts on the bench only: "that cut is in the cut -- only a cut on the bench can be thrown away".
 
 ### A new cut, a pasted run and a new gap are checked before they go in
 
-A new cut goes to a place in the cut or straight onto a shelf. It must be at least 1/24 s long, cannot run past the known end of its source, and an interviewer question may go only onto a shelf. Paste puts a run of new cuts and gaps in, whole, in its own order, gaps with their notes; "nothing to paste - copy some cuts first"; no question may be in it. A new gap must be at least 1/24 s ("a gap shorter than a frame is no gap -- delete it instead").
+A new cut goes to a place in the cut or straight onto a shelf. It must be at least 1/24 s long, cannot run past the known end of its source, and an interviewer question may go only onto a shelf, except a question the board hands over as exempt, which goes into the cut at the place the owner's notes name. Paste puts a run of new cuts and gaps in, whole, in its own order, gaps with their notes; "nothing to paste - copy some cuts first"; no question may be in it. A new gap must be at least 1/24 s ("a gap shorter than a frame is no gap -- delete it instead").
 
 Rules for every new cut, and for fixes made in the file by hand:
 
@@ -305,7 +305,7 @@ A change made to the file in a text editor is noticed within 2 seconds, when the
 A cut list has the timeline's facts, an optional title, the cut's rows in order, then the bench sections in order, and any extra data a part of the editor keeps with it.
 
 - Rows in the cut: a cut, a gap, a heading, or a note row.
-- A cut is one piece of a source: the clip's name exactly as written (that name is the clip's identity, never an editing program's own id), the speaker or none (a montage clip), in and out in source seconds (in always before out), a fade in and a fade out (each no longer than the cut; they may overlap), a gain of its own in dB (0.1 dB steps, within plus or minus 30, on top of levelling), a clip colour or none (the speaker's colour), a link into the transcript or none, its words (kept fresh from the transcript, never cut up by an edit), its highlighted phrases in order, and a free note of one or more lines. A cut can be marked as an interviewer's question: a question can never be in the cut (the house rule "no questions included in the edit ever"), only on the bench, and the mark is not kept in the file.
+- A cut is one piece of a source: the clip's name exactly as written (that name is the clip's identity, never an editing program's own id), the speaker or none (a montage clip), in and out in source seconds (in always before out), a fade in and a fade out (each no longer than the cut; they may overlap), a gain of its own in dB (0.1 dB steps, within plus or minus 30, on top of levelling), a clip colour or none (the speaker's colour), a link into the transcript or none, its words (kept fresh from the transcript, never cut up by an edit), its highlighted phrases in order, and a free note of one or more lines. A cut can be marked as an interviewer's question: a question can never be in the cut (the house rule "no questions included in the edit ever"), only on the bench, and the mark is not kept in the file. The one exemption: a question the owner's notes name for a place in the film, which the board hands over as exempt (see Timeline Cards: the board: What the board is, "The board hands its order to the cut"), sits in the cut at that place and plays there like any other cut, and its card is marked as exempt rather than flagged as a fault. Every other edit that would put a question in the cut is refused, with its reason, before anything changes.
 - A gap is black and silence of a set length (more than 0) with an optional note. It is its own row: it stays where it was put when a neighbour moves or is deleted, and is selected, moved, resized, deleted and copied like a cut.
 - A heading is a section (default colour Blue), a note heading (default colour Green) or a plain heading (no colour); it has a title, a marker colour, and optionally a summary of its section written by the assistant, with a mark of the words it was written from, so a changed section can read "out of date".
 - A note row is a direction card or an "unmatched" line, one line of text (it may be empty).
@@ -548,6 +548,8 @@ What a gap's note becomes when the cut is handed over is in Timeline Cards: the 
 ### A shelf category for interviewer questions is locked, for reference only
 
 {{33-004}}
+
+Except that a question the board handed over as exempt is not on the shelf at all: it sits in the cut at the place the owner's notes name, plays there, and its card is shown as exempt (see "A cut list holds the cut, the bench and the timeline's facts"). Every question on the shelf stays locked as above.
 
 - Exact: yes
 

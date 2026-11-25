@@ -1207,8 +1207,17 @@ see one capability, with a script that proves nothing was skipped.
      was corrected (he had let what the product shows today outrank a
      ruling of the owner's), and what is STILL OPEN are all in
      `spec/_trace/_joins/_rulings/_handoffs.md`; read its last section
-     before doing anything else to the pieces. Decision page 32 now has
-     eight questions. How it was done: all 474 places
+     before doing anything else to the pieces. **Decision page 32 (eight
+     questions) was ANSWERED the same night** and written into the lessons
+     and into sixteen pieces by a second round of fixers
+     (`_rulings/_after-page-32.md`): signing in on a computer is all it
+     takes, no admin approves one; a question his notes name plays in the
+     cut; the Fillers aid stays, off by default; sorted interviews do not
+     reach Timeline Cards by themselves; one client download link, made by
+     an admin for any folder, whatever parts are on; a file move never
+     lapses; shortening keeps both the review and the slider (asked twice:
+     the first asking described the slider wrongly); the Send to Resolve
+     button stays in the header. How the joins were done: all 474 places
      where one piece leans on another were checked, one reader per piece
      leaned ON (`tools/build_join_bundles.py`, brief
      `spec/_trace/JOINS_BRIEF.md`, answers in `spec/_trace/_joins/`). They
@@ -1221,8 +1230,8 @@ see one capability, with a script that proves nothing was skipped.
      each one, and the lead checked where two settlers met and looked up
      four facts in the present product (`_rulings/_lead.md`, `_lead.txt`).
      `tools/merge_join_rulings.py` makes `_joins/RULINGS.txt`: **364
-     settled, 8 for the owner (five questions, decision page 32), 1 waiting
-     for a render test on a real Resolve.** One fixer per piece (brief
+     settled at once, 8 put to the owner on decision page 32 and since
+     answered, 1 waiting for a render test on a real Resolve.** One fixer per piece (brief
      `JOINS_FIX_BRIEF.md`, its list from `build_join_bundles.py --fixes`)
      then changes only its own piece and records every finding in its
      trace under "Joins settled". When the owner answers page 32, give the
@@ -1235,8 +1244,8 @@ see one capability, with a script that proves nothing was skipped.
      reports in `_cross/_answers/`). The lead read each proposal: **77
      lessons amended** (94 fields, `_cross/AMENDED.txt`, old words kept in
      `_trace/amended.tsv`), 2 more withdrawn, 1 more sealed; 20 doubtful
-     proposals left as they were; two wait for the owner (page 32,
-     questions 6 and 7). What crosses: **2,172 lessons, 224 sealed notes.**
+     proposals left as they were. With page 32's answers written in, what
+     crosses: **2,171 lessons, 224 sealed notes.**
    - **Names shown on screen.** The writers put `[the assistant]` wherever
      on-screen text named the assistant, pending the owner's answer on
      whether its name shows. The calendar's maker is named in some Sorter
@@ -1330,14 +1339,11 @@ Paste this into a new Claude Code session opened in
 > holds answers. Every decision page (2 to 31) is answered and written
 > into the specification. The joins between pieces are read, ruled and
 > fixed, every lesson has been checked against my answers, and the word
-> scan passes (`tools/word_scan.py`, after `check_spec.py --build`). Still
-> open with me: decision page 32 (eight questions from the joins; bring
-> them to me, then give the held findings a ruling in
-> `spec/_trace/_joins/_rulings/_lead.txt`, run `merge_join_rulings.py` and
-> `build_join_bundles.py --fixes`, and send a fixer to each piece they
-> name); decision page 5, question 2, which waits on the speed
-> measurements; and which computers in other countries those measurements
-> run against. Next after that: the open list at the end of
+> scan passes (`tools/word_scan.py`, after `check_spec.py --build`).
+> Decision page 32 (eight questions from the joins) is answered and
+> applied. Still open with me: decision page 5, question 2, which waits on
+> the speed measurements; and which computers in other countries those
+> measurements run against. Next: the open list at the end of
 > `spec/_trace/_joins/_rulings/_handoffs.md`, the blind reader piece by
 > piece, the inventory top-ups, then step 5. Commit each finished piece;
 > push nothing.

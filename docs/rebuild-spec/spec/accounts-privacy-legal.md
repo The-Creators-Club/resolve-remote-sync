@@ -12,9 +12,9 @@ A studio can put its organisation's single sign-on in front of the accounts (see
 
 ### Only the people the admin has let in can open the product
 
-The admin decides which accounts may open the product, and every way in refuses any account outside that set: the dashboard's sign-in page, single sign-on, the app on an editor's computer, and every switchable part. An account existing on the NAS or at the organisation's sign-in service is not enough by itself: a person is in only once an admin has added them, approved them, or let in a group they belong to (see "Signing in through the studio's single sign-on"). Being let in is never assumed: not while the studio has no editors yet, and not when the product cannot read who it knows (then the sign-in is refused with "cannot confirm your account right now: try again shortly").
+The admin decides which accounts may open the product, and every way in refuses any account outside that set: the dashboard's sign-in page, single sign-on, the app on an editor's computer, and every switchable part. An account existing on the NAS or at the organisation's sign-in service is not enough by itself: a person is in only once an admin has added them, given them access to a project, or let in a group they belong to (see "Signing in through the studio's single sign-on"). Being let in is never assumed: not while the studio has no editors yet, and not when the product cannot read who it knows (then the sign-in is refused with "cannot confirm your account right now: try again shortly").
 
-The product keeps a list of the studio's people. A name joins it when an admin creates the account, approves the person's computer, or gives them access to a project, and the list keeps when and how each name joined. Names are compared ignoring capitals, and anything that is not a valid sign-in name is ignored. A report from a computer never adds a name to the list.
+The product keeps a list of the studio's people. A name joins it when an admin creates the account or gives them access to a project, and the list keeps when and how each name joined. Names are compared ignoring capitals, and anything that is not a valid sign-in name is ignored. A report from a computer never adds a name to the list.
 
 - Who: an admin decides.
 
@@ -362,7 +362,7 @@ Every page and every piece of data needs a signed-in person, except:
 - the server's health answer, which says only whether the server is up and its version, nothing else;
 - the studio's public description that installers and the app on editors' computers read (studio name, drive letter, addresses, which parts are on);
 - what a phone needs to install the dashboard or Timeline Cards as an app (icons, the app's description, the offline page), read only;
-- a client folder link in the b-roll archive and a shared folder link in the Footage Sorter, where the link itself is the credential;
+- the two kinds of link handed outside the studio, where the link itself is the credential: a client folder (chosen b-roll clips to preview) and a folder link (a folder of the studio's tree to download, made by an admin for any folder, whatever parts are switched on), both kept in one list (see The dashboard: Settings and setup, "An admin makes a link that lets anyone holding it download a folder of the studio's tree" and "An admin sees every link handed outside the studio and can switch one off at once");
 - the doors an editor's computer uses with its own sign-in (see "A computer's sign-in reaches only that computer's own work, as its own person"), which still check that sign-in.
 
 There are no public pages describing how to drive the server. Every rule about what is open or closed applies to the address as the server will act on it, however it was spelled (a doubled slash, odd capitals or encoded characters reach no page a plain spelling would not), and when in doubt a page behind the sign-in refuses.

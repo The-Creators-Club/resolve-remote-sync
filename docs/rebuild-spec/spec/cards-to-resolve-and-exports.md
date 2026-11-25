@@ -234,7 +234,7 @@ The editor has one dialog for sending to Resolve, exporting, importing and follo
 ### Where the dialog and the script downloads are reached
 
 - Toolbar button "Export" (download icon, tooltip "Resolve and exports: export, import, send, follow"): opens the dialog on the Export tab, or closes it if it is open.
-- Sending is an action on the cut, not a button in the top bar: the cut's own actions hold "Send to Resolve", which opens the Send tab with a fresh dry run. The Send to Resolve key, Alt+Shift+M, does the same. When the dialog later closes after a successful send, a toast says "Sent to Resolve."; when it closes without a send, nothing is said; a failure toasts "Send to Resolve failed: <reason>".
+- The red "Send to Resolve" button in the editor's header (see Timeline Cards: the editor: The page: panels, header, warnings and redrawing, "The header shows the brand, where you are, search, undo, redo and Send to Resolve"), and its row in the phone's More sheet, open the Send tab with a fresh dry run; nothing is built in Resolve until the person confirms. The Send to Resolve key, Alt+Shift+M, does the same. When the dialog later closes after a successful send, a toast says "Sent to Resolve."; when it closes without a send, nothing is said; a failure toasts "Send to Resolve failed: <reason>".
 - Command palette entries: "Send to Resolve" (found also by the words conform, timeline, library); "Export OTIO, FCPXML, EDL or the script" (opens Export); "Download the script as Markdown (.md)" (shows Ctrl+S); "Download the script as plain text (.txt)" (shows Ctrl+Shift+S); "Import a timeline from Resolve" (opens Import); "Follow Resolve's playhead" (opens Live); "Compare the cut list with its Resolve timeline" (compares now and opens Import).
 - Ctrl+S downloads the plain script as Markdown, from anywhere, including while typing in a text field; the browser's own "save page" is suppressed.
 - Ctrl+Shift+S downloads the plain script as plain text, same rules.
@@ -267,7 +267,7 @@ Nothing is ever written into Resolve's saved projects from outside Resolve. Fact
 - A refused plan shows the refusal sentence as an error ("The conform was refused." if none was given).
 - Footer line saying why the primary button is or is not available: "Check the plan first.", "The conform is refused: nothing can be sent.", "Sent.", or "Writes <n> cuts into <project> in Resolve on <machine>."
 - Red primary "Send to Resolve" (shows "Sending" while busy): enabled only when the dry run succeeded, Resolve is reachable with the project open, and nothing has been sent yet in this opening of the dialog.
-- On success the cut list records, as one edit, the timeline it was sent as and when ("<local time> on <machine>"); the tab shows "Built <name> (<timeline>): <n> cuts. <notes>"; the news line "Built <name> in Resolve: <n> cut(s)." with " The cut list could not record it." appended when that edit was refused. When the dialog was opened from the cut's "Send to Resolve" action the toast is left to that action ("Sent to Resolve."); otherwise this news is toasted.
+- On success the cut list records, as one edit, the timeline it was sent as and when ("<local time> on <machine>"); the tab shows "Built <name> (<timeline>): <n> cuts. <notes>"; the news line "Built <name> in Resolve: <n> cut(s)." with " The cut list could not record it." appended when that edit was refused. When the dialog was opened from the header's "Send to Resolve" button, its More sheet row, its key or its command palette entry, the toast is left to that action ("Sent to Resolve."); otherwise this news is toasted.
 - On failure: "Send to Resolve failed: <reason>" as an error toast and in the tab.
 
 Nothing is built in Resolve until the person has seen the dry run's cut, marker and length counts and pressed Send. What is sent is the editor's saved cut, never the assistant's candidate pool or a board's arrangement. A send that has started always finishes even if the page is closed; a dry run is abandoned when the page goes away. A send gives up after two minutes of waiting for Resolve, and the person then sees "Send to Resolve failed: <reason>".
@@ -313,7 +313,7 @@ Nothing already in the project is changed. What arrives:
 A timeline built from a cut runs the cut list's length, give or take a frame per clip. Sending a cut list that is identical to the timeline it names writes nothing and says so, and cuts nobody touched keep their exact frames.
 
 - Who: anyone signed in who may open the cut list.
-- Ways in: from the Send tab of the editor's dialog, opened from the cut's own actions, the Send to Resolve key (Alt+Shift+M) or the command palette.
+- Ways in: from the Send tab of the editor's dialog, opened from the red Send to Resolve button in the editor's header, its row in the phone's More sheet, the Send to Resolve key (Alt+Shift+M) or the command palette.
 
 ### A send is refused before anything is placed when it cannot succeed
 

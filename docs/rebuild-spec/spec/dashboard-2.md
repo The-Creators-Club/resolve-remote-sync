@@ -385,6 +385,27 @@ An admin sees the server's version and the app's version against the newest offe
 
 - Who: an admin.
 
+### An admin makes a link that lets anyone holding it download a folder of the studio's tree
+
+An admin picks any folder of the studio's tree and makes a link that hands everything in it, at full quality, to whoever it is sent to. This is the one way the studio hands a client full-quality files, and it is there whatever parts are switched on.
+
+- The dialog: "A link for <folder>", "Anyone who has the link can download everything in this folder, without an account, until it runs out or you switch it off.", a name ("Name shown to the person (optional)", at most 120 characters; the folder's name when left empty), how long it lasts (7, 14, 30 or 90 days, or No end date; 14 at first), and Make the link. Failure: "The link could not be made: <reason>".
+- Refusals: the whole tree or a whole top folder: "choose a folder inside it: a link for a whole root would hand out everything"; a folder outside the studio's tree is refused and the admin is told so; "that is not a folder a link can be made for"; "a link lasts between 1 and 365 days, or has no end date".
+- A link made shows "For anyone" (the studio's public address, when one is set up) and "On the team network" (or just "Link", with a note that it only opens for people on the team network because no public address has been set up), each with Copy ("Link copied").
+- The link cannot be guessed. A link switched off or run out stops opening at once.
+- What the person holding the link sees and downloads is described with the page they open (see The Footage Sorter and camera cards: Downloading originals and sharing folders, "Someone holding a folder link sees its files and picks which to take").
+- Who: an admin. Anyone else is told "<what> needs an admin of this dashboard".
+- Ways in: the list of links handed outside the studio, and a folder of the tree wherever a part shows one to an admin.
+- Phone and desk: making a link is reachable on a phone.
+- Name and search words: Share a folder. Search words: share folder, download link, client download, send footage, full quality.
+
+### An admin sees every link handed outside the studio and can switch one off at once
+
+Links is the one list of every link ever made that hands footage to people outside the studio, newest first, each saying which kind it is: a folder to download, or a client folder to preview. Client folders to preview are listed while the b-roll archive is on (see The b-roll archive: Client folders and links, "Editors gather archive clips into client folders, each with its own link"). For each: its name or folder, "<folder>  ·  by <who>  ·  opened <n> time(s)  ·  until <date>" (or "no end date"), and "switched off" or "ran out" when it is no longer active. It also shows when each was made, when it was last opened and when it was switched off. Active links have Show link and Switch off ("Link switched off"; "Could not switch it off: <reason>"); a link switched off stops opening at once. "Loading…", "No links yet.", "The links could not be loaded: <reason>".
+
+- Who: an admin.
+- Name and search words: Links. Search words: shared links, share folder, footage links, client links, switch off link.
+
 #### Lessons
 
 - Met: DSH-103, DSH-104, DSH-105, DSH-106, DSH-107, DSH-108, DSH-109, DSH-110, DSH-111, DSH-112, DSH-113.

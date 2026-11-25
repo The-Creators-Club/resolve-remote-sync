@@ -530,6 +530,8 @@ When a clip has been sorted, its files go to its folder like this:
 
 Every planned folder is created, even with nothing moving into it, so an episode's skeleton is made empty; held folders wait until a clip lands in them. The leftover files of a half-moved clip go with its next move. A clip that is only on a camera card in a reader is left to the card copy. A card's paths reported by a Windows computer are understood by Windows rules wherever they are handled.
 
+Filing an interview's clips in its interviewee folder hands nothing to Timeline Cards: the interview starts processing there when a person drops its clips onto the episode (see Timeline Cards: footage in, ready to cut: Running on its own, with a hand on every decision, "Clips dropped in become an interview ready to cut").
+
 A file whose destination already holds the identical file (same size, and for files of 64 MB or less the same content) is not moved and is listed as "already there"; of two identical files headed for the same place (the same card staged twice) only one moves, and the other is listed. Anything not identical (a different file already at the destination, or two different files for one name) is a **collision**; an unreadable file counts as not identical. A collision is never resolved on its own.
 
 Under each destination folder a person can see what is headed for it before it arrives: assigned clips not yet there are drawn dashed and dimmed, and the time folders they will make are shown (see "Footage is filed in day-and-camera time folders"). There is no deliberate wait before a move: a sorted clip moves as soon as its checks pass, so what a person sees as "about to move" is whatever is still waiting for its turn or for its checks.

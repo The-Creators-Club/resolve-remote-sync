@@ -521,7 +521,7 @@
 - The dashboard / Settings and setup | An admin switches a kind of reporting off for the whole studio | the confirmation on a save, an import or an undo of settings
 - The dashboard / Alerts by mail | A credential never crosses the internet unencrypted | the serious problem for an unencrypted computer
 - The b-roll archive / Client folders and links | Everything needs a sign-in except a short list of open doors ; An admin removes a person from the whole product | client links as their own credential, and stand-in names on folders
-- The Footage Sorter and camera cards / Downloading originals and sharing folders | Everything needs a sign-in except a short list of open doors | shared folder links as their own credential
+- The dashboard / Settings and setup | Everything needs a sign-in except a short list of open doors | the folder link to download (any folder, made by an admin) and the one list of links handed outside the studio
 - YouTube downloads / Rights and terms | A person downloads everything the product holds about them ; An admin erases a person's past history | YouTube records in the download, the erasure and the removal
 - Timeline Cards: the editor / Opening episodes and keeping the editor running | Signing out, and signing out everywhere | the saved episode list deleted on a real sign-out
 - The server: installing it and keeping it running / Installing on a NAS | The studio chooses how people sign in ; The admins are named in set-up, and are never the NAS's own administrator | the install-time choices
@@ -579,3 +579,5 @@
 - server-install-and-running-1 F4 | changed: A sign-in name has one shape, and a name accepted anywhere works everywhere ; What a refused sign-in says | 1 to 32 characters, "(at most 32 characters)"
 - server-install-and-running-1 F5 | no change here: server-install-and-running-1 changes and points here
 - whole-product F1 | no change here: whole-product changes; this text already deletes on time while the assistant is off
+- page 32, 32.1 | changed: Only the people the admin has let in can open the product | a person is in once an admin has added them, given them access to a project or let in their group; the list of people gains a name only when an admin creates the account or gives access to a project, never by approving a computer
+- page 32, 32.5 | changed: Everything needs a sign-in except a short list of open doors | two kinds of link handed outside the studio: a client folder to preview and a folder link to download, made by an admin for any folder whatever parts are on, in one list; points to The dashboard: Settings and setup (its heading not there yet)

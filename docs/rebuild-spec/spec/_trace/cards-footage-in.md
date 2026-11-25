@@ -298,7 +298,7 @@
 - cards-editor / Shortening, the edit chat and the assistant | The product marks which paragraphs are the interviewer's questions | the assistant never puts a question into a cut
 - fleet-jobs / Choosing who runs what | What transcribing needs and what a person sees while it runs ; Clips dropped in become an interview ready to cut | which able, free computer does the heavy work
 - proxies-and-file-moves / Raw camera formats and Blackmagic Proxy Generator | Every take is lined up by sound to within a frame | proxies made for raw camera files
-- footage-sorter-and-camera-cards / Sorting into shoots, people and cameras | Clips dropped in become an interview ready to cut | footage from cards arrives in the same place on its own
+- footage-sorter-and-camera-cards / Sorting into shoots, people and cameras | Clips dropped in become an interview ready to cut | footage the Sorter files from cards does not arrive by itself; a person drops it onto the episode from the folders it was filed in
 - youtube / File names and what a file carries | Montage material is downloaded clips with a credit record | a download's channel, title, address and date as its credit
 - whole-product / The assistant | Footage-in works most urgent first, within the site's daily budget | the site's one daily budget in money, set by an admin, with the expected cost shown before each task
 - whole-product / The assistant | Clips dropped in become an interview ready to cut | the site-wide switch and what is left when it is off
@@ -334,4 +334,5 @@
 - fleet-jobs F10 | no change here: fleet-jobs adds the kinds
 - proxies-and-file-moves F2 | changed: Every take is lined up by sound to within a frame | when no raw proxy can be made, the page names the camera, says its clips are in a raw camera format CC Sync cannot make proxies from, and carries on if a proxy appears
 - whole-product F5 | no change here: whole-product changes; this piece already has work running on its own wait for the next day's budget
+- page 32, 32.4 | changed: Clips dropped in become an interview ready to cut | the claim that card footage reaches the episode on its own removed, and the "Footage Sorter off" line with it; dropping clips is the only way in, from wherever they are, the Sorter's folders included; the join line above corrected
 - whole-product F6 | changed: Footage-in works most urgent first, within the site's daily budget | the unavailable message kept only for an assistant that is on; with it switched off nothing about it is shown

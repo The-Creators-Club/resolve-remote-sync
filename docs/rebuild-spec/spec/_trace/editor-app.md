@@ -404,7 +404,7 @@
 
 - Only one set-up runs at a time on a computer | APP-017 asks for it; no item shows it.
 - Set-up checks that it can finish before it changes anything | the checks before removing anything, the bare-drive refusal and the Resolve-installed check come from APP-014, APP-020 and APP-005.
-- The finish page says whether the computer is ready, and what happens next | the editor no longer copies a sync code and a key to send to the admin: the computer appears on the dashboard waiting for approval by itself; done is said only after the computer has reported in and its drive answers (APP-013); Resolve missing is a note on the finish page (joins 2026-11-24, editor-app F21).
+- The finish page says whether the computer is ready, and what happens next | the editor no longer copies a sync code and a key to send to the admin: the computer is the editor's once they sign in and syncs with no admin step (owner's answer 2026-11-24, page 32, 32.1); done is said only after the editor has signed in, the computer has reported in and its drive answers (APP-013); Resolve missing is a note on the finish page (joins 2026-11-24, editor-app F21).
 - An editor gets the installer for a new computer, or to repair one | a file or a link an admin hands over that works without signing in or the private network (APP-021).
 - The studio's drive letter and tree name cannot change under installed computers | APP-043; the text chooses refusing over carrying the change.
 - On Windows the icon comes back by itself, and a computer without it keeps working | the editor is told when the icon never appears, and starting the app again opens its settings (APP-070).
@@ -468,7 +468,7 @@
 
 - Sync / Wired or remote | One set-up wizard takes a computer from nothing to signed in and working, and is safe to run again | the role step of set-up and the wired finish page.
 - Sync / Wired or remote | Switching a computer between remote and wired is confirmed first | the confirmation itself.
-- Sync / Computers joining and changing | The finish page says whether the computer is ready, and what happens next | an admin approves a new computer.
+- Accounts, privacy and the legal paperwork / How a computer proves who it belongs to | The finish page says whether the computer is ready, and what happens next | a computer is the editor's once they sign in on it, with no approval (page 32, 32.1; replaces the pointer to Sync / Computers joining and changing).
 - Sync / Studio-wide stops and the editor's pause | The menu holds about ten everyday lines | Sync now and the one pause.
 - Sync / Disk space | The menu holds about ten everyday lines | resuming downloads after a low-disk pause.
 - Sync / Safety stops | The computer's sign-in and settings are readable only by the editor | an unsavable safety stop; the resume proxy download prompt.
@@ -556,3 +556,4 @@
 - sync-2 F5 | changed: The app keeps its own work going when part of it stops | the setting to switch automatic recovery off and its status sentence dropped.
 - sync-2 F6 | changed: The editor is told when the dashboard is not hearing from the computer, and when the clock is wrong | sync-2's sentence and threshold (more than 60 seconds, "Turn on setting the time automatically.").
 - sync-2 F9 | changed: The editor sees each ticked project with what it is doing and why | the safe-to-close line placed in the app's window.
+- page 32, 32.1 | changed: The finish page says whether the computer is ready, and what happens next ; Every install leaves exactly one copy of the app and keeps the sign-in, settings and identity ; Uninstalling removes the app and every way into the studio's server, never the media | the waiting-for-approval heading and sentences removed; done needs the editor signed in, and syncing then needs nothing more (pointer to Accounts); reinstall recognised as the same computer with no approval; full-uninstall and uninstaller wording no longer speak of approval. The Windows administrator prompt for the drive left as it is.

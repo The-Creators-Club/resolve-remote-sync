@@ -535,7 +535,7 @@
 - BRO-110 | 05-040 | the item avoids the browser preview as a proxy only when the original is here; the lesson says never | wrote never
 - BRO-122 | 07-006, 07-007 | the items list given-up stand-ins only to the page and tell nobody about the rest; the lesson asks the editor's app to show a count | wrote the count in the app
 - BRO-046 | 24-007, 24-012 | the items only log a failure while transcribing or a rejected transcript; the lesson asks every failure to show why | wrote transcription failures tried again, and a rejection counted as tried
-- BRO-125, BRO-127 | 23-046 | the item has no download from a client link; one ruling says no download, another asks a client link that downloads chosen folders | wrote both: the preview link never downloads, a separate delivery link does
+- BRO-125, BRO-127 | 23-046 | the item has no download from a client link; one ruling says no download, another asks a client link that downloads chosen folders | wrote both: the preview link never downloads; full-quality files go by the admin's folder link, pointed to (page 32, 32.5)
 - BRO-034 | 24-025 | the item's limits are options of a run started by hand; the ruling asks the owner's limit or stop time and the allowance spent | wrote the stop time as an admin setting; with describing only on the studio's own graphics cards (broll-Q2, the owner's answer of 2026-11-24) nothing is spent, so the allowance and the daily clip limit are gone
 - BRO-078 | 07-026 | the item fails a step after a fixed 15 minutes; the lesson asks limits that grow with length and speed | wrote limits that grow
 
@@ -556,12 +556,12 @@
 - The editor is told while any clip is cut on a stand-in | the count in the app and the render warning (BRO-122, broll-Q21)
 - A clip whose file has gone from the archive is hidden from search | broll-Q20
 - An editor makes a client folder from any folder of the archive in one step | BRO-126
-- A delivery link lets a client download full-quality files | BRO-127, BRO-015
+- A client who needs full-quality files is given a folder link | BRO-127, BRO-015; since page 32 (32.5) a pointer to the admin's folder link in The dashboard
 - Client links keep working when something else fails | BRO-134, BRO-135
 - Search never stops because of an update | BRO-137's promise
 - A drop survives the page closing, a restart and the network dropping | the work may continue on another able computer (broll-Q1)
 
-- An editor manages the folder list and makes new folders | the list also holds the Footage Sorter's folder links and the delivery links (the owner's answer of 2026-11-24)
+- An editor manages the folder list and makes new folders | the list holds client folders only; every link handed outside the studio is listed for an admin in The dashboard (the owner's answers of 2026-11-24, page 32, 32.5)
 
 ## Parts of items left out
 
@@ -640,11 +640,11 @@
 - Music / Sending to Resolve | A clip not on this computer yet is fetched first, with progress, and then placed | the same one-file fetch
 - Sync / Disk space | A drop holds at most 2,000 clips and is taken only if it fits | the computer's one free-space floor, "Keep this much free on the sync drive" (joins 2026-11-24, music F3); music writes nothing of a drop to the person's computer
 - YouTube downloads / Reaching the editor and Resolve | A clip not on this computer yet is fetched first, with progress, and then placed | the same one-file fetch
-- The Footage Sorter and camera cards / Downloading originals and sharing folders | A delivery link lets a client download full-quality files | sharing folders for download
+- The dashboard / Settings and setup | A client who needs full-quality files is given a folder link | the admin makes the folder link for full-quality files ("An admin makes a link that lets anyone holding it download a folder of the studio's tree")
 - The dashboard / Problems the server finds | Admins are told when the b-roll archive cannot be read | the standing problem
 - The dashboard / Alerts by mail | Admins are warned before a client link expires | the warnings
 - The dashboard / Overview, menus and finding things | Search never stops because of an update | a part shown as not working with its reason
-- The Footage Sorter and camera cards / Downloading originals and sharing folders | An editor manages the folder list and makes new folders | the one list of links handed outside the studio ("An admin sees every folder link and can switch one off at once"), holding the Sorter's folder links and every client folder link, seen and switched off by an admin
+- The dashboard / Settings and setup | An editor manages the folder list and makes new folders | the one list of links handed outside the studio ("An admin sees every link handed outside the studio and can switch one off at once"), holding every folder link and every client folder link, each saying its kind, seen and switched off by an admin
 - Work shared out across the computers / When a computer counts as free and able | Describing keeps the computer it runs on usable | start now, pause, resume and cancel of a drop as a way past the wait, and the setting for the share of a working computer such work may use
 - The app on each editor's computer / Settings, records and background work | The page says whether the app on this computer is ready to do the work ; When the app on the editor's computer cannot be reached or refuses, the editor is told what to try | the app's local status address
 - The app on each editor's computer / Telling the editor what is wrong | The computer doing the work shows what describing is doing, and the person at it can pause, resume, start now or cancel | the menu line and the settings-window buttons for describing
@@ -677,3 +677,4 @@
 - proxies-and-file-moves F1 | no change here: proxies-and-file-moves adds the collection rename; this text keeps its sentence and pointer
 - proxies-and-file-moves F6 | no change here: describing goes first, as this text already says; fleet-jobs states the order
 - youtube F8 | no change here: youtube changes; the one-file fetch still serves an editor who asks for a YouTube original on their computer
+- page 32, 32.5 | changed: A client who needs full-quality files is given a folder link ; An editor manages the folder list and makes new folders | the full-quality link is now the folder link an admin makes for any folder of the tree, pointed to in The dashboard; an editor does not make, revoke or renew one; "delivery link" taken out of the list, which holds client folders only and points to the dashboard's one list of links

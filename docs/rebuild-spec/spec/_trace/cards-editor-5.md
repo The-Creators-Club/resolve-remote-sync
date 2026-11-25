@@ -49,7 +49,7 @@
 - 29-001 | While the editor is starting, a placeholder of the editor is already on screen
 - 29-002 | When the editor cannot start, the person is told why, or sent to sign in and brought back
 - 29-008 | The header holds a Tools group for the editor's tools, folding into a drop-down on narrow screens
-- 29-009 | The header shows the brand, where you are, search, undo, redo and Export
+- 29-009 | The header shows the brand, where you are, search, undo, redo and Send to Resolve
 - 29-011 | left out: cut by the owner (2026-11-24, cards-editor-5-Q4)
 - 29-017 | Toasts: one at a time, with set lifetimes, Dismiss, and an Undo after every edit
 - 29-027 | A More menu offers each card's less common actions, and the header's
@@ -336,7 +336,7 @@
 - On a desk, the panels sit in tab groups the person can rearrange, resize and reset | widths never change by another panel, panels beside the cards, tabs closed from their header and reopened from the top bar (CE1-119, CE1-120, CE2-028 from part 1)
 - The editor lays itself out for desk, tablet, portrait phone and landscape phone | no crushed cards or sideways scroll at 1440 x 900 and 412 x 915 (CE1-121)
 - How the editor's menus open, move and close | hover never moves anything, readable menu text, settings sections start folded (CE3-096, CE2-030 from part 1)
-- The header shows the brand, where you are, search, undo, redo and Export | one line with ellipsis (CE3-093); top-bar icons with tooltips (CE2-028)
+- The header shows the brand, where you are, search, undo, redo and Send to Resolve | one line with ellipsis (CE3-093); top-bar icons with tooltips (CE2-028)
 - When the editor cannot start, the person is told why, or sent to sign in and brought back | works in Chrome and Safari (CE3-100)
 - In a desktop app window the editor is one whole window whose header is its title bar | CE3-092
 - Standing conditions go to one problems window and never pop up over the cards | CE3-095
@@ -370,10 +370,9 @@
 - 34-002 | the console window and Ctrl+Break on Windows, and a cut list idle 10 minutes being written and put away by itself: how the build's server runs, an arrangement
 - 29-007 | how stutters are avoided (every text style made ready in one go a few seconds after start, only what changes redrawn): means, not promises
 - 30-046 | answers checked every second or two while anything is waiting, an aids service: an arrangement
-- 29-009 | a trailing " (Claude)" (now: anything marking a list as made by the assistant), the " - " to long-dash conversion (owner's rule), the hover "Send to Resolve: not in this build" (now: why sending is not available); and, settled by the joins (2026-11-24, cards-editor-5 F5, ruling CRX-065), the whole header Send to Resolve (red button, "Sending", "Resolve: not connected", its toasts, its compaction step): sending is the cut's own action in the Cut lists sheet
-- 29-008 | "before Send if there is no Undo", Send among the compacted launchers and Send's tip: no Send in the header (joins 2026-11-24, cards-editor-5 F5); the carried line stays, with an "Except that" sentence after it, for the lead to change the source
+- 29-009 | a trailing " (Claude)" (now: anything marking a list as made by the assistant), the " - " to long-dash conversion (owner's rule), the hover "Send to Resolve: not in this build" (now: why sending is not available)
 - 29-011 | that the line is hidden on every layout: moved into cards-editor-5-Q4
-- 29-027 | the header extras' "Send to Resolve" row and its quiet reason rows ("Not in this build" / "Open a cut list first"): settled by the joins (2026-11-24, cards-editor-5 F5)
+- 29-027 | the reason "Not in this build": now "Resolve: not connected"
 - 29-041 | "There is no video window in this build.": reworded as saying there is no video window to show
 - 29-012 | the tip "Opening is not wired in this build", the line naming the notes program's folder and canvas, and "New from canvas": cut by the owner or naming the build
 - 32-019 | the loading lines "Reading the vault" and "Reading the vault’s episodes": shaped by the notes program
@@ -403,7 +402,7 @@
 - cards-board / What the board is | With no cut list open, the editor offers to open one or a recent one | handing the board over makes a cut list
 - cards-to-resolve-and-exports / Exports | With the help for the editing program switched off, the editor never mentions it and offers the exports | the XML, OTIO, EDL and script exports
 - cards-to-resolve-and-exports / Which computer is driving Resolve | With Resolve closed or absent, everything still edits and nothing shows as a fault | only a person's own signed-in computers drive Resolve
-- cards-to-resolve-and-exports / Sending a cut to Resolve | The header shows the brand, where you are, search, undo, redo and Export ; The lists page shows the episode's cut lists, newest first, with what is open, last opened and kept on this device | the Export button, its tooltips, and what the cut's own "Send to Resolve" opens
+- cards-to-resolve-and-exports / Sending a cut to Resolve | The header shows the brand, where you are, search, undo, redo and Send to Resolve | the Export button, its tooltips, and the Send tab the header's "Send to Resolve" opens
 - whole-product / The assistant | The editor shows only the tools the site has switched on | the site-wide assistant switch
 - editor-app / Installing and setting up | The app on the editor's computer opens the editor in a window of its own | the one app on the editor's computer
 - releases-and-updates / Installing an update on an editor's computer | The Android app gives the phone editor a full screen that never moves | how an app's update is offered and checked
@@ -427,9 +426,10 @@
 - cards-editor-5 F2 | changed: The episode's browser lists every transcript and cut list, and several can be chosen at once | each transcript row shows its person, clip, colour and whether it is loaded
 - cards-editor-5 F3 | changed: The Timeline Cards page lists every episode in its folders, most recently opened first | each episode says who is in it: "<who> is in it now" (within the last minute), "<who> was last in N min ago", or "<who> opened it <how long ago>" (ruling CE2-130, the coordinator's correction); cards-editor-4 points here
 - cards-editor-5 F4 | no change here: the list of episodes offers no Close and no confirmation for it, since an open episode caps and locks nothing; cards-editor-4 drops its closing sentence
-- cards-editor-5 F5 | changed: The header holds a Tools group for the editor's tools, folding into a drop-down on narrow screens ; The header shows the brand, where you are, search, undo, redo and Export ; A More menu offers each card's less common actions, and the header's ; The lists page shows the episode's cut lists, newest first, with what is open, last opened and kept on this device ; With the help for the editing program switched off, the editor never mentions it and offers the exports | header Send to Resolve, "Sending", "Resolve: not connected", its compaction step and the More extras row gone; the cut's own "Send to Resolve" sits on the open list's row of the Cut lists sheet (desk and phone); heading renamed from "... undo, redo and Send to Resolve"
-- cards-editor-5 F6 | changed: The header shows the brand, where you are, search, undo, redo and Export ; With the help for the editing program switched off, the editor never mentions it and offers the exports | the one "Export" button, always present, tooltip naming exports only when the help is off
+- cards-editor-5 F5 | changed: The header holds a Tools group for the editor's tools, folding into a drop-down on narrow screens ; The header shows the brand, where you are, search, undo, redo and Send to Resolve ; A More menu offers each card's less common actions, and the header's ; The lists page shows the episode's cut lists, newest first, with what is open, last opened and kept on this device ; With the help for the editing program switched off, the editor never mentions it and offers the exports | header Send to Resolve, "Sending", "Resolve: not connected", its compaction step and the More extras row gone; the cut's own "Send to Resolve" sits on the open list's row of the Cut lists sheet (desk and phone); heading renamed from "... undo, redo and Send to Resolve" (all of this undone by page 32, 32.8, below)
+- cards-editor-5 F6 | changed: The header shows the brand, where you are, search, undo, redo and Send to Resolve ; With the help for the editing program switched off, the editor never mentions it and offers the exports | the one "Export" button, always present, tooltip naming exports only when the help is off
 - cards-editor-5 F7 | changed: An edit is refused only for a real reason, and never in silence | the refusal "this request came from another site" and its cure, reload the page
-- cards-to-resolve-and-exports F10 | changed: The header shows the brand, where you are, search, undo, redo and Export | no send control in the header; what Resolve has open stays shown there as information only
+- cards-to-resolve-and-exports F10 | changed: The header shows the brand, where you are, search, undo, redo and Send to Resolve | what Resolve has open is shown there as information only (its "no send control in the header" undone by page 32, 32.8)
 - editor-app F9 | changed: The app on the editor's computer opens the editor in a window of its own | points to the app's new way in; editor-app carries the menu line
 - whole-product F7 | changed: The editor shows only the tools the site has switched on | until the site's switches are known, the assistant's tools and the tools for the editing program are not shown
+- page 32, 32.8 | changed: The header holds a Tools group for the editor's tools, folding into a drop-down on narrow screens ; The header shows the brand, where you are, search, undo, redo and Send to Resolve ; A More menu offers each card's less common actions, and the header's ; The lists page shows the episode's cut lists, newest first, with what is open, last opened and kept on this device ; With the help for the editing program switched off, the editor never mentions it and offers the exports | the header's red Send to Resolve back as the source has it (its compaction step, its More sheet row), its press, key and palette entry opening the Send tab with a fresh dry run (pointer to the hand-over piece); the "Except that" sentence and the Cut lists sheet's Send gone; heading renamed back from "... undo, redo and Export"; the Export button a launcher in the Tools group, as the carried text has it; help off: no Send button, key or entry

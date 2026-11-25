@@ -450,26 +450,23 @@ The editor loads and works in current Chrome and Safari on desk and phone; a pag
 
 {{29-008}}
 
-Except that the header holds no Send button: the Tools group always sits before the Undo button, and no Send launcher or tip is among the compacted header launchers.
-
 - Exact: yes
 
-### The header shows the brand, where you are, search, undo, redo and Export
+### The header shows the brand, where you are, search, undo, redo and Send to Resolve
 
 - **Brand**: the CC mark and "TIMELINE CARDS"; clicking it switches back to the Cards view (it does not leave the page).
 - **Breadcrumb**: the episode name, "/", then the cut list's title. The title is the list's project name, else its title, else the file's name without its ending, else "No cut list open". A leading episode name is dropped, and anything in the title that marks a list as made by Assistant is dropped. The full title is the hover text.
 - **Search box** (desk only): placeholder "Search the cards", key hint "Ctrl K". Typing filters live (see Find). Esc in a non-empty box clears it.
 - **Undo / Redo** icon buttons (desk only), disabled when there is nothing to undo or redo.
-- **Export**: the one "Export" button, always present whether or not the help for the editing program is on, opening the Resolve and exports dialog; its icon and tooltip are those of Timeline Cards: the hand-over to Resolve, and exports: Sending a cut to Resolve, "Where the dialog and the script downloads are reached". On a phone it sits with the tool buttons in the second header row.
+- **Send to Resolve** (desk only): a red primary "Send to Resolve" when a cut list is open and sending is available; "Sending" with a spinner while it runs; a second press meanwhile is ignored. When no computer can drive Resolve for this page (list open), a quiet label "Resolve: not connected" whose hover says why. With no list open nothing is drawn. Success toast "Sent to Resolve."; failure (error level) "Send to Resolve failed: <message>"; closing the Resolve panel without sending reports nothing. The red button opens the send panel; if that panel is not available it fails with the reason, or "the Resolve panel is not available yet". Pressing the button, its key or its command palette entry opens the Send tab with a fresh dry run, and nothing is built in Resolve until the person confirms (see Timeline Cards: the hand-over to Resolve, and exports: Sending a cut to Resolve, "The Send tab shows a dry run and sends on one press").
+- **Export**: the one "Export" button, a launcher in the Tools group (see "The header holds a Tools group for the editor's tools, folding into a drop-down on narrow screens"), always present whether or not the help for the editing program is on, opening the Resolve and exports dialog; its icon and tooltip are those of Timeline Cards: the hand-over to Resolve, and exports: Sending a cut to Resolve, "Where the dialog and the script downloads are reached".
 - **What Resolve has open**: the project and timeline Resolve has open on the computer driving it, shown as information only and never as a send control (see Timeline Cards: the hand-over to Resolve, and exports: Edits sent live and staged edits, "A cut list being edited never changes Resolve until it is sent").
 - **Phone header buttons**: Undo (icon) and More (opens the header More sheet).
-- **Header compaction** on the desk: below 1600 px wide the "TIMELINE CARDS" text is hidden; below 1500 px the search box drops its "Ctrl K" hint; below 1200 px the search box narrows and the tools fold into the Tools drop-down. On a phone the brand text and the episode part of the breadcrumb are hidden and the tool buttons drop to a second header row.
-
-The header holds no Send to Resolve button. Sending is an action on the cut: "Send to Resolve" sits with the open cut list's own actions in the Cut lists sheet, on the desk and on a phone alike (see "The lists page shows the episode's cut lists, newest first, with what is open, last opened and kept on this device"), and on its key and in the command palette; what it opens and the toasts it ends with are in Timeline Cards: the hand-over to Resolve, and exports: Sending a cut to Resolve, "Where the dialog and the script downloads are reached".
+- **Header compaction** on the desk: below 1600 px wide the "TIMELINE CARDS" text is hidden; below 1500 px the search box drops its "Ctrl K" hint; below 1200 px Send to Resolve becomes an icon with a tip, the search box narrows, and the tools fold into the Tools drop-down. On a phone the brand text and the episode part of the breadcrumb are hidden and the tool buttons drop to a second header row.
 
 At desk widths the header stays on one line: long names end in an ellipsis, every control stays visible, and the content fills the window below it. The top bar's buttons are icons with a tooltip each; on a phone, menu rows keep their words.
 
-- When the help for the editing program is off: nothing about Resolve is drawn in the header; the Export button stays, with the tooltip that names exports only (see Resolve is optional).
+- When the help for the editing program is off: no Send to Resolve button, label or tip is drawn, and nothing else about Resolve; there is no Send key or command palette entry either. The Export button stays, with the tooltip that names exports only (see Resolve is optional).
 - Exact: yes
 
 ### Toasts: one at a time, with set lifetimes, Dismiss, and an Undo after every edit
@@ -484,9 +481,10 @@ Opened from a card's "More actions" and the phone header's More. A sheet from th
 
 - On a gap: "Move this gap" (lifts it), "Remove the gap".
 - On a cut: "Edit edges", "Add a note"/"Edit the note", "Zoom to cut", "Move this cut" (lifts it), "Add a 1 s gap before" or "Remove the gap before" (toasts "A 1 s gap went in. Drag its edge to size it." / "Gap removed. Undo puts it back."), "Remove from cut".
-- Header extras: "Redo", "Shortcuts" (hidden on touch screens).
+- Header extras: "Redo", "Send to Resolve" (or a quiet row with the reason: "Resolve: not connected" / "Open a cut list first"), "Shortcuts" (hidden on touch screens).
 - On touch, tapping a disabled control that has a reason toasts the reason.
 
+- When the help for the editing program is off: the "Send to Resolve" row is not there.
 - Exact: yes
 
 ### The lane bar sets the lane's height, top or bottom, panels hidden, language, literal line and word size
@@ -614,7 +612,7 @@ An answer arriving in the background updates only the cards it concerns, and a s
 #### Lessons
 
 - Met: CE3-100, CE1-119, CE1-120, CE1-122, CE1-123, CE1-124, CE3-092, CE3-093, CE3-094, CE3-095, CE1-121, CE3-096, CE3-097, CE3-098.
-- Met for another part: CE2-028 (in "On a desk, the panels sit in tab groups the person can rearrange, resize and reset" and "The header shows the brand, where you are, search, undo, redo and Export"), CE2-030 (in "How the editor's menus open, move and close"), CE3-032 (in "On a desk, the panels sit in tab groups the person can rearrange, resize and reset").
+- Met for another part: CE2-028 (in "On a desk, the panels sit in tab groups the person can rearrange, resize and reset" and "The header shows the brand, where you are, search, undo, redo and Send to Resolve"), CE2-030 (in "How the editor's menus open, move and close"), CE3-032 (in "On a desk, the panels sit in tab groups the person can rearrange, resize and reset").
 
 ## Opening episodes and keeping the editor running
 
@@ -748,8 +746,7 @@ Each browser keeps, for itself only (not in the cut list, not on the server): th
 - An "Offline" row: one line saying what is kept on this device ("<n> cut lists on this device · <size>", "Nothing kept on this device for offline yet.", "Downloading <name> for offline…") or "Working offline: edits wait on this device." (gold), and a button "Offline" or "Offline settings".
 - "Cut lists", newest first (by last change, then name). Each row shows the FILE NAME (not the title); a muted line: "from <title>" only when the title differs from the file name, "<n> cut(s)" (cuts in the cut, not on the shelf), "rev <n>", or "cannot be read" for a file that will not open (it is still listed, with its error); tags "Open now" (the open list), "Last opened here" (gold; the list this device last left this episode on, remembered per device for up to 200 episodes, only marked and never opened by itself from this sheet), "On this device" or "On this device (part)" (kept for offline here, or by the keep-on-this-device feature). The tags and the Offline row update as a download runs (at most four times a second).
 - Clicking a row opens that list (clicking the open list just closes the sheet).
-- Row buttons: "Keep" (only where the keep-on-this-device feature is present: closes the sheet and hands the list to it; offered for any list), "Duplicate" and "Rename" (only when the server can write cut lists). The open list's row also holds the cut's own "Send to Resolve", on the desk and on a phone alike, while the help for the editing program is on: it closes the sheet and starts the send (see Timeline Cards: the hand-over to Resolve, and exports: Sending a cut to Resolve, "Where the dialog and the script downloads are reached"); when no computer can drive Resolve for this page it is disabled and says why.
-- Empty episode: "No cut lists in <episode> yet. Hand the board over, or start an empty one."
+- Row buttons: "Keep" (only where the keep-on-this-device feature is present: closes the sheet and hands the list to it; offered for any list), "Duplicate" and "Rename" (only when the server can write cut lists).- Empty episode: "No cut lists in <episode> yet. Hand the board over, or start an empty one."
 - "Start a cut list" section (only when the server can write): "Empty cut list". Where the episode cannot be written, the sheet says that cut lists cannot be made in it because it is read-only.
 - When the editor is opened through the dashboard, a footer: "Signed in as <user>" and an "All episodes" link back to the dashboard's episode list. While offline the link opens the episode list as this device last saved it, with its offline warning (see Working offline, connections and several devices, "The episode list shows which cut lists are kept on this device and opens them with no network"), and edits waiting on the device stay there; only when this device has never saved the episode list is the link refused, with "You are offline: the episode list needs the server, so this cut list stays open". Online, edits waiting on the device are sent before leaving.
 
@@ -822,7 +819,7 @@ On an editor's computer, Windows or a Mac alike, the editor can also be opened i
 
 ### With the help for the editing program switched off, the editor never mentions it and offers the exports
 
-When a site switches off the help for the editing program, nothing in the editor names Resolve or any editing program: no Send to Resolve action, key or palette entry, nothing in the header about what Resolve has open, no live timeline in the Cut lists sheet and no "last sent to" timeline on a cut list's row, no following of Resolve, and no keys taken from a preset in Resolve (the lane uses the editor's own keys). The exports stay where they always are, behind the one "Export" button of the header, whose tooltip then names exports only: an XML, an OTIO and an EDL of the cut, and a text script (see Timeline Cards: the hand-over to Resolve, and exports: Exports). There is no second, help-off-only way to the exports. Everything else works exactly the same: the cut, playback, the transcripts and search, the shelf, offline work, and every key, button and gesture.
+When a site switches off the help for the editing program, nothing in the editor names Resolve or any editing program: no Send to Resolve button, label, tip, key, palette entry or menu row, no "Resolve: not connected", nothing in the header about what Resolve has open, no live timeline in the Cut lists sheet and no "last sent to" timeline on a cut list's row, no following of Resolve, and no keys taken from a preset in Resolve (the lane uses the editor's own keys). The exports stay where they always are, behind the one "Export" button of the header, whose tooltip then names exports only: an XML, an OTIO and an EDL of the cut, and a text script (see Timeline Cards: the hand-over to Resolve, and exports: Exports). There is no second, help-off-only way to the exports. Everything else works exactly the same: the cut, playback, the transcripts and search, the shelf, offline work, and every key, button and gesture.
 
 - When the help for the editing program is off: as above; switching it on again brings every Resolve control back with nothing lost. A new site starts with the help for the editing program on (and Timeline Cards itself off until an admin switches it on).
 

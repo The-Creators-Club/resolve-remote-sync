@@ -184,7 +184,7 @@
 - SRT-167 | 35-047, 37-061, 38-039 | the items refuse, or open the file manager on the computer the Sorter runs on, Windows only; the ruling asks for open in Explorer. Wrote it on the person's own computer, pending Q3.
 - SRT-160 | 35-001, 38-005 | the items take a path as one computer's drive path; the ruling names every place by its server location. Wrote that a pasted path is understood as the place on the server.
 - SRT-163 | 37-027 | the ruling says there is no "all clips" source; the empty clip area offers "All clips (<total>)". Wrote no such entry in the sources list and kept the button in the empty clip area, which loads everything rather than being a source.
-- owner's requirements (switching a part off hides it and stops its work) | 36-032, 36-033 | the items say nothing of the part being off. Wrote that folder links stop opening while the part is off and work again when it is back on.
+- owner's requirements (switching a part off hides it and stops its work) | 36-032, 36-033 | the items say nothing of the part being off. Wrote that folder links stop opening while the part is off and work again when it is back on. (Since page 32, 32.5: the link is the dashboard's and opens whatever parts are switched on.)
 
 ## New in this text
 
@@ -282,3 +282,4 @@
 - footage-sorter-and-camera-cards-3 F16 | no change here: part 2 changes its line to admins only
 - footage-sorter-and-camera-cards-3 F17 | no change here: part 2 renames its button and points here
 - whole-product F8 | no change here: whole-product adds the Footage Sorter's Ask to its assistant lists
+- page 32, 32.5 | changed: An admin makes a link that hands a folder of footage to anyone holding it ; An admin sees every folder link and can switch one off at once ; The Sorter is a page of the dashboard, behind its sign-in | the link and the one list now live in dashboard-2 (Settings and setup) and exist whatever parts are on; this text keeps only Share folder… on the Sorter's page (which folder, the no-folder message, the card, whole-source-folder and planned-folder refusals) and opening Links from the Sorter, each pointing to dashboard-2's heading; "its links do not open" when the Sorter is off removed, now said to keep opening; the "Folder links" name and search words dropped (dashboard-2 names it Links); heading "Someone holding a folder link sees its files and picks which to take" and its text unchanged

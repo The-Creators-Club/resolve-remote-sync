@@ -279,3 +279,44 @@ Still open after the closing pass:
   aside.
 - The eight findings held for the owner (decision page 32) and the render
   test for youtube F6.
+
+## After decision page 32 (2026-11-24 and -25)
+
+The owner answered the eight questions; what each piece changed is in
+`_after-page-32.md`, and each piece's trace has a `page 32, 32.<n>` line under
+"Joins settled". Sixteen pieces were repaired in a second round of fixers.
+Headings that went or changed in that round: dashboard-1 REMOVED "A new
+computer is approved under its owner"; sync-2 REMOVED "An admin approves a new
+computer and ties it to an editor"; cards-editor-5 has its heading back as
+"The header shows the brand, where you are, search, undo, redo and Send to
+Resolve"; dashboard-2 ADDED "An admin makes a link that lets anyone holding it
+download a folder of the studio's tree" and "An admin sees every link handed
+outside the studio and can switch one off at once"; broll's "A delivery link
+lets a client download full-quality files" is renamed "A client who needs
+full-quality files is given a folder link". No cross-reference is left
+pointing at a heading that went.
+
+A third mistake of the lead's: question 32.7 described the shortening slider
+as something that "shortens the cut". It only previews which whole cards would
+go; the review is what cuts. The owner answered "only the slider" on that
+description. The fixer who took the review out found that nothing could then
+shorten a cut, and said so. Asked again with the facts right, the owner chose
+to keep both as they are; the piece was put back, the four lessons withdrawn
+on that account cross again, and his answer to 24.4 is marked as taken back.
+The rule this teaches: before putting a question to the owner, read the
+behaviours it is about in the pieces, not a summary of them.
+
+Still open after page 32, added to the list above:
+- 32.2: the cut list file, which keeps its format exactly, has no place to
+  record that a question is exempt (it does not store the question mark at
+  all). The exemption has to live somewhere other than that file unless the
+  owner allows the format one addition. The board says the editor shows the
+  question as exempt but points to no editor heading for it.
+- server-install-and-running-1: the table of facts still says that on
+  TrueNAS "a new key replaces the old", while the text beside it now says a
+  second computer's key is added beside the others on both kinds of NAS.
+- The board: Delete sets a paragraph card aside, and a note card the person
+  wrote is removed with Undo bringing it back. The second half is the lead's
+  own decision; the owner was told and has not objected.
+- cards-editor-5: Export is read as sitting in the header's Tools group; the
+  carried text does not name it.

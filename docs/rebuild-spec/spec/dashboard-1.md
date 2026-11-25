@@ -293,7 +293,7 @@ Every figure names the project or folder it covers, and a figure for one project
 
 ### An admin asks one computer to do something and is told when it will happen
 
-Requests an admin aims at one computer (update now, resume downloads, ask this computer why, change one of its settings) wait for that computer and reach it when it is next heard from. Each request waits until it has been carried out or for 14 days, whichever comes first, follows the computer if it is renamed, and is never delivered to a different computer claiming the same identity. Each answer to the admin names the editor and the computer and says when it will apply:
+Requests an admin aims at one computer (update now, resume downloads, ask this computer why, change one of its settings) wait for that computer and reach it when it is next heard from. Each request waits until it has been carried out or for 14 days, whichever comes first, then lapses and says so. The one exception is a file move, which never lapses and waits for as long as the computer is away (see Proxies and file moves: Moves that reach every computer, "A move waits for each computer however long it is away"). Every request follows the computer if it is renamed, and is never delivered to a different computer claiming the same identity. Each answer to the admin names the editor and the computer and says when it will apply:
 
 - nothing on record of the computer being heard from: "when that computer next reports. Nothing on record says when it last did";
 - last heard from 24 hours ago or more: "when that computer next reports. It was last heard from <age>, so this may sit for a while";
@@ -552,7 +552,7 @@ Computers wired to the server show "-" for synced, held and missing. Computers t
 
 "Missing files" opens a list under the row that survives refreshes: "missing on <name>, refreshed <ago>", each file and size, "and N more (the list stops at M)" when cut, or "Nothing listed yet.". These lists are refreshed every minute for computers that are behind. A person cannot open the list for a computer of someone they may not see.
 
-None: "No editor computer shares this folder yet. Approve the computer on the people and computers page: sharing follows by itself within a minute."
+None: the page says that no computer of an editor holds this project yet.
 
 ### A project's page shows which originals, proxies and Resolve clips each computer holds
 
@@ -744,21 +744,12 @@ The people and computers page shows an admin:
 - every person: "N accounts", or "No editor accounts yet.". Each shows the sign-in name, "shown as" (their display name), role, status (active or suspended), their computers, and the actions: set a password, suspend or resume, end their sign-ins, download their data, erase their history, and remove. Where the studio's NAS holds people's logins, it also shows whether the person's account may open the shared folders, and whether the NAS has it locked. When the account list cannot be read: "The account list is unavailable: <error>", with whatever did answer. The list refreshes by itself every 30 seconds, and every action answers with a notice or an error line. What each action does is in Accounts, privacy and the legal paperwork: Who may sign in, "An admin manages the studio's people from one list";
 - every known computer with its owner, name, operating system, app version, when last heard from, wired or syncing, its identity (on pointing) and how many projects are ticked on it, with "remove" ("Every computer that has reported in. Remove forgets it: its sync plan, its status and its membership of the studio."); empty: "No computer has reported in yet.";
 - suspended people, with each suspension's details;
-- computers waiting to be approved, each with a suggested owner and name when that computer has already said who it is (see "A new computer is approved under its owner");
 - people the studio knows by a computer, a plan or a report who have no account ("Known to the fleet (a device, a plan or a report), but no account here."), with remove, download data and erase history.
 
-Only real people appear in any list of people; the product's own accounts never do. When one part of this page cannot be read right now, it says so for that part only and shows the rest.
+A computer appears on this page, under the person who signed in on it, as soon as it has signed in; no admin approves it (see Accounts, privacy and the legal paperwork: How a computer proves who it belongs to, "A computer becomes a person's when they sign in on it"). Only real people appear in any list of people; the product's own accounts never do. When one part of this page cannot be read right now, it says so for that part only and shows the rest.
 
 - Who: an admin. Anyone else is told "admins only".
-- Name and search words: People and computers. Search words: people, users, editors, computers, accounts, approve.
-
-### A new computer is approved under its owner
-
-A computer not yet tied to a person waits for an admin to approve it. Approving means choosing its existing owner, filled in from what the computer said; one person may own many computers, so a second computer takes the same owner as the first. Approving it under a name the dashboard does not know is refused unless the admin ticks CREATE NEW EDITOR: "'<name>' is not an editor this dashboard knows. Pick the OWNER of this computer: one editor can own several computers, so a second computer takes the same username as the first. Tick CREATE NEW EDITOR if this really is a new person." A computer waiting more than 24 hours is raised as a problem (see "The kinds of problem the server finds and where each leads"). Once approved, sharing follows by itself within a minute.
-
-- Who: an admin.
-- On its own: suggests the owner and name from what the computer said.
-- By hand: the admin chooses the owner, or a new person by explicit choice.
+- Name and search words: People and computers. Search words: people, users, editors, computers, accounts.
 
 ### People are shown by the name they chose
 
@@ -836,7 +827,7 @@ An editor account at least 30 days old (or of unknown age) that no computer has 
 
 Every change to plans, people, computers, builds and settings is kept in a history of who did what and when, for 180 days. Nothing edits or removes a line, except removing lines past 180 days; deleting a person changes how their lines name them but does not remove the lines (see Accounts, privacy and the legal paperwork: What the product records about a person).
 
-Recorded acts include: ticks, unticks, undos and plan copies; creating, using a folder as, archiving and unarchiving a project; the studio-wide stop and start; downloads resumed; asking a computer for diagnostics; a person deleted; a computer approved or forgotten; a build published, made current or withdrawn; an update pushed to a computer and its withdrawal or expiry; a file moved and sent again; a Resolve undo asked for; site settings saved; asking a computer to change its settings and that being withdrawn, applied, refused or expiring; dismissing a problem, and a problem closing itself; changes to how many removals are allowed, and approving removals that were held back.
+Recorded acts include: ticks, unticks, undos and plan copies; creating, using a folder as, archiving and unarchiving a project; the studio-wide stop and start; downloads resumed; asking a computer for diagnostics; a person deleted; a computer forgotten; a build published, made current or withdrawn; an update pushed to a computer and its withdrawal or expiry; a file moved and sent again; a Resolve undo asked for; site settings saved; asking a computer to change its settings and that being withdrawn, applied, refused or expiring; dismissing a problem, and a problem closing itself; changes to how many removals are allowed, and approving removals that were held back.
 
 The page shows the newest 200 lines: when (exact time on pointing), who (display name, sign-in name on pointing; "?" when unknown, never blank), the act, its subject and its details as recorded (damaged details shown as plain text). A filter ("filter by project, editor, computer, version or action") with "filter" and "clear" searches across subject, who and act. It does not refresh by itself. Empty: "Nothing in the history matches "<q>"." or "Nothing has been recorded yet. Every tick, stop, deletion and publish from here on lands in this list."
 
@@ -845,7 +836,7 @@ The page shows the newest 200 lines: when (exact time on pointing), who (display
 
 #### Lessons
 
-- Met: DSH-065, DSH-066, DSH-067, DSH-068, DSH-069, DSH-070, DSH-071, DSH-072, DSH-073.
+- Met: DSH-065, DSH-067, DSH-068, DSH-069, DSH-070, DSH-071, DSH-072, DSH-073.
 
 ## Reports from computers
 
@@ -1037,7 +1028,6 @@ Each protection line that is missing (each project or computer, where a line has
 | More moves by hand at once than could be followed | error | the Overview |
 | A project is ticked for a computer that is not being sent it | error | the project |
 | A computer is being sent a project nobody ticked for it | warning | the Overview |
-| A computer has waited more than 24 hours to be approved | warning | the people and computers page |
 | Two computers claim one identity (a cloned computer) | error | the Overview |
 | A computer has been silent for a day | error | the computer |
 | A computer has been red for an hour, cause unknown | error | the computer |

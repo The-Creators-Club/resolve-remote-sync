@@ -470,3 +470,4 @@
 - resolve-on-the-editors-computer F6 | changed: Where each file of a sorted clip goes | "(Resolve reads the grade there)" dropped
 - server-install-and-running-1 F11 | changed: The studio's proxies, sound and project files go off site every night | own setting dropped; the record's page shows the server's "Nightly off-site backup" switch, time and Run now
 - server-install-and-running-1 F12 | no change here: server-install-and-running-1 lists the record's daily backup in the off-site copy; "The record survives losing the NAS" already agrees
+- page 32, 32.4 | changed: Where each file of a sorted clip goes | one sentence: filing an interview hands nothing to Timeline Cards; it starts processing when a person drops its clips onto the episode, pointing to cards-footage-in

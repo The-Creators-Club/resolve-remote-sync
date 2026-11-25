@@ -22,13 +22,17 @@ The answers, in short:
 - 32.6 A file move never lapses: it waits for a computer however long it is
   away. It is the one exception to the 14-day rule for requests to a
   computer.
-- 32.7 Shortening keeps only the slider. The review of suggestions one by
-  one goes.
+- 32.7 CORRECTED 2026-11-25: shortening keeps BOTH the review and the
+  slider, as the editor has them (his first answer rested on a wrong
+  description by the lead and was asked again). Nothing about shortening
+  changes in any piece; the 32.7 part of the cards-editor-4 section below
+  is void.
 - 32.8 The red Send to Resolve button stays in the editor's header, exactly
   as the editor has it.
 
 Lesson ids that no longer cross, and must not be named in any piece's
-Lessons lines: DSH-066, CE1-028, CE1-030, CE2-099, CE3-060. If your piece
+Lessons lines: DSH-066. (CE1-028, CE1-030, CE2-099 and CE3-060 were listed
+here until 32.7 was corrected; they cross again.) If your piece
 names one, take the id out of the line.
 
 ## accounts-privacy-legal

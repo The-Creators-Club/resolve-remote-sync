@@ -291,6 +291,8 @@
 - Error pages show only what kind of error happened | (DSH-142)
 - A change that did not come from the dashboard's own page is refused | a request whose browser hides its origin is refused on anything that changes data or drives the editing program (DSH-138)
 - Every setting of the site | one time zone for the site, folding the alert time zone into it; held by server-install-and-running-2 since the joins (2026-11-24)
+- An admin makes a link that lets anyone holding it download a folder of the studio's tree | the one link that hands a client full-quality files, made by an admin for any folder of the tree whatever parts are switched on; wording carried from footage-sorter-and-camera-cards-3 (the owner's answer 32.5, 2026-11-24)
+- An admin sees every link handed outside the studio and can switch one off at once | the one list of every link handed outside the studio, each saying its kind (a folder to download; a client folder to preview while the b-roll archive is on); wording carried from footage-sorter-and-camera-cards-3 (the owner's answer 32.5, 2026-11-24)
 
 ## Parts of items left out
 
@@ -334,6 +336,8 @@
 - music / Adding tracks to the library | Oversized requests are refused before they are read | the size limit a person meets when adding music
 - cards-editor / Speed and smoothness | A change that did not come from the dashboard's own page is refused | the refusal and its sentence shown in Timeline Cards
 - resolve-on-the-editors-computer / Colour look-up tables (LUTs) | Every setting of the site | the shared libraries every computer gets (the setting itself is held by server-install-and-running-1)
+- footage-sorter-and-camera-cards / Downloading originals and sharing folders | An admin makes a link that lets anyone holding it download a folder of the studio's tree | the page the person holding a folder link opens and downloads from
+- broll / Client folders and links | An admin sees every link handed outside the studio and can switch one off at once | the client folders to preview, listed here while the b-roll archive is on
 
 ## Settled from the present product
 
@@ -374,3 +378,4 @@
 - youtube F1 | changed: Every setting of the site | the extra-measures setting line dropped; points to youtube's heading under the settled name
 - youtube F2 | changed: Every setting of the site | says it lists the core's settings and each part's own are in that part's piece
 - youtube F3 | changed: Every setting of the site | the YouTube downloads setting line dropped; points to youtube
+- page 32, 32.5 | changed: An admin makes a link that lets anyone holding it download a folder of the studio's tree ; An admin sees every link handed outside the studio and can switch one off at once | this piece becomes the home of the one full-quality download link (admin, any folder of the tree, whatever parts are on) and of the one list of links handed outside the studio

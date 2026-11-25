@@ -52,14 +52,14 @@
 - 01-040 | An editor is told once when their computer may not be recognised after a rename, and syncing carries on
 - 12-056 | A renamed computer keeps its plan and everything waiting for it ; A disk copied onto a second computer is caught and explained
 - 15-079 | A disk copied onto a second computer is caught and explained
-- 15-080 | An admin approves a new computer and ties it to an editor
-- 16-022 | An admin approves a new computer and ties it to an editor
+- 15-080 | left out: settled by the owner (2026-11-24, page 32, 32.1)
+- 16-022 | A computer belongs to a person only once it is tied to a known editor
 - 16-027 | A new server over a NAS editors already sync from keeps what each computer syncs
 - 16-028 | A computer belongs to a person only once it is tied to a known editor
 - 20-006 | A computer belongs to a person only once it is tied to a known editor
 - 20-020 | A disk copied onto a second computer is caught and explained
 - 20-022 | A renamed computer keeps its plan and everything waiting for it
-- 21-015 | An admin approves a new computer and ties it to an editor
+- 21-015 | left out: settled by the owner (2026-11-24, page 32, 32.1)
 - 01-034 | A project folder moved or renamed by the editor is noticed, named and can be put back in one click
 - 02-015 | When an admin renames or moves a project on the server, every editor's copy follows by itself
 - 02-016 | When an admin renames or moves a project on the server, every editor's copy follows by itself
@@ -166,10 +166,9 @@
 - Sync onto the NAS never depends on changing permissions | SYN-132
 - Moving or restoring a file never overwrites one already there, on any system | SYN-134
 - A file of zeros left by a power cut is never sent over a good copy | SYN-135
-- An admin approves a new computer and ties it to an editor | the admin approves from the list of computers waiting and chooses the editor, in place of a hand-run step where a device identity and a username are typed in; "applied N of M" (SYN-126); a known computer back with a new identity is shown (SYN-125)
 - A disk copied onto a second computer is caught and explained | found once, in one wording, in place of three findings
 - The dashboard knows what each computer holds, project by project | what a computer or an editor-writable file reports is capped, with one entry saying how many were left out (SYN-127)
-- A computer belongs to a person only once it is tied to a known editor | a computer that belongs to nobody is listed as such, in place of a line only in the server's log
+- A computer belongs to a person only once it is tied to a known editor | a computer that belongs to nobody is listed as such, in place of a line only in the server's log; the tie is the sign-in, with no approval step (page 32, 32.1); "applied N of M" (SYN-126); a known computer back as if new needs only a new sign-in (SYN-125)
 - A remote editor's downloads take the studio's fastest path, and an admin can choose it | the per-computer view shows which connection each computer's downloads use and says when it is the slow one; a connection not used is said there, not only in the app's log
 - When an admin renames or moves a project on the server, every editor's copy follows by itself | the sentences with the help for the editing program off (owner's requirements, section 2)
 - A project folder moved or renamed by the editor is noticed, named and can be put back in one click | on macOS the answers name Finder, since a Mac has no Explorer
@@ -197,7 +196,7 @@
 - 02-034 | files held until their date (SYN-124)
 - 21-015 | the device identity's shape and length (63 characters), and naming the computer with the editor's NAS username typed by hand: insides of one way of sharing
 - 20-006 | the shape of a valid sign-in name (belongs to accounts-privacy-legal) and "a raw device identifier"
-- 16-022 | approval on the NAS as a step of its own, and the line only in the server's log
+- 16-022 | approval on the NAS as a step of its own (no computer is approved: page 32, 32.1), and the line only in the server's log
 - 16-027 | the words "seed deferred" reworded to plain words
 - 16-028 | "an older app's computer shared by person": one part older than another
 - 15-079 | the three separate findings and the sync-network clash fix "reinstall or reset that computer's sync identity" (an inside of one way of sharing)
@@ -228,6 +227,7 @@
 - sync / Studio-wide stops and the editor's pause | The app's menu says in one phrase what syncing is doing now | stops and the pause
 - accounts-privacy-legal / What the product records about a person | The dashboard lists what each computer still owes, and never claims "nothing" when it cannot tell | a computer withholding its file list
 - accounts-privacy-legal / Who may sign in | A computer belongs to a person only once it is tied to a known editor | what a known editor and a sign-in name are
+- accounts-privacy-legal / How a computer proves who it belongs to | A computer belongs to a person only once it is tied to a known editor | a computer becomes a person's when they sign in on it
 - proxies-and-file-moves / Relinking Resolve after a move | When an admin renames or moves a project on the server, every editor's copy follows by itself | relinking Resolve after the folder moved
 - resolve-on-the-editors-computer / Clip paths and media outside the shared tree | Each computer says in one sentence why it is not syncing, and since when | clips outside the tree that will never upload
 - proxies-and-file-moves / Moves that reach every computer | When an admin renames or moves a project on the server, every editor's copy follows by itself | the server side of a project moved
@@ -235,7 +235,7 @@
 - dashboard / Transfers and the queue | The app and the dashboard show the same live picture of what is moving | the Transfers page and the transfer history
 - dashboard / Alerts by mail | Admins are told when syncing has been down or failing on a computer for an hour | delivery of alerts
 - dashboard / Problems the server finds | A disk copied onto a second computer is caught and explained | the overview's problems
-- dashboard / People and computers | An admin approves a new computer and ties it to an editor | the list of computers waiting for approval
+- dashboard / People and computers | A computer belongs to a person only once it is tied to a known editor | the computer shown under the person who signed in on it
 - editor-app / Installing and setting up | The editor picks the folder for the project tree when setting up | the set-up screens
 - editor-app / The tray or menu-bar icon and its menu | The app's menu says in one phrase what syncing is doing now | the menu itself
 - editor-app / Starting, staying running and crashing | Syncing comes back by itself when it stops running | crash reports and restarts of the app
@@ -286,3 +286,4 @@
 - sync-2 F9 | changed: Every editor is told whether it is safe to shut down or unplug their computer | the app added as a way in
 - sync-2 F10 | no change here: sync-1 changes its future-dated wording
 - sync-2 F11 | changed: A file changed in two places at once keeps both versions | count and up to 20 files with their paths, marked as cut with how many more
+- page 32, 32.1 | changed: An admin approves a new computer and ties it to an editor (removed) ; A computer belongs to a person only once it is tied to a known editor ; The way footage travels is chosen by measuring real transfers ; Each computer says in one sentence why it is not syncing, and since when | no approval of computers: the approval behaviour, its name and search words, and the 24-hour waiting warning removed; the tie is the sign-in, with a pointer to Accounts; projects arrive within about a minute of signing in; a reinstalled computer needs only a new sign-in; "applied N of M" kept for sharing several projects; a computer finds the NAS once its editor has signed in; "an admin's approval" dropped from the reasons' opening (the reasons table had no approval row)

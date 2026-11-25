@@ -75,6 +75,8 @@ A person hands the board to the Timeline Cards editor, and its order becomes a c
 | A paragraph card | A cut on its interview's clip, with its speaker, colour and text, playing its highlighted part, or the whole paragraph when nothing is highlighted, through to its last word however long it is |
 | A note card | One note row per line of the card, in order, so a flag card of 12 lines lands as 12 consecutive note rows; an empty card is one note row reading "(empty card)" |
 | A card whose paragraph cannot be found | An "unmatched" note holding the card's text and a link to its paragraph |
+| An interviewer question the owner's notes name for that place | A cut at that place that plays, shown in the editor as exempt |
+| Any other interviewer question, in play or set aside | The shelf category "Interviewer questions", from which it cannot be placed in the cut |
 
 A paragraph card is tied to its paragraph and its timed words, so it lands without any search for its words. Before anything is written, a preview shows the beginning of the result first. Afterwards the person is told how many cards were placed and how many did not land (each of those with its number, paragraph, speaker, first words and the reason), how many notes, alternates and set-aside cards there are, and for each interview which clip its cards were placed on.
 
@@ -154,7 +156,7 @@ A person drags a card to any place in any column. While it is dragged, the card 
 
 ### Selecting several cards and acting on them at once
 
-A person selects one card or many, with the same keys and gestures as in the Timeline Cards editor, and moves, sets aside or deletes them together as one undoable step.
+A person selects one card or many, with the same keys and gestures as in the Timeline Cards editor, and moves or removes them together as one undoable step. Removing them (Delete pressed twice, or Ctrl+X) sets every paragraph card aside, from this episode's transcripts or another's: it is never destroyed (see "Setting cards aside and tagging the cold open"). A note card the person wrote goes from the board, and Undo brings it back.
 
 - Who: anyone signed in who can open the board.
 
@@ -326,7 +328,7 @@ These rules are what the assistant follows whenever it sorts, orders, checks or 
 
 The house style the assistant follows unless asked otherwise:
 
-- never any interviewer question;
+- never any interviewer question, except one the owner's notes name for a place;
 - withhold, then reveal: the film raises one big question early and keeps it open until near the end, with smaller withheld cycles where they help, never one demanded per section, and never a section that opens on its own answer;
 - part of a sentence can be the whole card;
 - end sections on a cliffhanger;
@@ -370,13 +372,13 @@ Every paragraph goes into exactly one theme: none twice, none thrown away. Place
 
 ### Interviewer questions never play
 
-The film is one conversation between the interviewees, with no voiceover and no interviewer. On the board, an interviewer question is kept, never dropped: one that sets up an answer is set aside in the set-aside group of its answer's theme, and one that sets nothing up ("Could you repeat that?", "Shall we start again?", "Do you want some water?") goes to "Uncategorised". A question anywhere in the order that plays is flagged as a fault, and the person is told how many there are and where, so he can set each one aside. Questions already set aside are still marked as questions but not counted in the warning. A question that the owner's notes name for a place in the film is exempt, and is shown as exempt rather than as a fault. In the unused material, questions are marked as context only, and are never proposed for the cut, not even as a bridge.
+The film is one conversation between the interviewees, with no voiceover and no interviewer. On the board, an interviewer question is kept, never dropped: one that sets up an answer is set aside in the set-aside group of its answer's theme, and one that sets nothing up ("Could you repeat that?", "Shall we start again?", "Do you want some water?") goes to "Uncategorised". A question anywhere in the order that plays is flagged as a fault, and the person is told how many there are and where, so he can set each one aside. Questions already set aside are still marked as questions but not counted in the warning. A question that the owner's notes name for a place in the film is exempt, and is shown as exempt rather than as a fault: it is handed to the cut at that place and plays there, and the editor shows it as exempt too. Every other question is handed to the cut's shelf, in "Interviewer questions", and cannot be placed (see "The board hands its order to the cut"). In the unused material, questions are marked as context only, and are never proposed for the cut, not even as a bridge.
 
 - By hand: a person can drag a question into play. It is then flagged until his notes name it for that place.
 
 ### Themes run in story order
 
-Each theme has a role: opening, body or ending. A theme with no stated role is the opening if it is called "Personal Stories", the ending if it is called "Ending" (any letter case), and body otherwise. A sorted board opens with Personal Stories, then the body themes in the order a viewer should meet them (context before consequence, problem before response, a specific case before what it means), never by size, then Ending, then "Uncategorised" last. A sorted board never doubles a card and never brings back a card a person deleted. The person is told why the middle themes run in the order chosen.
+Each theme has a role: opening, body or ending. A theme with no stated role is the opening if it is called "Personal Stories", the ending if it is called "Ending" (any letter case), and body otherwise. A sorted board opens with Personal Stories, then the body themes in the order a viewer should meet them (context before consequence, problem before response, a specific case before what it means), never by size, then Ending, then "Uncategorised" last. A sorted board never doubles a card and never brings back into play a card a person set aside or removed. The person is told why the middle themes run in the order chosen.
 
 - On its own: each theme's role and the order of the themes on a new board.
 - By hand: a person sets a theme's role and drags themes into any order.

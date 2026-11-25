@@ -43,3 +43,11 @@ list as they run today.
 ## Rulings of a settler the lead changed
 
 (none yet)
+
+(none by line; where the lead and a settler differed, the lead's line in `_lead.txt` says why)
+
+## The lead's own mistakes that day, for whoever does this next
+
+1. The first five fix lists hid the settler's note on `apply` verdicts, so fixers left settled findings alone (fixed in `build_join_bundles.py`; the five were sent back).
+2. A look-up of what the product shows today was allowed to overrule the owner's ruling about who is shown in an episode (corrected; a ruling outranks present behaviour).
+3. Question 32.7 was put to the owner with a wrong description of the shortening slider (asked again; both the review and the slider stay).

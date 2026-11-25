@@ -37,6 +37,7 @@ Stays behind: never shown to the session that rebuilds the product.
 - **Recommended:** A, because one way of shortening is the fewest parts, and the slider already shows the cut getting shorter as it moves.
 - **What you would notice:** with A or B one of the two shortening panels goes.
 - (cards-editor-1-Q9)
+- **Taken back by the owner 2026-11-25** (decision page 32, 32.7): the question's "the slider already shows the cut getting shorter" hid that the slider only previews and the review is what cuts. Asked again with that said, he keeps both, as the editor has them.
 
 ### 24.5 Should the lane keep taking its keys from the editor's own keyboard preset in Resolve, now that nothing before the hand-over is meant to need an editing program?
 

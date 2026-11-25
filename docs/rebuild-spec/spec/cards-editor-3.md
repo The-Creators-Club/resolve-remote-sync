@@ -561,9 +561,9 @@ The aids show on transcript paragraphs, on cards (including shelf items) and in 
 | 9 | Fillers | "Hesitations and filler words, marked as trimmable" | greyed with a faint strike-through |
 | 10 | Romanisation under Cyrillic | "Latin letters under Russian and Ukrainian words" | a "Romanised" line under the original (transcript and cards) |
 
-- Modes per aid: Off (never), Not read (on for languages not in "Languages I read"; the default for eight aids), All (on for every language; the default for aid 1). Aid 7 is Off by default.
+- Modes per aid: Off (never), Not read (on for languages not in "Languages I read"; the default for seven aids), All (on for every language; the default for aid 1). Aids 7 and 9 are Off by default: the fillers aid marks nothing until a person switches it on.
 - Languages I read: toggles for English, Chinese, Russian and Ukrainian; default English and Chinese. Traditional Chinese counts as Chinese; a mixed Russian/Ukrainian clip counts as Russian.
-- So by default a Russian or Ukrainian clip shows every aid except the word-by-word gloss, and a Mandarin or English clip shows only aid 1.
+- So by default a Russian or Ukrainian clip shows every aid except the word-by-word gloss and the fillers, and a Mandarin or English clip shows only aid 1.
 - These rows are the one place each aid is switched: the transcript, the cards and the lane (its language aids and its "Word by word" literal line, which is aid 7) all draw from them.
 - The settings are kept per device (this browser); unreadable settings fall back to the defaults; if the browser refuses to keep them, they last for the session.
 - No mark changes size or weight: every mark is an underline or a tint, so nothing reflows. Each kind has its own line style besides its colour, colour is never the only signal, and marks never cover a selection. The "Romanised" and "Word by word" lines cannot be selected as text.
@@ -581,7 +581,7 @@ The safe cut points and the key that moves an edge to one are described in Timel
 - Setting: Join check. Does: has the assistant read the joined original again after a splice or trim. Default: Not read. Who: anyone who can open the editor. Applies to: a computer. Search words: join check, splice, meaning changed, grammar break.
 - Setting: Word-by-word gloss. Does: shows a literal English word under each original word. Default: Off. Who: anyone who can open the editor. Applies to: a computer. Search words: gloss, word by word, literal English, reading aid.
 - Setting: Names, places, numbers, dates. Does: marks them so they can be heard and checked. Default: Not read. Who: anyone who can open the editor. Applies to: a computer. Search words: names, places, numbers, dates, reading aid.
-- Setting: Fillers. Does: marks hesitations and filler words as trimmable. Default: Not read. Who: anyone who can open the editor. Applies to: a computer. Search words: fillers, hesitations, um, trimmable, reading aid.
+- Setting: Fillers. Does: marks hesitations and filler words as trimmable. Default: Off. Who: anyone who can open the editor. Applies to: a computer. Search words: fillers, hesitations, um, trimmable, reading aid.
 - Setting: Romanisation under Cyrillic. Does: shows Latin letters under Russian and Ukrainian words. Default: Not read. Who: anyone who can open the editor. Applies to: a computer. Search words: romanisation, Cyrillic, Latin letters, Russian, Ukrainian.
 - Setting: Languages I read. Does: decides which languages the aids set to Not read stay off for. Default: English and Chinese. Who: anyone who can open the editor. Applies to: a computer. Search words: languages I read, reading aids, my languages.
 - When the assistant is off: the gloss, the word links of aid 1 and the join check by the assistant are absent, and their rows are not offered; every other aid still shows.

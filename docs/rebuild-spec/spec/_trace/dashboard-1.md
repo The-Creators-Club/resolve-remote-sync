@@ -84,8 +84,8 @@
 - 16-036 | Every finished file lands in the history and is kept 7 days
 - 20-054 | The Transfers page shows what is moving now, file by file ; A project's page shows which originals, proxies and Resolve clips each computer holds
 - 20-055 | Every finished file lands in the history and is kept 7 days
-- 11-044 | An admin sees every person and computer in one place ; A new computer is approved under its owner
-- 11-045 | A new computer is approved under its owner
+- 11-044 | An admin sees every person and computer in one place
+- 11-045 | left out: settled by the owner (2026-11-24, page 32, 32.1)
 - 11-051 | An admin forgets a computer
 - 12-009 | An admin forgets a computer
 - 13-010 | People are shown by the name they chose
@@ -381,7 +381,6 @@
 - Whether a computer is safe to close | DSH-031.
 - Proxies left without their original are reported once per folder | DSH-049.
 - A renamed or cloned computer keeps what is its own | DSH-070 and DSH-071: clones both shown and flagged, a rename counts after five minutes of silence, a rename onto another's name changes neither plan.
-- A new computer is approved under its owner | DSH-066 and DSH-078: an approval waiting over 24 hours is a problem.
 - The server looks for problems about every ten minutes | DSH-088: an overdue scheduled check is itself a problem.
 - The server counts what each project holds on the NAS | DSH-077: a count that would drop over 90% of a project's files is not taken. DSH-055: files never sent are never owed.
 - A computer that cannot sign in is still shown, and admins are told | DSH-020, DSH-021: "nobody signed in" and "cannot sign in".
@@ -431,7 +430,6 @@
 - 20-001 | the health of each project's sharing kept by the server and what the NAS still has to receive: insides.
 - 20-003 | the 15 minutes a new project gets before its absence counts: an arrangement of how sharing is set up.
 - 11-044 | NAS editor accounts, file-access keys waiting for approval, and devices seen by the server's file sync: arrangements of the present NAS access and sync; sign-in kinds go to accounts-privacy-legal.
-- 11-045 | checking the shape of a typed-in computer identity: an arrangement; approval is by choosing.
 - 11-051, 12-009, 16-055 | removing the computer from the server's file sync before anything else: an arrangement; the promise that forgetting is all or nothing is written.
 - 20-024 | the list of record kinds removed: insides, summarised.
 - 20-019 | the computer's sharing connection: an inside.
@@ -527,3 +525,5 @@
 - sync-1 F6 | changed: An admin resumes a computer's stopped downloads (renamed from "An admin resumes a computer's stopped proxy download") ; Each computer's issues are listed worst first, each explained ; Fleet-wide trouble is shown above the computers ; Each computer shows the work in progress on it ; An admin asks one computer to do something and is told when it will happen ; An admin reads the history of who changed what ; Files waiting are on hold only for the computer's own reason | "downloads", not "proxy download", for the safety stop and its Resume
 - sync-2 F1 | changed: Each computer leads with one headline | as dashboard-1 F23
 - sync-2 F2 | changed: Each computer leads with one headline ; A computer that cannot sign in is still shown, and admins are told | uses "Not syncing: this computer cannot sign in to the server: <reason>"
+- page 32, 32.1 | changed: An admin sees every person and computer in one place ; A new computer is approved under its owner (removed) ; A project's page lists every computer that shares it and what each is missing ; An admin reads the history of who changed what ; The kinds of problem the server finds and where each leads | no approving of computers: the behaviour, the waiting list, the 24-hour problem row, "approved" among recorded acts and "approve" in search words gone; a computer appears under its signer at once, pointing to Accounts; the empty project line now says no editor's computer holds the project yet (described, not quoted); DSH-066 out of the Lessons line (dashboard-1 F24 settled the same way)
+- page 32, 32.6 | changed: An admin asks one computer to do something and is told when it will happen | the 14-day rule now names its one exception, a file move, pointing to Proxies and file moves' "A move waits for each computer however long it is away"

@@ -22,6 +22,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -123,6 +124,87 @@ SHARED_ASSET_FOLDERS = [
 ]
 
 SHARED_ASSET_FOLDER_IDS = frozenset(fid for fid, _rel, _label in SHARED_ASSET_FOLDERS)
+
+# Every shared library lives under Assets/ -- the dashboard's collector builds
+# the NAS path as <assets prefix>/<rel minus "Assets/">, so a rel outside it
+# names nothing the server provisions. Refusing it here also keeps a bad site
+# row from pointing a fleet-wide, no-tick Syncthing folder at the tree itself.
+_ASSET_PREFIX = "Assets/"
+_ASSET_LABELS = {rel: label for _fid, rel, label in SHARED_ASSET_FOLDERS}
+
+
+def asset_folder_id(rel: str) -> str:
+    """The Syncthing folder id for a shared library's rel path.
+
+    server/common.slugify and dashboard/provision.slugify, byte for byte (the
+    dashboard mints the NAS folder's id with it, so a different answer here is
+    a folder this machine never matches): lower-case, every run of characters
+    outside a-z0-9 becomes one '-'. "Assets/Music" -> "assets-music".
+    server/tests/test_cross_component.py pins the three equal. Raises
+    ValueError for a rel with no letter or digit, as they do."""
+    text = str(rel).replace("\\", "/").strip().lower()
+    slug = "-".join(p for p in re.split(r"[^a-z0-9]+", text) if p)
+    if not slug:
+        raise ValueError(f"asset_folder_id({rel!r}) produced an empty id")
+    return slug
+
+
+def shared_asset_folders_for(rels: Any) -> list[tuple[str, str, str]]:
+    """(id, rel, label) triples for the site's shared library rel paths.
+
+    2026-11-28: the companion used to accept only the two libraries compiled
+    in, whatever the site said, so a site adding one (Assets/Music, so a
+    project's music stops being offline on every remote editor) needed a
+    release AND still reached nobody, because site.normalise dropped the list.
+    Now the site's list is the list, exactly as it is for the dashboard and
+    the server (provision.shared_asset_folders_for). Sanitised the same way:
+    `..` and empty segments dropped, a rel outside Assets/ and a duplicate id
+    skipped with a warning, never raised -- this runs on every reconcile."""
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for raw in rels or []:
+        rel = str(raw).replace("\\", "/").strip().strip("/")
+        rel = "/".join(p for p in rel.split("/") if p and p != "..")
+        if not rel.startswith(_ASSET_PREFIX) or rel == _ASSET_PREFIX.rstrip("/"):
+            log.warning("shared asset folder %r is not a library under Assets/; left out", raw)
+            continue
+        try:
+            fid = asset_folder_id(rel)
+        except ValueError:
+            log.warning("shared asset folder %r has no letter or digit for a folder id; "
+                        "left out", raw)
+            continue
+        if fid in seen:
+            log.warning("shared asset folder %r repeats folder id %r; left out", raw, fid)
+            continue
+        seen.add(fid)
+        out.append((fid, rel, _ASSET_LABELS.get(rel, rel)))
+    return out
+
+
+def site_shared_asset_folders(site: Any = None) -> list[tuple[str, str, str]]:
+    """This site's shared libraries, from the cached manifest; the built-in
+    SHARED_ASSET_FOLDERS when the site names none (a dashboard older than the
+    list, no cache yet, or a list that sanitised to nothing). Never raises.
+
+    The defaults on an empty answer, never "no libraries": an editor whose
+    cache was lost must keep the LUTs and the gallery it already has. A site
+    that DROPS a library from a non-empty list just stops being reconciled
+    for it here; nothing removes the folder or its files (the server's rule
+    too: "never deletes folders")."""
+    try:
+        if site is None:
+            # Imported here, not at the top: this module is the low layer the
+            # sync package is built on and has never pulled the app's config
+            # and upgrade modules in at import time.
+            from .. import site as site_mod
+            site = site_mod.cached_site()
+        rels = (site or {}).get("shared_asset_folders") or []
+        folders = shared_asset_folders_for(rels)
+    except Exception:
+        log.debug("could not read the site's shared asset folders", exc_info=True)
+        folders = []
+    return folders or list(SHARED_ASSET_FOLDERS)
 
 ASSET_JUNK_IGNORE_LINES = [
     "(?i)**/.DS_Store", "(?i).DS_Store",

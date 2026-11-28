@@ -34547,3 +34547,69 @@ unknown pids, transition-only recording, the watch loop) and
 `companion/tests/test_script_server.py` (the measured rows; CR-68
 still holds with untrusted states; a healthy machine unchanged; an
 unreadable table fails open).
+
+## CR-387 - a project's music was offline on every remote editor: the music library was not a synced folder, and the companion could not have accepted it if it were - FIXED in repo (companion 0.10.0: site.py, sync/syncthing_admin.py, sync/shared_folders.py; music indexer config), unshipped; the site setting is the switch
+
+**Seen 2026-11-27.** Ruskin: "music in Pangolins hasn't been syncing", the
+clips offline in Resolve. The project's own `Animals/Audio/Music` had synced
+perfectly (54 files on the NAS, the same 54 by name and size on
+DESKTOP-LQQ41TC). The offline ones were 14 clips in the project's
+`Audio/Music` bin linked to the shared library, `P:\Assets\Music\...`. That
+library is not a shared asset folder (only `Assets/Luts` and `Assets/Stills`
+were), so a remote editor only ever had a track from it that they had sent
+from /music themselves (`broll_fetch`'s one-file download). His log said it
+in words: `clip's original is not on this computer and no usable proxy for
+it is either: P:\Assets\Music\...`. (Same report, other cause: the Adobe
+Podcast Interviews-VI audio is linked at `X:\Vault\...`, outside the tree
+entirely - see the MulticamPipeline side, not fixed here.)
+
+The owner's ask: `Assets/Music` becomes a synced folder. 9.6 GB, ~400 audio
+files, no video.
+
+**The latent bug underneath.** The site list was meant to be data since
+2026-08-17 (`[tree] shared_assets`, Settings' `shared_asset_folders`), and
+the dashboard and the server both honour it: the collector creates the NAS
+folder and shares it with every editor. The companion never did. Its
+`SharedFolderManager` reconciled only the two compiled-in libraries, and
+`site.normalise` kept only STRINGS from `shared_asset_folders` while the
+dashboard publishes OBJECTS (`{"id", "rel", "label"}`), so the list never
+survived into `site.json` anyway. A library a site added was offered by the
+NAS and accepted by nobody, and test_cross_component's comment ("learns the
+registry from the folders the server shares with it") described a mechanism
+that did not exist.
+
+**Fix.**
+- `site.normalise` keeps the `rel` of an object entry (still accepts a bare
+  string). The id is NOT taken from the wire.
+- `syncthing_admin.shared_asset_folders_for(rels)` / `asset_folder_id(rel)`:
+  the server's slugify rule byte for byte, the same sanitising as
+  `provision.shared_asset_folders_for` (`..` and empty segments dropped,
+  duplicate ids skipped and logged), plus one rule of its own: a rel outside
+  `Assets/` is refused, since the collector only provisions under the assets
+  prefix and a fleet-wide no-tick folder must never be pointed at the tree.
+- `site_shared_asset_folders()` reads the cached manifest and falls back to
+  the built-in two when the site names none (old dashboard, no cache, a list
+  that sanitised to nothing): an editor never loses its LUTs and gallery to
+  a lost cache.
+- `SharedFolderManager.folders` is now a property: an explicit list stays
+  fixed (tests), otherwise the site's list, re-read on each use, so a library
+  an admin adds arrives on the next sequencer pass without a tray restart.
+  Dropping a library from the list stops its reconcile; nothing deletes it.
+- Music indexer: `.stversions` and `.stfolder` join `_stems` in
+  `EXCLUDE_DIRS`. Staggered versioning moves every replaced or deleted track
+  into `Assets/Music/.stversions`, and the sweep would have indexed each one
+  as a second track.
+- No change to the vendor defaults (still Luts + Stills): Music is THIS
+  site's choice, set in Settings.
+
+**Rollout order.** Either order is safe. The site setting first makes the
+NAS create `assets-music` and offer it; companions before 0.10.0 leave an
+unknown offer pending (harmless). 0.10.0 accepts it into
+`<local_root>/Assets/Music` on the next pass. Base rig: its local root IS
+the share, it accepts nothing.
+
+Tests: `companion/tests/test_shared_folders.py` (a site-added library is
+reconciled and accepted at the right path, the fallback, the sanitising, an
+explicit list is not replaced), `companion/tests/test_site.py` (the object
+shape survives normalise), `server/tests/test_cross_component.py` (the
+companion's id rule pinned to the server's and the dashboard's).

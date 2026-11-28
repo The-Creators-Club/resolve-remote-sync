@@ -282,6 +282,61 @@ def test_the_manager_can_name_its_folders_for_the_halt(tmp_path):
             folder_id for folder_id, _rel, _label in shared_folders.SHARED_ASSET_FOLDERS]
 
 
+# -- the SITE's list of libraries (2026-11-28) ---------------------------------
+
+
+from ccsync_companion.sync import syncthing_admin  # noqa: E402
+
+
+def test_a_library_the_site_adds_is_reconciled_without_a_release(tmp_path, monkeypatch):
+    """Assets/Music, 2026-11-28: a project's music bin linked to
+    P:\\Assets\\Music was offline on every remote editor, because the
+    companion accepted only the two libraries compiled in. The site's list is
+    the list now, re-read on every use (no tray restart)."""
+    site = {"shared_asset_folders": ["Assets/Luts"]}
+    monkeypatch.setattr(shared_folders, "site_shared_asset_folders",
+                        lambda: syncthing_admin.site_shared_asset_folders(site))
+    manager = shared_folders.SharedFolderManager(FakeAdmin(), tmp_path)
+    assert manager.folder_ids() == ["assets-luts"]
+    site["shared_asset_folders"] = ["Assets/Luts", "Assets/Music"]
+    assert manager.folder_ids() == ["assets-luts", "assets-music"]
+
+    admin = FakeAdmin(pending={"assets-music": {"offeredBy": {"DEVICE-1": {}}}})
+    manager = shared_folders.SharedFolderManager(admin, tmp_path)
+    assert manager.reconcile()["assets-music"] == "accepted"
+    accepted = [c for c in admin.calls if c[0] == "accept"]
+    assert accepted[0][1:3] == ("assets-music",
+                                shared_folders.local_path_for(tmp_path, "Assets/Music"))
+
+
+def test_the_site_list_falls_back_to_the_built_in_libraries():
+    """No cache, an old dashboard, or a list that sanitises to nothing: the
+    editor keeps the LUTs and the gallery it already has."""
+    defaults = list(syncthing_admin.SHARED_ASSET_FOLDERS)
+    assert syncthing_admin.site_shared_asset_folders({}) == defaults
+    assert syncthing_admin.site_shared_asset_folders({"shared_asset_folders": []}) == defaults
+    assert syncthing_admin.site_shared_asset_folders(
+        {"shared_asset_folders": ["Projects", "../x"]}) == defaults
+
+
+def test_the_site_list_is_sanitised_and_keeps_known_labels():
+    got = syncthing_admin.shared_asset_folders_for([
+        "Assets/Luts", "Assets\\Music", "/Assets/Music/", "Assets/../SFX",
+        "Projects/2026", "Assets", "",
+    ])
+    assert got == [
+        ("assets-luts", "Assets/Luts", "Assets/Luts (LUT library)"),
+        ("assets-music", "Assets/Music", "Assets/Music"),
+        ("assets-sfx", "Assets/SFX", "Assets/SFX"),
+    ]
+
+
+def test_an_explicit_folder_list_is_not_replaced_by_the_site(tmp_path, monkeypatch):
+    monkeypatch.setattr(shared_folders, "site_shared_asset_folders",
+                        lambda: pytest.fail("the site must not be asked"))
+    assert _manager(FakeAdmin(), tmp_path).folder_ids() == [LUTS_FOLDER_ID]
+
+
 # -- SYNC-6: the drive is out --------------------------------------------------
 
 

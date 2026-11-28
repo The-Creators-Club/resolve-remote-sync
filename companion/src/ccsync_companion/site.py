@@ -182,7 +182,23 @@ def normalise(data: Any) -> Optional[dict[str, Any]]:
         out[key] = value.strip() if isinstance(value, str) else ""
     for key in LIST_KEYS:
         value = data.get(key, [])
-        out[key] = [str(v) for v in value if isinstance(v, (str, int))] if isinstance(value, list) else []
+        if not isinstance(value, list):
+            out[key] = []
+            continue
+        items = []
+        for v in value:
+            # The dashboard publishes shared_asset_folders as OBJECTS
+            # ({"id", "rel", "label"}, site_store._shape), and this loop used
+            # to keep only strings, so the site's list never survived here and
+            # a library a site added (Assets/Music, 2026-11-28) was offered by
+            # the NAS and accepted by no editor. The rel is what is kept: the
+            # folder id is re-derived from it by the fleet's one rule
+            # (syncthing_admin.asset_folder_id), never trusted from the wire.
+            if isinstance(v, dict):
+                v = v.get("rel")
+            if isinstance(v, (str, int)):
+                items.append(str(v))
+        out[key] = items
     for key, fallback in INT_KEYS.items():
         try:
             out[key] = int(data.get(key, fallback))

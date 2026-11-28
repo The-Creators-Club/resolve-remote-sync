@@ -35,9 +35,10 @@ from typing import Any, Callable, Optional
 
 from .syncthing_admin import (
     ASSET_STIGNORE_LINES,
-    SHARED_ASSET_FOLDERS,
+    SHARED_ASSET_FOLDERS,  # noqa: F401 - re-exported, the built-in fallback list
     missing_asset_ignore_lines,
     release_guard,
+    site_shared_asset_folders,
 )
 
 log = logging.getLogger("ccsync.sync.shared_folders")
@@ -236,7 +237,11 @@ class SharedFolderManager:
         # "/Volumes/SAMDISK 1" (ROOT_MISPLACED) permanently. Worse, the
         # folder is POINTED at the ghost. Absent means do nothing at all.
         self._root_present_fn = root_present_fn
-        self.folders = list(SHARED_ASSET_FOLDERS if folders is None else folders)
+        # An explicit list is fixed (tests, the borrowed-folder callers).
+        # Without one the SITE decides, re-read on every use so a library the
+        # admin adds is picked up on the next pass without a tray restart
+        # (2026-11-28; see syncthing_admin.site_shared_asset_folders).
+        self._fixed_folders = None if folders is None else list(folders)
         # "Is syncing halted on this machine?" (sync-safety-2, 2026-08-21).
         # The halt pauses folders through Syncthing's REST API and this
         # reconcile RELEASES a paused shared folder every time it runs, so
@@ -253,6 +258,17 @@ class SharedFolderManager:
         # SYNC-101 (sweep 2026-09-03): the failures themselves, kept for
         # problems() instead of being logged once and forgotten.
         self._problems = FolderProblems(now=now)
+
+    @property
+    def folders(self) -> list[tuple[str, str, str]]:
+        """(id, rel, label) for every library this machine keeps."""
+        if self._fixed_folders is not None:
+            return list(self._fixed_folders)
+        return site_shared_asset_folders()
+
+    @folders.setter
+    def folders(self, value: list[tuple[str, str, str]]) -> None:
+        self._fixed_folders = list(value)
 
     def problems(self) -> list[str]:
         """One sentence per shared folder that is not working on this

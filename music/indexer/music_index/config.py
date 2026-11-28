@@ -59,7 +59,11 @@ def require_tools():
 
 # Folders under MUSIC_ROOT that are never indexed. _stems holds partial mixes
 # (BASS/DRUMS/...) whose full versions are already in the library.
-EXCLUDE_DIRS = {'_stems'}
+# .stversions/.stfolder: the library is a Syncthing shared folder since
+# 2026-11-28 (Assets/Music, so remote editors have the tracks a project links
+# to). Staggered versioning moves every replaced or deleted track into
+# .stversions/, and a sweep that indexed it would list each one twice.
+EXCLUDE_DIRS = {'_stems', '.stversions', '.stfolder'}
 
 AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.aiff', '.aif', '.opus'}
 

@@ -269,11 +269,16 @@ def test_the_shared_asset_id_rule_is_the_same_on_both_sides():
     """A site that adds a library names only its rel path; the Syncthing
     folder id is derived. Both derivations must be slugify(rel), or the two
     ends provision two different folders for one directory."""
-    rels = ["Assets/Luts", "Assets/Stills", "Assets/SFX", "Assets/Fusion Macros"]
+    rels = ["Assets/Luts", "Assets/Stills", "Assets/SFX", "Assets/Fusion Macros",
+            "Assets/Music", "Assets/B-roll Archive", "Assets/Sound FX (2026)"]
     assert (common.shared_asset_folders_for(rels)
-            == dash_provision.shared_asset_folders_for(rels))
+            == dash_provision.shared_asset_folders_for(rels)
+            # The companion since 2026-11-28 takes the site's list too
+            # (site_shared_asset_folders), so its id for a rel must be the
+            # NAS folder's id or the offer is never matched.
+            == companion_admin.shared_asset_folders_for(rels))
     for folder_id, rel, _label in common.shared_asset_folders_for(rels):
-        assert folder_id == common.slugify(rel)
+        assert folder_id == common.slugify(rel) == companion_admin.asset_folder_id(rel)
 
 
 def test_no_builder_emits_duplicate_lines():
@@ -303,8 +308,10 @@ def test_shared_asset_folder_identity_agrees_across_all_three_modules():
             == dash_provision.DEFAULT_SHARED_ASSET_FOLDERS
             == companion_admin.SHARED_ASSET_FOLDERS)
     # Unconfigured (this test run) the effective registries are the defaults.
-    # The companion has no override at all on purpose: it is a frozen exe that
-    # learns the registry from the folders the server shares with it.
+    # The companion's SHARED_ASSET_FOLDERS is only its fallback: since
+    # 2026-11-28 it reconciles the list the site manifest publishes
+    # (syncthing_admin.site_shared_asset_folders), and these are what it keeps
+    # when the site names none.
     assert (common.SHARED_ASSET_FOLDERS
             == dash_provision.SHARED_ASSET_FOLDERS
             == companion_admin.SHARED_ASSET_FOLDERS)

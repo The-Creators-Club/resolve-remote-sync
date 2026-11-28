@@ -80,6 +80,19 @@ def test_a_good_manifest_survives_normalisation_intact():
     assert site["nas_kind"] == "synology"
 
 
+def test_shared_asset_folders_survive_in_the_shape_the_dashboard_sends():
+    """site_store._shape publishes them as {"id", "rel", "label"} objects, and
+    normalise used to keep only strings, so every editor saw [] and accepted
+    no library the site added (Assets/Music, 2026-11-28). The rel is kept;
+    the id is re-derived (syncthing_admin.asset_folder_id)."""
+    site = site_mod.normalise({"schema": 1, "shared_asset_folders": [
+        {"id": "assets-luts", "rel": "Assets/Luts", "label": "Assets/Luts (LUT library)"},
+        {"id": "assets-music", "rel": "Assets/Music", "label": "Assets/Music"},
+        {"id": "no-rel"}, 7, None, "Assets/SFX",
+    ]})
+    assert site["shared_asset_folders"] == ["Assets/Luts", "Assets/Music", "7", "Assets/SFX"]
+
+
 def test_every_string_may_be_unset():
     """"" is a legitimate value for every string: the server simply has not
     been told. Consumers fall back; none of them may see a KeyError."""
